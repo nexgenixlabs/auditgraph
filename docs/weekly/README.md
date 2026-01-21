@@ -159,6 +159,6 @@ Documentation is successful if:
 
 ---
 
-**Maintained by:** Bhupathi (Founder) + Claude (AI Co-founder)  
+**Maintained by:** Team NexGenixLabs 
 **Started:** January 21, 2026  
 **Updated:** Weekly

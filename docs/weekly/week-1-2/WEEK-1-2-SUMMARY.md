@@ -683,7 +683,7 @@ requests==2.31.0
 ### Appendix D: Sample Discovery Output
 ```json
 {
-  "subscription_id": "34780384-6a21-4b79-ac90-1e3976b58a33",
+  "subscription_id": "34780384-XXXX-4b79-XXXX-1e3976b58a33",
   "subscription_name": "auditgraphdev",
   "discovered_at": "2026-01-21T22:02:34.460761",
   "statistics": {

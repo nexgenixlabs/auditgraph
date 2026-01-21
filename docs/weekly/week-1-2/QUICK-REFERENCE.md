@@ -40,10 +40,10 @@ python app/test_discovery.py
 ## 🔑 Environment Variables
 
 ```bash
-AZURE_TENANT_ID=aaa1cba5-23b8-49d0-9d9e-1802369217af
-AZURE_CLIENT_ID=b29a04cb-40cc-4e26-935b-04f822b269a0
-AZURE_CLIENT_SECRET=y_F8Q~tHdkgE3tUqbtqvEZYxlscYX3EIJDeGFaYb
-AZURE_SUBSCRIPTION_ID=34780384-6a21-4b79-ac90-1e3976b58a33
+AZURE_TENANT_ID=aaa1cba5-XXXX-49d0-XXXX-1802369XXXX
+AZURE_CLIENT_ID=b29a04cb-XXXX-4e26-XXXX-04f822b2XXXX
+AZURE_CLIENT_SECRET=y_F8Q~tHdkgE3tUqbtqvEZYxlscYX3EIJDeXXXX
+AZURE_SUBSCRIPTION_ID=34780384-XXXX-4b79-XXXX-1e3976b5XXXX
 ```
 
 ## 🎯 Test SPNs Created
@@ -129,7 +129,4 @@ az role assignment list --assignee <client-id>
 
 ## 📞 Contact
 
-**Founder:** Bhupathi  
-**Project:** AuditGraph  
-**Timeline:** 10 weeks to MVP  
-**Target:** 10 customers, $50K MRR by Dec 2026
+
