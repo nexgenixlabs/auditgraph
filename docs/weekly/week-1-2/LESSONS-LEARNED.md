@@ -138,7 +138,7 @@ Speak the customer's language. Map technical findings to their business outcomes
 ### 1. Founder-Market Fit is Real
 
 **Advantage:**
-Working at Lantern Care gives us:
+Working at NexGenHealthcare gives us:
 - Direct access to first customer
 - Deep understanding of pain points
 - Insider knowledge of buying process
@@ -353,7 +353,7 @@ Production-grade error handling is not optional.
 
 ### Business
 
-1. **Lantern Care pilot is critical**
+1. **NexGenHealthcare pilot is critical**
    - Validates product-market fit
    - Provides case study
    - Generates revenue

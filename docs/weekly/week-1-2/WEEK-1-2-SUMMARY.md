@@ -11,7 +11,7 @@
 Build a Cloud Identity Security Posture Management (CSPM) platform that discovers, visualizes, and governs all identities (human and non-human) across multi-cloud environments, starting with Azure.
 
 **Target Market:** Mid-market healthcare organizations  
-**First Customer:** Lantern Care/EDHC  
+**First Customer:** NexGenHealthcare  
 **Goal:** 10 paying customers, $50K MRR by December 2026
 
 ---
@@ -493,7 +493,7 @@ GET    /api/v1/stats/summary           # Dashboard stats
 - ✅ Risk scoring algorithm development
 
 ### Product Skills
-- ✅ User needs analysis (Lantern Care pain points)
+- ✅ User needs analysis (NexGenHealthcare pain points)
 - ✅ MVP scoping (what to build first)
 - ✅ Value proposition refinement
 - ✅ Competitive differentiation thinking
@@ -524,7 +524,7 @@ GET    /api/v1/stats/summary           # Dashboard stats
    - Rollback capabilities?
 
 4. **Compliance Frameworks**
-   - Start with HIPAA (Lantern Care needs)
+   - Start with HIPAA (NexGenHealthcare needs)
    - Add SOC2, ISO27001, PCI-DSS later?
    - How to map identity risks to controls?
 
@@ -573,13 +573,13 @@ GET    /api/v1/stats/summary           # Dashboard stats
 ### Product-Market Fit
 - ✅ Solve real pain point (60% invisible identities)
 - ✅ Target underserved market (mid-market healthcare)
-- ✅ Leverage insider advantage (Lantern Care pilot)
+- ✅ Leverage insider advantage (NexGenHealthcare pilot)
 - ✅ Clear value proposition vs competitors
 
 ### Execution Discipline
 - ✅ Stick to 10 hours/week commitment
 - ✅ Ship features incrementally
-- ✅ Get customer feedback early (Lantern Care)
+- ✅ Get customer feedback early (NexGenHealthcare)
 - ✅ Maintain day job (don't burn out)
 
 ### Founder-Market Fit
@@ -616,7 +616,7 @@ GET    /api/v1/stats/summary           # Dashboard stats
 - Strategic product advice
 - Documentation assistance
 
-**Lantern Care VP of Security:**
+**NexGenHealthcare VP of Security:**
 - Problem validation
 - Pilot customer commitment
 - Domain expertise feedback

@@ -100,7 +100,7 @@ Track major insights and breakthroughs:
 
 - [x] First discovery run successful
 - [x] Critical risks detected
-- [ ] First customer deployment (Lantern Care)
+- [ ] First customer deployment (NexGenHealthcare)
 - [ ] 10 paying customers
 - [ ] $50K MRR achieved
 
