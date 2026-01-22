@@ -1,0 +1,93 @@
+# Read the current models.py
+with open('app/engines/discovery/models.py', 'r') as f:
+    content = f.read()
+
+# Find and replace the patterns section
+old_patterns = '''MICROSOFT_DISPLAY_NAME_PATTERNS = [
+    'Microsoft',
+    'Office 365',
+    'Windows',
+    'Azure',
+    'Skype',
+    'SharePoint',
+    'Teams',
+    'Exchange',
+    'Dynamics',
+    'Power',
+    'Intune',
+    'Substrate',
+    'Conferencing',
+    'Sway',
+    'Bing',
+    'Cortana',
+    'Viva',
+]'''
+
+new_patterns = '''MICROSOFT_DISPLAY_NAME_PATTERNS = [
+    'Microsoft',
+    'Office 365',
+    'Office365',
+    'Office',
+    'Windows',
+    'Azure',
+    'Skype',
+    'SharePoint',
+    'Teams',
+    'Exchange',
+    'Dynamics',
+    'Power',
+    'Intune',
+    'Substrate',
+    'Conferencing',
+    'Sway',
+    'Bing',
+    'Cortana',
+    'Viva',
+    'M365',
+    'O365',
+    'AAD',
+    'Device Registration',
+    'Messaging Bot',
+    'Media Analysis',
+    'Customer Experience',
+    'Signup',
+    'OneProfile',
+    'SubscriptionRP',
+    'Common Data Service',
+    'Portfolios',
+    'CAP',
+    'OMS',
+    'OCaaS',
+    'MCAPI',
+    'Safelinks',
+    'IC3',
+    'IDS-PROD',
+    'Graph Connector',
+    'SPAuthEvent',
+    'Request Approvals',
+    'Policy Administration',
+    'Narada',
+    'WeveEngine',
+    'Dataverse',
+    'Billing RP',
+    'IAM',
+    'MS-PIM',
+    'CloudLicensing',
+    'IPSubstrate',
+    'aciapi',
+    'ESTS',
+    'CompliancePolicy',
+    'Configuration Manager',
+    'ProjectWorkManagement',
+    'PushChannel',
+    'WindowsUpdate',
+    'TenantSearchProcessors',
+    'DeploymentScheduler',
+]'''
+
+content = content.replace(old_patterns, new_patterns)
+
+with open('app/engines/discovery/models.py', 'w') as f:
+    f.write(content)
+
+print("✅ Updated MICROSOFT_DISPLAY_NAME_PATTERNS with expanded list")
