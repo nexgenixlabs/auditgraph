@@ -1,14 +1,16 @@
 {
   "subscription_id": "34780384-6a21-4b79-ac90-1e3976b58a33",
   "subscription_name": "auditgraphdev",
-  "discovered_at": "2026-01-21T22:02:34.460761",
+  "discovered_at": "2026-01-22T18:18:47.843084",
   "statistics": {
-    "total_identities": 180,
-    "service_principals": 180,
+    "total_identities": 181,
+    "service_principals": 181,
     "managed_identities": 0,
+    "microsoft_system_spns": 172,
+    "custom_spns": 9,
     "critical_risks": 4,
     "high_risks": 0,
-    "medium_risks": 173
+    "medium_risks": 2
   },
   "identities": [
     {
@@ -17,11 +19,14 @@
       "identity_type": "service_principal",
       "app_id": "eace8149-b661-472f-b40d-939f89085bd4",
       "object_id": "00350676-71ca-49c9-ba03-fa91673bc2f3",
+      "created_datetime": "2025-04-18T21:04:57+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "0105a7ee-6292-45cd-972b-5aa9e5119a7c",
@@ -29,11 +34,14 @@
       "identity_type": "service_principal",
       "app_id": "66a88757-258c-4c72-893c-3e8bed4d6899",
       "object_id": "0105a7ee-6292-45cd-972b-5aa9e5119a7c",
+      "created_datetime": "2025-04-29T20:46:07+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "0137c24b-9df2-4c36-96cd-3465c0c753d0",
@@ -41,11 +49,14 @@
       "identity_type": "service_principal",
       "app_id": "9e133cac-5238-4d1e-aaa0-d8ff4ca23f4e",
       "object_id": "0137c24b-9df2-4c36-96cd-3465c0c753d0",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "02a6a9e0-e3ac-4e84-b3aa-6ae6dd57d959",
@@ -53,11 +64,14 @@
       "identity_type": "service_principal",
       "app_id": "aa9ecb1e-fd53-4aaa-a8fe-7a54de2c1334",
       "object_id": "02a6a9e0-e3ac-4e84-b3aa-6ae6dd57d959",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "048269f0-e848-45a3-851f-408b8e03a896",
@@ -65,11 +79,14 @@
       "identity_type": "service_principal",
       "app_id": "d7097cd1-c779-44d0-8c71-ab1f8386a97e",
       "object_id": "048269f0-e848-45a3-851f-408b8e03a896",
+      "created_datetime": "2025-04-18T20:51:03+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "050f3b5b-3d36-4e87-8263-dfb288295430",
@@ -77,11 +94,14 @@
       "identity_type": "service_principal",
       "app_id": "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9",
       "object_id": "050f3b5b-3d36-4e87-8263-dfb288295430",
+      "created_datetime": "2025-04-18T20:51:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "0557f76b-096d-4cf0-922b-55fdfe89e650",
@@ -89,11 +109,14 @@
       "identity_type": "service_principal",
       "app_id": "870c4f2e-85b6-4d43-bdda-6ed9a579b725",
       "object_id": "0557f76b-096d-4cf0-922b-55fdfe89e650",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "061175b5-64c6-4906-b372-287d346a25e3",
@@ -101,11 +124,14 @@
       "identity_type": "service_principal",
       "app_id": "5a807f24-c9de-44ee-a3a7-329e88a00ffc",
       "object_id": "061175b5-64c6-4906-b372-287d346a25e3",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "08336f5e-323c-44b3-88fe-37e139a01437",
@@ -113,6 +139,7 @@
       "identity_type": "service_principal",
       "app_id": "573cf9c2-0680-465b-b6da-827df65a2581",
       "object_id": "08336f5e-323c-44b3-88fe-37e139a01437",
+      "created_datetime": "2026-01-21T21:08:50+00:00",
       "role_assignments": [
         {
           "role_name": "Reader",
@@ -121,7 +148,11 @@
         }
       ],
       "risk_level": "info",
-      "risk_reasons": []
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "08d201eb-a927-4803-a623-f250da73e32b",
@@ -129,11 +160,14 @@
       "identity_type": "service_principal",
       "app_id": "944f0bd1-117b-4b1c-af26-804ed95e767e",
       "object_id": "08d201eb-a927-4803-a623-f250da73e32b",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "0aa45992-a113-4ff7-9885-34926967855c",
@@ -141,11 +175,16 @@
       "identity_type": "service_principal",
       "app_id": "87daba75-a4be-466d-84ef-649e9531125c",
       "object_id": "0aa45992-a113-4ff7-9885-34926967855c",
+      "created_datetime": "2026-01-21T21:40:38+00:00",
       "role_assignments": [],
       "risk_level": "medium",
       "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+        "No role assignments (orphaned custom identity)"
+      ],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "0c057f73-f311-43ac-8880-33a69326434b",
@@ -153,11 +192,14 @@
       "identity_type": "service_principal",
       "app_id": "0a5f63c0-b750-4f38-a71c-4fc0d58b89e2",
       "object_id": "0c057f73-f311-43ac-8880-33a69326434b",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "0d935954-2ef8-4d5c-9ddf-0004c252a079",
@@ -165,11 +207,14 @@
       "identity_type": "service_principal",
       "app_id": "b97b6bd4-a49f-4a0c-af18-af507d1da76c",
       "object_id": "0d935954-2ef8-4d5c-9ddf-0004c252a079",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "0e16ae6c-f63e-45b6-88db-1e3aff5404e5",
@@ -177,11 +222,14 @@
       "identity_type": "service_principal",
       "app_id": "00000012-0000-0000-c000-000000000000",
       "object_id": "0e16ae6c-f63e-45b6-88db-1e3aff5404e5",
+      "created_datetime": "2025-04-18T20:50:17+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "1056197d-a3b0-4def-b74a-c7a135e0b633",
@@ -189,11 +237,14 @@
       "identity_type": "service_principal",
       "app_id": "2220bbc4-4518-4fef-aac6-c6f32e9f9fd1",
       "object_id": "1056197d-a3b0-4def-b74a-c7a135e0b633",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "108f9ee5-7fff-4fc8-9814-94ce713a712a",
@@ -201,11 +252,14 @@
       "identity_type": "service_principal",
       "app_id": "b4bddae8-ab25-483e-8670-df09b9f1d0ea",
       "object_id": "108f9ee5-7fff-4fc8-9814-94ce713a712a",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "10d73653-359a-4027-8e6c-27c8a6484188",
@@ -213,11 +267,14 @@
       "identity_type": "service_principal",
       "app_id": "224a7b82-46c9-4d6b-8db0-7360fb444681",
       "object_id": "10d73653-359a-4027-8e6c-27c8a6484188",
+      "created_datetime": "2025-04-25T22:10:46+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "176808c2-8c3f-412e-aeda-a53f5b2df990",
@@ -225,11 +282,14 @@
       "identity_type": "service_principal",
       "app_id": "00000009-0000-0000-c000-000000000000",
       "object_id": "176808c2-8c3f-412e-aeda-a53f5b2df990",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "1e7fd831-82f4-4c36-8c1b-4488f9edd150",
@@ -237,11 +297,14 @@
       "identity_type": "service_principal",
       "app_id": "f8f7a2aa-e116-4ba6-8aea-ca162cfa310d",
       "object_id": "1e7fd831-82f4-4c36-8c1b-4488f9edd150",
+      "created_datetime": "2025-04-30T11:05:48+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "1ee664f4-b12c-4ce2-929c-d481b17125d3",
@@ -249,11 +312,14 @@
       "identity_type": "service_principal",
       "app_id": "b2cc270f-563e-4d8a-af47-f00963a71dcd",
       "object_id": "1ee664f4-b12c-4ce2-929c-d481b17125d3",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "20ac5942-af9b-4c2e-8075-97383a1a1820",
@@ -261,11 +327,14 @@
       "identity_type": "service_principal",
       "app_id": "ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b",
       "object_id": "20ac5942-af9b-4c2e-8075-97383a1a1820",
+      "created_datetime": "2025-04-18T20:50:56+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "22f8b194-2ad8-4755-a787-375b14474568",
@@ -273,11 +342,14 @@
       "identity_type": "service_principal",
       "app_id": "c44b4083-3bb0-49c1-b47d-974e53cbdf3c",
       "object_id": "22f8b194-2ad8-4755-a787-375b14474568",
+      "created_datetime": "2025-04-29T20:48:20+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "24472316-0c4e-4a38-9ddd-1514d1c80202",
@@ -285,11 +357,14 @@
       "identity_type": "service_principal",
       "app_id": "c728155f-7b2a-4502-a08b-b8af9b269319",
       "object_id": "24472316-0c4e-4a38-9ddd-1514d1c80202",
+      "created_datetime": "2025-04-18T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "24ecd734-8579-40bb-bdee-c75b93f839d2",
@@ -297,11 +372,14 @@
       "identity_type": "service_principal",
       "app_id": "934d626a-1ead-4a36-a77d-12ec63b87a0d",
       "object_id": "24ecd734-8579-40bb-bdee-c75b93f839d2",
+      "created_datetime": "2025-04-18T20:50:49+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "255b1ad2-0406-4d6c-a65c-bb3c96b51514",
@@ -309,11 +387,14 @@
       "identity_type": "service_principal",
       "app_id": "a47591ab-e23e-4ffa-9e1b-809b9067e726",
       "object_id": "255b1ad2-0406-4d6c-a65c-bb3c96b51514",
+      "created_datetime": "2025-04-18T20:50:56+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "289aa9a1-acc9-4458-9403-688a201c1d98",
@@ -321,11 +402,14 @@
       "identity_type": "service_principal",
       "app_id": "e3335adb-5ca0-40dc-b8d3-bedc094e523b",
       "object_id": "289aa9a1-acc9-4458-9403-688a201c1d98",
+      "created_datetime": "2025-06-11T05:12:52+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "2b11ea28-22bc-4255-8e5a-c52dd5c79568",
@@ -333,11 +417,14 @@
       "identity_type": "service_principal",
       "app_id": "8ae6a0b1-a07f-4ec9-927a-afb8d39da81c",
       "object_id": "2b11ea28-22bc-4255-8e5a-c52dd5c79568",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "2da6dacc-cb8b-44cf-bcf4-73f3686a1cef",
@@ -345,11 +432,14 @@
       "identity_type": "service_principal",
       "app_id": "1c2909a7-6432-4263-a70d-929a3c1f9ee5",
       "object_id": "2da6dacc-cb8b-44cf-bcf4-73f3686a1cef",
+      "created_datetime": "2025-04-19T01:20:32+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "2ee1f41e-65dd-40d3-9c78-fa713dd1055c",
@@ -357,11 +447,14 @@
       "identity_type": "service_principal",
       "app_id": "f53895d3-095d-408f-8e93-8f94b391404e",
       "object_id": "2ee1f41e-65dd-40d3-9c78-fa713dd1055c",
+      "created_datetime": "2025-04-18T20:50:17+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "30446e05-6ed6-4e56-a33d-c22dcab29bc2",
@@ -369,11 +462,14 @@
       "identity_type": "service_principal",
       "app_id": "ab158d9a-0b5c-4cc3-bb2b-f6646581e4e4",
       "object_id": "30446e05-6ed6-4e56-a33d-c22dcab29bc2",
+      "created_datetime": "2025-04-19T11:49:03+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "328d9dd1-4f02-4667-bdf5-1c6104db449b",
@@ -381,11 +477,14 @@
       "identity_type": "service_principal",
       "app_id": "50d8616b-fd4f-4fac-a1c9-a6a9440d7fe0",
       "object_id": "328d9dd1-4f02-4667-bdf5-1c6104db449b",
+      "created_datetime": "2025-04-18T20:48:47+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "34acfd8f-074b-4705-8daa-2193042f0185",
@@ -393,11 +492,14 @@
       "identity_type": "service_principal",
       "app_id": "0d38933a-0bbd-41ca-9ebd-28c4b5ba7cb7",
       "object_id": "34acfd8f-074b-4705-8daa-2193042f0185",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "3807aea8-cab3-4ec0-99f6-49a39fc348c6",
@@ -405,11 +507,14 @@
       "identity_type": "service_principal",
       "app_id": "dcad865d-9257-4521-ad4d-bae3e137b345",
       "object_id": "3807aea8-cab3-4ec0-99f6-49a39fc348c6",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "381a08cd-732c-45c9-9775-ca651418ae42",
@@ -417,11 +522,14 @@
       "identity_type": "service_principal",
       "app_id": "c9a559d2-7aab-4f13-a6ed-e7e9c52aec87",
       "object_id": "381a08cd-732c-45c9-9775-ca651418ae42",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "384aa26f-0eca-4d97-9676-99ae09b939a8",
@@ -429,11 +537,14 @@
       "identity_type": "service_principal",
       "app_id": "18af356b-c4fd-4f52-9899-d09d21397ab7",
       "object_id": "384aa26f-0eca-4d97-9676-99ae09b939a8",
+      "created_datetime": "2025-04-18T21:26:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "387c7249-e6b3-4c7c-a1e1-453bcd68823c",
@@ -441,11 +552,14 @@
       "identity_type": "service_principal",
       "app_id": "394866fc-eedb-4f01-8536-3ff84b16be2a",
       "object_id": "387c7249-e6b3-4c7c-a1e1-453bcd68823c",
+      "created_datetime": "2025-04-18T21:29:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "387cc9da-5bac-4d96-be0a-26d21eb21d10",
@@ -453,11 +567,14 @@
       "identity_type": "service_principal",
       "app_id": "aeb86249-8ea3-49e2-900b-54cc8e308f85",
       "object_id": "387cc9da-5bac-4d96-be0a-26d21eb21d10",
+      "created_datetime": "2025-04-18T20:55:01+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "3b3fd402-b97e-4556-b75b-dbd3dd7c52eb",
@@ -465,11 +582,14 @@
       "identity_type": "service_principal",
       "app_id": "0bf30f3b-4a52-48df-9a82-234910c4a086",
       "object_id": "3b3fd402-b97e-4556-b75b-dbd3dd7c52eb",
+      "created_datetime": "2025-04-18T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "3b860d39-2d8c-4e93-94d0-fdf354824028",
@@ -477,11 +597,14 @@
       "identity_type": "service_principal",
       "app_id": "905fcf26-4eb7-48a0-9ff0-8dcc7194b5ba",
       "object_id": "3b860d39-2d8c-4e93-94d0-fdf354824028",
+      "created_datetime": "2025-04-18T20:50:18+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "3d9115bb-0c94-4760-9bcc-5429f49b662c",
@@ -489,11 +612,14 @@
       "identity_type": "service_principal",
       "app_id": "45a330b1-b1ec-4cc1-9161-9f03992aa49f",
       "object_id": "3d9115bb-0c94-4760-9bcc-5429f49b662c",
+      "created_datetime": "2025-04-18T21:28:21+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "416b790b-4c12-4583-8205-a71523a7fc0f",
@@ -501,11 +627,14 @@
       "identity_type": "service_principal",
       "app_id": "0fa37baf-7afc-4baf-ab2d-d5bb891d53ef",
       "object_id": "416b790b-4c12-4583-8205-a71523a7fc0f",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "4356532e-9494-4710-88ef-06b73b806df7",
@@ -513,11 +642,14 @@
       "identity_type": "service_principal",
       "app_id": "6abc93dc-978e-48a3-8e54-458e593ed8cf",
       "object_id": "4356532e-9494-4710-88ef-06b73b806df7",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "43dd38ac-7624-41eb-b477-9b4124103013",
@@ -525,11 +657,14 @@
       "identity_type": "service_principal",
       "app_id": "6e99704e-62d5-40f6-b2fe-90aafbe3a710",
       "object_id": "43dd38ac-7624-41eb-b477-9b4124103013",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "45cc5ee0-8489-4255-916c-e155b086394d",
@@ -537,11 +672,14 @@
       "identity_type": "service_principal",
       "app_id": "00000007-0000-0ff1-ce00-000000000000",
       "object_id": "45cc5ee0-8489-4255-916c-e155b086394d",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "45cce5e3-b528-4d5b-9c32-e02abcdb38cb",
@@ -549,11 +687,14 @@
       "identity_type": "service_principal",
       "app_id": "d73f4b35-55c9-48c7-8b10-651f6f2acb2e",
       "object_id": "45cce5e3-b528-4d5b-9c32-e02abcdb38cb",
+      "created_datetime": "2025-04-18T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "48449c01-ec2d-4705-9604-e6244eb3095b",
@@ -561,6 +702,7 @@
       "identity_type": "service_principal",
       "app_id": "996aaff2-6332-4332-b611-56b78badcac2",
       "object_id": "48449c01-ec2d-4705-9604-e6244eb3095b",
+      "created_datetime": "2026-01-21T21:40:25+00:00",
       "role_assignments": [
         {
           "role_name": "Owner",
@@ -571,7 +713,11 @@
       "risk_level": "critical",
       "risk_reasons": [
         "Owner on subscription level"
-      ]
+      ],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "4869a2b9-c51d-4588-94b2-58edb94c88b3",
@@ -579,11 +725,14 @@
       "identity_type": "service_principal",
       "app_id": "e8bdeda8-b4a3-4eed-b307-5e2456238a77",
       "object_id": "4869a2b9-c51d-4588-94b2-58edb94c88b3",
+      "created_datetime": "2025-11-17T20:05:36+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "48e9ef98-1078-43df-9044-4ef1754307e4",
@@ -591,11 +740,14 @@
       "identity_type": "service_principal",
       "app_id": "f2c304cf-8e7e-4c3f-8164-16299ad9d272",
       "object_id": "48e9ef98-1078-43df-9044-4ef1754307e4",
+      "created_datetime": "2026-01-21T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "49fd8d01-170c-4e77-becd-d43876dde4af",
@@ -603,11 +755,14 @@
       "identity_type": "service_principal",
       "app_id": "00000003-0000-0ff1-ce00-000000000000",
       "object_id": "49fd8d01-170c-4e77-becd-d43876dde4af",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "4aa1e47d-8087-4860-b038-8b7308feaa06",
@@ -615,11 +770,14 @@
       "identity_type": "service_principal",
       "app_id": "75d4238e-b142-4d2d-aed9-232b830b8706",
       "object_id": "4aa1e47d-8087-4860-b038-8b7308feaa06",
+      "created_datetime": "2025-06-19T12:36:53+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "4adf1e9a-651b-41f5-bca1-bc0a91e1d2ea",
@@ -627,11 +785,14 @@
       "identity_type": "service_principal",
       "app_id": "c09dc6d6-3bff-482b-8e40-68b3ad65f3fa",
       "object_id": "4adf1e9a-651b-41f5-bca1-bc0a91e1d2ea",
+      "created_datetime": "2025-04-18T20:54:08+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "4c6fe539-7e20-49eb-b1a6-1b1bd58ccf6f",
@@ -639,11 +800,16 @@
       "identity_type": "service_principal",
       "app_id": "f8d98a96-0999-43f5-8af3-69971c7bb423",
       "object_id": "4c6fe539-7e20-49eb-b1a6-1b1bd58ccf6f",
+      "created_datetime": "2026-01-20T01:01:36+00:00",
       "role_assignments": [],
       "risk_level": "medium",
       "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+        "No role assignments (orphaned custom identity)"
+      ],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "4d2a61df-3207-4acc-8565-e74c14f52922",
@@ -651,6 +817,7 @@
       "identity_type": "service_principal",
       "app_id": "2edb9dba-b5ff-41d7-9890-5a0b3fc6dfa6",
       "object_id": "4d2a61df-3207-4acc-8565-e74c14f52922",
+      "created_datetime": "2026-01-21T21:40:40+00:00",
       "role_assignments": [
         {
           "role_name": "User Access Administrator",
@@ -661,7 +828,11 @@
       "risk_level": "critical",
       "risk_reasons": [
         "User Access Administrator on subscription level"
-      ]
+      ],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "5005e307-641c-4989-846f-11a480a108d8",
@@ -669,11 +840,14 @@
       "identity_type": "service_principal",
       "app_id": "4e445925-163e-42ca-b801-9073bfa46d17",
       "object_id": "5005e307-641c-4989-846f-11a480a108d8",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "503f0006-d4df-4bbc-ab10-c1051ee021cf",
@@ -681,11 +855,14 @@
       "identity_type": "service_principal",
       "app_id": "c830ddb0-63e6-4f22-bd71-2ad47198a23e",
       "object_id": "503f0006-d4df-4bbc-ab10-c1051ee021cf",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "5196062d-dae7-4643-a8c2-a0b2cdcf7cd1",
@@ -693,11 +870,14 @@
       "identity_type": "service_principal",
       "app_id": "0f698dd4-f011-4d23-a33e-b36416dcb1e6",
       "object_id": "5196062d-dae7-4643-a8c2-a0b2cdcf7cd1",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "5241945a-2a52-44cf-ab3b-199930875a5f",
@@ -705,11 +885,14 @@
       "identity_type": "service_principal",
       "app_id": "3570e63c-5acf-4f3f-9f15-a49faa5120d3",
       "object_id": "5241945a-2a52-44cf-ab3b-199930875a5f",
+      "created_datetime": "2025-11-05T23:16:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "5309a8c3-b0be-401a-a239-0cc853af0f1a",
@@ -717,11 +900,14 @@
       "identity_type": "service_principal",
       "app_id": "65d91a3d-ab74-42e6-8a2f-0add61688c74",
       "object_id": "5309a8c3-b0be-401a-a239-0cc853af0f1a",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "53464d7c-68a9-4989-99ea-a2397e88bdee",
@@ -729,11 +915,14 @@
       "identity_type": "service_principal",
       "app_id": "b5a60e17-278b-4c92-a4e2-b9262e66bb28",
       "object_id": "53464d7c-68a9-4989-99ea-a2397e88bdee",
+      "created_datetime": "2025-04-18T20:51:56+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "536c5c00-4848-49ef-a7af-d9bc3e1fb2c1",
@@ -741,11 +930,14 @@
       "identity_type": "service_principal",
       "app_id": "ebe0c285-db95-403f-a1a3-a793bd6d7767",
       "object_id": "536c5c00-4848-49ef-a7af-d9bc3e1fb2c1",
+      "created_datetime": "2025-04-18T21:19:11+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "53e63eb8-5649-4ecb-bda9-d5d7444f4c8e",
@@ -753,11 +945,14 @@
       "identity_type": "service_principal",
       "app_id": "66c23536-2118-49d3-bc66-54730b057680",
       "object_id": "53e63eb8-5649-4ecb-bda9-d5d7444f4c8e",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "563e43af-87fe-4db1-9928-efac0c200633",
@@ -765,6 +960,7 @@
       "identity_type": "service_principal",
       "app_id": "b29a04cb-40cc-4e26-935b-04f822b269a0",
       "object_id": "563e43af-87fe-4db1-9928-efac0c200633",
+      "created_datetime": "2026-01-21T21:10:21+00:00",
       "role_assignments": [
         {
           "role_name": "Reader",
@@ -773,7 +969,11 @@
         }
       ],
       "risk_level": "info",
-      "risk_reasons": []
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "57d78afd-0b48-4253-8b91-c258008e4064",
@@ -781,11 +981,14 @@
       "identity_type": "service_principal",
       "app_id": "1996141e-2b07-4491-927a-5a024b335c78",
       "object_id": "57d78afd-0b48-4253-8b91-c258008e4064",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "599a2dd5-de4f-404b-8e67-a01ab6c777fa",
@@ -793,11 +996,14 @@
       "identity_type": "service_principal",
       "app_id": "00000002-0000-0ff1-ce00-000000000000",
       "object_id": "599a2dd5-de4f-404b-8e67-a01ab6c777fa",
+      "created_datetime": "2025-04-18T20:50:17+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "59fa3b6b-f3fc-44dc-a96c-267d00927edb",
@@ -805,11 +1011,14 @@
       "identity_type": "service_principal",
       "app_id": "85eced78-2127-4b24-9418-95f0bbe3d145",
       "object_id": "59fa3b6b-f3fc-44dc-a96c-267d00927edb",
+      "created_datetime": "2025-09-29T14:01:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "5bd81530-9c38-4b41-ac42-e532f02f4da5",
@@ -817,11 +1026,14 @@
       "identity_type": "service_principal",
       "app_id": "cbfda01c-c883-45aa-aedc-e7a484615620",
       "object_id": "5bd81530-9c38-4b41-ac42-e532f02f4da5",
+      "created_datetime": "2025-04-18T20:50:30+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "5e6db0c3-475b-4851-b79a-718b84f2ab0e",
@@ -829,11 +1041,14 @@
       "identity_type": "service_principal",
       "app_id": "618dd325-23f6-4b6f-8380-4df78026e39b",
       "object_id": "5e6db0c3-475b-4851-b79a-718b84f2ab0e",
+      "created_datetime": "2025-06-11T05:19:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "5e990002-727d-40ad-8a38-48162d2f1bc9",
@@ -841,11 +1056,14 @@
       "identity_type": "service_principal",
       "app_id": "14452459-6fa6-4ec0-bc50-1528a1a06bf0",
       "object_id": "5e990002-727d-40ad-8a38-48162d2f1bc9",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "61ea8c3a-e3d2-463d-a158-4abedafcfaef",
@@ -853,11 +1071,14 @@
       "identity_type": "service_principal",
       "app_id": "1b912ec3-a9dd-4c4d-a53e-76aa7adb28d7",
       "object_id": "61ea8c3a-e3d2-463d-a158-4abedafcfaef",
+      "created_datetime": "2026-01-21T20:30:39+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "62b7f03a-c4bc-4455-a255-f615f986b2e7",
@@ -865,11 +1086,14 @@
       "identity_type": "service_principal",
       "app_id": "00000005-0000-0000-c000-000000000000",
       "object_id": "62b7f03a-c4bc-4455-a255-f615f986b2e7",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "6470dfa9-a035-40d1-b4c0-3b83a155930a",
@@ -877,11 +1101,14 @@
       "identity_type": "service_principal",
       "app_id": "978877ea-b2d6-458b-80c7-05df932f3723",
       "object_id": "6470dfa9-a035-40d1-b4c0-3b83a155930a",
+      "created_datetime": "2025-04-18T20:50:56+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "674df2d8-4184-423e-afe7-3f04d6e4a272",
@@ -889,11 +1116,14 @@
       "identity_type": "service_principal",
       "app_id": "bf9fc203-c1ff-4fd4-878b-323642e462ec",
       "object_id": "674df2d8-4184-423e-afe7-3f04d6e4a272",
+      "created_datetime": "2025-04-18T22:48:58+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "67d471a4-71a3-4fe5-820f-f331b1203c78",
@@ -901,11 +1131,14 @@
       "identity_type": "service_principal",
       "app_id": "48af08dc-f6d2-435f-b2a7-069abd99c086",
       "object_id": "67d471a4-71a3-4fe5-820f-f331b1203c78",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "68f60188-6442-46c3-b86e-ffbab8eee267",
@@ -913,11 +1146,29 @@
       "identity_type": "service_principal",
       "app_id": "5da7367f-09c8-493e-8fd4-638089cddec3",
       "object_id": "68f60188-6442-46c3-b86e-ffbab8eee267",
+      "created_datetime": "2025-06-11T05:12:52+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
+    },
+    {
+      "id": "6c2c86aa-6c13-4c29-ab67-d69644f3ed9b",
+      "display_name": "Azure RBAC Data Plane",
+      "identity_type": "service_principal",
+      "app_id": "5861f7fb-5582-4c1a-83c0-fc5ffdb531a6",
+      "object_id": "6c2c86aa-6c13-4c29-ab67-d69644f3ed9b",
+      "created_datetime": "2026-01-21T22:04:48+00:00",
+      "role_assignments": [],
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "6d909d14-d670-4c5d-90e3-7c5ad7795fe6",
@@ -925,11 +1176,14 @@
       "identity_type": "service_principal",
       "app_id": "3c896ded-22c5-450f-91f6-3d1ef0848f6e",
       "object_id": "6d909d14-d670-4c5d-90e3-7c5ad7795fe6",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "6f525981-d2b5-4217-ab7f-8aa58129789a",
@@ -937,11 +1191,14 @@
       "identity_type": "service_principal",
       "app_id": "00000007-0000-0000-c000-000000000000",
       "object_id": "6f525981-d2b5-4217-ab7f-8aa58129789a",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "701f0358-eba7-4515-b880-ec0f41cb338e",
@@ -949,11 +1206,14 @@
       "identity_type": "service_principal",
       "app_id": "507bc9da-c4e2-40cb-96a7-ac90df92685c",
       "object_id": "701f0358-eba7-4515-b880-ec0f41cb338e",
+      "created_datetime": "2025-04-27T09:07:10+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "7241cd18-2141-494a-b115-2d3315eed364",
@@ -961,11 +1221,14 @@
       "identity_type": "service_principal",
       "app_id": "80dbdb39-4f33-4799-8b6f-711b5e3e61b6",
       "object_id": "7241cd18-2141-494a-b115-2d3315eed364",
+      "created_datetime": "2025-11-05T23:28:16+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "73e71ac9-4784-468c-8450-6f4c0e43c11f",
@@ -973,11 +1236,14 @@
       "identity_type": "service_principal",
       "app_id": "0000000c-0000-0000-c000-000000000000",
       "object_id": "73e71ac9-4784-468c-8450-6f4c0e43c11f",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "743c5244-972a-425e-9882-204251160101",
@@ -985,11 +1251,14 @@
       "identity_type": "service_principal",
       "app_id": "93625bc8-bfe2-437a-97e0-3d0060024faa",
       "object_id": "743c5244-972a-425e-9882-204251160101",
+      "created_datetime": "2025-04-18T21:03:18+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "75e7d640-ebea-4578-ac6f-5409fa15c936",
@@ -997,11 +1266,14 @@
       "identity_type": "service_principal",
       "app_id": "a57aca87-cbc0-4f3c-8b9e-dc095fdc8978",
       "object_id": "75e7d640-ebea-4578-ac6f-5409fa15c936",
+      "created_datetime": "2025-04-18T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "75fe867a-e5dc-407f-bf19-c39f567a6173",
@@ -1009,11 +1281,14 @@
       "identity_type": "service_principal",
       "app_id": "01fc33a7-78ba-4d2f-a4b7-768e336e890e",
       "object_id": "75fe867a-e5dc-407f-bf19-c39f567a6173",
+      "created_datetime": "2026-01-21T20:48:41+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "76572020-b7e2-4341-af01-b7cb535f085b",
@@ -1021,11 +1296,14 @@
       "identity_type": "service_principal",
       "app_id": "51b5e278-ed7e-42c6-8787-7ff93e92f577",
       "object_id": "76572020-b7e2-4341-af01-b7cb535f085b",
+      "created_datetime": "2025-04-18T20:50:19+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "775e4b18-2425-4c14-824a-dfa3128c21f7",
@@ -1033,11 +1311,14 @@
       "identity_type": "service_principal",
       "app_id": "de247707-4e4a-47d6-89fd-3c632f870b34",
       "object_id": "775e4b18-2425-4c14-824a-dfa3128c21f7",
+      "created_datetime": "2025-06-11T05:19:49+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "776c5b54-0a7f-4b8b-a950-eccae33bd6ec",
@@ -1045,11 +1326,14 @@
       "identity_type": "service_principal",
       "app_id": "509e4652-da8d-478d-a730-e9d4a1996ca4",
       "object_id": "776c5b54-0a7f-4b8b-a950-eccae33bd6ec",
+      "created_datetime": "2025-10-25T00:13:16+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "7963fe50-eef9-488e-83e3-f3500f9d117e",
@@ -1057,11 +1341,14 @@
       "identity_type": "service_principal",
       "app_id": "4c8f074c-e32b-4ba7-b072-0f39d71daf51",
       "object_id": "7963fe50-eef9-488e-83e3-f3500f9d117e",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "7bfe8596-da4b-410a-ba68-f8cc96df7540",
@@ -1069,11 +1356,14 @@
       "identity_type": "service_principal",
       "app_id": "3340b944-b12e-47d0-b46b-35f08ec1d8ee",
       "object_id": "7bfe8596-da4b-410a-ba68-f8cc96df7540",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "7d8934cd-caca-445e-9957-0bfce861553b",
@@ -1081,11 +1371,14 @@
       "identity_type": "service_principal",
       "app_id": "00000002-0000-0000-c000-000000000000",
       "object_id": "7d8934cd-caca-445e-9957-0bfce861553b",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "7f0b3fa2-7963-42da-8810-4c4b01af4749",
@@ -1093,11 +1386,14 @@
       "identity_type": "service_principal",
       "app_id": "c5b17a4f-cc6f-4649-9480-684280a2af3a",
       "object_id": "7f0b3fa2-7963-42da-8810-4c4b01af4749",
+      "created_datetime": "2026-01-21T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "82a580ad-e4df-4fe8-9a9c-b5c156eab8f9",
@@ -1105,11 +1401,14 @@
       "identity_type": "service_principal",
       "app_id": "ea890292-c8c8-4433-b5ea-b09d0668e1a6",
       "object_id": "82a580ad-e4df-4fe8-9a9c-b5c156eab8f9",
+      "created_datetime": "2025-04-18T20:51:26+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "8326ade6-bf5b-4aa8-8165-496bccb8d987",
@@ -1117,11 +1416,14 @@
       "identity_type": "service_principal",
       "app_id": "00000001-0000-0000-c000-000000000000",
       "object_id": "8326ade6-bf5b-4aa8-8165-496bccb8d987",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "84623650-a03e-46c8-a0c4-53aac5a09053",
@@ -1129,11 +1431,14 @@
       "identity_type": "service_principal",
       "app_id": "a164aee5-7d0a-46bb-9404-37421d58bdf7",
       "object_id": "84623650-a03e-46c8-a0c4-53aac5a09053",
+      "created_datetime": "2025-04-18T20:50:50+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "87cf7429-b4ad-49f2-b636-41517cb26ccd",
@@ -1141,11 +1446,14 @@
       "identity_type": "service_principal",
       "app_id": "6872b314-67ab-4a16-98e7-a663b0f772c3",
       "object_id": "87cf7429-b4ad-49f2-b636-41517cb26ccd",
+      "created_datetime": "2025-04-18T20:54:59+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "88500218-d22d-4208-a99d-f00f4a4ac6dd",
@@ -1153,11 +1461,14 @@
       "identity_type": "service_principal",
       "app_id": "9cb77803-d937-493e-9a3b-4b49de3f5a74",
       "object_id": "88500218-d22d-4208-a99d-f00f4a4ac6dd",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "8c262200-68c2-400a-8448-a017a0103a2f",
@@ -1165,11 +1476,14 @@
       "identity_type": "service_principal",
       "app_id": "62b732f7-fc71-40bc-b27d-35efcb0509de",
       "object_id": "8c262200-68c2-400a-8448-a017a0103a2f",
+      "created_datetime": "2025-04-18T20:50:51+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "8cee476c-8e2a-4dfc-9806-c1a7df7c51d7",
@@ -1177,11 +1491,14 @@
       "identity_type": "service_principal",
       "app_id": "644c1b11-f63f-45fa-826b-a9d2801db711",
       "object_id": "8cee476c-8e2a-4dfc-9806-c1a7df7c51d7",
+      "created_datetime": "2025-04-18T20:54:59+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "8cfdc1d5-c726-4d40-875b-68f39a5b722b",
@@ -1189,11 +1506,14 @@
       "identity_type": "service_principal",
       "app_id": "02d2a314-8dbb-47d3-8a77-1677403097de",
       "object_id": "8cfdc1d5-c726-4d40-875b-68f39a5b722b",
+      "created_datetime": "2025-11-05T23:28:02+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "8e638422-a100-498b-bd0f-7f66075fd438",
@@ -1201,11 +1521,14 @@
       "identity_type": "service_principal",
       "app_id": "9ea1ad79-fdb6-4f9a-8bc3-2b70f96e34c7",
       "object_id": "8e638422-a100-498b-bd0f-7f66075fd438",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "8efb9912-9dcd-40b6-88ca-5b6cc05179a8",
@@ -1213,11 +1536,14 @@
       "identity_type": "service_principal",
       "app_id": "557c67cf-c916-4293-8373-d584996f60ae",
       "object_id": "8efb9912-9dcd-40b6-88ca-5b6cc05179a8",
+      "created_datetime": "2025-04-18T20:50:30+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "91a66d47-e860-48cf-a8fd-ee8992c430c7",
@@ -1225,11 +1551,14 @@
       "identity_type": "service_principal",
       "app_id": "40775b29-2688-46b6-a3b5-b256bd04df9f",
       "object_id": "91a66d47-e860-48cf-a8fd-ee8992c430c7",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "933fbeb5-1d2c-4db4-9b6b-f99af546ea1a",
@@ -1237,11 +1566,14 @@
       "identity_type": "service_principal",
       "app_id": "62a112d5-f305-42a6-8ced-6b8e3f71fb0d",
       "object_id": "933fbeb5-1d2c-4db4-9b6b-f99af546ea1a",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "952170b8-b170-4ce0-a1ba-86c53996d2cb",
@@ -1249,11 +1581,14 @@
       "identity_type": "service_principal",
       "app_id": "f9d02341-e7aa-456d-926d-4a0ca599fbee",
       "object_id": "952170b8-b170-4ce0-a1ba-86c53996d2cb",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "96046f4c-e027-4baf-96b9-2036ab068447",
@@ -1261,11 +1596,14 @@
       "identity_type": "service_principal",
       "app_id": "f36c30df-d241-4c14-a0ee-752c71e4d3da",
       "object_id": "96046f4c-e027-4baf-96b9-2036ab068447",
+      "created_datetime": "2025-10-11T20:05:10+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "9676d621-d7fa-46c9-a9fb-c498966f28d6",
@@ -1273,11 +1611,14 @@
       "identity_type": "service_principal",
       "app_id": "81473081-50b9-469a-b9d8-303109583ecb",
       "object_id": "9676d621-d7fa-46c9-a9fb-c498966f28d6",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "97312b60-fc1e-41ad-92e4-ff79f726770d",
@@ -1285,11 +1626,14 @@
       "identity_type": "service_principal",
       "app_id": "2a486b53-dbd2-49c0-a2bc-278bdfc30833",
       "object_id": "97312b60-fc1e-41ad-92e4-ff79f726770d",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "9787c028-542e-4c91-8d64-9ce5a271135b",
@@ -1297,11 +1641,14 @@
       "identity_type": "service_principal",
       "app_id": "0000000a-0000-0000-c000-000000000000",
       "object_id": "9787c028-542e-4c91-8d64-9ce5a271135b",
+      "created_datetime": "2025-04-18T20:50:18+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "9a666993-45ee-489d-a793-556130715325",
@@ -1309,11 +1656,14 @@
       "identity_type": "service_principal",
       "app_id": "4787c7ff-7cea-43db-8d0d-919f15c6354b",
       "object_id": "9a666993-45ee-489d-a793-556130715325",
+      "created_datetime": "2025-04-23T00:17:48+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "9b4d8852-5b75-444b-b3d4-199acf1a4657",
@@ -1321,11 +1671,14 @@
       "identity_type": "service_principal",
       "app_id": "d6fdaa33-e821-4211-83d0-cf74736489e1",
       "object_id": "9b4d8852-5b75-444b-b3d4-199acf1a4657",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "9f10c427-a1f8-4929-9716-3cc545b30682",
@@ -1333,11 +1686,14 @@
       "identity_type": "service_principal",
       "app_id": "7df0a125-d3be-4c96-aa54-591f83ff541c",
       "object_id": "9f10c427-a1f8-4929-9716-3cc545b30682",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a4538663-7bb5-4d3a-8a9d-510b0f179368",
@@ -1345,11 +1701,14 @@
       "identity_type": "service_principal",
       "app_id": "09abbdfd-ed23-44ee-a2d9-a627aa1c90f3",
       "object_id": "a4538663-7bb5-4d3a-8a9d-510b0f179368",
+      "created_datetime": "2025-04-18T20:50:17+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a4f786b3-af03-4b9c-8f4e-ac67f692cd35",
@@ -1357,11 +1716,14 @@
       "identity_type": "service_principal",
       "app_id": "98db8bd6-0cc0-4e67-9de5-f187f1cd1b41",
       "object_id": "a4f786b3-af03-4b9c-8f4e-ac67f692cd35",
+      "created_datetime": "2025-04-18T20:50:37+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a62aea91-8a57-4dd6-a0be-3db8094618a9",
@@ -1369,11 +1731,14 @@
       "identity_type": "service_principal",
       "app_id": "b1379a75-ce5e-4fa3-80c6-89bb39bf646c",
       "object_id": "a62aea91-8a57-4dd6-a0be-3db8094618a9",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a638655f-cfc3-4c65-bcb1-e6e9d7e044a0",
@@ -1381,11 +1746,14 @@
       "identity_type": "service_principal",
       "app_id": "2b479c68-8d9b-4e27-9d85-5d74803de734",
       "object_id": "a638655f-cfc3-4c65-bcb1-e6e9d7e044a0",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a65e9deb-9fa3-4723-af6f-74d98f4f515d",
@@ -1393,11 +1761,14 @@
       "identity_type": "service_principal",
       "app_id": "0eda3b13-ddc9-4c25-b7dd-2f6ea073d6b7",
       "object_id": "a65e9deb-9fa3-4723-af6f-74d98f4f515d",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a6a56f56-e5d2-4691-b090-6a1916a9b074",
@@ -1405,11 +1776,14 @@
       "identity_type": "service_principal",
       "app_id": "63e61dc2-f593-4a6f-92b9-92e4d2c03d4f",
       "object_id": "a6a56f56-e5d2-4691-b090-6a1916a9b074",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a88460a1-f754-418e-bd62-df52637ea2fd",
@@ -1417,11 +1791,14 @@
       "identity_type": "service_principal",
       "app_id": "207a6836-d031-4764-a9d8-c1193f455f21",
       "object_id": "a88460a1-f754-418e-bd62-df52637ea2fd",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a92b60c7-9b4a-46da-94b9-76b929403551",
@@ -1429,11 +1806,14 @@
       "identity_type": "service_principal",
       "app_id": "cb1bda4c-1213-4e8b-911a-0a8c83c5d3b7",
       "object_id": "a92b60c7-9b4a-46da-94b9-76b929403551",
+      "created_datetime": "2025-04-18T20:54:58+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "a99cb24a-6866-4f87-a77d-f964bb644270",
@@ -1441,11 +1821,14 @@
       "identity_type": "service_principal",
       "app_id": "0af06dc6-e4b5-4f28-818e-e78e62d137a5",
       "object_id": "a99cb24a-6866-4f87-a77d-f964bb644270",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ab88800e-c749-4596-98da-e4fd2bdba020",
@@ -1453,11 +1836,14 @@
       "identity_type": "service_principal",
       "app_id": "e29b5c86-b9ab-4a86-9a20-d10842007599",
       "object_id": "ab88800e-c749-4596-98da-e4fd2bdba020",
+      "created_datetime": "2025-04-18T20:51:46+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ab9810f2-3f8b-4c8c-bd39-e38e685184a5",
@@ -1465,11 +1851,14 @@
       "identity_type": "service_principal",
       "app_id": "797f4846-ba00-4fd7-ba43-dac1f8f63013",
       "object_id": "ab9810f2-3f8b-4c8c-bd39-e38e685184a5",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "acde7fb1-ae30-4947-9499-168a301dda0d",
@@ -1477,11 +1866,14 @@
       "identity_type": "service_principal",
       "app_id": "4747d38e-36c5-4bc3-979b-b0ef74df54d1",
       "object_id": "acde7fb1-ae30-4947-9499-168a301dda0d",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ad5984c1-3ece-4d88-8023-ec5b58b489b3",
@@ -1489,6 +1881,7 @@
       "identity_type": "service_principal",
       "app_id": "b4d9f76f-4218-42d5-a621-f802356b744a",
       "object_id": "ad5984c1-3ece-4d88-8023-ec5b58b489b3",
+      "created_datetime": "2026-01-21T21:40:32+00:00",
       "role_assignments": [
         {
           "role_name": "Reader",
@@ -1497,7 +1890,11 @@
         }
       ],
       "risk_level": "info",
-      "risk_reasons": []
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "adc7f2be-e021-4b87-bcdc-20d8c8aef965",
@@ -1505,11 +1902,14 @@
       "identity_type": "service_principal",
       "app_id": "1e70cd27-4707-4589-8ec5-9bd20c472a46",
       "object_id": "adc7f2be-e021-4b87-bcdc-20d8c8aef965",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "add01497-fd64-4e8c-9773-4ac54a05f4a4",
@@ -1517,11 +1917,14 @@
       "identity_type": "service_principal",
       "app_id": "475226c6-020e-4fb2-8a90-7a972cbfc1d4",
       "object_id": "add01497-fd64-4e8c-9773-4ac54a05f4a4",
+      "created_datetime": "2025-04-18T20:50:56+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b5ad8397-aa52-4a07-8cf6-371e88a2dd6f",
@@ -1529,11 +1932,14 @@
       "identity_type": "service_principal",
       "app_id": "6f0478d5-61a3-4897-a2f2-de09a5a90c7f",
       "object_id": "b5ad8397-aa52-4a07-8cf6-371e88a2dd6f",
+      "created_datetime": "2025-04-18T20:50:30+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b6069d17-7fc2-42a2-8923-b02e46c46c38",
@@ -1541,11 +1947,14 @@
       "identity_type": "service_principal",
       "app_id": "48ac35b8-9aa8-4d74-927d-1f4a14a0b239",
       "object_id": "b6069d17-7fc2-42a2-8923-b02e46c46c38",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b6432255-470e-4db8-9454-24ddbffb9888",
@@ -1553,11 +1962,14 @@
       "identity_type": "service_principal",
       "app_id": "c161e42e-d4df-4a3d-9b42-e7a3c31f59d4",
       "object_id": "b6432255-470e-4db8-9454-24ddbffb9888",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b6da8d13-7546-47c6-b44b-e715e18e9a61",
@@ -1565,11 +1977,14 @@
       "identity_type": "service_principal",
       "app_id": "d8c767ef-3e9a-48c4-aef9-562696539b39",
       "object_id": "b6da8d13-7546-47c6-b44b-e715e18e9a61",
+      "created_datetime": "2026-01-21T21:12:02+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b7230614-7711-4f85-9286-7bd52afe7917",
@@ -1577,11 +1992,14 @@
       "identity_type": "service_principal",
       "app_id": "c5393580-f805-4401-95e8-94b7a6ef2fc2",
       "object_id": "b7230614-7711-4f85-9286-7bd52afe7917",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b7f562e8-66f0-480d-8c65-e734d7b41fb6",
@@ -1589,11 +2007,14 @@
       "identity_type": "service_principal",
       "app_id": "ca0a114d-6fbc-46b3-90fa-2ec954794ddb",
       "object_id": "b7f562e8-66f0-480d-8c65-e734d7b41fb6",
+      "created_datetime": "2025-04-18T20:50:30+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "b8214c70-7c2c-4cc2-a2fd-521276efcd4d",
@@ -1601,11 +2022,14 @@
       "identity_type": "service_principal",
       "app_id": "56c1da01-2129-48f7-9355-af6d59d42766",
       "object_id": "b8214c70-7c2c-4cc2-a2fd-521276efcd4d",
+      "created_datetime": "2025-04-18T21:19:13+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "be163020-d28a-4617-b9ef-34e6d47b9d17",
@@ -1613,11 +2037,14 @@
       "identity_type": "service_principal",
       "app_id": "0517ffae-825d-4aff-999e-3f2336b8a20a",
       "object_id": "be163020-d28a-4617-b9ef-34e6d47b9d17",
+      "created_datetime": "2025-11-05T23:16:12+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "bf143fb1-d4eb-4371-903a-e5cd221e5bca",
@@ -1625,11 +2052,14 @@
       "identity_type": "service_principal",
       "app_id": "6b91db1b-f05b-405a-a0b2-e3f60b28d645",
       "object_id": "bf143fb1-d4eb-4371-903a-e5cd221e5bca",
+      "created_datetime": "2025-04-18T20:54:58+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "bf826828-b81b-4076-b61b-35443715dcfd",
@@ -1637,11 +2067,14 @@
       "identity_type": "service_principal",
       "app_id": "00000004-0000-0ff1-ce00-000000000000",
       "object_id": "bf826828-b81b-4076-b61b-35443715dcfd",
+      "created_datetime": "2025-04-18T20:50:18+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "c13de866-5868-40d3-931a-6904d7c6a085",
@@ -1649,11 +2082,14 @@
       "identity_type": "service_principal",
       "app_id": "08e18876-6177-487e-b8b5-cf950c1e598c",
       "object_id": "c13de866-5868-40d3-931a-6904d7c6a085",
+      "created_datetime": "2025-04-18T20:51:41+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "c393b1f6-989f-41ed-8d62-dcddd0c52547",
@@ -1661,11 +2097,14 @@
       "identity_type": "service_principal",
       "app_id": "8b3391f4-af01-4ee8-b4ea-9871b2499735",
       "object_id": "c393b1f6-989f-41ed-8d62-dcddd0c52547",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "c6a5fe49-946b-4641-9cc3-e63c2a94d82a",
@@ -1673,11 +2112,14 @@
       "identity_type": "service_principal",
       "app_id": "9e4a5442-a5c9-4f6f-b03f-5b9fcaaf24b1",
       "object_id": "c6a5fe49-946b-4641-9cc3-e63c2a94d82a",
+      "created_datetime": "2025-04-18T21:46:42+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ca013ef4-098f-4dbc-96ec-9853a1202447",
@@ -1685,11 +2127,14 @@
       "identity_type": "service_principal",
       "app_id": "dc457883-bafe-4f8b-a333-29685e7eaa9e",
       "object_id": "ca013ef4-098f-4dbc-96ec-9853a1202447",
+      "created_datetime": "2025-04-25T08:43:40+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ca5ffc89-5eaf-4164-a4e7-716a849b9be6",
@@ -1697,11 +2142,14 @@
       "identity_type": "service_principal",
       "app_id": "982bda36-4632-4165-a46a-9863b1bbcf7d",
       "object_id": "ca5ffc89-5eaf-4164-a4e7-716a849b9be6",
+      "created_datetime": "2025-04-18T21:27:53+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "cc53d37f-5720-4ce4-8086-2d0022b14ff9",
@@ -1709,11 +2157,14 @@
       "identity_type": "service_principal",
       "app_id": "fbb0ac1a-82dd-478b-a0e5-0b2b98ef38fe",
       "object_id": "cc53d37f-5720-4ce4-8086-2d0022b14ff9",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "cc86d4a2-b306-41d5-9438-67946fa9597c",
@@ -1721,11 +2172,14 @@
       "identity_type": "service_principal",
       "app_id": "944861d3-5975-4f8b-afd4-3422c0b1b6ce",
       "object_id": "cc86d4a2-b306-41d5-9438-67946fa9597c",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ce4dc8e0-6cb1-437f-94fa-2a78e46e41f6",
@@ -1733,11 +2187,14 @@
       "identity_type": "service_principal",
       "app_id": "2f3f02c9-5679-4a5c-a605-0de55b07d135",
       "object_id": "ce4dc8e0-6cb1-437f-94fa-2a78e46e41f6",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ceca13b0-b527-47ce-ab85-965f642ebee7",
@@ -1745,11 +2202,14 @@
       "identity_type": "service_principal",
       "app_id": "a68e1e61-ad4f-45b6-897d-0a1ea8786345",
       "object_id": "ceca13b0-b527-47ce-ab85-965f642ebee7",
+      "created_datetime": "2025-04-29T20:46:06+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "cf23fb8b-7a21-448f-90a1-6b3d13e567fc",
@@ -1757,11 +2217,14 @@
       "identity_type": "service_principal",
       "app_id": "5a4a238f-f186-4fff-95bd-d3e70f9e1a08",
       "object_id": "cf23fb8b-7a21-448f-90a1-6b3d13e567fc",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "cfcec7db-2197-4a55-8350-376eddd61369",
@@ -1769,11 +2232,14 @@
       "identity_type": "service_principal",
       "app_id": "65c8bd9e-caac-4816-be98-0692f41191bc",
       "object_id": "cfcec7db-2197-4a55-8350-376eddd61369",
+      "created_datetime": "2025-04-18T20:50:52+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d0451932-220c-40ac-a971-baaa3bd8a5b6",
@@ -1781,6 +2247,7 @@
       "identity_type": "service_principal",
       "app_id": "a54e2bd1-ad26-4036-bf5f-0a7d0487c1f3",
       "object_id": "d0451932-220c-40ac-a971-baaa3bd8a5b6",
+      "created_datetime": "2026-01-21T21:40:28+00:00",
       "role_assignments": [
         {
           "role_name": "Contributor",
@@ -1791,7 +2258,11 @@
       "risk_level": "critical",
       "risk_reasons": [
         "Contributor on subscription level"
-      ]
+      ],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "d0507a8c-09ff-4504-a619-1952475a6f1d",
@@ -1799,11 +2270,14 @@
       "identity_type": "service_principal",
       "app_id": "cc15fd57-2c6c-4117-a88c-83b1d56b4bbe",
       "object_id": "d0507a8c-09ff-4504-a619-1952475a6f1d",
+      "created_datetime": "2025-04-18T20:50:17+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d2d8cd99-c590-4ae3-aeb5-8d2020de84e5",
@@ -1811,11 +2285,14 @@
       "identity_type": "service_principal",
       "app_id": "abc63b55-0325-4305-9e1e-3463b182a6dc",
       "object_id": "d2d8cd99-c590-4ae3-aeb5-8d2020de84e5",
+      "created_datetime": "2025-06-03T01:46:46+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d3bfb872-cb1c-44bb-8ea9-36dc47d1f605",
@@ -1823,11 +2300,14 @@
       "identity_type": "service_principal",
       "app_id": "c9299480-c13a-49db-a7ae-cdfe54fe0313",
       "object_id": "d3bfb872-cb1c-44bb-8ea9-36dc47d1f605",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d41496fa-d046-41f5-b660-da26d0e6f022",
@@ -1835,11 +2315,14 @@
       "identity_type": "service_principal",
       "app_id": "f569b9c7-be15-4e87-86f7-87d30d02090b",
       "object_id": "d41496fa-d046-41f5-b660-da26d0e6f022",
+      "created_datetime": "2025-04-18T21:29:35+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d5c3fa37-a6ea-4ad6-846f-2c15bc4fbba2",
@@ -1847,11 +2330,14 @@
       "identity_type": "service_principal",
       "app_id": "794ded15-70c6-4bcd-a0bb-9b7ad530a01a",
       "object_id": "d5c3fa37-a6ea-4ad6-846f-2c15bc4fbba2",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d6760124-ff3e-4aae-8af6-fa7c96114913",
@@ -1859,11 +2345,14 @@
       "identity_type": "service_principal",
       "app_id": "37182072-3c9c-4f6a-a4b3-b3f91cacffce",
       "object_id": "d6760124-ff3e-4aae-8af6-fa7c96114913",
+      "created_datetime": "2025-04-18T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d6b876d1-1e93-4395-bd75-a248bd50810d",
@@ -1871,11 +2360,14 @@
       "identity_type": "service_principal",
       "app_id": "00000006-0000-0ff1-ce00-000000000000",
       "object_id": "d6b876d1-1e93-4395-bd75-a248bd50810d",
+      "created_datetime": "2025-04-18T20:50:23+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d6d97f5e-12b5-43bf-8a82-c59a353429fe",
@@ -1883,11 +2375,14 @@
       "identity_type": "service_principal",
       "app_id": "0469d4cd-df37-4d93-8a61-f8c75b809164",
       "object_id": "d6d97f5e-12b5-43bf-8a82-c59a353429fe",
+      "created_datetime": "2026-01-21T20:44:22+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d72c8f77-8443-4231-9a14-58c8f45cfe28",
@@ -1895,11 +2390,14 @@
       "identity_type": "service_principal",
       "app_id": "00000003-0000-0000-c000-000000000000",
       "object_id": "d72c8f77-8443-4231-9a14-58c8f45cfe28",
+      "created_datetime": "2025-04-18T20:44:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d7718233-2806-4d37-9d46-5503dfef2536",
@@ -1907,11 +2405,14 @@
       "identity_type": "service_principal",
       "app_id": "8d3a7d3c-c034-4f19-a2ef-8412952a9671",
       "object_id": "d7718233-2806-4d37-9d46-5503dfef2536",
+      "created_datetime": "2025-08-11T15:22:52+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "d7e8205f-2f01-4191-9b5f-7c17f0a92ef0",
@@ -1919,11 +2420,14 @@
       "identity_type": "service_principal",
       "app_id": "b55b276d-2b09-4ad2-8de5-f09cf24ffba9",
       "object_id": "d7e8205f-2f01-4191-9b5f-7c17f0a92ef0",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "db060e9c-2764-4592-9a5b-a73fade42a1e",
@@ -1931,11 +2435,14 @@
       "identity_type": "service_principal",
       "app_id": "8bbf8725-b3ca-4468-a217-7c8da873186e",
       "object_id": "db060e9c-2764-4592-9a5b-a73fade42a1e",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "dbf88bba-f628-4479-a1f5-88ff76f03977",
@@ -1943,11 +2450,14 @@
       "identity_type": "service_principal",
       "app_id": "e8be65d6-d430-4289-a665-51bf2a194bda",
       "object_id": "dbf88bba-f628-4479-a1f5-88ff76f03977",
+      "created_datetime": "2025-11-17T20:05:36+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "dc6c0344-627d-4beb-9e2f-d3c88ce6a66f",
@@ -1955,11 +2465,14 @@
       "identity_type": "service_principal",
       "app_id": "00000005-0000-0ff1-ce00-000000000000",
       "object_id": "dc6c0344-627d-4beb-9e2f-d3c88ce6a66f",
+      "created_datetime": "2025-04-18T20:50:17+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "de25836b-4ed4-44bf-8343-9a147f6a7564",
@@ -1967,11 +2480,14 @@
       "identity_type": "service_principal",
       "app_id": "c9224372-5534-42cb-a48b-8db4f4a3892e",
       "object_id": "de25836b-4ed4-44bf-8343-9a147f6a7564",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "de4fc10d-43c4-4d45-81bd-f8b2c8e4539d",
@@ -1979,11 +2495,14 @@
       "identity_type": "service_principal",
       "app_id": "1690c5aa-925a-4d0e-836b-722c795bd0d0",
       "object_id": "de4fc10d-43c4-4d45-81bd-f8b2c8e4539d",
+      "created_datetime": "2025-04-18T20:50:56+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e1af5335-449c-4208-a819-c2fbb320f4c9",
@@ -1991,11 +2510,14 @@
       "identity_type": "service_principal",
       "app_id": "3138fe80-4087-4b04-80a6-8866c738028a",
       "object_id": "e1af5335-449c-4208-a819-c2fbb320f4c9",
+      "created_datetime": "2025-04-18T20:50:25+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e2dba5b5-c72d-48e1-b492-27cf35854cc0",
@@ -2003,11 +2525,14 @@
       "identity_type": "service_principal",
       "app_id": "b20d0d3a-dc90-485b-ad11-6031e769e221",
       "object_id": "e2dba5b5-c72d-48e1-b492-27cf35854cc0",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e4ab972f-5e47-4d6a-a6f9-f6a7a88b3522",
@@ -2015,11 +2540,14 @@
       "identity_type": "service_principal",
       "app_id": "80ccca67-54bd-44ab-8625-4b79c4dc7775",
       "object_id": "e4ab972f-5e47-4d6a-a6f9-f6a7a88b3522",
+      "created_datetime": "2026-01-20T01:07:20+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e524fc69-35f5-4e7d-bdeb-b3c08cbed2dc",
@@ -2027,11 +2555,14 @@
       "identity_type": "service_principal",
       "app_id": "26a18ebc-cdf7-4a6a-91cb-beb352805e81",
       "object_id": "e524fc69-35f5-4e7d-bdeb-b3c08cbed2dc",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e572cfdc-a5e0-44a8-a74f-5621d85b948a",
@@ -2039,11 +2570,14 @@
       "identity_type": "service_principal",
       "app_id": "82f45fb0-18b4-4d68-8bed-9e44909e3890",
       "object_id": "e572cfdc-a5e0-44a8-a74f-5621d85b948a",
+      "created_datetime": "2025-04-18T20:50:30+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e8174182-fdeb-4767-bad1-1b41a991d5f0",
@@ -2051,11 +2585,14 @@
       "identity_type": "service_principal",
       "app_id": "7a274595-3618-4e6f-b54e-05bb353e0153",
       "object_id": "e8174182-fdeb-4767-bad1-1b41a991d5f0",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "e9d9c5e2-7ae8-4a2e-8c2a-7477baa504d6",
@@ -2063,11 +2600,14 @@
       "identity_type": "service_principal",
       "app_id": "2e49aa60-1bd3-43b6-8ab6-03ada3d9f08b",
       "object_id": "e9d9c5e2-7ae8-4a2e-8c2a-7477baa504d6",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ee1c8a8e-440f-45cf-bda6-57303bcacd16",
@@ -2075,6 +2615,7 @@
       "identity_type": "service_principal",
       "app_id": "5e703a4d-c222-450a-9c4c-fa2056f02918",
       "object_id": "ee1c8a8e-440f-45cf-bda6-57303bcacd16",
+      "created_datetime": "2026-01-21T21:09:57+00:00",
       "role_assignments": [
         {
           "role_name": "Owner",
@@ -2085,7 +2626,11 @@
       "risk_level": "critical",
       "risk_reasons": [
         "Owner on subscription level"
-      ]
+      ],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": false
     },
     {
       "id": "ee5314c2-2fc1-4ec8-b7ac-9396db295e6e",
@@ -2093,11 +2638,14 @@
       "identity_type": "service_principal",
       "app_id": "913c6de4-2a4a-4a61-a9ce-945d2b2ce2e0",
       "object_id": "ee5314c2-2fc1-4ec8-b7ac-9396db295e6e",
+      "created_datetime": "2025-04-18T20:50:27+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "ee66a501-fe1e-43f1-b6c1-f37e5deeaead",
@@ -2105,11 +2653,14 @@
       "identity_type": "service_principal",
       "app_id": "00edd498-7c0c-4e68-859c-5a55d518c9c0",
       "object_id": "ee66a501-fe1e-43f1-b6c1-f37e5deeaead",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "eee43553-4c1c-4ae7-850f-5ab550ce0e94",
@@ -2117,11 +2668,14 @@
       "identity_type": "service_principal",
       "app_id": "0ef94e72-e4fc-4aa0-a8f4-ff27deb3e6eb",
       "object_id": "eee43553-4c1c-4ae7-850f-5ab550ce0e94",
+      "created_datetime": "2025-04-18T20:50:29+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "f67708a7-0e29-4ded-a473-94e412fa9b9f",
@@ -2129,11 +2683,14 @@
       "identity_type": "service_principal",
       "app_id": "789e8929-0390-42a2-8934-0f9dafb8ec89",
       "object_id": "f67708a7-0e29-4ded-a473-94e412fa9b9f",
+      "created_datetime": "2025-04-18T20:54:59+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "f6c4adea-0a7c-4bae-a0fa-fe8fe3afc599",
@@ -2141,11 +2698,14 @@
       "identity_type": "service_principal",
       "app_id": "8fca0a66-c008-4564-a876-ab3ae0fd5cff",
       "object_id": "f6c4adea-0a7c-4bae-a0fa-fe8fe3afc599",
+      "created_datetime": "2025-04-18T20:44:34+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "f717cea4-582b-4985-b5df-1a5556f41590",
@@ -2153,11 +2713,14 @@
       "identity_type": "service_principal",
       "app_id": "c2ada927-a9e2-4564-aae2-70775a2fa0af",
       "object_id": "f717cea4-582b-4985-b5df-1a5556f41590",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "fa7faba6-82e3-4c8e-a99c-aa0e762617da",
@@ -2165,11 +2728,14 @@
       "identity_type": "service_principal",
       "app_id": "21a8a852-89f4-4947-a374-b26b2db3d365",
       "object_id": "fa7faba6-82e3-4c8e-a99c-aa0e762617da",
+      "created_datetime": "2025-04-18T20:50:28+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "fc112f0e-f84d-4a90-aef7-976f64c7193f",
@@ -2177,11 +2743,14 @@
       "identity_type": "service_principal",
       "app_id": "91ad134d-5284-4adc-a896-d7fd24e9fa15",
       "object_id": "fc112f0e-f84d-4a90-aef7-976f64c7193f",
+      "created_datetime": "2026-01-20T01:07:55+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "fc546fa9-6a7a-46d9-9e9f-c5c8aef72d9a",
@@ -2189,11 +2758,14 @@
       "identity_type": "service_principal",
       "app_id": "a3dfc3c6-2c7d-4f42-aeec-b2877f9bce97",
       "object_id": "fc546fa9-6a7a-46d9-9e9f-c5c8aef72d9a",
+      "created_datetime": "2025-04-18T20:55:02+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     },
     {
       "id": "fe66ae7e-354f-46aa-bfed-87ec82bab723",
@@ -2201,11 +2773,14 @@
       "identity_type": "service_principal",
       "app_id": "167e2ded-f32d-49f5-8a10-308b921bc7ee",
       "object_id": "fe66ae7e-354f-46aa-bfed-87ec82bab723",
+      "created_datetime": "2025-04-18T20:50:24+00:00",
       "role_assignments": [],
-      "risk_level": "medium",
-      "risk_reasons": [
-        "No role assignments (orphaned)"
-      ]
+      "risk_level": "info",
+      "risk_reasons": [],
+      "enabled": true,
+      "has_expired_credentials": false,
+      "associated_resource_id": null,
+      "is_microsoft_system": true
     }
   ]
 }
