@@ -19,6 +19,7 @@ from .models import (
     RiskLevel
 )
 from .credential_checker import CredentialChecker
+from .activity_tracker import ActivityTracker
 
 
 class AzureDiscoveryEngine:
@@ -75,6 +76,9 @@ class AzureDiscoveryEngine:
         
         # Initialize credential checker
         self.credential_checker = CredentialChecker(self.credential)
+        
+        # Initialize activity tracker
+        self.activity_tracker = ActivityTracker(self.credential)
         
         self.sub_client = SubscriptionClient(credential=self.credential)
         
@@ -297,6 +301,74 @@ class AzureDiscoveryEngine:
             if warning_count > 0:
                 print(f"    🟡 Warning (< 30 days): {warning_count}")
     
+    def check_activity(self, identities: List[Identity]) -> None:
+        """
+        Check last activity for service principals
+        """
+        print("\n🕐 Checking Last Activity...")
+        
+        # Only check custom SPNs (not Microsoft system SPNs)
+        custom_spns = [
+            i for i in identities 
+            if i.identity_type == IdentityType.SERVICE_PRINCIPAL 
+            and not i.is_microsoft_system
+        ]
+        
+        print(f"  Checking {len(custom_spns)} custom service principals...")
+        
+        never_used_count = 0
+        stale_count = 0
+        inactive_count = 0
+        active_count = 0
+        unknown_count = 0
+        
+        for identity in custom_spns:
+            # Get last sign-in
+            last_sign_in = self.activity_tracker.get_last_sign_in(identity.app_id)
+            status = self.activity_tracker.get_activity_status(last_sign_in, identity.created_datetime)
+            
+            # Store in identity object
+            identity.last_sign_in = last_sign_in
+            identity.activity_status = status
+            
+            # Print alerts for problematic activity
+            if status == "never_used":
+                days_old = (datetime.utcnow() - identity.created_datetime).days if identity.created_datetime else 0
+                print(f"  🔴 {identity.display_name}: Never used (created {days_old} days ago)")
+                never_used_count += 1
+            elif status == "stale":
+                days_ago = (datetime.utcnow() - last_sign_in).days
+                print(f"  🟠 {identity.display_name}: Stale (last used {days_ago} days ago)")
+                stale_count += 1
+            elif status == "inactive":
+                days_ago = (datetime.utcnow() - last_sign_in).days
+                print(f"  🟡 {identity.display_name}: Inactive (last used {days_ago} days ago)")
+                inactive_count += 1
+            elif status == "active":
+                if last_sign_in:
+                    hours_ago = (datetime.utcnow() - last_sign_in).total_seconds() / 3600
+                    if hours_ago < 24:
+                        print(f"  🟢 {identity.display_name}: Active (last used {int(hours_ago)} hours ago)")
+                    else:
+                        days_ago = int(hours_ago / 24)
+                        print(f"  🟢 {identity.display_name}: Active (last used {days_ago} days ago)")
+                active_count += 1
+            elif status == "unknown":
+                unknown_count += 1
+        
+        # Summary
+        print(f"\n  Summary:")
+        if never_used_count > 0:
+            print(f"    🔴 Never used: {never_used_count}")
+        if stale_count > 0:
+            print(f"    🟠 Stale (90+ days): {stale_count}")
+        if inactive_count > 0:
+            print(f"    🟡 Inactive (30-90 days): {inactive_count}")
+        if active_count > 0:
+            print(f"    🟢 Active (< 30 days): {active_count}")
+        if unknown_count > 0:
+            print(f"    ⚪ No sign-in data (90+ days or never used): {unknown_count}")
+    
     def run_discovery(self) -> DiscoveryResult:
         """
         Run complete discovery process
@@ -348,6 +420,9 @@ class AzureDiscoveryEngine:
         
         # Check credential expiration (after risk calculation)
         self.check_credentials(all_identities)
+        
+        # Check last activity
+        self.check_activity(all_identities)
         
         # Print summary
         print("\n" + "="*60)

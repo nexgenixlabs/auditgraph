@@ -169,6 +169,8 @@ class Identity:
     # For service principals
     credential_expiration: Optional[datetime] = None
     credential_status: str = "unknown"  # unknown, good, warning, critical, expired
+    last_sign_in: Optional[datetime] = None
+    activity_status: str = "unknown"  # unknown, active, inactive, stale, never_used
     
     # For managed identities
     associated_resource_id: Optional[str] = None
