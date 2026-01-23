@@ -20,6 +20,7 @@ from .models import (
 )
 from .credential_checker import CredentialChecker
 from .activity_tracker import ActivityTracker
+from app.database import Database
 
 
 class AzureDiscoveryEngine:
@@ -79,6 +80,9 @@ class AzureDiscoveryEngine:
         
         # Initialize activity tracker
         self.activity_tracker = ActivityTracker(self.credential)
+        
+        # Initialize database
+        self.db = Database()
         
         self.sub_client = SubscriptionClient(credential=self.credential)
         
@@ -369,6 +373,95 @@ class AzureDiscoveryEngine:
         if unknown_count > 0:
             print(f"    ⚪ No sign-in data (90+ days or never used): {unknown_count}")
     
+    def save_to_database(self, result) -> int:
+        """
+        Save discovery results to PostgreSQL database
+        
+        Returns:
+            discovery_run_id
+        """
+        print("\n💾 Saving to database...")
+        
+        # Create discovery run
+        run_id = self.db.create_discovery_run(
+            subscription_id=self.subscription_id,
+            subscription_name=result.subscription_name
+        )
+        print(f"  ✓ Discovery run created (ID: {run_id})")
+        
+        # Count risk levels
+        risk_counts = {
+            'critical': 0,
+            'high': 0,
+            'medium': 0,
+            'low': 0
+        }
+        
+        # Save each identity
+        saved_count = 0
+        for identity in result.identities:
+            # Only save non-Microsoft system identities (the actionable ones)
+            if identity.is_microsoft_system:
+                continue
+            
+            # Prepare identity data
+            identity_data = {
+                'identity_id': identity.id,
+                'display_name': identity.display_name,
+                'identity_type': identity.identity_type.value,
+                'app_id': identity.app_id,
+                'object_id': identity.object_id,
+                'created_datetime': identity.created_datetime,
+                'enabled': identity.enabled,
+                'is_microsoft_system': identity.is_microsoft_system,
+                'risk_level': identity.risk_level.value if identity.risk_level else None,
+                'risk_reasons': identity.risk_reasons,
+                'credential_expiration': identity.credential_expiration,
+                'credential_status': identity.credential_status,
+                'last_sign_in': identity.last_sign_in,
+                'activity_status': identity.activity_status,
+                'tags': identity.tags
+            }
+            
+            # Save identity
+            identity_db_id = self.db.save_identity(run_id, identity_data)
+            
+            # Count risk levels
+            if identity.risk_level:
+                risk_level = identity.risk_level.value.lower()
+                if risk_level in risk_counts:
+                    risk_counts[risk_level] += 1
+            
+            # Save role assignments
+            for role in identity.role_assignments:
+                role_data = {
+                    'role_name': role.role_name,
+                    'scope': role.scope,
+                    'scope_type': role.scope_type,
+                    'principal_id': role.principal_id,
+                    'assignment_id': role.assignment_id,
+                    'created_on': role.created_on
+                }
+                self.db.save_role_assignment(identity_db_id, role_data)
+            
+            saved_count += 1
+        
+        print(f"  ✓ Saved {saved_count} identities")
+        print(f"  ✓ Saved {sum(len(i.role_assignments) for i in result.identities if not i.is_microsoft_system)} role assignments")
+        
+        # Complete the discovery run
+        self.db.complete_discovery_run(
+            run_id=run_id,
+            total_identities=saved_count,
+            critical_count=risk_counts['critical'],
+            high_count=risk_counts['high'],
+            medium_count=risk_counts['medium'],
+            low_count=risk_counts['low']
+        )
+        print(f"  ✓ Discovery run completed")
+        
+        return run_id
+    
     def run_discovery(self) -> DiscoveryResult:
         """
         Run complete discovery process
@@ -423,6 +516,9 @@ class AzureDiscoveryEngine:
         
         # Check last activity
         self.check_activity(all_identities)
+        
+        # Save to database
+        self.save_to_database(result)
         
         # Print summary
         print("\n" + "="*60)
