@@ -18,6 +18,7 @@ from .models import (
     DiscoveryResult,
     RiskLevel
 )
+from .credential_checker import CredentialChecker
 
 
 class AzureDiscoveryEngine:
@@ -71,6 +72,9 @@ class AzureDiscoveryEngine:
             credential=self.credential,
             subscription_id=self.subscription_id
         )
+        
+        # Initialize credential checker
+        self.credential_checker = CredentialChecker(self.credential)
         
         self.sub_client = SubscriptionClient(credential=self.credential)
         
@@ -237,6 +241,62 @@ class AzureDiscoveryEngine:
         except Exception as e:
             print(f"  ✗ Error discovering role assignments: {str(e)}")
     
+    def check_credentials(self, identities: List[Identity]) -> None:
+        """
+        Check credential expiration for service principals
+        """
+        print("\n🔑 Checking Credential Expiration...")
+        
+        # Only check custom SPNs (not Microsoft system SPNs)
+        custom_spns = [
+            i for i in identities 
+            if i.identity_type == IdentityType.SERVICE_PRINCIPAL 
+            and not i.is_microsoft_system
+        ]
+        
+        print(f"  Checking {len(custom_spns)} custom service principals...")
+        
+        expired_count = 0
+        critical_count = 0
+        warning_count = 0
+        
+        for identity in custom_spns:
+            # Get the application ID from the service principal
+            app_id = identity.app_id  # This is the appId
+            
+            # Check expiration
+            expiration_date = self.credential_checker.check_credential_expiration(app_id)
+            status = self.credential_checker.get_expiration_status(expiration_date)
+            
+            # Store in identity object
+            identity.credential_expiration = expiration_date
+            identity.credential_status = status
+            
+            # Print alerts for problematic credentials
+            if status == "expired":
+                print(f"  ❌ {identity.display_name}: EXPIRED")
+                expired_count += 1
+            elif status == "critical":
+                days = (expiration_date - datetime.utcnow()).days
+                print(f"  🔴 {identity.display_name}: Expires in {days} days")
+                critical_count += 1
+            elif status == "warning":
+                days = (expiration_date - datetime.utcnow()).days
+                print(f"  🟡 {identity.display_name}: Expires in {days} days")
+                warning_count += 1
+        
+        # Summary
+        if expired_count == 0 and critical_count == 0 and warning_count == 0:
+            print(f"  ✓ All credentials are valid for 30+ days")
+        else:
+            print(f"\n  Summary:")
+            if expired_count > 0:
+                print(f"    ❌ Expired: {expired_count}")
+            if critical_count > 0:
+                print(f"    🔴 Critical (< 7 days): {critical_count}")
+            if warning_count > 0:
+                print(f"    🟡 Warning (< 30 days): {warning_count}")
+    
     def run_discovery(self) -> DiscoveryResult:
         """
         Run complete discovery process
@@ -285,6 +345,9 @@ class AzureDiscoveryEngine:
                 print(f"    🚨 {identity.display_name}: {identity.risk_level.value.upper()}")
                 for reason in identity.risk_reasons:
                     print(f"       - {reason}")
+        
+        # Check credential expiration (after risk calculation)
+        self.check_credentials(all_identities)
         
         # Print summary
         print("\n" + "="*60)

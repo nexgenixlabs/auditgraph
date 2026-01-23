@@ -167,8 +167,8 @@ class Identity:
     is_microsoft_system: bool = False  # NEW: Track if it's a Microsoft SPN
     
     # For service principals
-    credential_expires: Optional[datetime] = None
-    has_expired_credentials: bool = False
+    credential_expiration: Optional[datetime] = None
+    credential_status: str = "unknown"  # unknown, good, warning, critical, expired
     
     # For managed identities
     associated_resource_id: Optional[str] = None
@@ -202,7 +202,7 @@ class Identity:
                     )
         
         # Check for expired credentials
-        if self.has_expired_credentials:
+        if self.credential_status == 'expired':
             if self.risk_level == RiskLevel.INFO:
                 self.risk_level = RiskLevel.MEDIUM
             self.risk_reasons.append("Has expired credentials")
@@ -245,7 +245,7 @@ class Identity:
             'risk_level': self.risk_level.value,
             'risk_reasons': self.risk_reasons,
             'enabled': self.enabled,
-            'has_expired_credentials': self.has_expired_credentials,
+            'credential_status': self.credential_status,
             'associated_resource_id': self.associated_resource_id,
             'is_microsoft_system': self.is_microsoft_system  # NEW
         }
