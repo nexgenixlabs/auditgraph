@@ -21,6 +21,7 @@ from .models import (
 from .credential_checker import CredentialChecker
 from .activity_tracker import ActivityTracker
 from app.database import Database
+from app.engines.drift_detector import DriftDetector
 
 
 class AzureDiscoveryEngine:
@@ -462,6 +463,36 @@ class AzureDiscoveryEngine:
         
         return run_id
     
+    def detect_drift(self, current_run_id: int):
+        """
+        Detect drift by comparing current run with previous run
+        
+        Args:
+            current_run_id: ID of the current discovery run
+        """
+        # Get the previous completed run
+        cursor = self.db.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE status = 'completed' AND id < %s
+            ORDER BY id DESC
+            LIMIT 1
+        """, (current_run_id,))
+        
+        result = cursor.fetchone()
+        cursor.close()
+        
+        if not result:
+            print("\nℹ️  No previous run found - skipping drift detection")
+            return
+        
+        previous_run_id = result[0]
+        
+        # Initialize drift detector and compare
+        detector = DriftDetector(self.db)
+        changes = detector.compare_runs(current_run_id, previous_run_id)
+        detector.print_drift_report(changes, current_run_id, previous_run_id)
+    
     def run_discovery(self) -> DiscoveryResult:
         """
         Run complete discovery process
@@ -518,7 +549,10 @@ class AzureDiscoveryEngine:
         self.check_activity(all_identities)
         
         # Save to database
-        self.save_to_database(result)
+        run_id = self.save_to_database(result)
+        
+        # Run drift detection (compare with previous run)
+        self.detect_drift(run_id)
         
         # Print summary
         print("\n" + "="*60)
