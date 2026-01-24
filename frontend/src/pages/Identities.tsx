@@ -1,9 +1,11 @@
 // src/pages/Identities.tsx
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { getIdentities } from '../services/api';
 import { Identity } from '../types';
 
 const Identities: React.FC = () => {
+  const navigate = useNavigate();
   const [identities, setIdentities] = useState<Identity[]>([]);
   const [filteredIdentities, setFilteredIdentities] = useState<Identity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -104,6 +106,10 @@ const Identities: React.FC = () => {
       setSortField(field);
       setSortOrder('desc');
     }
+  };
+
+  const handleRowClick = (identityId: string) => {
+    navigate(`/identities/${identityId}`);
   };
 
   const getRiskBadgeColor = (riskLevel: string) => {
@@ -324,7 +330,11 @@ const Identities: React.FC = () => {
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredIdentities.length > 0 ? (
                 filteredIdentities.map((identity, index) => (
-                  <tr key={index} className="hover:bg-gray-50 cursor-pointer">
+                  <tr 
+                    key={index} 
+                    onClick={() => handleRowClick(identity.identity_id)}
+                    className="hover:bg-gray-50 cursor-pointer transition-colors"
+                  >
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm font-medium text-gray-900">
                         {identity.display_name}

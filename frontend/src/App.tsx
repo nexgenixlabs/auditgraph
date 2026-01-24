@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Identities from './pages/Identities';
+import IdentityDetail from './pages/IdentityDetail';
 
 function App() {
   return (
@@ -36,6 +37,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/identities" element={<Identities />} />
+          <Route path="/identities/:id" element={<IdentityDetail />} />
         </Routes>
       </div>
     </Router>
@@ -45,14 +47,17 @@ function App() {
 function NavLinks() {
   const location = useLocation();
   
-  const isActive = (path: string) => location.pathname === path;
+  const isActive = (path: string) => {
+    if (path === '/') return location.pathname === '/';
+    return location.pathname.startsWith(path);
+  };
   
   return (
     <div className="flex items-baseline space-x-1">
       <Link
         to="/"
         className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-          isActive('/') 
+          isActive('/') && location.pathname === '/'
             ? 'bg-blue-600 text-white' 
             : 'text-gray-700 hover:bg-gray-100'
         }`}
