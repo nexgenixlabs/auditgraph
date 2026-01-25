@@ -151,6 +151,23 @@ class Database:
         ))
         self.conn.commit()
         cursor.close()
+
+    def save_entra_role_assignment(self, identity_db_id: int, entra_role_data: Dict):
+        """Save an Entra ID directory role assignment to the database"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO entra_role_assignments (
+                identity_db_id, role_name, role_definition_id, directory_scope
+            ) VALUES (%s, %s, %s, %s)
+        """, (
+            identity_db_id,
+            entra_role_data.get('role_name'),
+            entra_role_data.get('role_definition_id'),
+            entra_role_data.get('directory_scope')
+        ))
+        self.conn.commit()
+        cursor.close()
+
     
     def get_latest_discovery_run(self) -> Optional[Dict]:
         """Get the most recent completed discovery run"""

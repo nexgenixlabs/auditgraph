@@ -55,6 +55,10 @@ class AzureDiscoveryEngine:
         principal_ids_with_roles = set(ra['principal_id'] for ra in role_assignments)
         print(f"  Found {len(principal_ids_with_roles)} unique principals with roles")
         
+        # Step 2.5: Discover Entra ID directory roles
+        print("\n🔑 Discovering Entra ID Directory Roles...")
+        entra_roles = await self._discover_entra_roles(principal_ids_with_roles)
+        
         # Step 3: Discover Service Principals
         print("\n📋 Discovering Service Principals...")
         service_principals = await self._discover_service_principals()
@@ -74,7 +78,7 @@ class AzureDiscoveryEngine:
         
         # Step 6: Calculate risks
         print("\n⚠️  Calculating Risk Levels...")
-        identities_with_risks = self._calculate_risks(all_identities, role_assignments)
+        identities_with_risks = self._calculate_risks(all_identities, role_assignments, entra_roles)
         
         # Step 7: Check credentials
         print("\n🔑 Checking Credential Expiration...")
@@ -220,7 +224,44 @@ class AzureDiscoveryEngine:
             print(f"  ❌ Error: {e}")
             return []
     
-    def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict]) -> List[Dict]:
+    async def _discover_entra_roles(self, principal_ids: Set[str]) -> List[Dict[str, Any]]:
+        """Discover Entra ID directory role assignments for given principals"""
+        try:
+            print("🔑 Discovering Entra ID Directory Roles...")
+            
+            # Get all directory role assignments
+            role_assignments_response = await self.graph_client.role_management.directory.role_assignments.get()
+            
+            entra_roles = []
+            if role_assignments_response and role_assignments_response.value:
+                for assignment in role_assignments_response.value:
+                    # Only include assignments for principals we care about
+                    if assignment.principal_id in principal_ids:
+                        # Get role definition to get role name
+                        try:
+                            role_def = await self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(assignment.role_definition_id).get()
+                            role_name = role_def.display_name if role_def else "Unknown Role"
+                        except:
+                            role_name = "Unknown Role"
+                        
+                        entra_roles.append({
+                            'principal_id': assignment.principal_id,
+                            'role_name': role_name,
+                            'role_definition_id': assignment.role_definition_id,
+                            'directory_scope': assignment.directory_scope_id or '/',
+                        })
+                        
+                        if len(entra_roles) <= 10:
+                            print(f"    ✓ {role_name}")
+            
+            print(f"  Found {len(entra_roles)} Entra ID role assignments")
+            return entra_roles
+            
+        except Exception as e:
+            print(f"  ❌ Error discovering Entra roles: {e}")
+            return []
+
+    def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict], entra_roles: List[Dict] = []) -> List[Dict]:
         actionable_identities = []
         
         for identity in identities:
@@ -247,25 +288,83 @@ class AzureDiscoveryEngine:
             risk_level = 'info'
             risk_reasons = ['No elevated privileges']
             
+            # Check Entra ID directory roles FIRST (higher privilege)
+            identity_entra_roles = [er for er in entra_roles if er['principal_id'] == identity['object_id']]
+
+            # Critical Entra ID roles (check but don't break - collect all roles)
+            entra_risk_level = 'info'
+            entra_risk_reason = None
+            
+            for entra_role in identity_entra_roles:
+                role_name_lower = entra_role['role_name'].lower()
+                if 'global administrator' in role_name_lower:
+                    entra_risk_level = 'critical'
+                    entra_risk_reason = 'Entra ID Global Administrator'
+                    break  # Global Admin is highest, no need to check more
+                elif 'privileged role administrator' in role_name_lower:
+                    entra_risk_level = 'critical'
+                    entra_risk_reason = 'Entra ID Privileged Role Administrator'
+                elif 'application administrator' in role_name_lower or 'cloud application administrator' in role_name_lower:
+                    if entra_risk_level != 'critical':
+                        entra_risk_level = 'critical'
+                        entra_risk_reason = f"Entra ID {entra_role['role_name']}"
+                elif 'user administrator' in role_name_lower or 'security administrator' in role_name_lower:
+                    if entra_risk_level not in ['critical']:
+                        entra_risk_level = 'high'
+                        entra_risk_reason = f"Entra ID {entra_role['role_name']}"
+            
+            # Set initial risk from Entra roles
+            if entra_risk_reason:
+                risk_level = entra_risk_level
+                risk_reasons = [entra_risk_reason]
+            
+            # Store Entra roles for display
+            identity['entra_roles'] = identity_entra_roles
+            
+            # Then check Azure RBAC roles
+            # Check Azure RBAC roles and combine with Entra assessment
+            azure_risk_level = 'info'
+            azure_risk_reason = None
+            
             for role in identity_roles:
                 role_name = role['role_name'].lower()
                 scope_type = role['scope_type']
                 
                 if 'owner' in role_name and scope_type == 'subscription':
-                    risk_level = 'critical'
-                    risk_reasons = [f"Owner on subscription level"]
+                    azure_risk_level = 'critical'
+                    azure_risk_reason = f"Azure Owner on subscription"
                     break
                 elif 'contributor' in role_name and scope_type == 'subscription':
-                    risk_level = 'critical'
-                    risk_reasons = [f"Contributor on subscription level"]
-                    break
+                    azure_risk_level = 'critical'
+                    azure_risk_reason = f"Azure Contributor on subscription"
                 elif 'user access administrator' in role_name:
-                    risk_level = 'critical'
-                    risk_reasons = [f"User Access Administrator on {scope_type} level"]
-                    break
+                    if azure_risk_level != 'critical':
+                        azure_risk_level = 'critical'
+                        azure_risk_reason = f"Azure User Access Administrator"
                 elif any(x in role_name for x in ['reader', 'monitoring']):
-                    risk_level = 'medium'
-                    risk_reasons = [f"{role['role_name']} on {scope_type} level"]
+                    if azure_risk_level not in ['critical', 'high']:
+                        azure_risk_level = 'medium'
+                        azure_risk_reason = f"Azure {role['role_name']}"
+            
+            # Combine risks: Keep highest risk level, list both reasons
+            if azure_risk_reason:
+                # If both are critical, show Entra first (higher privilege)
+                if risk_level == 'critical' and azure_risk_level == 'critical':
+                    risk_reasons.append(azure_risk_reason)
+                # If Azure is more critical than current, upgrade
+                elif azure_risk_level == 'critical' and risk_level != 'critical':
+                    risk_level = 'critical'
+                    if risk_reasons[0] != 'No elevated privileges':
+                        risk_reasons.append(azure_risk_reason)
+                    else:
+                        risk_reasons = [azure_risk_reason]
+                # If same level, append
+                elif azure_risk_level == risk_level:
+                    risk_reasons.append(azure_risk_reason)
+                # If Azure is higher than current non-critical
+                elif risk_level == 'info':
+                    risk_level = azure_risk_level
+                    risk_reasons = [azure_risk_reason]
             
             if len(identity_roles) == 0:
                 risk_level = 'medium'
@@ -319,6 +418,11 @@ class AzureDiscoveryEngine:
             identity_roles = identity.get('roles', [])
             for role in identity_roles:
                 self.db.save_role_assignment(identity_db_id, role)
+            
+            # Save Entra ID role assignments for this identity
+            identity_entra_roles = identity.get('entra_roles', [])
+            for entra_role in identity_entra_roles:
+                self.db.save_entra_role_assignment(identity_db_id, entra_role)
             
             saved_count += 1
         

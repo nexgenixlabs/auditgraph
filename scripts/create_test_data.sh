@@ -82,16 +82,16 @@ echo "============================================================"
 
 RG_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/rg-auditgraph-test"
 
-echo "Assigning Contributor to Bob Wilson on RG..."
+echo "Assigning Contributor to Bob cat on RG..."
 az role assignment create \
-  --assignee "bob.wilson.test@$DOMAIN" \
+  --assignee "bob.cat.test@$DOMAIN" \
   --role "Contributor" \
   --scope "$RG_ID" \
   2>/dev/null || echo "  ✓ Already assigned"
 
-echo "Assigning Reader to John Doe on RG..."
+echo "Assigning Reader to Peeter parker on RG..."
 az role assignment create \
-  --assignee "john.doe.test@$DOMAIN" \
+  --assignee "Peeter.parker.test@$DOMAIN" \
   --role "Reader" \
   --scope "$RG_ID" \
   2>/dev/null || echo "  ✓ Already assigned"
