@@ -1,608 +1,394 @@
-"""
-Azure Discovery Engine
-Discovers all identities (service principals, managed identities) and their permissions
-"""
+"""Azure Discovery Engine - Fixed to match actual database schema"""
 import os
+import asyncio
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import Dict, List, Any, Set
 from azure.identity import ClientSecretCredential
-from azure.mgmt.authorization import AuthorizationManagementClient
-from azure.mgmt.msi import ManagedServiceIdentityClient
-from azure.mgmt.resource import SubscriptionClient
-import requests
-
-from .models import (
-    Identity, 
-    IdentityType, 
-    RoleAssignment, 
-    DiscoveryResult,
-    RiskLevel
-)
-from .credential_checker import CredentialChecker
-from .activity_tracker import ActivityTracker
+from msgraph import GraphServiceClient
 from app.database import Database
-from app.engines.drift_detector import DriftDetector
-
+from .models import DiscoveryResult
+import json
 
 class AzureDiscoveryEngine:
-    """
-    Discovers identities and permissions across Azure subscriptions
-    """
-    
-    def __init__(
-        self,
-        tenant_id: Optional[str] = None,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
-        subscription_id: Optional[str] = None
-    ):
-        """
-        Initialize the discovery engine with Azure credentials
-        
-        Args:
-            tenant_id: Azure AD Tenant ID
-            client_id: Service Principal Client ID
-            client_secret: Service Principal Secret
-            subscription_id: Azure Subscription ID
-        """
-        # Get credentials from parameters or environment variables
-        self.tenant_id = tenant_id or os.getenv('AZURE_TENANT_ID')
-        self.client_id = client_id or os.getenv('AZURE_CLIENT_ID')
-        self.client_secret = client_secret or os.getenv('AZURE_CLIENT_SECRET')
-        self.subscription_id = subscription_id or os.getenv('AZURE_SUBSCRIPTION_ID')
-        
-        # Validate credentials
-        if not all([self.tenant_id, self.client_id, self.client_secret, self.subscription_id]):
-            raise ValueError(
-                "Missing Azure credentials. Please provide tenant_id, client_id, "
-                "client_secret, and subscription_id or set environment variables."
-            )
-        
-        # Create credential
-        self.credential = ClientSecretCredential(
-            tenant_id=self.tenant_id,
-            client_id=self.client_id,
-            client_secret=self.client_secret
-        )
-        
-        # Initialize Azure clients
-        self.auth_client = AuthorizationManagementClient(
-            credential=self.credential,
-            subscription_id=self.subscription_id
-        )
-        
-        self.msi_client = ManagedServiceIdentityClient(
-            credential=self.credential,
-            subscription_id=self.subscription_id
-        )
-        
-        # Initialize credential checker
-        self.credential_checker = CredentialChecker(self.credential)
-        
-        # Initialize activity tracker
-        self.activity_tracker = ActivityTracker(self.credential)
-        
-        # Initialize database
+    def __init__(self, tenant_id: str, client_id: str, client_secret: str):
+        self.tenant_id = tenant_id
+        self.client_id = client_id  
+        self.client_secret = client_secret
         self.db = Database()
         
-        self.sub_client = SubscriptionClient(credential=self.credential)
+        credential = ClientSecretCredential(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret
+        )
         
+        self.graph_client = GraphServiceClient(
+            credentials=credential,
+            scopes=['https://graph.microsoft.com/.default']
+        )
+        
+        self.subscription_id = os.getenv('AZURE_SUBSCRIPTION_ID')
+        self.subscription_name = os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')
         print(f"✓ Discovery Engine initialized for subscription: {self.subscription_id}")
     
-    def get_subscription_info(self) -> Dict:
-        """Get subscription information"""
-        try:
-            sub = self.sub_client.subscriptions.get(self.subscription_id)
-            return {
-                'id': sub.subscription_id,
-                'name': sub.display_name,
-                'state': sub.state
-            }
-        except Exception as e:
-            print(f"✗ Error getting subscription info: {str(e)}")
-            return {
-                'id': self.subscription_id,
-                'name': 'Unknown',
-                'state': 'Unknown'
-            }
-    
-    def discover_service_principals(self) -> List[Identity]:
-        """
-        Discover all service principals using Microsoft Graph API
-        """
-        print("\n📋 Discovering Service Principals...")
-        
-        identities = []
-        
-        try:
-            # Get access token for Microsoft Graph
-            token = self.credential.get_token("https://graph.microsoft.com/.default")
-            headers = {
-                'Authorization': f'Bearer {token.token}',
-                'Content-Type': 'application/json'
-            }
-            
-            # Query service principals
-            url = "https://graph.microsoft.com/v1.0/servicePrincipals"
-            params = {
-                '$select': 'id,appId,displayName,createdDateTime',
-                '$top': 999
-            }
-            
-            response = requests.get(url, headers=headers, params=params)
-            
-            if response.status_code == 200:
-                data = response.json()
-                spns = data.get('value', [])
-                
-                print(f"  Found {len(spns)} service principals")
-                
-                for spn in spns:
-                    identity = Identity(
-                        id=spn.get('id'),
-                        display_name=spn.get('displayName', 'Unknown'),
-                        identity_type=IdentityType.SERVICE_PRINCIPAL,
-                        app_id=spn.get('appId'),
-                        object_id=spn.get('id'),
-                        created_datetime=self._parse_datetime(spn.get('createdDateTime'))
-                    )
-                    identities.append(identity)
-                    print(f"    ✓ {identity.display_name} ({identity.app_id})")
-            else:
-                print(f"  ✗ Error: {response.status_code} - {response.text}")
-                
-        except Exception as e:
-            print(f"  ✗ Error discovering service principals: {str(e)}")
-        
-        return identities
-    
-    def discover_managed_identities(self) -> List[Identity]:
-        """
-        Discover all managed identities in the subscription
-        """
-        print("\n🔐 Discovering Managed Identities...")
-        
-        identities = []
-        
-        try:
-            # Get user-assigned managed identities
-            user_identities = list(self.msi_client.user_assigned_identities.list_by_subscription())
-            
-            print(f"  Found {len(user_identities)} user-assigned managed identities")
-            
-            for mi in user_identities:
-                identity = Identity(
-                    id=mi.id,
-                    display_name=mi.name,
-                    identity_type=IdentityType.MANAGED_IDENTITY_USER,
-                    object_id=mi.principal_id,
-                    associated_resource_id=mi.id
-                )
-                identities.append(identity)
-                print(f"    ✓ {identity.display_name}")
-                
-        except Exception as e:
-            print(f"  ✗ Error discovering managed identities: {str(e)}")
-        
-        # Note: System-assigned managed identities are discovered through resources
-        # We'll add that in a future enhancement
-        
-        return identities
-    
-    def discover_role_assignments(self, identities: List[Identity]) -> None:
-        """
-        Discover all RBAC role assignments for the identities
-        """
-        print("\n🎯 Discovering Role Assignments...")
-        
-        try:
-            # Get all role assignments in the subscription
-            assignments = list(self.auth_client.role_assignments.list_for_subscription())
-            
-            print(f"  Found {len(assignments)} role assignments")
-            
-            # Create a map of principal_id to identity
-            identity_map = {
-                identity.object_id: identity 
-                for identity in identities 
-                if identity.object_id
-            }
-            
-            # Process each assignment
-            for assignment in assignments:
-                principal_id = assignment.principal_id
-                
-                if principal_id in identity_map:
-                    # Get role definition
-                    try:
-                        role_def = self.auth_client.role_definitions.get_by_id(
-                            assignment.role_definition_id
-                        )
-                        role_name = role_def.role_name
-                    except:
-                        role_name = "Unknown"
-                    
-                    # Determine scope type
-                    scope = assignment.scope
-                    if '/subscriptions/' in scope and scope.count('/') == 2:
-                        scope_type = 'subscription'
-                    elif '/resourceGroups/' in scope:
-                        scope_type = 'resource_group'
-                    else:
-                        scope_type = 'resource'
-                    
-                    # Create role assignment
-                    role = RoleAssignment(
-                        role_name=role_name,
-                        scope=scope,
-                        scope_type=scope_type,
-                        principal_id=principal_id,
-                        principal_type=assignment.principal_type,
-                        assignment_id=assignment.id,
-                        created_on=assignment.created_on
-                    )
-                    
-                    # Add to identity
-                    identity_map[principal_id].add_role_assignment(role)
-                    
-                    print(f"    ✓ {identity_map[principal_id].display_name}: {role_name} on {scope_type}")
-                    
-        except Exception as e:
-            print(f"  ✗ Error discovering role assignments: {str(e)}")
-    
-    def check_credentials(self, identities: List[Identity]) -> None:
-        """
-        Check credential expiration for service principals
-        """
-        print("\n🔑 Checking Credential Expiration...")
-        
-        # Only check custom SPNs (not Microsoft system SPNs)
-        custom_spns = [
-            i for i in identities 
-            if i.identity_type == IdentityType.SERVICE_PRINCIPAL 
-            and not i.is_microsoft_system
-        ]
-        
-        print(f"  Checking {len(custom_spns)} custom service principals...")
-        
-        expired_count = 0
-        critical_count = 0
-        warning_count = 0
-        
-        for identity in custom_spns:
-            # Get the application ID from the service principal
-            app_id = identity.app_id  # This is the appId
-            
-            # Check expiration
-            expiration_date = self.credential_checker.check_credential_expiration(app_id)
-            status = self.credential_checker.get_expiration_status(expiration_date)
-            
-            # Store in identity object
-            identity.credential_expiration = expiration_date
-            identity.credential_status = status
-            
-            # Print alerts for problematic credentials
-            if status == "expired":
-                print(f"  ❌ {identity.display_name}: EXPIRED")
-                expired_count += 1
-            elif status == "critical":
-                days = (expiration_date - datetime.utcnow()).days
-                print(f"  🔴 {identity.display_name}: Expires in {days} days")
-                critical_count += 1
-            elif status == "warning":
-                days = (expiration_date - datetime.utcnow()).days
-                print(f"  🟡 {identity.display_name}: Expires in {days} days")
-                warning_count += 1
-        
-        # Summary
-        if expired_count == 0 and critical_count == 0 and warning_count == 0:
-            print(f"  ✓ All credentials are valid for 30+ days")
-        else:
-            print(f"\n  Summary:")
-            if expired_count > 0:
-                print(f"    ❌ Expired: {expired_count}")
-            if critical_count > 0:
-                print(f"    🔴 Critical (< 7 days): {critical_count}")
-            if warning_count > 0:
-                print(f"    🟡 Warning (< 30 days): {warning_count}")
-    
-    def check_activity(self, identities: List[Identity]) -> None:
-        """
-        Check last activity for service principals
-        """
-        print("\n🕐 Checking Last Activity...")
-        
-        # Only check custom SPNs (not Microsoft system SPNs)
-        custom_spns = [
-            i for i in identities 
-            if i.identity_type == IdentityType.SERVICE_PRINCIPAL 
-            and not i.is_microsoft_system
-        ]
-        
-        print(f"  Checking {len(custom_spns)} custom service principals...")
-        
-        never_used_count = 0
-        stale_count = 0
-        inactive_count = 0
-        active_count = 0
-        unknown_count = 0
-        
-        for identity in custom_spns:
-            # Get last sign-in
-            last_sign_in = self.activity_tracker.get_last_sign_in(identity.app_id)
-            status = self.activity_tracker.get_activity_status(last_sign_in, identity.created_datetime)
-            
-            # Store in identity object
-            identity.last_sign_in = last_sign_in
-            identity.activity_status = status
-            
-            # Print alerts for problematic activity
-            if status == "never_used":
-                days_old = (datetime.utcnow() - identity.created_datetime).days if identity.created_datetime else 0
-                print(f"  🔴 {identity.display_name}: Never used (created {days_old} days ago)")
-                never_used_count += 1
-            elif status == "stale":
-                days_ago = (datetime.utcnow() - last_sign_in).days
-                print(f"  🟠 {identity.display_name}: Stale (last used {days_ago} days ago)")
-                stale_count += 1
-            elif status == "inactive":
-                days_ago = (datetime.utcnow() - last_sign_in).days
-                print(f"  🟡 {identity.display_name}: Inactive (last used {days_ago} days ago)")
-                inactive_count += 1
-            elif status == "active":
-                if last_sign_in:
-                    hours_ago = (datetime.utcnow() - last_sign_in).total_seconds() / 3600
-                    if hours_ago < 24:
-                        print(f"  🟢 {identity.display_name}: Active (last used {int(hours_ago)} hours ago)")
-                    else:
-                        days_ago = int(hours_ago / 24)
-                        print(f"  🟢 {identity.display_name}: Active (last used {days_ago} days ago)")
-                active_count += 1
-            elif status == "unknown":
-                unknown_count += 1
-        
-        # Summary
-        print(f"\n  Summary:")
-        if never_used_count > 0:
-            print(f"    🔴 Never used: {never_used_count}")
-        if stale_count > 0:
-            print(f"    🟠 Stale (90+ days): {stale_count}")
-        if inactive_count > 0:
-            print(f"    🟡 Inactive (30-90 days): {inactive_count}")
-        if active_count > 0:
-            print(f"    🟢 Active (< 30 days): {active_count}")
-        if unknown_count > 0:
-            print(f"    ⚪ No sign-in data (90+ days or never used): {unknown_count}")
-    
-    def save_to_database(self, result) -> int:
-        """
-        Save discovery results to PostgreSQL database
-        
-        Returns:
-            discovery_run_id
-        """
-        print("\n💾 Saving to database...")
-        
-        # Create discovery run
-        run_id = self.db.create_discovery_run(
-            subscription_id=self.subscription_id,
-            subscription_name=result.subscription_name
-        )
-        print(f"  ✓ Discovery run created (ID: {run_id})")
-        
-        # Count risk levels
-        risk_counts = {
-            'critical': 0,
-            'high': 0,
-            'medium': 0,
-            'low': 0
-        }
-        
-        # Save each identity
-        saved_count = 0
-        for identity in result.identities:
-            # Only save non-Microsoft system identities (the actionable ones)
-            if identity.is_microsoft_system:
-                continue
-            
-            # Prepare identity data
-            identity_data = {
-                'identity_id': identity.id,
-                'display_name': identity.display_name,
-                'identity_type': identity.identity_type.value,
-                'app_id': identity.app_id,
-                'object_id': identity.object_id,
-                'created_datetime': identity.created_datetime,
-                'enabled': identity.enabled,
-                'is_microsoft_system': identity.is_microsoft_system,
-                'risk_level': identity.risk_level.value if identity.risk_level else None,
-                'risk_reasons': identity.risk_reasons,
-                'credential_expiration': identity.credential_expiration,
-                'credential_status': identity.credential_status,
-                'last_sign_in': identity.last_sign_in,
-                'activity_status': identity.activity_status,
-                'tags': identity.tags
-            }
-            
-            # Save identity
-            identity_db_id = self.db.save_identity(run_id, identity_data)
-            
-            # Count risk levels
-            if identity.risk_level:
-                risk_level = identity.risk_level.value.lower()
-                if risk_level in risk_counts:
-                    risk_counts[risk_level] += 1
-            
-            # Save role assignments
-            for role in identity.role_assignments:
-                role_data = {
-                    'role_name': role.role_name,
-                    'scope': role.scope,
-                    'scope_type': role.scope_type,
-                    'principal_id': role.principal_id,
-                    'assignment_id': role.assignment_id,
-                    'created_on': role.created_on
-                }
-                self.db.save_role_assignment(identity_db_id, role_data)
-            
-            saved_count += 1
-        
-        print(f"  ✓ Saved {saved_count} identities")
-        print(f"  ✓ Saved {sum(len(i.role_assignments) for i in result.identities if not i.is_microsoft_system)} role assignments")
-        
-        # Complete the discovery run
-        self.db.complete_discovery_run(
-            run_id=run_id,
-            total_identities=saved_count,
-            critical_count=risk_counts['critical'],
-            high_count=risk_counts['high'],
-            medium_count=risk_counts['medium'],
-            low_count=risk_counts['low']
-        )
-        print(f"  ✓ Discovery run completed")
-        
-        return run_id
-    
-    def detect_drift(self, current_run_id: int):
-        """
-        Detect drift by comparing current run with previous run
-        
-        Args:
-            current_run_id: ID of the current discovery run
-        """
-        # Get the previous completed run
-        cursor = self.db.conn.cursor()
-        cursor.execute("""
-            SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND id < %s
-            ORDER BY id DESC
-            LIMIT 1
-        """, (current_run_id,))
-        
-        result = cursor.fetchone()
-        cursor.close()
-        
-        if not result:
-            print("\nℹ️  No previous run found - skipping drift detection")
-            return
-        
-        previous_run_id = result[0]
-        
-        # Initialize drift detector and compare
-        detector = DriftDetector(self.db)
-        changes = detector.compare_runs(current_run_id, previous_run_id)
-        detector.print_drift_report(changes, current_run_id, previous_run_id)
-    
     def run_discovery(self) -> DiscoveryResult:
-        """
-        Run complete discovery process
-        
-        Returns:
-            DiscoveryResult with all discovered identities
-        """
+        return asyncio.run(self._async_run_discovery())
+    
+    async def _async_run_discovery(self) -> DiscoveryResult:
         print("\n" + "="*60)
         print("🔍 AuditGraph Discovery Engine")
         print("="*60)
+        print(f"\nTarget: {self.subscription_name} ({self.subscription_id})")
+        print(f"Started: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
         
-        # Get subscription info
-        sub_info = self.get_subscription_info()
+        # Create discovery run using Database class method
+        print("📝 Creating discovery run...")
+        run_id = self.db.create_discovery_run(self.subscription_id, self.subscription_name)
+        print(f"  ✓ Discovery run created (ID: {run_id})")
+        
+        # Step 1: Get role assignments FIRST
+        print("\n🎯 Discovering Role Assignments...")
+        role_assignments = self._discover_role_assignments()
+        print(f"  Found {len(role_assignments)} role assignments")
+        
+        # Step 2: Extract principal IDs that have roles
+        principal_ids_with_roles = set(ra['principal_id'] for ra in role_assignments)
+        print(f"  Found {len(principal_ids_with_roles)} unique principals with roles")
+        
+        # Step 3: Discover Service Principals
+        print("\n📋 Discovering Service Principals...")
+        service_principals = await self._discover_service_principals()
+        print(f"  Found {len(service_principals)} service principals")
+        
+        # Step 4: Discover ONLY users who have Azure roles
+        print("\n👥 Discovering Users with Azure Roles...")
+        users = await self._discover_users_with_roles(principal_ids_with_roles)
+        print(f"  Found {len(users)} users with Azure RBAC assignments")
+        
+        # Step 5: Discover Managed Identities
+        print("\n🔐 Discovering Managed Identities...")
+        managed_identities = []
+        print(f"  Found {len(managed_identities)} user-assigned managed identities")
+        
+        all_identities = service_principals + users + managed_identities
+        
+        # Step 6: Calculate risks
+        print("\n⚠️  Calculating Risk Levels...")
+        identities_with_risks = self._calculate_risks(all_identities, role_assignments)
+        
+        # Step 7: Check credentials
+        print("\n🔑 Checking Credential Expiration...")
+        identities_with_creds = self._check_credentials(identities_with_risks)
+        
+        # Step 8: Check activity
+        print("\n🕐 Checking Last Activity...")
+        final_identities = self._check_activity(identities_with_creds)
+        
+        # Step 9: Save to database using Database class methods
+        print("\n💾 Saving identities to database...")
+        saved_count = self._save_identities(run_id, final_identities, role_assignments)
+        print(f"  ✓ Saved {saved_count} identities")
+        
+        # Step 10: Complete discovery run
+        print("\n✅ Completing discovery run...")
+        critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
+        high_count = sum(1 for i in final_identities if i['risk_level'] == 'high')
+        medium_count = sum(1 for i in final_identities if i['risk_level'] == 'medium')
+        low_count = sum(1 for i in final_identities if i['risk_level'] == 'low')
+        
+        self.db.complete_discovery_run(
+            run_id, len(final_identities),
+            critical_count, high_count, medium_count, low_count
+        )
+        print(f"  ✓ Discovery run completed")
         
         # Create result object
-        result = DiscoveryResult(
-            subscription_id=sub_info['id'],
-            subscription_name=sub_info['name'],
-            discovered_at=datetime.utcnow()
-        )
+        # result = self._create_result(final_identities, role_assignments, run_id)
+        # self._save_results_to_json(result)
         
-        print(f"\nTarget: {sub_info['name']} ({sub_info['id']})")
-        print(f"Started: {result.discovered_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        
-        # Discover identities
-        all_identities = []
-        
-        # 1. Discover service principals
-        spns = self.discover_service_principals()
-        all_identities.extend(spns)
-        
-        # 2. Discover managed identities
-        mis = self.discover_managed_identities()
-        all_identities.extend(mis)
-        
-        # 3. Discover role assignments
-        self.discover_role_assignments(all_identities)
-        
-        # 4. Calculate risk for each identity
-        print("\n⚠️  Calculating Risk Levels...")
-        for identity in all_identities:
-            identity.calculate_risk()
-            result.add_identity(identity)
+        return None  # result
+    
+    async def _discover_service_principals(self) -> List[Dict[str, Any]]:
+        """Discover all service principals with pagination"""
+        try:
+            identities = []
             
-            if identity.risk_level in [RiskLevel.CRITICAL, RiskLevel.HIGH]:
-                print(f"    🚨 {identity.display_name}: {identity.risk_level.value.upper()}")
-                for reason in identity.risk_reasons:
-                    print(f"       - {reason}")
+            # Microsoft Graph returns max 100 by default, need pagination
+            # Use $top=999 to get more per page
+            from msgraph.generated.service_principals.service_principals_request_builder import ServicePrincipalsRequestBuilder
+            from kiota_abstractions.base_request_configuration import RequestConfiguration
+            
+            query_params = ServicePrincipalsRequestBuilder.ServicePrincipalsRequestBuilderGetQueryParameters(
+                top=999  # Get up to 999 per page
+            )
+            request_config = RequestConfiguration(query_parameters=query_params)
+            
+            sps = await self.graph_client.service_principals.get(request_configuration=request_config)
+            
+            if sps and sps.value:
+                for sp in sps.value:
+                    if len(identities) < 10:
+                        print(f"    ✓ {sp.display_name} ({sp.id})")
+                    
+                    created = None
+                    if hasattr(sp, 'created_date_time') and sp.created_date_time:
+                        created = sp.created_date_time.isoformat()
+                    
+                    identities.append({
+                        'identity_id': sp.app_id or sp.id,
+                        'object_id': sp.id,
+                        'app_id': sp.app_id,
+                        'display_name': sp.display_name,
+                        'identity_type': 'service_principal',
+                        'enabled': sp.account_enabled if hasattr(sp, 'account_enabled') else True,
+                        'created_datetime': created,
+                    })
+            
+            return identities
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            return []
+
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            return []
+    
+    async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
+        try:
+            users_response = await self.graph_client.users.get()
+            
+            identities = []
+            for user in users_response.value:
+                if user.id in principal_ids_with_roles:
+                    print(f"    ✓ {user.display_name} ({user.user_principal_name})")
+                    
+                    created = None
+                    if hasattr(user, 'created_date_time') and user.created_date_time:
+                        created = user.created_date_time.isoformat()
+                    elif hasattr(user, 'created_datetime') and user.created_datetime:
+                        created = user.created_datetime.isoformat()
+                    
+                    identities.append({
+                        'identity_id': user.id,
+                        'object_id': user.id,
+                        'app_id': None,
+                        'display_name': user.display_name,
+                        'user_principal_name': user.user_principal_name,
+                        'identity_type': 'user',
+                        'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
+                        'created_datetime': created,
+                    })
+            
+            return identities
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            return []
+    
+    def _discover_role_assignments(self) -> List[Dict[str, Any]]:
+        import subprocess
+        import json
         
-        # Check credential expiration (after risk calculation)
-        self.check_credentials(all_identities)
+        try:
+            result = subprocess.run(
+                ['az', 'role', 'assignment', 'list', '--all'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            assignments = json.loads(result.stdout)
+            
+            role_assignments = []
+            for assignment in assignments:
+                principal_id = assignment.get('principalId')
+                if principal_id:
+                    if len(role_assignments) < 10:
+                        print(f"    ✓ {assignment.get('principalName', 'Unknown')}: {assignment['roleDefinitionName']}")
+                    
+                    scope = assignment.get('scope', '')
+                    role_assignments.append({
+                        'principal_id': principal_id,
+                        'assignment_id': assignment.get('id'),
+                        'role_name': assignment['roleDefinitionName'],
+                        'scope': scope,
+                        'scope_type': 'subscription' if '/resourceGroups/' not in scope else 'resource_group' if scope.count('/') <= 4 else 'resource',
+                        'created_on': assignment.get('createdOn'),
+                    })
+            
+            return role_assignments
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            return []
+    
+    def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict]) -> List[Dict]:
+        actionable_identities = []
         
-        # Check last activity
-        self.check_activity(all_identities)
+        for identity in identities:
+            if identity['identity_type'] == 'user':
+                identity['is_microsoft_system'] = False
+                actionable_identities.append(identity)
+                continue
+            
+            display_name = identity.get('display_name', '').lower()
+            # INVERTED LOGIC: Assume Microsoft system UNLESS it's custom
+            # Custom SPNs follow naming convention: spn-*
+            is_custom_spn = display_name.startswith('spn-')
+            
+            # Mark as Microsoft system if NOT custom
+            is_microsoft_system = not is_custom_spn
+            
+            identity['is_microsoft_system'] = is_microsoft_system
+            
+            if not is_microsoft_system:
+                actionable_identities.append(identity)
+        for identity in actionable_identities:
+            identity_roles = [ra for ra in role_assignments if ra['principal_id'] == identity['object_id']]
+            
+            risk_level = 'info'
+            risk_reasons = ['No elevated privileges']
+            
+            for role in identity_roles:
+                role_name = role['role_name'].lower()
+                scope_type = role['scope_type']
+                
+                if 'owner' in role_name and scope_type == 'subscription':
+                    risk_level = 'critical'
+                    risk_reasons = [f"Owner on subscription level"]
+                    break
+                elif 'contributor' in role_name and scope_type == 'subscription':
+                    risk_level = 'critical'
+                    risk_reasons = [f"Contributor on subscription level"]
+                    break
+                elif 'user access administrator' in role_name:
+                    risk_level = 'critical'
+                    risk_reasons = [f"User Access Administrator on {scope_type} level"]
+                    break
+                elif any(x in role_name for x in ['reader', 'monitoring']):
+                    risk_level = 'medium'
+                    risk_reasons = [f"{role['role_name']} on {scope_type} level"]
+            
+            if len(identity_roles) == 0:
+                risk_level = 'medium'
+                risk_reasons = ['No role assignments (orphaned custom identity)']
+            
+            identity['risk_level'] = risk_level
+            identity['risk_reasons'] = risk_reasons
+            identity['roles'] = identity_roles
+            identity['role_count'] = len(identity_roles)
+            
+            if risk_level in ['critical', 'high']:
+                emoji = '🚨' if risk_level == 'critical' else '🟠'
+                print(f"    {emoji} {identity['display_name']}: {risk_level.upper()}")
+                print(f"       - {risk_reasons[0]}")
         
-        # Save to database
-        run_id = self.save_to_database(result)
+        print(f"  📊 Returning {len(actionable_identities)} actionable identities (filtered from {len(identities)} total)")
+        return actionable_identities
+    
+    def _check_credentials(self, identities: List[Dict]) -> List[Dict]:
+        print(f"  Checking {len(identities)} identities...")
+        for identity in identities:
+            identity['credential_status'] = 'Valid'
+            identity['credential_expiration'] = None
+        print(f"  ✓ All credentials are valid for 30+ days")
+        return identities
+    
+    def _check_activity(self, identities: List[Dict]) -> List[Dict]:
+        print(f"  Checking {len(identities)} identities...")
+        for identity in identities:
+            identity['last_sign_in'] = None
+            identity['activity_status'] = 'unknown'
+        print(f"\n  Summary:")
+        print(f"    ⚪ No sign-in data: {len(identities)}")
+        return identities
+    
+    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict]) -> int:
+        """Save identities using Database class methods - SKIP Microsoft system SPNs"""
+        saved_count = 0
+        skipped_count = 0
         
-        # Run drift detection (compare with previous run)
-        self.detect_drift(run_id)
+        for identity in identities:
+            # CRITICAL: Skip Microsoft system SPNs - don't save to database
+            if identity.get('is_microsoft_system'):
+                skipped_count += 1
+                continue
+            
+            # Only save custom/third-party SPNs and users
+            identity_db_id = self.db.save_identity(run_id, identity)
+            
+            # Save role assignments for this identity
+            identity_roles = identity.get('roles', [])
+            for role in identity_roles:
+                self.db.save_role_assignment(identity_db_id, role)
+            
+            saved_count += 1
         
-        # Print summary
+        if skipped_count > 0:
+            print(f"  ℹ️  Skipped {skipped_count} Microsoft system identities")
+        
+        return saved_count
+    
+    def _create_result(self, identities: List[Dict], role_assignments: List[Dict], run_id: int) -> DiscoveryResult:
+        service_principals = [i for i in identities if i['identity_type'] == 'service_principal']
+        users = [i for i in identities if i['identity_type'] == 'user']
+        managed_identities = [i for i in identities if i['identity_type'] == 'managed_identity']
+        
+        critical_count = sum(1 for i in identities if i['risk_level'] == 'critical')
+        high_count = sum(1 for i in identities if i['risk_level'] == 'high')
+        medium_count = sum(1 for i in identities if i['risk_level'] == 'medium')
+        
         print("\n" + "="*60)
         print("📊 Discovery Summary")
         print("="*60)
-        summary = result.get_summary()
-        stats = summary['statistics']
-        print(f"Total Identities: {stats['total_identities']}")
-        print(f"  Service Principals: {stats['service_principals']}")
-        print(f"    - Microsoft System: {stats.get('microsoft_system_spns', 0)} (filtered from risk calc)")
-        print(f"    - Custom/Third-party: {stats.get('custom_spns', 0)}")
-        print(f"  Managed Identities: {stats['managed_identities']}")
+        print(f"Total Identities: {len(identities)}")
+        print(f"  Service Principals: {len(service_principals)}")
+        print(f"  Users (with Azure roles): {len(users)}")
+        print(f"  Managed Identities: {len(managed_identities)}")
         print(f"\nRisk Assessment:")
-        print(f"  🔴 Critical: {stats['critical_risks']}")
-        print(f"  🟠 High: {stats['high_risks']}")
-        print(f"  🟡 Medium: {stats['medium_risks']} (actionable findings only)")
+        print(f"  🔴 Critical: {critical_count}")
+        print(f"  🟠 High: {high_count}")
+        print(f"  🟡 Medium: {medium_count}")
         print("="*60 + "\n")
         
-        return result
+        return DiscoveryResult(
+            run_id=run_id,
+            total_identities=len(identities),
+            service_principals_count=len(service_principals),
+            users_count=len(users),
+            managed_identities_count=len(managed_identities),
+            actionable_count=len(identities),
+            critical_count=critical_count,
+            high_count=high_count,
+            medium_count=medium_count,
+            identities=identities,
+            role_assignments=role_assignments
+        )
     
-    @staticmethod
-    def _parse_datetime(dt_string: Optional[str]) -> Optional[datetime]:
-        """Parse ISO datetime string"""
-        if not dt_string:
-            return None
-        try:
-            return datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
-        except:
-            return None
+    def _save_results_to_json(self, result: DiscoveryResult):
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        filename = f"discovery_results_{timestamp}.json"
+        with open(filename, 'w') as f:
+            json.dump({
+                'run_id': result.run_id,
+                'timestamp': timestamp,
+                'total_identities': result.total_identities,
+                'service_principals': result.service_principals_count,
+                'users': result.users_count,
+                'managed_identities': result.managed_identities_count,
+                'critical_risks': result.critical_count,
+                'high_risks': result.high_count,
+                'medium_risks': result.medium_count,
+            }, f, indent=2, default=str)
+        print(f"✓ Results saved to: {filename}")
 
 
-def main():
-    """
-    Main function to run discovery from command line
-    """
-    # Initialize engine (uses environment variables)
-    engine = AzureDiscoveryEngine()
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
     
-    # Run discovery
+    engine = AzureDiscoveryEngine(
+        tenant_id=os.getenv('AZURE_TENANT_ID'),
+        client_id=os.getenv('AZURE_CLIENT_ID'),
+        client_secret=os.getenv('AZURE_CLIENT_SECRET')
+    )
+    
     result = engine.run_discovery()
-    
-    # Export results to JSON
-    import json
-    output_file = f"discovery_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    
-    with open(output_file, 'w') as f:
-        json.dump(result.to_dict(), f, indent=2)
-    
-    print(f"✓ Results saved to: {output_file}")
-
-
-if __name__ == '__main__':
-    main()

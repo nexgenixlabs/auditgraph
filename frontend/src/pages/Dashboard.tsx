@@ -273,8 +273,8 @@ const Dashboard: React.FC = () => {
           color="gray"
         />
         <StatsCard
-          title="Noise Reduction"
-          value="99%"
+          title="Privileged Identities"
+          value={`${(stats?.critical_risks || 0) + (stats?.high_risks || 0)} require attention`}
           color="green"
           icon="✨"
         />
