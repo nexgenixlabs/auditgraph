@@ -1,49 +1,72 @@
-#!/usr/bin/env python3
-"""Test AuditGraph Discovery Engine"""
+"""
+AuditGraph Discovery Test Runner
+
+Runs Azure + Entra discovery and stores results as a new discovery run in the DB.
+"""
+
 import os
 import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from dotenv import load_dotenv
 
-from app.engines.discovery import AzureDiscoveryEngine
-import json
-from datetime import datetime
+# Ensure app module is resolvable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
 
 
 def main():
-    print("\n" + "="*70)
-    print(" "*20 + "AuditGraph Discovery Test")
-    print("="*70)
-    
-    required_vars = ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SUBSCRIPTION_ID']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        print("\n❌ Missing environment variables:")
-        for var in missing_vars:
-            print(f"   - {var}")
-        sys.exit(1)
-    
-    print("\n✓ Environment variables loaded")
-    
+    print("=" * 70)
+    print("                    AuditGraph Discovery Test")
+    print("=" * 70)
+
+    # Load environment variables from backend/.env
+    load_dotenv()
+    print("✓ Environment variables loaded")
+
+    # Required Azure credentials
+    tenant_id = os.getenv("AZURE_TENANT_ID")
+    client_id = os.getenv("AZURE_CLIENT_ID")
+    client_secret = os.getenv("AZURE_CLIENT_SECRET")
+
+    # Optional (engine may use it internally)
+    subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
+
+    # Validate env vars
+    missing = []
+    if not tenant_id:
+        missing.append("AZURE_TENANT_ID")
+    if not client_id:
+        missing.append("AZURE_CLIENT_ID")
+    if not client_secret:
+        missing.append("AZURE_CLIENT_SECRET")
+
+    if missing:
+        raise Exception(f"❌ Missing required environment variables: {', '.join(missing)}")
+
+    print("✓ Azure credentials found")
+    if subscription_id:
+        print(f"✓ Subscription ID (env): {subscription_id}")
+
     try:
-        engine = AzureDiscoveryEngine()
-        result = engine.run_discovery()
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_file = f"discovery_results_{timestamp}.json"
-        
-        with open(output_file, 'w') as f:
-            json.dump(result.to_dict(), f, indent=2)
-        
-        print(f"✓ Results saved to: {output_file}\n")
-        
-    except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        # Initialize discovery engine (NOTE: subscription_id is NOT a constructor arg)
+        engine = AzureDiscoveryEngine(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+
+        print("✓ AzureDiscoveryEngine initialized")
+        print("▶ Starting discovery run...")
+
+        # Run discovery
+        engine.run_discovery()
+
+        print("✓ Discovery completed successfully")
+
+    except Exception:
+        print("❌ Discovery failed")
+        raise
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

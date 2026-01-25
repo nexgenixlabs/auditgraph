@@ -1,11 +1,31 @@
-from fastapi import FastAPI
+from flask import Flask
+from flask_cors import CORS
 
-app = FastAPI(title="AuditGraph API", version="0.1.0")
+from app.api.routes import api_bp
 
-@app.get("/")
-def read_root():
-    return {"message": "AuditGraph API is running!"}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+def create_app() -> Flask:
+    app = Flask(__name__)
+
+    # Keep React dashboard working (allow localhost + your LAN IP for dev)
+    CORS(
+        app,
+        resources={
+            r"/api/*": {
+                "origins": [
+                    "http://localhost:3000",
+                    "http://127.0.0.1:3000",
+                    "http://192.168.1.200:3000",
+                ]
+            }
+        },
+    )
+
+    # Register API routes
+    app.register_blueprint(api_bp, url_prefix="/api")
+    return app
+
+
+if __name__ == "__main__":
+    app = create_app()
+    app.run(host="0.0.0.0", port=5001, debug=True)
