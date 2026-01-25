@@ -1,100 +1,24 @@
-# Week 3-4 Quick Reference
+# Week 5 Quick Reference
 
 ## 🎯 Quick Stats
 
 | Metric | Value |
 |--------|-------|
 | **Status** | ✅ COMPLETE |
-| **Time Spent** | 8 hours (6 sessions) |
-| **Lines of Code** | ~2,000+ |
-| **Noise Reduction** | 99% (181 → 9) |
-| **API Endpoints** | 7 |
-| **Database Tables** | 3 + 2 views |
-| **Discovery Runs** | 5 |
-| **Azure Cost** | ~$15/month |
+| **Time Spent** | 10 hours (5 sessions) |
+| **Lines of Code** | ~3,000+ |
+| **Identities** | 16 (down from 197) |
+| **Noise Reduction** | 92% |
+| **Entra Roles** | 31 discovered |
+| **Total Roles** | 42 (11 Azure + 31 Entra) |
+| **Frontend Components** | 6 |
+| **Backend Endpoints** | 3 |
 
 ---
 
-## 🚀 How to Run Discovery
-```bash
-# 1. Navigate to backend
-cd ~/projects/auditgraph/backend
+## 🚀 How to Run
 
-# 2. Activate virtual environment
-source venv/bin/activate
-
-# 3. Run discovery (with auto-save and drift detection)
-python app/test_discovery.py
-```
-
-**Expected Output:**
-```
-📋 Discovering Service Principals...
-  Found 188 service principals
-⚠️  Calculating Risk Levels...
-  🚨 4 critical risks
-🔑 Checking Credential Expiration...
-  ✓ All valid 30+ days
-🕐 Checking Last Activity...
-  ⚪ No sign-in data: 9
-💾 Saving to database...
-  ✓ Run #5 created
-🔄 Drift Detection...
-  ✅ No changes detected
-```
-
----
-
-## 🗄️ Database Commands
-
-### Connect to PostgreSQL
-```bash
-# Using psql
-psql -h auditgraph-db-dev.postgres.database.azure.com \
-     -U auditgraph_admin \
-     -d auditgraph \
-     -p 5432
-
-# Password: AuditGraph2024!Secure
-```
-
-### Quick Queries
-```sql
--- Get all discovery runs
-SELECT id, started_at, status, total_identities, critical_count 
-FROM discovery_runs 
-ORDER BY id DESC;
-
--- Get latest identities
-SELECT display_name, risk_level, credential_status, activity_status
-FROM identities 
-WHERE discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
-ORDER BY risk_level;
-
--- Get critical risks
-SELECT display_name, risk_reasons 
-FROM v_critical_identities;
-
--- Get drift between last two runs
--- (Use drift detector instead)
-```
-
-### Backup/Restore
-```bash
-# Backup database
-pg_dump -h auditgraph-db-dev.postgres.database.azure.com \
-        -U auditgraph_admin -d auditgraph > backup.sql
-
-# Restore database
-psql -h auditgraph-db-dev.postgres.database.azure.com \
-     -U auditgraph_admin -d auditgraph < backup.sql
-```
-
----
-
-## 🔌 API Commands
-
-### Start API Server
+### Start Backend API
 ```bash
 cd ~/projects/auditgraph/backend
 source venv/bin/activate
@@ -103,141 +27,218 @@ python app/api.py
 # API available at: http://localhost:5001
 ```
 
-### Test Endpoints
+### Start Frontend
 ```bash
-# Health check
-curl http://localhost:5001/api/health
+cd ~/projects/auditgraph/frontend
+npm start
 
-# Get all identities
-curl http://localhost:5001/api/identities | python3 -m json.tool
-
-# Get critical risks
-curl http://localhost:5001/api/risks | python3 -m json.tool
-
-# Get specific identity
-curl http://localhost:5001/api/identities/ee1c8a8e-440f-45cf-bda6-57303bcacd16
-
-# Get discovery runs
-curl http://localhost:5001/api/runs | python3 -m json.tool
-
-# Get drift report
-curl http://localhost:5001/api/drift/5 | python3 -m json.tool
-
-# Get stats
-curl http://localhost:5001/api/stats | python3 -m json.tool
+# Frontend available at: http://localhost:3000
 ```
 
----
-
-## 🧪 Test Drift Detection
+### Run Discovery
 ```bash
-# Run standalone drift detector
-python app/test_drift.py
-
-# Expected output:
-# Comparing: Run #5 vs Run #4
-# ✅ No changes detected - environment is stable
-```
-
----
-
-## 📁 Key Files
-
-| File | Purpose | Lines |
-|------|---------|-------|
-| `app/engines/discovery/azure_discovery.py` | Main discovery engine | 500+ |
-| `app/database.py` | Database operations | 200+ |
-| `app/engines/drift_detector.py` | Change detection | 200+ |
-| `app/api.py` | REST API | 300+ |
-| `app/engines/discovery/credential_checker.py` | Credential monitoring | 150+ |
-| `app/engines/discovery/activity_tracker.py` | Activity tracking | 150+ |
-| `app/engines/discovery/models.py` | Data models | 200+ |
-| `database_schema.sql` | DB schema | 200+ |
-
----
-
-## 🔑 Environment Variables
-```bash
-# Azure Credentials (.env)
-AZURE_TENANT_ID=aaa1cba5-23b8-49d0-9d9e-1802369217af
-AZURE_CLIENT_ID=b29a04cb-40cc-4e26-935b-04f822b269a0
-AZURE_CLIENT_SECRET=y_F8Q~tHdkgE3tUqbtqvEZYxlscYX3EIJDeGFaYb
-AZURE_SUBSCRIPTION_ID=34780384-6a21-4b79-ac90-1e3976b58a33
-
-# Database Configuration (.env)
-DB_HOST=auditgraph-db-dev.postgres.database.azure.com
-DB_PORT=5432
-DB_NAME=auditgraph
-DB_USER=auditgraph_admin
-DB_PASSWORD=AuditGraph2024!Secure
+cd ~/projects/auditgraph/backend
+source venv/bin/activate
+python -m app.engines.discovery.azure_discovery
 ```
 
 ---
 
 ## 📊 Current State
 
-### Discovery Run #5 (Latest)
+### Identity Breakdown
+- **Total Discovered:** 197 identities
+- **Filtered Out:** 181 Microsoft system SPNs (92%)
+- **Actionable:** 16 identities saved to database
+  - Service Principals: 13
+  - Users: 3
 
-| Metric | Value |
-|--------|-------|
-| Total Identities | 188 |
-| Microsoft System | 179 (filtered) |
-| Custom Identities | 9 |
-| Critical Risks | 4 |
-| High Risks | 0 |
-| Medium Risks | 2 |
-| Credentials Status | All valid 30+ days |
-| Activity Status | No recent sign-ins |
+### Risk Distribution
+- **Critical:** 6 identities
+- **High:** 0 identities
+- **Medium:** 10 identities
+- **Low:** 0 identities
 
-### Critical Identities
-
-| Name | Risk | Reason |
-|------|------|--------|
-| spn-overprivileged-owner | 🔴 Critical | Owner on subscription |
-| spn-user-access-admin | 🔴 Critical | User Access Admin on subscription |
-| spn-contributor-sub | 🔴 Critical | Contributor on subscription |
-| spn-auditgraph-admin | 🔴 Critical | Owner on subscription |
-
-### Database Stats
-
-| Metric | Value |
-|--------|-------|
-| Discovery Runs | 5 |
-| Identities Tracked | 45 |
-| Role Assignments | 35 |
-| Database Size | <10 MB |
+### Role Tracking
+- **Azure RBAC Roles:** 11
+- **Entra ID Roles:** 31
+- **Total Roles:** 42
 
 ---
 
-## 🔧 Azure Resources
+## 🔑 Key Files
 
-### PostgreSQL Server
-```bash
-# Server details
-Name: auditgraph-db-dev
-Location: Central US
-SKU: Standard_B1ms
-Version: PostgreSQL 14
-Database: auditgraph
-
-# Get connection string
-az postgres flexible-server show \
-  --name auditgraph-db-dev \
-  --resource-group auditgraph-dev-rg
+### Frontend
+```
+frontend/src/
+├── pages/
+│   ├── Dashboard.tsx           # Main dashboard
+│   ├── Identities.tsx          # Identity list
+│   └── IdentityDetail.tsx      # Detail view
+├── components/
+│   └── StatsCard.tsx           # Stat display
+├── services/
+│   └── api.ts                  # API client
+└── types/
+    └── index.ts                # TypeScript types
 ```
 
-### Permissions Granted
-```bash
-# Service Principal: spn-auditgraph-discovery
-Permissions:
-  - Directory.Read.All (Azure AD)
-  - Application.Read.All (Microsoft Graph)
-  - AuditLog.Read.All (Microsoft Graph)
+### Backend
+```
+backend/app/
+├── database.py                 # UPDATED - Entra roles
+└── engines/discovery/
+    └── azure_discovery.py      # UPDATED - Major refactor
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## 🗄️ Database Commands
+
+### Connect to PostgreSQL
+```bash
+psql -h auditgraph-db-dev.postgres.database.azure.com \
+     -U auditgraph_admin \
+     -d auditgraph \
+     -p 5432
+# Password: AuditGraph2024!Secure
+```
+
+### Quick Queries
+```sql
+-- Get all identities
+SELECT display_name, risk_level, identity_type 
+FROM identities 
+WHERE discovery_run_id = (SELECT MAX(id) FROM discovery_runs)
+ORDER BY risk_level;
+
+-- Get Entra roles
+SELECT i.display_name, era.role_name
+FROM identities i
+JOIN entra_role_assignments era ON i.id = era.identity_db_id
+ORDER BY i.display_name;
+
+-- Count roles per identity
+SELECT 
+    i.display_name,
+    COUNT(DISTINCT ra.id) as azure_roles,
+    COUNT(DISTINCT era.id) as entra_roles,
+    COUNT(DISTINCT ra.id) + COUNT(DISTINCT era.id) as total_roles
+FROM identities i
+LEFT JOIN role_assignments ra ON i.id = ra.identity_db_id
+LEFT JOIN entra_role_assignments era ON i.id = era.identity_db_id
+GROUP BY i.id, i.display_name
+ORDER BY total_roles DESC;
+```
+
+---
+
+## 📌 API Endpoints
+
+### Backend API (Port 5001)
+```bash
+# Health check
+curl http://localhost:5001/api/health
+
+# Get statistics
+curl http://localhost:5001/api/stats
+
+# Get all identities
+curl http://localhost:5001/api/identities
+
+# Get specific identity
+curl http://localhost:5001/api/identities/:id
+
+# Get critical risks
+curl http://localhost:5001/api/risks
+
+# Get all discovery runs
+curl http://localhost:5001/api/runs
+
+# Get drift report
+curl http://localhost:5001/api/drift/:run_id
+```
+
+---
+
+## 🧪 Test Data
+
+### Service Principals (13)
+```
+1. spn-auditgraph-admin          (CRITICAL - Owner)
+2. spn-auditgraph-automation     (MEDIUM - Reader)
+3. spn-auditgraph-discovery      (MEDIUM - Reader)
+4. spn-backup-automation         (MEDIUM - no roles)
+5. spn-contributor-sub           (CRITICAL - Contributor)
+6. spn-devops-pipeline           (MEDIUM - no roles)
+7. spn-monitoring-alerts         (MEDIUM - no roles)
+8. spn-overprivileged-owner      (CRITICAL - Owner)
+9. spn-reader-rg                 (MEDIUM - Reader)
+10. spn-readonly-reporting       (MEDIUM - no roles)
+11. spn-security-scanner         (MEDIUM - no roles)
+12. spn-unused-orphan            (MEDIUM - orphaned)
+13. spn-user-access-admin        (CRITICAL - User Access Admin)
+```
+
+### Users (3)
+```
+1. Bhupathi Reddy Sangabattula   (CRITICAL - 32 roles)
+   - Entra: Global Admin, Priv Role Admin, +28 more
+   - Azure: Owner, User Access Admin
+
+2. Jane Smith (Test)             (CRITICAL - 2 roles)
+   - Entra: Cloud App Administrator
+   - Azure: Contributor
+
+3. John Doe (Test)               (MEDIUM - 1 role)
+   - Azure: Reader
+```
+
+---
+
+## 🛠️ Common Commands
+
+### Frontend Development
+```bash
+# Install dependencies
+cd ~/projects/auditgraph/frontend
+npm install
+
+# Start dev server
+npm start
+
+# Build for production
+npm run build
+
+# Run TypeScript check
+npm run type-check
+```
+
+### Backend Development
+```bash
+# Activate virtual environment
+cd ~/projects/auditgraph/backend
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run discovery
+python -m app.engines.discovery.azure_discovery
+
+# Start API server
+python app/api.py
+
+# Python shell for testing
+python
+>>> from app.database import Database
+>>> db = Database()
+>>> db.get_latest_discovery_run()
+```
+
+---
+
+## 🔧 Troubleshooting
 
 ### Issue: "Module not found"
 ```bash
@@ -248,12 +249,12 @@ source venv/bin/activate
 
 ### Issue: "Database connection failed"
 ```bash
-# Solution 1: Check firewall rules
+# Solution: Check firewall rules
 az postgres flexible-server firewall-rule list \
   --name auditgraph-db-dev \
   --resource-group auditgraph-dev-rg
 
-# Solution 2: Add your IP
+# Add your IP if needed
 az postgres flexible-server firewall-rule create \
   --resource-group auditgraph-dev-rg \
   --name auditgraph-db-dev \
@@ -262,160 +263,178 @@ az postgres flexible-server firewall-rule create \
   --end-ip-address $(curl -4 -s ifconfig.me)
 ```
 
-### Issue: "API port already in use"
+### Issue: "Frontend not loading data"
 ```bash
-# Solution: Use different port
-# Edit app/api.py line: app.run(port=5002)
-# Or kill process on port 5001:
-lsof -ti:5001 | xargs kill -9
+# Solution 1: Check backend is running
+curl http://localhost:5001/api/health
+
+# Solution 2: Check CORS settings in app/api.py
+# Should have: CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}})
+
+# Solution 3: Check browser console for errors
+# Open DevTools → Console
 ```
 
-### Issue: "Permission denied (Graph API)"
+### Issue: "Discovery returns 0 identities"
 ```bash
-# Solution: Check permissions
-az ad app permission list --id b29a04cb-40cc-4e26-935b-04f822b269a0
+# Solution: Check Azure credentials
+az account show
 
-# Grant permissions if missing
-az ad app permission add --id b29a04cb-40cc-4e26-935b-04f822b269a0 \
-  --api 00000003-0000-0000-c000-000000000000 \
-  --api-permissions 9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30=Role
+# Verify SPN permissions
+az ad app permission list --id <client-id>
 
-az ad app permission admin-consent --id b29a04cb-40cc-4e26-935b-04f822b269a0
-```
-
----
-
-## 📦 Dependencies
-```bash
-# Install all dependencies
-pip install -r requirements.txt
-
-# Key packages:
-# - azure-identity
-# - azure-mgmt-authorization
-# - azure-mgmt-msi
-# - psycopg2-binary
-# - flask
-# - flask-cors
-# - requests
+# Re-run with debug
+python -m app.engines.discovery.azure_discovery
 ```
 
 ---
 
-## 🔄 Git Commands
+## 📊 Performance Benchmarks
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Discovery | ~11 seconds | 197 identities |
+| Entra role discovery | ~3 seconds | 31 roles |
+| User discovery | ~2 seconds | 3 users |
+| Database save | ~1 second | 16 identities |
+| API response | <100ms | Average |
+| Frontend render | <2 seconds | Initial load |
+
+---
+
+## 💾 Backup & Recovery
+
+### Backup Database
 ```bash
-# Check status
-git status
+pg_dump -h auditgraph-db-dev.postgres.database.azure.com \
+        -U auditgraph_admin \
+        -d auditgraph \
+        > backup-$(date +%Y%m%d).sql
+```
 
-# Commit changes
-git add .
-git commit -m "Week 3-4: Description"
-git push origin main
-
-# View history
-git log --oneline --graph --decorate
-
-# View Week 3-4 commits
-git log --since="2026-01-23" --oneline
+### Restore Database
+```bash
+psql -h auditgraph-db-dev.postgres.database.azure.com \
+     -U auditgraph_admin \
+     -d auditgraph \
+     < backup-20260125.sql
 ```
 
 ---
 
-## 📈 Performance Benchmarks
+## 🔍 Debugging
 
-| Operation | Time |
-|-----------|------|
-| Discovery (188 identities) | ~5 seconds |
-| Credential check (9 SPNs) | ~3 seconds |
-| Activity check (9 SPNs) | ~2 seconds |
-| Database save | ~1 second |
-| Drift detection | <1 second |
-| **Total Run Time** | **~10 seconds** |
-
-| API Endpoint | Response Time |
-|--------------|---------------|
-| /api/health | <10ms |
-| /api/identities | <100ms |
-| /api/risks | <50ms |
-| /api/runs | <100ms |
-| /api/drift/<id> | <200ms |
-| /api/stats | <50ms |
-
----
-
-## 💰 Cost Breakdown
-
-| Resource | Monthly Cost |
-|----------|--------------|
-| PostgreSQL Flexible Server (Standard_B1ms) | ~$10-15 |
-| Storage (<10 MB) | <$1 |
-| Network egress | <$1 |
-| **Total** | **~$12-17** |
-
----
-
-## 🎯 Quick Commands
+### Check Discovery Output
 ```bash
-# Full discovery + drift
-python app/test_discovery.py
+# Run discovery with full output
+python -m app.engines.discovery.azure_discovery 2>&1 | tee discovery.log
 
-# Just drift detection
-python app/test_drift.py
+# Check for errors
+grep -i error discovery.log
+grep -i warning discovery.log
+```
 
-# Start API
+### Check Database State
+```bash
+# Connect and inspect
+psql -h auditgraph-db-dev.postgres.database.azure.com \
+     -U auditgraph_admin -d auditgraph
+
+-- Check last discovery run
+SELECT * FROM discovery_runs ORDER BY id DESC LIMIT 1;
+
+-- Check identity count
+SELECT COUNT(*) FROM identities;
+
+-- Check Entra roles
+SELECT COUNT(*) FROM entra_role_assignments;
+```
+
+### Check API Health
+```bash
+# Test all endpoints
+for endpoint in health stats identities risks runs; do
+    echo "Testing /api/$endpoint..."
+    curl -s http://localhost:5001/api/$endpoint | jq
+done
+```
+
+---
+
+## 📁 Project Structure
+
+```
+auditgraph/
+├── backend/
+│   ├── app/
+│   │   ├── api.py
+│   │   ├── database.py
+│   │   └── engines/
+│   │       └── discovery/
+│   │           └── azure_discovery.py
+│   ├── requirements.txt
+│   └── venv/
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── pages/
+│   │   ├── components/
+│   │   ├── services/
+│   │   └── types/
+│   ├── package.json
+│   └── node_modules/
+├── docs/
+│   └── weekly/
+│       ├── week-1-2/
+│       ├── week-3-4/
+│       └── week-5/
+└── .env
+```
+
+---
+
+## 🎯 Quick Commands Reference
+
+```bash
+# DISCOVERY
+python -m app.engines.discovery.azure_discovery
+
+# API
 python app/api.py
 
-# Database query
-python -c "from app.database import Database; db = Database(); print('Connected')"
+# FRONTEND
+npm start
 
-# Check last run
-python -c "from app.database import Database; db=Database(); print(db.get_latest_discovery_run())"
+# DATABASE
+psql -h auditgraph-db-dev.postgres.database.azure.com -U auditgraph_admin -d auditgraph
+
+# GIT
+git status
+git add .
+git commit -m "message"
+git push origin main
+
+# AZURE
+az account show
+az ad sp list --all
 ```
 
 ---
 
-## 📚 Useful Links
+## 🔗 Useful Links
 
 **Documentation:**
+- [Week 5 Summary](WEEK-5-SUMMARY.md)
+- [Week 5 Lessons Learned](LESSONS-LEARNED.md)
+- [Week 3-4 Summary](../week-3-4/WEEK-3-4-SUMMARY.md)
+
+**External:**
 - [Microsoft Graph API](https://learn.microsoft.com/en-us/graph/api/overview)
-- [Azure PostgreSQL](https://learn.microsoft.com/en-us/azure/postgresql/)
-- [Flask Docs](https://flask.palletsprojects.com/)
-
-**Internal Docs:**
-- [Week 1-2 Summary](../week-1-2/WEEK-1-2-SUMMARY.md)
-- [Week 3-4 Summary](WEEK-3-4-SUMMARY.md)
-- [Lessons Learned](LESSONS-LEARNED.md)
-
-**GitHub:**
-- [Repository](https://github.com/bhupathireddys/auditgraph)
+- [React Docs](https://react.dev/)
+- [TypeScript Docs](https://www.typescriptlang.org/docs/)
 
 ---
 
-## 🎓 Common Tasks
-
-### Add New Discovery
-
-1. Run discovery: `python app/test_discovery.py`
-2. Check database: Query `discovery_runs` table
-3. View drift: Automatic in output
-4. Check via API: `curl http://localhost:5001/api/runs`
-
-### Debug Discovery Issues
-
-1. Check logs in terminal output
-2. Verify Azure credentials: `az account show`
-3. Test Graph API access: `az rest --method GET --url "https://graph.microsoft.com/v1.0/applications"`
-4. Check database connection: Run query command above
-
-### Update Database Schema
-
-1. Modify `database_schema.sql`
-2. Drop tables: `DROP TABLE role_assignments, identities, discovery_runs CASCADE;`
-3. Recreate: `python apply_schema.py`
-4. Re-run discovery to populate
-
----
-
-**Last Updated:** January 23, 2026  
+**Last Updated:** January 25, 2026  
 **Status:** Current  
-**Next Update:** Week 5-6
+**Next Update:** Week 6
