@@ -10,7 +10,7 @@ const Identities: React.FC = () => {
   const [filteredIdentities, setFilteredIdentities] = useState<Identity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   // Filter states
   const [searchTerm, setSearchTerm] = useState('');
   const [riskFilter, setRiskFilter] = useState<string>('all');
@@ -20,10 +20,12 @@ const Identities: React.FC = () => {
 
   useEffect(() => {
     fetchIdentities();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     applyFilters();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [identities, searchTerm, riskFilter, typeFilter, sortField, sortOrder]);
 
   const fetchIdentities = async () => {
@@ -40,27 +42,32 @@ const Identities: React.FC = () => {
     }
   };
 
+  const safeLower = (v?: any) => (v ?? '').toString().toLowerCase();
+
   const applyFilters = () => {
     let filtered = [...identities];
 
     // Search filter
     if (searchTerm) {
+      const search = safeLower(searchTerm);
       filtered = filtered.filter(identity =>
-        identity.display_name.toLowerCase().includes(searchTerm.toLowerCase())
+        safeLower(identity.display_name).includes(search)
       );
     }
 
     // Risk level filter
     if (riskFilter !== 'all') {
+      const rf = safeLower(riskFilter);
       filtered = filtered.filter(identity =>
-        identity.risk_level.toLowerCase() === riskFilter.toLowerCase()
+        safeLower(identity.risk_level) === rf
       );
     }
 
     // Type filter
     if (typeFilter !== 'all') {
+      const tf = safeLower(typeFilter);
       filtered = filtered.filter(identity =>
-        identity.identity_type.toLowerCase().includes(typeFilter.toLowerCase())
+        safeLower(identity.identity_type).includes(tf)
       );
     }
 
@@ -70,22 +77,23 @@ const Identities: React.FC = () => {
       let bValue: any;
 
       switch (sortField) {
-        case 'risk_level':
-          const riskOrder = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
-          aValue = riskOrder[a.risk_level.toLowerCase() as keyof typeof riskOrder] || 0;
-          bValue = riskOrder[b.risk_level.toLowerCase() as keyof typeof riskOrder] || 0;
+        case 'risk_level': {
+          const riskOrder: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+          aValue = riskOrder[safeLower(a.risk_level)] || 0;
+          bValue = riskOrder[safeLower(b.risk_level)] || 0;
           break;
+        }
         case 'display_name':
-          aValue = a.display_name.toLowerCase();
-          bValue = b.display_name.toLowerCase();
+          aValue = safeLower(a.display_name);
+          bValue = safeLower(b.display_name);
           break;
         case 'identity_type':
-          aValue = a.identity_type.toLowerCase();
-          bValue = b.identity_type.toLowerCase();
+          aValue = safeLower(a.identity_type);
+          bValue = safeLower(b.identity_type);
           break;
         case 'role_count':
-          aValue = a.role_count || 0;
-          bValue = b.role_count || 0;
+          aValue = (a as any).role_count || 0;
+          bValue = (b as any).role_count || 0;
           break;
         default:
           return 0;
@@ -112,8 +120,8 @@ const Identities: React.FC = () => {
     navigate(`/identities/${identityId}`);
   };
 
-  const getRiskBadgeColor = (riskLevel: string) => {
-    const level = riskLevel.toLowerCase();
+  const getRiskBadgeColor = (riskLevel?: string) => {
+    const level = (riskLevel ?? 'info').toLowerCase();
     switch (level) {
       case 'critical':
         return 'bg-red-100 text-red-800 border-red-200';
@@ -132,7 +140,7 @@ const Identities: React.FC = () => {
 
   const getActivityBadge = (activityStatus?: string) => {
     if (!activityStatus) return null;
-    
+
     const status = activityStatus.toLowerCase();
     if (status.includes('active')) {
       return <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">Active</span>;
@@ -158,7 +166,7 @@ const Identities: React.FC = () => {
         <div className="bg-red-50 border border-red-200 rounded-lg p-6 max-w-md">
           <h2 className="text-red-600 font-bold text-lg mb-2">Error Loading Identities</h2>
           <p className="text-red-700">{error}</p>
-          <button 
+          <button
             onClick={fetchIdentities}
             className="mt-4 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700"
           >
@@ -275,7 +283,7 @@ const Identities: React.FC = () => {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th 
+                <th
                   onClick={() => handleSort('display_name')}
                   className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 >
@@ -286,7 +294,8 @@ const Identities: React.FC = () => {
                     )}
                   </div>
                 </th>
-                <th 
+
+                <th
                   onClick={() => handleSort('identity_type')}
                   className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 >
@@ -297,7 +306,8 @@ const Identities: React.FC = () => {
                     )}
                   </div>
                 </th>
-                <th 
+
+                <th
                   onClick={() => handleSort('risk_level')}
                   className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 >
@@ -308,10 +318,12 @@ const Identities: React.FC = () => {
                     )}
                   </div>
                 </th>
+
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Activity Status
                 </th>
-                <th 
+
+                <th
                   onClick={() => handleSort('role_count')}
                   className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 >
@@ -322,45 +334,55 @@ const Identities: React.FC = () => {
                     )}
                   </div>
                 </th>
+
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Credentials
                 </th>
               </tr>
             </thead>
+
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredIdentities.length > 0 ? (
-                filteredIdentities.map((identity, index) => (
-                  <tr 
-                    key={index} 
-                    onClick={() => handleRowClick(identity.identity_id)}
-                    className="hover:bg-gray-50 cursor-pointer transition-colors"
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">
-                        {identity.display_name}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {identity.identity_type}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full border ${getRiskBadgeColor(identity.risk_level)}`}>
-                        {identity.risk_level.toUpperCase()}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {getActivityBadge(identity.activity_status)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {identity.role_count || 0} role{(identity.role_count || 0) !== 1 ? 's' : ''}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`text-xs ${identity.credential_status === 'Valid' ? 'text-green-600' : 'text-red-600'}`}>
-                        {identity.credential_status || 'Unknown'}
-                      </span>
-                    </td>
-                  </tr>
-                ))
+                filteredIdentities.map((identity, index) => {
+                  const risk = (identity.risk_level ?? 'info');
+                  return (
+                    <tr
+                      key={index}
+                      onClick={() => handleRowClick(identity.identity_id)}
+                      className="hover:bg-gray-50 cursor-pointer transition-colors"
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-gray-900">
+                          {identity.display_name ?? 'Unknown'}
+                        </div>
+                      </td>
+
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {identity.identity_type ?? 'unknown'}
+                      </td>
+
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full border ${getRiskBadgeColor(risk)}`}>
+                          {risk.toUpperCase()}
+                        </span>
+                      </td>
+
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {getActivityBadge(identity.activity_status)}
+                      </td>
+
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {(identity as any).role_count || 0} role{(((identity as any).role_count || 0) !== 1) ? 's' : ''}
+                      </td>
+
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`text-xs ${identity.credential_status === 'Valid' ? 'text-green-600' : 'text-red-600'}`}>
+                          {identity.credential_status || 'Unknown'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
                   <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
