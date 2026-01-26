@@ -3,7 +3,7 @@ RESOURCE_GROUP="auditgraph-dev-rg"
 LOCATION="centralus"
 SERVER_NAME="auditgraph-db-dev"
 ADMIN_USER="auditgraph_admin"
-ADMIN_PASSWORD="AuditGraph2024!Secure"
+ADMIN_PASSWORD="REPLACE_ME_WITH_A_STRONG_PASSWORD"
 DATABASE_NAME="auditgraph"
 
 # Create PostgreSQL Flexible Server in Central US

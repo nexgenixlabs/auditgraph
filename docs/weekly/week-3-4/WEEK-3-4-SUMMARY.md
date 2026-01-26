@@ -472,8 +472,8 @@ az postgres flexible-server create \
   --resource-group auditgraph-dev-rg \
   --name auditgraph-db-dev \
   --location centralus \
-  --admin-user auditgraph_admin \
-  --admin-password "AuditGraph2024!Secure" \
+  --admin-user XXXXX \
+  --admin-password "XXXXXX" \
   --sku-name Standard_B1ms \
   --tier Burstable \
   --version 14 \

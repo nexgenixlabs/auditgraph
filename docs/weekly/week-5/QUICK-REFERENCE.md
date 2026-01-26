@@ -97,11 +97,11 @@ backend/app/
 
 ### Connect to PostgreSQL
 ```bash
-psql -h auditgraph-db-dev.postgres.database.azure.com \
+psql -h xxxxx-db-dev.postgres.database.azure.com \
      -U auditgraph_admin \
      -d auditgraph \
      -p 5432
-# Password: AuditGraph2024!Secure
+# Password: AuditGrxxxxx
 ```
 
 ### Quick Queries
@@ -306,7 +306,7 @@ python -m app.engines.discovery.azure_discovery
 
 ### Backup Database
 ```bash
-pg_dump -h auditgraph-db-dev.postgres.database.azure.com \
+pg_dump -h auditxxxgraph-db-dev.postgres.database.azure.com \
         -U auditgraph_admin \
         -d auditgraph \
         > backup-$(date +%Y%m%d).sql
@@ -406,7 +406,7 @@ python app/api.py
 npm start
 
 # DATABASE
-psql -h auditgraph-db-dev.postgres.database.azure.com -U auditgraph_admin -d auditgraph
+psql -h xxxxxtgraph-db-dev.postgres.database.azure.com -U auditgraph_admin -d auditgraph
 
 # GIT
 git status

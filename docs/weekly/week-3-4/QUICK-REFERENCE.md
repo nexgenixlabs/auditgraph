@@ -50,12 +50,12 @@ python app/test_discovery.py
 ### Connect to PostgreSQL
 ```bash
 # Using psql
-psql -h auditgraph-db-dev.postgres.database.azure.com \
+psql -h xxxxxx-db-dev.postgres.database.azure.com \
      -U auditgraph_admin \
-     -d auditgraph \
+     -d xxxxxx \
      -p 5432
 
-# Password: AuditGraph2024!Secure
+# Password: Axxxxxxx
 ```
 
 ### Quick Queries
@@ -82,11 +82,11 @@ FROM v_critical_identities;
 ### Backup/Restore
 ```bash
 # Backup database
-pg_dump -h auditgraph-db-dev.postgres.database.azure.com \
+pg_dump -h xxxx-db-dev.postgres.database.azure.com \
         -U auditgraph_admin -d auditgraph > backup.sql
 
 # Restore database
-psql -h auditgraph-db-dev.postgres.database.azure.com \
+psql -h xxx-db-dev.postgres.database.azure.com \
      -U auditgraph_admin -d auditgraph < backup.sql
 ```
 
@@ -159,17 +159,17 @@ python app/test_drift.py
 ## 🔑 Environment Variables
 ```bash
 # Azure Credentials (.env)
-AZURE_TENANT_ID=aaa1cba5-23b8-49d0-9d9e-1802369217af
-AZURE_CLIENT_ID=b29a04cb-40cc-4e26-935b-04f822b269a0
-AZURE_CLIENT_SECRET=y_F8Q~tHdkgE3tUqbtqvEZYxlscYX3EIJDeGFaYb
-AZURE_SUBSCRIPTION_ID=34780384-6a21-4b79-ac90-1e3976b58a33
+AZURE_TENANT_ID=xxxxx-23b8-xxxx-9d9e-1802369217af
+AZURE_CLIENT_ID=xxxxx-40cc-xxxx-935b-04f822b269a0
+AZURE_CLIENT_SECRET=REPLACE_ME
+AZURE_SUBSCRIPTION_ID=xxxxx-6a21-4b79-xxxx-1e3976b58a33
 
 # Database Configuration (.env)
 DB_HOST=auditgraph-db-dev.postgres.database.azure.com
 DB_PORT=5432
-DB_NAME=auditgraph
-DB_USER=auditgraph_admin
-DB_PASSWORD=AuditGraph2024!Secure
+DB_NAME=xxxxxx
+DB_USER=REPLACE_ME
+DB_PASSWORD=REPLACE_ME
 ```
 
 ---
