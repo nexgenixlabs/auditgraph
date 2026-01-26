@@ -1,6 +1,6 @@
 from flask import Blueprint
 
-from app.legacy_api import (
+from app.api.handlers import (
     health_check,
     get_stats,
     get_identities,

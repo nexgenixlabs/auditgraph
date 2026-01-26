@@ -1,3 +1,16 @@
+# backend/app/main.py
+
+from pathlib import Path
+from dotenv import load_dotenv
+
+# -------------------------------------------------------------------
+# Load environment variables BEFORE importing modules that connect to DB
+# -------------------------------------------------------------------
+BACKEND_DIR = Path(__file__).resolve().parents[1]  # .../backend
+load_dotenv(BACKEND_DIR / ".env.local")            # local dev (real creds) - ignored by git
+load_dotenv(BACKEND_DIR / ".env")                  # optional fallback
+load_dotenv(BACKEND_DIR / ".env.example")          # safe fallback (placeholders)
+
 from flask import Flask
 from flask_cors import CORS
 
