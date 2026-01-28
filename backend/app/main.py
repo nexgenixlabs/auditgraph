@@ -1,5 +1,4 @@
 # backend/app/main.py
-
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -13,13 +12,13 @@ load_dotenv(BACKEND_DIR / ".env.example")          # safe fallback (placeholders
 
 from flask import Flask
 from flask_cors import CORS
-
 from app.api.routes import api_bp
-
+from app.scheduler import start_scheduler, stop_scheduler
+import atexit
 
 def create_app() -> Flask:
     app = Flask(__name__)
-
+    
     # Keep React dashboard working (allow localhost + your LAN IP for dev)
     CORS(
         app,
@@ -33,11 +32,17 @@ def create_app() -> Flask:
             }
         },
     )
-
+    
     # Register API routes
     app.register_blueprint(api_bp, url_prefix="/api")
+    
+    # Start the scheduler when app starts
+    start_scheduler()
+    
+    # Stop the scheduler when app shuts down
+    atexit.register(stop_scheduler)
+    
     return app
-
 
 if __name__ == "__main__":
     app = create_app()

@@ -282,6 +282,15 @@ def get_identity_details(identity_id: str):
         
         roles.append(role_data)
 
+    
+    # Week 7: Get Graph API permissions
+    print(f"DEBUG: About to get permissions for identity_db_id: {identity_db_id}")
+    try:
+        graph_permissions = db.get_graph_permissions(identity_db_id)
+    except Exception as e:
+        print(f"Error getting permissions: {e}")
+        graph_permissions = []
+
     db.close()
 
     return jsonify(
@@ -289,6 +298,7 @@ def get_identity_details(identity_id: str):
             "run_id": latest_run,
             "identity": identity,
             "roles": roles,
+            "graph_permissions": graph_permissions,
         }
     )
 
@@ -433,3 +443,46 @@ def get_stats():
     db.close()
 
     return jsonify({"total_discovery_runs": int(total_runs), "latest_run": latest_summary})
+
+def get_scheduler_status():
+    """Get scheduler status and next run time"""
+    from app import scheduler as scheduler_module
+    
+    # Check if scheduler is running
+    scheduler = scheduler_module.scheduler
+    next_run = None
+    scheduler_active = False
+    
+    if scheduler is not None:
+        try:
+            job = scheduler.get_job('discovery_every_6h')
+            if job:
+                next_run = job.next_run_time
+                scheduler_active = True
+        except:
+            pass
+    
+    # Get last discovery run
+    db = _db()
+    cursor = db.conn.cursor()
+    
+    cursor.execute("""
+        SELECT completed_at 
+        FROM discovery_runs 
+        WHERE status = 'completed' 
+        ORDER BY completed_at DESC 
+        LIMIT 1
+    """)
+    
+    last_run = cursor.fetchone()
+    last_run_time = last_run[0] if last_run else None
+    
+    cursor.close()
+    db.close()
+    
+    return jsonify({
+        "scheduler_active": scheduler_active,
+        "schedule": "Every 6 hours",
+        "next_run": next_run.isoformat() if next_run else None,
+        "last_run": last_run_time.isoformat() if last_run_time else None
+    })

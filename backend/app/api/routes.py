@@ -8,6 +8,7 @@ from app.api.handlers import (
     get_risks,
     get_discovery_runs,
     get_drift_report,
+    get_scheduler_status,
 )
 
 api_bp = Blueprint("api", __name__)
@@ -20,3 +21,4 @@ api_bp.route("/identities/<identity_id>", methods=["GET"])(get_identity_details)
 api_bp.route("/risks", methods=["GET"])(get_risks)
 api_bp.route("/runs", methods=["GET"])(get_discovery_runs)
 api_bp.route("/drift/<int:run_id>", methods=["GET"])(get_drift_report)
+api_bp.route("/scheduler/status", methods=["GET"])(get_scheduler_status)
