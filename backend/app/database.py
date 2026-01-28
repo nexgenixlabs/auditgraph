@@ -182,6 +182,118 @@ class Database:
         cursor.close()
         return dict(result) if result else None
     
+    # ========================================================================
+    # WEEK 6: Role Intelligence Methods
+    # ========================================================================
+    
+    def get_identity_roles_enriched(self, identity_db_id: int) -> List[Dict]:
+        """
+        Get all role assignments for an identity with intelligence data
+        
+        Returns:
+            List of roles with intelligence (risk level, descriptions, etc.)
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get Azure RBAC roles with intelligence
+        cursor.execute("""
+            SELECT 
+                'azure' as role_type,
+                ra.role_name,
+                ra.scope,
+                ra.scope_type,
+                ra.created_on,
+                rp.privileged,
+                rp.risk_level,
+                rp.description,
+                rp.why_critical,
+                ral.last_activity_date,
+                ral.days_since_last_use
+            FROM role_assignments ra
+            LEFT JOIN role_permissions rp 
+                ON rp.role_name = ra.role_name AND rp.role_type = 'azure'
+            LEFT JOIN role_activity_log ral 
+                ON ral.identity_db_id = ra.identity_db_id 
+                AND ral.role_name = ra.role_name
+            WHERE ra.identity_db_id = %s
+        """, (identity_db_id,))
+        
+        azure_roles = [dict(row) for row in cursor.fetchall()]
+        
+        # Get Entra roles with intelligence
+        cursor.execute("""
+            SELECT 
+                'entra' as role_type,
+                era.role_name,
+                era.directory_scope as scope,
+                'directory' as scope_type,
+                NULL as created_on,
+                rp.privileged,
+                rp.risk_level,
+                rp.description,
+                rp.why_critical,
+                ral.last_activity_date,
+                ral.days_since_last_use
+            FROM entra_role_assignments era
+            LEFT JOIN role_permissions rp 
+                ON rp.role_name = era.role_name AND rp.role_type = 'entra'
+            LEFT JOIN role_activity_log ral 
+                ON ral.identity_db_id = era.identity_db_id 
+                AND ral.role_name = era.role_name
+            WHERE era.identity_db_id = %s
+        """, (identity_db_id,))
+        
+        entra_roles = [dict(row) for row in cursor.fetchall()]
+        
+        cursor.close()
+        
+        # Combine and return
+        return azure_roles + entra_roles
+    
+    def get_role_attack_patterns(self, role_name: str) -> List[Dict]:
+        """Get attack patterns for a specific role"""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 
+                attack_scenario,
+                real_world_example,
+                company_affected,
+                breach_year,
+                estimated_cost_usd
+            FROM role_attack_patterns
+            WHERE role_name = %s
+            ORDER BY breach_year DESC
+        """, (role_name,))
+        
+        patterns = [dict(row) for row in cursor.fetchall()]
+        cursor.close()
+        return patterns
+    
+    def get_role_hipaa_violations(self, role_name: str) -> List[Dict]:
+        """Get HIPAA violations for a specific role"""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 
+                hipaa_section,
+                violation_explanation,
+                violation_risk,
+                typical_penalty_min,
+                typical_penalty_max
+            FROM role_hipaa_mappings
+            WHERE role_name = %s
+            ORDER BY 
+                CASE violation_risk
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    ELSE 4
+                END
+        """, (role_name,))
+        
+        violations = [dict(row) for row in cursor.fetchall()]
+        cursor.close()
+        return violations
+
     def close(self):
         """Close database connection"""
         if self.conn:

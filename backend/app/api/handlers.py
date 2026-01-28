@@ -88,11 +88,11 @@ def get_identities():
     latest_run = cursor.fetchone()[0]
 
     if not latest_run:
+        cursor.close()
+        db.close()
         return jsonify({"error": "No completed discovery runs found"}), 404
 
-    # NOTE:
-    # Your current schema does NOT have identity_roles table.
-    # We'll return role_count=0 for now; role modeling can be added later.
+    # Query with role count from BOTH Azure RBAC and Entra roles
     query = """
         SELECT
             i.identity_id,
@@ -102,7 +102,16 @@ def get_identities():
             i.credential_status,
             i.credential_expiration,
             i.created_datetime,
-            i.activity_status
+            i.activity_status,
+            (
+                SELECT COUNT(*) 
+                FROM role_assignments ra 
+                WHERE ra.identity_db_id = i.id
+            ) + (
+                SELECT COUNT(*) 
+                FROM entra_role_assignments era 
+                WHERE era.identity_db_id = i.id
+            ) as role_count
         FROM identities i
         WHERE i.discovery_run_id = %s
     """
@@ -142,20 +151,31 @@ def get_identities():
                 "identity_id": row[0],
                 "display_name": row[1],
                 "identity_type": row[2],
-                "risk_level": row[3],
+                "risk_level": row[3] or "info",
                 "credential_status": row[4] or "Unknown",
-                "credential_expiration": row[5],
-                "created_datetime": row[6],
+                "credential_expiration": row[5].isoformat() if row[5] else None,
+                "created_datetime": row[6].isoformat() if row[6] else None,
                 "activity_status": row[7] or "unknown",
-                "role_count": 0,  # placeholder until identity_roles table exists
+                "role_count": int(row[8]) if row[8] else 0,
             }
         )
+
+    cursor.close()
+    db.close()
 
     return jsonify({"run_id": latest_run, "count": len(identities), "identities": identities})
 
 
 def get_identity_details(identity_id: str):
-    """Get detailed info for a single identity (roles, metadata) from latest run."""
+    """
+    Get detailed info for a single identity with FULL ROLE INTELLIGENCE.
+    
+    WEEK 6: Returns enriched roles with:
+    - Risk levels (CRITICAL, HIGH, etc.)
+    - Attack patterns
+    - HIPAA violations
+    - Descriptions
+    """
     db = _db()
     cursor = db.conn.cursor()
 
@@ -163,9 +183,11 @@ def get_identity_details(identity_id: str):
     latest_run = cursor.fetchone()[0]
 
     if not latest_run:
+        cursor.close()
+        db.close()
         return jsonify({"error": "No completed discovery runs found"}), 404
 
-    # NOTE: your identities table column is last_sign_in (not last_signin_datetime)
+    # Get identity details
     cursor.execute(
         """
         SELECT
@@ -193,32 +215,80 @@ def get_identity_details(identity_id: str):
     row = cursor.fetchone()
 
     if not row:
+        cursor.close()
+        db.close()
         return jsonify({"error": "Identity not found"}), 404
 
-    # NOTE:
-    # identity_roles table doesn't exist in current schema.
-    # Return roles=[] for now.
+    identity_db_id = row[0]
+    
+    identity = {
+        "identity_id": row[1],
+        "display_name": row[2],
+        "identity_type": row[3],
+        "risk_level": row[4] or "info",
+        "credential_status": row[5] or "Unknown",
+        "credential_expiration": row[6].isoformat() if row[6] else None,
+        "created_datetime": row[7].isoformat() if row[7] else None,
+        "activity_status": row[8] or "unknown",
+        "last_sign_in": row[9].isoformat() if row[9] else None,
+        "risk_reasons": _parse_risk_reasons(row[10]),
+        "object_id": row[11],
+        "app_id": row[12],
+        "enabled": row[13],
+        "is_microsoft_system": row[14],
+        "tags": row[15],
+    }
+
+    cursor.close()
+
+    # WEEK 6: Get enriched roles with intelligence
+    try:
+        roles_enriched = db.get_identity_roles_enriched(identity_db_id)
+    except AttributeError:
+        # Fallback if Week 6 methods not available
+        roles_enriched = []
+
+    # Format roles for response
+    roles = []
+    for role in roles_enriched:
+        role_data = {
+            "role_name": role.get("role_name"),
+            "role_type": role.get("role_type"),
+            "scope": role.get("scope"),
+            "scope_type": role.get("scope_type"),
+            "created_on": role.get("created_on").isoformat() if role.get("created_on") else None,
+            # Week 6: Intelligence fields
+            "privileged": role.get("privileged"),
+            "risk_level": role.get("risk_level"),
+            "description": role.get("description"),
+            "why_critical": role.get("why_critical"),
+            "last_activity_date": role.get("last_activity_date").isoformat() if role.get("last_activity_date") else None,
+            "days_since_last_use": role.get("days_since_last_use"),
+        }
+        
+        # Get attack patterns
+        try:
+            attack_patterns = db.get_role_attack_patterns(role.get("role_name"))
+            role_data["attack_patterns"] = attack_patterns
+        except AttributeError:
+            role_data["attack_patterns"] = []
+        
+        # Get HIPAA violations
+        try:
+            hipaa_violations = db.get_role_hipaa_violations(role.get("role_name"))
+            role_data["hipaa_violations"] = hipaa_violations
+        except AttributeError:
+            role_data["hipaa_violations"] = []
+        
+        roles.append(role_data)
+
+    db.close()
+
     return jsonify(
         {
             "run_id": latest_run,
-            "identity": {
-                "identity_id": row[1],
-                "display_name": row[2],
-                "identity_type": row[3],
-                "risk_level": row[4],
-                "credential_status": row[5],
-                "credential_expiration": row[6],
-                "created_datetime": row[7],
-                "activity_status": row[8],
-                "last_sign_in": row[9],
-                "risk_reasons": _parse_risk_reasons(row[10]),
-                "object_id": row[11],
-                "app_id": row[12],
-                "enabled": row[13],
-                "is_microsoft_system": row[14],
-                "tags": row[15],
-            },
-            "roles": [],
+            "identity": identity,
+            "roles": roles,
         }
     )
 
@@ -232,6 +302,8 @@ def get_risks():
     latest_run = cursor.fetchone()[0]
 
     if not latest_run:
+        cursor.close()
+        db.close()
         return jsonify({"error": "No completed discovery runs found"}), 404
 
     cursor.execute(
@@ -253,6 +325,9 @@ def get_risks():
     )
     rows = cursor.fetchall()
 
+    cursor.close()
+    db.close()
+
     return jsonify(
         {
             "run_id": latest_run,
@@ -262,8 +337,8 @@ def get_risks():
                     "identity_id": r[0],
                     "display_name": r[1],
                     "identity_type": r[2],
-                    "risk_level": r[3],
-                    "risk_reason": _parse_risk_reasons(r[4]),  # keep key for frontend compatibility
+                    "risk_level": r[3] or "info",
+                    "risk_reason": _parse_risk_reasons(r[4]),
                 }
                 for r in rows
             ],
@@ -285,6 +360,9 @@ def get_discovery_runs():
         """
     )
     rows = cursor.fetchall()
+
+    cursor.close()
+    db.close()
 
     return jsonify(
         {
@@ -309,6 +387,7 @@ def get_drift_report(run_id: int):
     db = _db()
     detector = DriftDetector(db)
     report = detector.generate_drift_report(run_id)
+    db.close()
     return jsonify(report)
 
 
@@ -349,5 +428,8 @@ def get_stats():
             "high_count": int(r[4] or 0),
             "medium_count": int(r[5] or 0),
         }
+
+    cursor.close()
+    db.close()
 
     return jsonify({"total_discovery_runs": int(total_runs), "latest_run": latest_summary})
