@@ -382,7 +382,7 @@ const IdentityDetail: React.FC = () => {
                           {hasHipaaViolations && (
                             <div className="bg-purple-50 border-l-4 border-purple-400 p-3 rounded">
                               <p className="text-xs font-semibold text-purple-800 mb-2">
-                                📋 HIPAA Compliance Violations:
+                                📋 Compliance Impact (HIPAA):
                               </p>
                               {role.hipaa_violations.map((violation: any, idx: number) => (
                                 <div key={idx} className="mb-2 last:mb-0">
@@ -495,9 +495,10 @@ const IdentityDetail: React.FC = () => {
             </div>
           </div>
 
-          {/* HIPAA Compliance */}
+          {/* Compliance Impact */}
           <div className="bg-purple-50 border border-purple-200 rounded-lg p-6">
-            <h2 className="text-lg font-bold text-gray-900 mb-4">🏥 HIPAA Compliance</h2>
+            <h2 className="text-lg font-bold text-gray-900 mb-4">📋 Compliance Impact (HIPAA)</h2>
+            <p className="text-sm text-gray-600 mb-4">Additional frameworks (PCI-DSS, SOX, FERPA, ISO 27001) coming in Week 8</p>
             <div className="space-y-2 text-sm text-gray-700">
               <p><strong>§164.308(a)(3):</strong> Workforce access review required</p>
               <p><strong>§164.308(a)(4):</strong> Access authorization must be documented</p>
