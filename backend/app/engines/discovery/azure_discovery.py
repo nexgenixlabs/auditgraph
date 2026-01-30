@@ -57,16 +57,21 @@ class AzureDiscoveryEngine:
         
         # Step 2.5: Discover Entra ID directory roles
         print("\n🔑 Discovering Entra ID Directory Roles...")
-        entra_roles = await self._discover_entra_roles(principal_ids_with_roles)
+        entra_roles = await self._discover_entra_roles()
+        
+        # Merge principal IDs from both Azure RBAC and Entra roles
+        entra_principal_ids = set(er['principal_id'] for er in entra_roles)
+        all_principal_ids = principal_ids_with_roles.union(entra_principal_ids)
+        print(f"  Total unique principals (RBAC + Entra): {len(all_principal_ids)}")
         
         # Step 3: Discover Service Principals
         print("\n📋 Discovering Service Principals...")
         service_principals = await self._discover_service_principals()
         print(f"  Found {len(service_principals)} service principals")
         
-        # Step 4: Discover ONLY users who have Azure roles
-        print("\n👥 Discovering Users with Azure Roles...")
-        users = await self._discover_users_with_roles(principal_ids_with_roles)
+        # Step 4: Discover users who have Azure RBAC OR Entra roles
+        print("\n👥 Discovering Users with Roles...")
+        users = await self._discover_users_with_roles(all_principal_ids)
         print(f"  Found {len(users)} users with Azure RBAC assignments")
         
         # Step 5: Discover Managed Identities
@@ -123,7 +128,8 @@ class AzureDiscoveryEngine:
             from kiota_abstractions.base_request_configuration import RequestConfiguration
             
             query_params = ServicePrincipalsRequestBuilder.ServicePrincipalsRequestBuilderGetQueryParameters(
-                top=999  # Get up to 999 per page
+                top=999,  # Get up to 999 per page
+                select=['id', 'appId', 'displayName', 'accountEnabled', 'createdDateTime']
             )
             request_config = RequestConfiguration(query_parameters=query_params)
             
@@ -135,8 +141,15 @@ class AzureDiscoveryEngine:
                         print(f"    ✓ {sp.display_name} ({sp.id})")
                     
                     created = None
+                    # Debug: Check what fields are available
+                    if len(identities) < 3:
+                        if hasattr(sp, 'additional_data'):
+                    
                     if hasattr(sp, 'created_date_time') and sp.created_date_time:
                         created = sp.created_date_time.isoformat()
+                    elif hasattr(sp, 'additional_data') and sp.additional_data:
+                        if sp.additional_data.get('createdDateTime'):
+                            created = sp.additional_data.get('createdDateTime')
                     
                     identities.append({
                         'identity_id': sp.app_id or sp.id,
@@ -159,7 +172,15 @@ class AzureDiscoveryEngine:
     
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
         try:
-            users_response = await self.graph_client.users.get()
+            # Request createdDateTime field explicitly
+            from msgraph.generated.users.users_request_builder import UsersRequestBuilder
+            query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
+                select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime']
+            )
+            request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
+                query_parameters=query_params
+            )
+            users_response = await self.graph_client.users.get(request_configuration=request_config)
             
             identities = []
             for user in users_response.value:
@@ -224,7 +245,7 @@ class AzureDiscoveryEngine:
             print(f"  ❌ Error: {e}")
             return []
     
-    async def _discover_entra_roles(self, principal_ids: Set[str]) -> List[Dict[str, Any]]:
+    async def _discover_entra_roles(self) -> List[Dict[str, Any]]:
         """Discover Entra ID directory role assignments for given principals"""
         try:
             print("🔑 Discovering Entra ID Directory Roles...")
@@ -235,8 +256,7 @@ class AzureDiscoveryEngine:
             entra_roles = []
             if role_assignments_response and role_assignments_response.value:
                 for assignment in role_assignments_response.value:
-                    # Only include assignments for principals we care about
-                    if assignment.principal_id in principal_ids:
+                    # Include ALL Entra role assignments
                         # Get role definition to get role name
                         try:
                             role_def = await self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(assignment.role_definition_id).get()
@@ -366,7 +386,8 @@ class AzureDiscoveryEngine:
                     risk_level = azure_risk_level
                     risk_reasons = [azure_risk_reason]
             
-            if len(identity_roles) == 0:
+            # Check if identity has NO roles (neither Azure RBAC nor Entra)
+            if len(identity_roles) == 0 and len(identity_entra_roles) == 0:
                 risk_level = 'medium'
                 risk_reasons = ['No role assignments (orphaned custom identity)']
             
@@ -412,6 +433,37 @@ class AzureDiscoveryEngine:
                 continue
             
             # Only save custom/third-party SPNs and users
+            
+            # Set source for multi-cloud
+            identity['source'] = 'azure'
+            
+            # For SPNs without created_datetime, calculate from roles or previous runs
+            if not identity.get('created_datetime'):
+                # Try role assignment dates first
+                role_dates = [r.get('created_on') for r in identity.get('roles', []) if r.get('created_on')]
+                if role_dates:
+                    identity['created_datetime'] = min(role_dates)
+                else:
+                    # Check previous runs for this identity_id
+                    from datetime import datetime
+                    cursor = self.db.conn.cursor()
+                    cursor.execute("""
+                        SELECT created_datetime 
+                        FROM identities 
+                        WHERE identity_id = %s 
+                        AND created_datetime IS NOT NULL
+                        ORDER BY discovery_run_id DESC 
+                        LIMIT 1
+                    """, (identity.get('identity_id'),))
+                    prev_result = cursor.fetchone()
+                    cursor.close()
+                    
+                    if prev_result and prev_result[0]:
+                        identity['created_datetime'] = prev_result[0]
+                    else:
+                        # Truly new identity
+                        identity['created_datetime'] = datetime.utcnow().isoformat()
+            
             identity_db_id = self.db.save_identity(run_id, identity)
             
             # Save role assignments for this identity

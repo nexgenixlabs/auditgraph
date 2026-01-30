@@ -14,18 +14,33 @@ const api = axios.create({
 });
 
 export const getStats = async () => {
-  const res = await api.get('/stats');
-  return res.data;
+  try {
+    const res = await api.get('/stats');
+    return res.data;
+  } catch (error) {
+    console.error('Failed to fetch stats:', error);
+    throw error;
+  }
 };
 
 export const getRisks = async () => {
-  const res = await api.get('/risks');
-  return res.data;
+  try {
+    const res = await api.get('/risks');
+    return res.data;
+  } catch (error) {
+    console.error('Failed to fetch risks:', error);
+    throw error;
+  }
 };
 
 export const getIdentities = async () => {
-  const res = await api.get('/identities');
-  return res.data;
+  try {
+    const res = await api.get('/identities');
+    return res.data;
+  } catch (error) {
+    console.error('Failed to fetch getIdentities:', error);
+    throw error;
+  }
 };
 
 /**
@@ -36,6 +51,7 @@ export const getIdentities = async () => {
  * So we merge roles into the identity object here.
  */
 export const getIdentity = async (identityId: string): Promise<Identity> => {
+  try {
   const res = await api.get(`/identities/${identityId}`);
   const payload = res.data;
 
@@ -56,6 +72,10 @@ export const getIdentity = async (identityId: string): Promise<Identity> => {
           ? roles.length
           : 0,
   };
+  } catch (error) {
+    console.error('Failed to fetch identity:', error);
+    throw error;
+  }
 };
 
 export default api;

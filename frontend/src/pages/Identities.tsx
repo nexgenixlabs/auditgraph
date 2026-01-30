@@ -306,6 +306,9 @@ const Identities: React.FC = () => {
                     )}
                   </div>
                 </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Source
+                </th>
 
                 <th
                   onClick={() => handleSort('risk_level')}
@@ -320,7 +323,10 @@ const Identities: React.FC = () => {
                 </th>
 
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Activity Status
+                  Last Login
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Created
                 </th>
 
                 <th
@@ -360,6 +366,11 @@ const Identities: React.FC = () => {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         {identity.identity_type ?? 'unknown'}
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className="px-2 py-1 text-xs font-medium text-blue-700 bg-blue-100 rounded">
+                          ☁️ {(identity.source || 'azure').toUpperCase()}
+                        </span>
+                      </td>
 
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full border ${getRiskBadgeColor(risk)}`}>
@@ -367,8 +378,11 @@ const Identities: React.FC = () => {
                         </span>
                       </td>
 
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {getActivityBadge(identity.activity_status)}
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {identity.last_sign_in ? new Date(identity.last_sign_in).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Never'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {identity.created_datetime ? new Date(identity.created_datetime).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '-'}
                       </td>
 
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">

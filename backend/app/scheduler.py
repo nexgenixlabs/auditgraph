@@ -108,7 +108,7 @@ def start_scheduler():
     logger.info("📅 Schedule: Every 6 hours")
     
     # Get next run time
-    job = scheduler.get_job('daily_discovery')
+    job = scheduler.get_job('discovery_every_6h')
     if job:
         next_run = job.next_run_time
         logger.info(f"🕐 Next scheduled run: {next_run}")
@@ -140,7 +140,7 @@ def get_next_run_time():
     if scheduler is None:
         return None
     
-    job = scheduler.get_job('daily_discovery')
+    job = scheduler.get_job('discovery_every_6h')
     if job:
         return job.next_run_time
     

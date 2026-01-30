@@ -4,6 +4,7 @@ export interface Identity {
   identity_id: string;
   display_name: string;
   identity_type: string;
+  source?: string;
   risk_level: string;
   credential_status?: string;
   activity_status?: string;
