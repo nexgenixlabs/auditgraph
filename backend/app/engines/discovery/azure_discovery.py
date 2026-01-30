@@ -69,6 +69,9 @@ class AzureDiscoveryEngine:
         service_principals = await self._discover_service_principals()
         print(f"  Found {len(service_principals)} service principals")
         
+        # Step 3.5: Discover SPN Credentials
+        credentials_map = await self._discover_credentials(service_principals)
+        
         # Step 4: Discover users who have Azure RBAC OR Entra roles
         print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
@@ -95,7 +98,7 @@ class AzureDiscoveryEngine:
         
         # Step 9: Save to database using Database class methods
         print("\n💾 Saving identities to database...")
-        saved_count = self._save_identities(run_id, final_identities, role_assignments)
+        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map)
         print(f"  ✓ Saved {saved_count} identities")
         
         # Step 10: Complete discovery run
@@ -166,6 +169,74 @@ class AzureDiscoveryEngine:
             print(f"  ❌ Error: {e}")
             return []
     
+    async def _discover_credentials(self, service_principals: List[Dict]) -> Dict[str, List[Dict]]:
+        """
+        Discover credentials (secrets, certificates, federated) for service principals
+        
+        Returns:
+            Dictionary mapping identity_id to list of credentials
+        """
+        credentials_map = {}
+        
+        print("\n🔑 Discovering SPN Credentials...")
+        
+        for sp in service_principals:
+            try:
+                # Get full service principal details including credentials
+                sp_response = await self.graph_client.service_principals.by_service_principal_id(sp['object_id']).get()
+                
+                credentials = []
+                
+                # Process password credentials (secrets)
+                if hasattr(sp_response, 'password_credentials') and sp_response.password_credentials:
+                    for pwd_cred in sp_response.password_credentials:
+                        credentials.append({
+                            'credential_type': 'secret',
+                            'key_id': str(pwd_cred.key_id) if pwd_cred.key_id else None,
+                            'display_name': pwd_cred.display_name if hasattr(pwd_cred, 'display_name') else None,
+                            'start_datetime': pwd_cred.start_date_time.isoformat() if hasattr(pwd_cred, 'start_date_time') and pwd_cred.start_date_time else None,
+                            'end_datetime': pwd_cred.end_date_time.isoformat() if hasattr(pwd_cred, 'end_date_time') and pwd_cred.end_date_time else None,
+                        })
+                
+                # Process key credentials (certificates)
+                if hasattr(sp_response, 'key_credentials') and sp_response.key_credentials:
+                    for key_cred in sp_response.key_credentials:
+                        credentials.append({
+                            'credential_type': 'certificate',
+                            'key_id': str(key_cred.key_id) if key_cred.key_id else None,
+                            'display_name': key_cred.display_name if hasattr(key_cred, 'display_name') else None,
+                            'start_datetime': key_cred.start_date_time.isoformat() if hasattr(key_cred, 'start_date_time') and key_cred.start_date_time else None,
+                            'end_datetime': key_cred.end_date_time.isoformat() if hasattr(key_cred, 'end_date_time') and key_cred.end_date_time else None,
+                            'thumbprint': key_cred.custom_key_identifier.decode('utf-8') if hasattr(key_cred, 'custom_key_identifier') and key_cred.custom_key_identifier else None,
+                        })
+                
+                # Process federated credentials
+                if hasattr(sp_response, 'federated_identity_credentials') and sp_response.federated_identity_credentials:
+                    for fed_cred in sp_response.federated_identity_credentials:
+                        credentials.append({
+                            'credential_type': 'federated',
+                            'key_id': fed_cred.id if hasattr(fed_cred, 'id') else str(hash(fed_cred.subject)),
+                            'display_name': fed_cred.name if hasattr(fed_cred, 'name') else None,
+                            'start_datetime': None,
+                            'end_datetime': None,  # Federated credentials don't expire
+                            'issuer': fed_cred.issuer if hasattr(fed_cred, 'issuer') else None,
+                            'subject': fed_cred.subject if hasattr(fed_cred, 'subject') else None,
+                        })
+                
+                if credentials:
+                    credentials_map[sp['identity_id']] = credentials
+                    if len(credentials_map) <= 5:  # Show first 5
+                        print(f"    ✓ {sp['display_name']}: {len(credentials)} credential(s)")
+            
+            except Exception as e:
+                # Don't fail entire discovery if one SPN fails
+                if len(credentials_map) == 0:  # Only show first error
+                    print(f"    ⚠️  Error getting credentials for {sp['display_name']}: {e}")
+                continue
+        
+        print(f"  Found credentials for {len(credentials_map)} SPNs")
+        return credentials_map
+
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
         try:
             # Request createdDateTime field explicitly
@@ -417,7 +488,7 @@ class AzureDiscoveryEngine:
         print(f"    ⚪ No sign-in data: {len(identities)}")
         return identities
     
-    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict]) -> int:
+    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None) -> int:
         """Save identities using Database class methods - SKIP Microsoft system SPNs"""
         saved_count = 0
         skipped_count = 0
@@ -471,6 +542,15 @@ class AzureDiscoveryEngine:
             identity_entra_roles = identity.get('entra_roles', [])
             for entra_role in identity_entra_roles:
                 self.db.save_entra_role_assignment(identity_db_id, entra_role)
+            
+            # Save credentials for this identity (SPNs only)
+            if credentials_map and identity.get('identity_id') in credentials_map:
+                credentials = credentials_map[identity.get('identity_id')]
+                for credential in credentials:
+                    self.db.save_credential(identity_db_id, credential)
+                
+                # Update credential summary on identity record
+                self.db.update_identity_credential_summary(identity_db_id)
             
             saved_count += 1
         

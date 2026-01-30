@@ -362,3 +362,133 @@ class Database:
         """Close database connection"""
         if self.conn:
             self.conn.close()
+
+    # ========================================================================
+    # WEEK 9: Credential Management Methods
+    # ========================================================================
+    
+    def save_credential(self, identity_db_id: int, credential: Dict) -> int:
+        """
+        Save a credential (secret, certificate, or federated) for an identity
+        
+        Args:
+            identity_db_id: Database ID of the identity
+            credential: Dictionary with credential details
+                - credential_type: 'secret', 'certificate', or 'federated'
+                - key_id: Unique identifier
+                - display_name: Optional name
+                - start_datetime: When credential becomes valid
+                - end_datetime: When credential expires
+                - thumbprint: For certificates
+                - issuer: For federated credentials
+                - subject: For federated credentials
+        
+        Returns:
+            credential_id: Database ID of saved credential
+        """
+        cursor = self.conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO credentials (
+                identity_db_id, credential_type, key_id, display_name,
+                start_datetime, end_datetime, thumbprint, issuer, subject
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (identity_db_id, key_id) 
+            DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                start_datetime = EXCLUDED.start_datetime,
+                end_datetime = EXCLUDED.end_datetime,
+                thumbprint = EXCLUDED.thumbprint,
+                issuer = EXCLUDED.issuer,
+                subject = EXCLUDED.subject,
+                discovered_at = NOW()
+            RETURNING id
+        """, (
+            identity_db_id,
+            credential['credential_type'],
+            credential['key_id'],
+            credential.get('display_name'),
+            credential.get('start_datetime'),
+            credential.get('end_datetime'),
+            credential.get('thumbprint'),
+            credential.get('issuer'),
+            credential.get('subject')
+        ))
+        
+        credential_id = cursor.fetchone()[0]
+        cursor.close()
+        self.conn.commit()
+        
+        return credential_id
+    
+    def update_identity_credential_summary(self, identity_db_id: int):
+        """
+        Update credential_count, next_expiry, and credential_risk on identity
+        
+        This should be called after saving all credentials for an identity
+        """
+        cursor = self.conn.cursor()
+        
+        cursor.execute("""
+            WITH credential_summary AS (
+                SELECT 
+                    COUNT(*) as count,
+                    MIN(end_datetime) as earliest_expiry,
+                    CASE 
+                        WHEN MIN(end_datetime) < NOW() THEN 'expired'
+                        WHEN MIN(end_datetime) < NOW() + INTERVAL '30 days' THEN 'expiring_soon'
+                        WHEN MIN(end_datetime) IS NULL THEN 'unknown'
+                        ELSE 'healthy'
+                    END as risk
+                FROM credentials
+                WHERE identity_db_id = %s
+            )
+            UPDATE identities
+            SET 
+                credential_count = credential_summary.count,
+                next_expiry = credential_summary.earliest_expiry,
+                credential_risk = credential_summary.risk
+            FROM credential_summary
+            WHERE identities.id = %s
+        """, (identity_db_id, identity_db_id))
+        
+        cursor.close()
+        self.conn.commit()
+    
+    def get_identity_credentials(self, identity_db_id: int) -> List[Dict]:
+        """
+        Get all credentials for an identity
+        
+        Returns:
+            List of credential dictionaries with computed fields
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT 
+                id,
+                credential_type,
+                key_id,
+                display_name,
+                start_datetime,
+                end_datetime,
+                thumbprint,
+                issuer,
+                subject,
+                discovered_at,
+                CASE 
+                    WHEN end_datetime < NOW() THEN 'expired'
+                    WHEN end_datetime < NOW() + INTERVAL '30 days' THEN 'expiring_soon'
+                    WHEN end_datetime < NOW() + INTERVAL '90 days' THEN 'healthy'
+                    ELSE 'healthy'
+                END as status,
+                EXTRACT(DAY FROM (end_datetime - NOW())) as days_to_expiry
+            FROM credentials
+            WHERE identity_db_id = %s
+            ORDER BY end_datetime ASC NULLS LAST
+        """, (identity_db_id,))
+        
+        credentials = [dict(row) for row in cursor.fetchall()]
+        cursor.close()
+        
+        return credentials

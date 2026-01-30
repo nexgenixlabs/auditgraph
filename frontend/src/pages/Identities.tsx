@@ -388,11 +388,32 @@ const Identities: React.FC = () => {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         {(identity as any).role_count || 0} role{(((identity as any).role_count || 0) !== 1) ? 's' : ''}
                       </td>
-
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`text-xs ${identity.credential_status === 'Valid' ? 'text-green-600' : 'text-red-600'}`}>
-                          {identity.credential_status || 'Unknown'}
-                        </span>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        {identity.credential_count && identity.credential_count > 0 ? (
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs text-gray-600">
+                              {identity.credential_count} credential{identity.credential_count > 1 ? 's' : ''}
+                            </span>
+                            {identity.next_expiry && (
+                              <span className="text-xs text-gray-500">
+                                Expires: {new Date(identity.next_expiry).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                              </span>
+                            )}
+                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full w-fit ${
+                              identity.credential_risk === 'expired' ? 'bg-red-100 text-red-800' :
+                              identity.credential_risk === 'expiring_soon' ? 'bg-yellow-100 text-yellow-800' :
+                              identity.credential_risk === 'healthy' ? 'bg-green-100 text-green-800' :
+                              'bg-gray-100 text-gray-800'
+                            }`}>
+                              {identity.credential_risk === 'expired' ? '🔴 Expired' :
+                               identity.credential_risk === 'expiring_soon' ? '🟡 Expiring Soon' :
+                               identity.credential_risk === 'healthy' ? '🟢 Healthy' :
+                               'Unknown'}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400">No credentials</span>
+                        )}
                       </td>
                     </tr>
                   );

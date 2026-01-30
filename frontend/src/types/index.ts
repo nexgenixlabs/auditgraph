@@ -7,6 +7,9 @@ export interface Identity {
   source?: string;
   risk_level: string;
   credential_status?: string;
+  credential_count?: number;
+  next_expiry?: string;
+  credential_risk?: string;
   activity_status?: string;
   credential_expiration?: string;
   created_datetime?: string;
