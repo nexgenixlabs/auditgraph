@@ -357,3 +357,8 @@ class Database:
         
         cursor.close()
         return permissions
+
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()

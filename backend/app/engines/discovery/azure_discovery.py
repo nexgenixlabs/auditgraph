@@ -141,10 +141,6 @@ class AzureDiscoveryEngine:
                         print(f"    ✓ {sp.display_name} ({sp.id})")
                     
                     created = None
-                    # Debug: Check what fields are available
-                    if len(identities) < 3:
-                        if hasattr(sp, 'additional_data'):
-                    
                     if hasattr(sp, 'created_date_time') and sp.created_date_time:
                         created = sp.created_date_time.isoformat()
                     elif hasattr(sp, 'additional_data') and sp.additional_data:

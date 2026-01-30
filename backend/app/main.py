@@ -1,3 +1,4 @@
+import os
 # backend/app/main.py
 from pathlib import Path
 from dotenv import load_dotenv
