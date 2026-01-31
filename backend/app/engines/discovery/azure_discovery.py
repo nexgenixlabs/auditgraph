@@ -72,6 +72,9 @@ class AzureDiscoveryEngine:
         # Step 3.5: Discover SPN Credentials
         credentials_map = await self._discover_credentials(service_principals)
         
+        # Step 3.6: Discover API Permissions
+        permissions_map = await self._discover_permissions(service_principals)
+        
         # Step 4: Discover users who have Azure RBAC OR Entra roles
         print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
@@ -98,7 +101,7 @@ class AzureDiscoveryEngine:
         
         # Step 9: Save to database using Database class methods
         print("\n💾 Saving identities to database...")
-        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map)
+        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map)
         print(f"  ✓ Saved {saved_count} identities")
         
         # Step 10: Complete discovery run
@@ -236,6 +239,68 @@ class AzureDiscoveryEngine:
         
         print(f"  Found credentials for {len(credentials_map)} SPNs")
         return credentials_map
+
+
+    async def _discover_permissions(self, service_principals: List[Dict]) -> Dict[str, List[Dict]]:
+        """
+        Discover Graph API permissions for service principals
+        
+        Returns:
+            Dictionary mapping identity_id to list of permissions
+        """
+        permissions_map = {}
+        
+        print("\n🔐 Discovering API Permissions...")
+        
+        for sp in service_principals:
+            try:
+                # Get app role assignments for this service principal
+                assignments = await self.graph_client.service_principals.by_service_principal_id(
+                    sp['object_id']
+                ).app_role_assignments.get()
+                
+                if not assignments or not assignments.value:
+                    continue
+                
+                permissions = []
+                
+                for assignment in assignments.value:
+                    # Get the resource service principal to fetch permission details
+                    resource_sp_id = assignment.resource_id
+                    
+                    try:
+                        resource_sp = await self.graph_client.service_principals.by_service_principal_id(
+                            resource_sp_id
+                        ).get()
+                        
+                        # Find the specific app role
+                        if hasattr(resource_sp, 'app_roles') and resource_sp.app_roles:
+                            for app_role in resource_sp.app_roles:
+                                if str(app_role.id) == str(assignment.app_role_id):
+                                    permissions.append({
+                                        'name': app_role.value if app_role.value else 'Unknown',
+                                        'description': app_role.display_name if app_role.display_name else '',
+                                        'resource_name': resource_sp.display_name if resource_sp.display_name else 'Microsoft Graph',
+                                        'permission_type': 'Application',
+                                        'permission_id': str(app_role.id),
+                                        'consent_type': 'Admin'
+                                    })
+                                    break
+                    except Exception as e:
+                        # Skip if we can't fetch resource details
+                        continue
+                
+                if permissions:
+                    permissions_map[sp['identity_id']] = permissions
+                    if len(permissions_map) <= 5:  # Show first 5
+                        print(f"    ✓ {sp['display_name']}: {len(permissions)} permission(s)")
+            
+            except Exception as e:
+                # Skip this SPN if permission fetch fails
+                continue
+        
+        print(f"  ✓ Fetched permissions for {len(permissions_map)} service principals")
+        return permissions_map
 
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
         try:
@@ -488,7 +553,7 @@ class AzureDiscoveryEngine:
         print(f"    ⚪ No sign-in data: {len(identities)}")
         return identities
     
-    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None) -> int:
+    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None) -> int:
         """Save identities using Database class methods - SKIP Microsoft system SPNs"""
         saved_count = 0
         skipped_count = 0
@@ -551,6 +616,11 @@ class AzureDiscoveryEngine:
                 
                 # Update credential summary on identity record
                 self.db.update_identity_credential_summary(identity_db_id)
+            
+            # Save API permissions for this identity (SPNs only)
+            if permissions_map and identity.get('identity_id') in permissions_map:
+                permissions = permissions_map[identity.get('identity_id')]
+                self.db.store_graph_permissions(identity_db_id, permissions)
             
             saved_count += 1
         
