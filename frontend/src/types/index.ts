@@ -20,6 +20,7 @@ export interface Identity {
   last_sign_in?: string;
   enabled?: boolean;
   roles?: RoleAssignment[];
+  graph_permissions?: GraphPermission[];
 }
 
 export interface RoleAssignment {
@@ -27,6 +28,16 @@ export interface RoleAssignment {
   scope: string;
   scope_type: string;
   created_on?: string;
+}
+
+export interface GraphPermission {
+  permission_name: string;
+  permission_description?: string;
+  resource_name?: string;
+  risk_level?: string;
+  permission_type?: string;
+  permission_id?: string;
+  consent_type?: string;
 }
 
 export interface DiscoveryRun {

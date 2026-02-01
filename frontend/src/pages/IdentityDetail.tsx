@@ -74,6 +74,14 @@ const IdentityDetail: React.FC = () => {
     return Array.isArray(r) ? r : [];
   }, [identity]);
 
+  const graphPermissions = useMemo(() => {
+    const p: any = (identity as any)?.graph_permissions;
+    console.log('DEBUG: identity object:', identity);
+    console.log('DEBUG: graph_permissions:', p);
+    console.log('DEBUG: is array?', Array.isArray(p));
+    return Array.isArray(p) ? p : [];
+  }, [identity]);
+
   const hasOwnerRole = useMemo(() => {
     return roles.some((r: any) => safeLower(r?.role_name).includes('owner'));
   }, [roles]);
@@ -432,6 +440,71 @@ const IdentityDetail: React.FC = () => {
               </div>
             ) : (
               <p className="text-gray-500 text-center py-4">No role assignments found</p>
+            )}
+          </div>
+
+          {/* API Permissions - WEEK 9 */}
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4">
+              🔐 API Permissions ({graphPermissions.length})
+            </h2>
+
+            {graphPermissions.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Permission
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Resource
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Risk
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {graphPermissions.map((perm: any, index: number) => (
+                      <tr 
+                        key={index}
+                        className={`hover:bg-gray-50 ${
+                          perm?.risk_level === 'critical' ? 'bg-red-50' :
+                          perm?.risk_level === 'high' ? 'bg-orange-50' :
+                          ''
+                        }`}
+                      >
+                        <td className="px-4 py-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">
+                              {perm?.permission_name || 'Unknown'}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {perm?.permission_description || ''}
+                            </p>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-600">
+                          {perm?.resource_name || 'Unknown'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`px-2 py-1 text-xs font-bold rounded-full ${
+                            perm?.risk_level === 'critical' ? 'bg-red-600 text-white' :
+                            perm?.risk_level === 'high' ? 'bg-orange-500 text-white' :
+                            perm?.risk_level === 'medium' ? 'bg-yellow-500 text-white' :
+                            'bg-gray-500 text-white'
+                          }`}>
+                            {(perm?.risk_level || 'unknown').toUpperCase()}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-gray-500 text-center py-4">No API permissions found</p>
             )}
           </div>
         </div>

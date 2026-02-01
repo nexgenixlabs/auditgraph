@@ -450,6 +450,28 @@ def get_stats():
 
     return jsonify({"total_discovery_runs": int(total_runs), "latest_run": latest_summary})
 
+def trigger_discovery():
+    """
+    Manually trigger discovery immediately
+    Returns status of the trigger
+    """
+    from app.scheduler import trigger_manual_discovery
+    
+    try:
+        # Trigger discovery in background
+        trigger_manual_discovery()
+        
+        return jsonify({
+            "status": "success",
+            "message": "Discovery started successfully",
+            "note": "Discovery is running in the background. Check /api/runs for completion."
+        }), 202
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to trigger discovery: {str(e)}"
+        }), 500
+
 def get_scheduler_status():
     """Get scheduler status and next run time"""
     from app import scheduler as scheduler_module

@@ -52,26 +52,28 @@ export const getIdentities = async () => {
  */
 export const getIdentity = async (identityId: string): Promise<Identity> => {
   try {
-  const res = await api.get(`/identities/${identityId}`);
-  const payload = res.data;
-
-  // Backward/forward compatible:
-  // - if backend already embeds roles inside identity, keep it
-  // - else merge payload.roles into identity.roles
-  const identity: Identity = payload?.identity ?? payload;
-
-  const roles = identity?.roles ?? payload?.roles ?? [];
-
-  return {
-    ...identity,
-    roles,
-    role_count:
-      typeof identity?.role_count === 'number'
-        ? identity.role_count
-        : Array.isArray(roles)
-          ? roles.length
-          : 0,
-  };
+    const res = await api.get(`/identities/${identityId}`);
+    const payload = res.data;
+    
+    // Extract identity, roles, and graph_permissions
+    const identity: Identity = payload?.identity ?? payload;
+    const roles = identity?.roles ?? payload?.roles ?? [];
+    const graph_permissions = identity?.graph_permissions ?? payload?.graph_permissions ?? [];
+    
+    console.log('API: Full payload:', payload);
+    console.log('API: graph_permissions extracted:', graph_permissions);
+    
+    return {
+      ...identity,
+      roles,
+      graph_permissions,
+      role_count:
+        typeof identity?.role_count === 'number'
+          ? identity.role_count
+          : Array.isArray(roles)
+            ? roles.length
+            : 0,
+    };
   } catch (error) {
     console.error('Failed to fetch identity:', error);
     throw error;
