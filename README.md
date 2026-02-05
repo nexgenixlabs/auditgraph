@@ -37,6 +37,12 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
   - Drill-down identity details
   - Role intelligence with attack patterns
 
+- **Scheduled Discovery & Change Alerts**: Automated monitoring with email notifications
+  - Configurable discovery interval (6, 12, or 24 hours)
+  - Email alerts when identities are added or removed
+  - Summary table showing category changes (Before | After | Change)
+  - Only sends notifications when actual changes occur (no spam)
+
 ## Architecture
 
 ```
@@ -130,7 +136,58 @@ DB_PORT=5432
 DB_NAME=auditgraph
 DB_USER=your-db-user
 DB_PASSWORD=your-db-password
+
+# Email Notifications (Microsoft Graph API)
+EMAIL_FROM=sender@yourdomain.com
+EMAIL_TO=security-team@yourdomain.com
+
+# Scheduler Configuration
+DISCOVERY_INTERVAL_HOURS=12  # Options: 6, 12, or 24
 ```
+
+## Scheduled Discovery
+
+AuditGraph runs automated discovery on a configurable schedule and sends email notifications when identity changes are detected.
+
+### How It Works
+
+1. **Scheduled Runs**: Discovery runs automatically every 6, 12, or 24 hours (configurable)
+2. **Change Detection**: Compares current run with previous run to detect:
+   - New identities added to the environment
+   - Identities removed from the environment
+3. **Email Alerts**: Sends HTML email report only when changes occur
+
+### Email Report Format
+
+```
++------------------------------------------+
+|  AuditGraph Identity Change Report       |
+|  Run #15 vs Run #14                      |
++------------------------------------------+
+
+Summary by Category
+| Category                  | Before | After | Change |
+|---------------------------|--------|-------|--------|
+| Service Principals        |   13   |  12   |   -1   |
+| Human Users               |    6   |   6   |    0   |
+| Guest Users               |    1   |   0   |   -1   |
+| Microsoft Internal        |  193   | 193   |    0   |
+
+Removed Identities (2)
+- spn-old-service (Service Principal) [MEDIUM]
+- guest-user@external.com (Guest) [LOW]
+```
+
+### Identity Discovery Rules
+
+| Identity Type | Discovery Rule |
+|---------------|----------------|
+| Service Principals | All discovered (including orphaned with no roles) |
+| User Assigned Managed Identities | All discovered (including orphaned) |
+| System Assigned Managed Identities | Only with RBAC roles assigned |
+| Human Users | Only with Azure RBAC or Entra ID roles |
+| Guest Users | Only with roles assigned |
+| Microsoft Internal | All discovered (informational only)
 
 ## API Endpoints
 

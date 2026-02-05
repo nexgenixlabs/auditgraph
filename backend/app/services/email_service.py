@@ -53,27 +53,29 @@ class EmailService:
     }
 
     def __init__(self):
-        """Initialize Microsoft Graph client using Azure credentials"""
+        """Initialize email service configuration"""
         self.tenant_id = os.getenv('AZURE_TENANT_ID')
         self.client_id = os.getenv('AZURE_CLIENT_ID')
         self.client_secret = os.getenv('AZURE_CLIENT_SECRET')
         self.from_email = os.getenv('EMAIL_FROM', 'bhupathireddys@nexgenixlabs.com')
         self.to_email = os.getenv('EMAIL_TO', 'info@nexgenixlabs.com')
 
-        # Initialize Graph client
-        if all([self.tenant_id, self.client_id, self.client_secret]):
-            credential = ClientSecretCredential(
-                tenant_id=self.tenant_id,
-                client_id=self.client_id,
-                client_secret=self.client_secret
-            )
-            self.graph_client = GraphServiceClient(
-                credentials=credential,
-                scopes=['https://graph.microsoft.com/.default']
-            )
-        else:
-            self.graph_client = None
+        # Check if credentials are configured
+        self.credentials_configured = all([self.tenant_id, self.client_id, self.client_secret])
+        if not self.credentials_configured:
             logger.warning("Azure credentials not configured - email service disabled")
+
+    def _create_graph_client(self):
+        """Create a fresh Graph client (called per-request to avoid event loop issues)"""
+        credential = ClientSecretCredential(
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret
+        )
+        return GraphServiceClient(
+            credentials=credential,
+            scopes=['https://graph.microsoft.com/.default']
+        )
 
     def send_identity_change_report(
         self,
@@ -111,25 +113,25 @@ class EmailService:
             category_counts=category_counts
         )
 
-        # Handle event loop properly - create new loop if needed
+        # Always create a fresh event loop to avoid "Event loop is closed" errors
+        # This is necessary because the scheduler runs in a background thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        return loop.run_until_complete(self._send_email_graph(subject, html_body, self.to_email))
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, self.to_email))
+        finally:
+            loop.close()
 
     async def _send_email_graph(self, subject: str, html_body: str, to_email: str) -> bool:
         """Send email using Microsoft Graph API"""
-        if not self.graph_client:
-            logger.warning("Graph client not initialized - skipping email")
+        if not self.credentials_configured:
+            logger.warning("Azure credentials not configured - skipping email")
             return False
 
         try:
+            # Create fresh Graph client for this request (avoids event loop issues)
+            graph_client = self._create_graph_client()
+
             # Create message
             message = Message(
                 subject=subject,
@@ -151,7 +153,7 @@ class EmailService:
             )
 
             # Send email as the from_email user
-            await self.graph_client.users.by_user_id(self.from_email).send_mail.post(request_body)
+            await graph_client.users.by_user_id(self.from_email).send_mail.post(request_body)
 
             logger.info(f"Identity change report email sent to {to_email} via Microsoft Graph")
             return True
@@ -171,16 +173,20 @@ class EmailService:
         timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
 
         summary_table = self._build_summary_table(category_counts)
+
+        # Only include sections for identities that actually changed
+        new_identities = changes.get('new_identities', [])
+        removed_identities = changes.get('removed_identities', [])
+
         new_section = self._build_identity_section(
             'New Identities',
-            changes.get('new_identities', []),
-            'added'
-        )
+            new_identities
+        ) if new_identities else ''
+
         removed_section = self._build_identity_section(
             'Removed Identities',
-            changes.get('removed_identities', []),
-            'removed'
-        )
+            removed_identities
+        ) if removed_identities else ''
 
         html = f"""
 <!DOCTYPE html>
@@ -305,17 +311,11 @@ class EmailService:
     def _build_identity_section(
         self,
         title: str,
-        identities: List[Dict],
-        change_type: str
+        identities: List[Dict]
     ) -> str:
         """Build HTML section for new or removed identities"""
         if not identities:
-            return f"""
-    <div class="section">
-        <h2 class="section-title">{title} (0)</h2>
-        <p class="no-items">No {change_type} identities in this run.</p>
-    </div>
-"""
+            return ''
 
         items = []
         for identity in identities:
