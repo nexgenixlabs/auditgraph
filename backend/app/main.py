@@ -6,7 +6,8 @@ from app.api.handlers import (
     get_stats,
     get_identities,
     get_identity_details,
-    get_risks,            # ✅ add this import
+    get_risks,
+    get_identity_summary,
 )
 
 def create_app():
@@ -36,10 +37,10 @@ def create_app():
     def dashboard_summary():
         return get_stats()
 
-    # UI expects this
+    # UI expects this - provides category breakdown for dashboard
     @app.get("/api/identity-summary")
     def identity_summary():
-        return get_stats()
+        return get_identity_summary()
 
     # Optional alias
     @app.get("/api/stats")

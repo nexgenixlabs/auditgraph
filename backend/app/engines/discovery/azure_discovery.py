@@ -222,7 +222,8 @@ class AzureDiscoveryEngine:
             
             query_params = ServicePrincipalsRequestBuilder.ServicePrincipalsRequestBuilderGetQueryParameters(
                 top=999,  # Get up to 999 per page
-                select=['id', 'appId', 'displayName', 'accountEnabled', 'createdDateTime']
+                select=['id', 'appId', 'displayName', 'accountEnabled', 'createdDateTime',
+                        'servicePrincipalType', 'alternativeNames', 'appOwnerOrganizationId', 'publisherName']
             )
             request_config = RequestConfiguration(query_parameters=query_params)
             
@@ -271,7 +272,8 @@ class AzureDiscoveryEngine:
                         'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
                     }
 
-                    # Classify Managed Identities (UAMI/SAMI) vs regular Service Principals
+                    # Classify identity into the correct category
+                    # Categories: service_principal, managed_identity_system, managed_identity_user, microsoft_internal
                     sp_type = None
                     if hasattr(sp, "service_principal_type"):
                         sp_type = sp.service_principal_type
@@ -279,7 +281,8 @@ class AzureDiscoveryEngine:
                         sp_type = getattr(sp, "servicePrincipalType")
                     sp_type_norm = str(sp_type or "").strip().lower()
 
-                    # NOTE: In Entra, managed identities are represented as service principals with servicePrincipalType=ManagedIdentity.
+                    # Category 1 & 2: Managed Identities (SAMI / UAMI)
+                    # In Entra, managed identities are represented as service principals with servicePrincipalType=ManagedIdentity
                     if sp_type_norm == "managedidentity":
                         alt_names = []
                         if hasattr(sp, "alternative_names") and sp.alternative_names:
@@ -290,15 +293,23 @@ class AzureDiscoveryEngine:
                         alt_join = " ".join([str(a) for a in alt_names]).lower()
                         is_uami = "userassignedidentities" in alt_join
                         identity_dict["identity_category"] = "managed_identity_user" if is_uami else "managed_identity_system"
-                        # keep identity_type aligned to category for UI filtering
                         identity_dict["identity_type"] = identity_dict["identity_category"]
                         identity_dict["alternative_names"] = alt_names
+                        identity_dict["is_microsoft_system"] = False  # Managed identities are customer-owned
+                        identities.append(identity_dict)
+
+                    # Category 3: Microsoft Internal (first-party Microsoft apps)
+                    elif self._is_microsoft_system_app(identity_dict):
+                        identity_dict["identity_category"] = "microsoft_internal"
+                        identity_dict["identity_type"] = "service_principal"  # Keep legacy type for compatibility
+                        identity_dict["is_microsoft_system"] = True
+                        identities.append(identity_dict)
+
+                    # Category 4: Customer Service Principals (custom apps)
                     else:
                         identity_dict["identity_category"] = "service_principal"
                         identity_dict["identity_type"] = "service_principal"
-                    
-                    # CRITICAL: Filter OUT Microsoft system apps during discovery
-                    if not self._is_microsoft_system_app(identity_dict):
+                        identity_dict["is_microsoft_system"] = False
                         identities.append(identity_dict)
             
             return identities
@@ -527,28 +538,36 @@ class AzureDiscoveryEngine:
         return managed_identities
     
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
+        """
+        Discover human users who have Azure RBAC or Entra ID roles.
+        Users without roles are NOT discovered - this is by design for security posture focus.
+        """
         try:
-            # Request createdDateTime field explicitly
             from msgraph.generated.users.users_request_builder import UsersRequestBuilder
             query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
-                select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime']
+                select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType']
             )
             request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
                 query_parameters=query_params
             )
             users_response = await self.graph_client.users.get(request_configuration=request_config)
-            
+
             identities = []
             for user in users_response.value:
+                # Only include users who have roles (Azure RBAC or Entra ID)
                 if user.id in principal_ids_with_roles:
                     print(f"    ✓ {user.display_name} ({user.user_principal_name})")
-                    
+
                     created = None
                     if hasattr(user, 'created_date_time') and user.created_date_time:
                         created = user.created_date_time.isoformat()
                     elif hasattr(user, 'created_datetime') and user.created_datetime:
                         created = user.created_datetime.isoformat()
-                    
+
+                    # Determine if guest user
+                    user_type = getattr(user, 'user_type', None) or ''
+                    is_guest = user_type.lower() == 'guest' if user_type else False
+
                     identities.append({
                         'identity_id': user.id,
                         'object_id': user.id,
@@ -556,10 +575,11 @@ class AzureDiscoveryEngine:
                         'display_name': user.display_name,
                         'user_principal_name': user.user_principal_name,
                         'identity_type': 'user',
+                        'identity_category': 'guest' if is_guest else 'human_user',
                         'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
                         'created_datetime': created,
                     })
-            
+
             return identities
         except Exception as e:
             print(f"  ❌ Error: {e}")
@@ -640,70 +660,100 @@ class AzureDiscoveryEngine:
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
-        Determine if a service principal is a Microsoft system app.
-        Uses API metadata, NOT naming conventions.
-        
-        Microsoft system apps have one or more of these characteristics:
+        Determine if a service principal is a Microsoft first-party app.
+        Uses API metadata for reliable detection.
+
+        Microsoft first-party apps have one or more of these characteristics:
         - appOwnerOrganizationId = Microsoft's tenant ID
         - publisherName = 'Microsoft Services' or 'Microsoft Corporation'
-        - servicePrincipalType = 'ManagedIdentity' (system-assigned, tied to Azure resource)
-        - appId in known Microsoft app list (Office 365, Azure Portal, etc.)
-        
+        - appId in known Microsoft first-party app list
+
+        NOTE: Managed Identities (both SAMI and UAMI) are NOT filtered here.
+        They are customer-owned Azure resources and should be tracked.
+
         Args:
             identity: Service principal dict from Microsoft Graph
-            
+
         Returns:
-            True if Microsoft system app, False if customer-owned
+            True if Microsoft first-party app, False if customer-owned
         """
-        # Microsoft's tenant ID
+        # Skip managed identities - they are customer-owned, not Microsoft apps
+        # They have their own category (managed_identity_system / managed_identity_user)
+        sp_type = (identity.get('service_principal_type') or identity.get('servicePrincipalType') or '').lower()
+        if sp_type == 'managedidentity':
+            return False
+
+        # Microsoft's well-known tenant ID
         MICROSOFT_TENANT_ID = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a'
-        
-        # Check 1: Microsoft-owned tenant
-        if identity.get('appOwnerOrganizationId') == MICROSOFT_TENANT_ID:
+
+        # Check 1: Microsoft-owned tenant (most reliable check)
+        app_owner_org = identity.get('app_owner_organization_id') or identity.get('appOwnerOrganizationId')
+        if app_owner_org == MICROSOFT_TENANT_ID:
             return True
-        
-        # Check 2: Publisher name
-        publisher = (identity.get('publisherName') or '').lower()
-        if 'microsoft' in publisher and ('services' in publisher or 'corporation' in publisher):
-            return True
-        
-        # Check 3: System-assigned managed identity (tied to Azure resource lifecycle)
-        if identity.get('servicePrincipalType') == 'ManagedIdentity':
-            return True
-        
-        # Check 4: Known Microsoft first-party app IDs (common ones)
-        MICROSOFT_FIRST_PARTY_APPS = {
-            '00000003-0000-0000-c000-000000000000',  # Microsoft Graph
+
+        # Check 2: Publisher name indicates Microsoft
+        publisher = (identity.get('publisher_name') or identity.get('publisherName') or '').lower()
+        if publisher:
+            # Strong Microsoft publisher patterns
+            microsoft_publishers = [
+                'microsoft services',
+                'microsoft corporation',
+                'microsoft azure',
+            ]
+            if any(mp in publisher for mp in microsoft_publishers):
+                return True
+
+        # Check 3: Known Microsoft first-party app IDs
+        # These are well-documented Microsoft service principals
+        MICROSOFT_FIRST_PARTY_APP_IDS = {
+            # Core Microsoft services
+            '00000001-0000-0000-c000-000000000000',  # Azure ESTS
             '00000002-0000-0000-c000-000000000000',  # Azure AD Graph (legacy)
+            '00000003-0000-0000-c000-000000000000',  # Microsoft Graph
+            '00000004-0000-0000-c000-000000000000',  # Windows Azure Security Token Service
+            '00000005-0000-0000-c000-000000000000',  # Office 365 Management APIs
+            '00000006-0000-0ff1-ce00-000000000000',  # Microsoft Office 365 Portal
+            '00000007-0000-0000-c000-000000000000',  # Azure Key Vault
+            '00000007-0000-0ff1-ce00-000000000000',  # Microsoft Office 365
+            '00000009-0000-0000-c000-000000000000',  # Microsoft Power BI
+            '0000000a-0000-0000-c000-000000000000',  # Microsoft Intune
+            '0000000c-0000-0000-c000-000000000000',  # Microsoft App Access Panel
+            '00000012-0000-0000-c000-000000000000',  # Microsoft Rights Management Services
+
+            # Azure services
             '797f4846-ba00-4fd7-ba43-dac1f8f63013',  # Azure Service Management
-            '00000005-0000-0000-c000-000000000000',  # Office 365 Management
-        
+            'c44b4083-3bb0-49c1-b47d-974e53cbdf3c',  # Azure Portal
+
+            # Office services
+            '00000002-0000-0ff1-ce00-000000000000',  # Office 365 Exchange Online
+            '00000003-0000-0ff1-ce00-000000000000',  # Office 365 SharePoint Online
         }
 
-        if identity.get('appId') in MICROSOFT_FIRST_PARTY_APPS:
+        app_id = identity.get('app_id') or identity.get('appId')
+        if app_id and app_id in MICROSOFT_FIRST_PARTY_APP_IDS:
             return True
-        
-        # Default: Assume customer-owned (discover it!)
+
+        # Default: Assume customer-owned (track it!)
         return False
 
     def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict], entra_roles: List[Dict] = []) -> List[Dict]:
-        actionable_identities = []
-        
+        """
+        Calculate risk levels for all identities.
+
+        All identities are returned (including Microsoft internal), but:
+        - Microsoft internal identities get 'info' risk level (not actionable)
+        - Customer identities get proper risk assessment
+        """
+        # Process ALL identities - don't filter any out
         for identity in identities:
-            if identity['identity_type'] == 'user':
+            # Set identity_category for users if not already set
+            if identity.get('identity_type') == 'user':
+                if not identity.get('identity_category'):
+                    identity['identity_category'] = 'human_user'
                 identity['is_microsoft_system'] = False
-                actionable_identities.append(identity)
-                continue
-            
-            # Determine if this is a Microsoft system app (not customer-owned)
-            # Use API metadata, NOT naming conventions!
-            is_microsoft_system = self._is_microsoft_system_app(identity)
-            
-            identity['is_microsoft_system'] = is_microsoft_system
-            
-            if not is_microsoft_system:
-                actionable_identities.append(identity)
-        for identity in actionable_identities:
+
+        # Calculate risks for all identities
+        for identity in identities:
             identity_roles = [ra for ra in role_assignments if ra['principal_id'] == identity['object_id']]
             
             risk_level = 'info'
@@ -788,22 +838,40 @@ class AzureDiscoveryEngine:
                     risk_reasons = [azure_risk_reason]
             
             # Check if identity has NO roles (neither Azure RBAC nor Entra)
+            is_microsoft = identity.get('is_microsoft_system', False)
+            identity_category = identity.get('identity_category', '')
+
             if len(identity_roles) == 0 and len(identity_entra_roles) == 0:
-                risk_level = 'medium'
-                risk_reasons = ['No role assignments (orphaned custom identity)']
-            
+                if is_microsoft or identity_category == 'microsoft_internal':
+                    # Microsoft internal identities without roles are normal - not a risk
+                    risk_level = 'info'
+                    risk_reasons = ['Microsoft internal service (no customer action needed)']
+                else:
+                    # Customer identities without roles may be orphaned
+                    risk_level = 'medium'
+                    risk_reasons = ['No role assignments (orphaned custom identity)']
+
+            # Override risk for Microsoft internal identities - they're informational only
+            if is_microsoft or identity_category == 'microsoft_internal':
+                risk_level = 'info'
+                if not risk_reasons or risk_reasons[0] == 'No elevated privileges':
+                    risk_reasons = ['Microsoft internal service (no customer action needed)']
+
             identity['risk_level'] = risk_level
             identity['risk_reasons'] = risk_reasons
             identity['roles'] = identity_roles
             identity['role_count'] = len(identity_roles)
-            
-            if risk_level in ['critical', 'high']:
+
+            if risk_level in ['critical', 'high'] and not is_microsoft:
                 emoji = '🚨' if risk_level == 'critical' else '🟠'
                 print(f"    {emoji} {identity['display_name']}: {risk_level.upper()}")
                 print(f"       - {risk_reasons[0]}")
-        
-        print(f"  📊 Returning {len(actionable_identities)} actionable identities (filtered from {len(identities)} total)")
-        return actionable_identities
+
+        # Count by category for summary
+        customer_count = sum(1 for i in identities if not i.get('is_microsoft_system', False))
+        microsoft_count = sum(1 for i in identities if i.get('is_microsoft_system', False))
+        print(f"  📊 Returning {len(identities)} identities ({customer_count} customer, {microsoft_count} Microsoft internal)")
+        return identities
     
     def _check_credentials(self, identities: List[Dict]) -> List[Dict]:
         print(f"  Checking {len(identities)} identities...")
@@ -823,17 +891,16 @@ class AzureDiscoveryEngine:
         return identities
     
     def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None) -> int:
-        """Save identities using Database class methods - SKIP Microsoft system SPNs"""
+        """Save all identities to database with proper categorization"""
         saved_count = 0
-        skipped_count = 0
-        
+        microsoft_count = 0
+
         for identity in identities:
-            # CRITICAL: Skip Microsoft system SPNs - don't save to database
+            # Track Microsoft internal identities (they are now saved with proper category)
             if identity.get('is_microsoft_system'):
-                skipped_count += 1
-                continue
-            
-            # Only save custom/third-party SPNs and users
+                microsoft_count += 1
+
+            # Save ALL identities - Microsoft internal ones have identity_category='microsoft_internal'
             
             # Set source for multi-cloud
             identity['source'] = 'azure'
@@ -897,10 +964,10 @@ class AzureDiscoveryEngine:
                 self.db.store_app_roles(identity_db_id, app_roles)
             
             saved_count += 1
-        
-        if skipped_count > 0:
-            print(f"  ℹ️  Skipped {skipped_count} Microsoft system identities")
-        
+
+        if microsoft_count > 0:
+            print(f"  ℹ️  Included {microsoft_count} Microsoft internal identities (categorized separately)")
+
         return saved_count
     
     def _create_result(self, identities: List[Dict], role_assignments: List[Dict], run_id: int) -> DiscoveryResult:

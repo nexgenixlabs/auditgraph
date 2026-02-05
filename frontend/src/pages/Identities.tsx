@@ -127,148 +127,37 @@ function normalizeCategoryFromBackend(raw?: any): IdentityCategory | undefined {
   return undefined;
 }
 
-function looksLikeMicrosoftFirstParty(identityId?: string, displayName?: string) {
-  const id = safeLower(identityId).trim();
-  const name = safeLower(displayName).trim();
-
-  if (!id && !name) return false;
-
-  // Guardrails: don't classify our own/custom SPNs as Microsoft internal
-  // unless they explicitly contain strong Microsoft tokens.
-  const customPrefixes = ['spn-', 'app-', 'svc-', 'auditgraph', 'nexgenix', 'lantern'];
-  const strongMsTokens = ['microsoft', 'azure', 'entra', 'aad', 'office', 'sharepoint', 'exchange', 'teams', 'intune', 'defender', 'sentinel'];
-  if (customPrefixes.some(p => name.startsWith(p) || name.includes(p))) {
-    if (!strongMsTokens.some(t => name.includes(t))) return false;
-  }
-
-  // Well-known Microsoft appId patterns (rare but keep)
-  if (id.endsWith('000000000000')) return true;
-  if (id.startsWith('00000001-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('00000002-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('00000003-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('00000004-0000-0ff1-ce00-000000000000')) return true;
-  if (id.startsWith('00000005-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('00000006-0000-0ff1-ce00-000000000000')) return true;
-  if (id.startsWith('00000007-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('00000007-0000-0ff1-ce00-000000000000')) return true;
-  if (id.startsWith('00000009-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('0000000a-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('0000000c-0000-0000-c000-000000000000')) return true;
-  if (id.startsWith('00000012-0000-0000-c000-000000000000')) return true;
-
-  // Name-based heuristics (more conservative; avoid generic tokens that cause false positives)
-  const tokens = [
-    'microsoft',
-    'azure',
-    'entra',
-    'active directory',
-    'azure ad',
-    'aad',
-    'ms graph',
-    'graph',
-    'office',
-    'm365',
-    'o365',
-    'sharepoint',
-    'exchange',
-    'teams',
-    'intune',
-    'defender',
-    'sentinel',
-    'azure monitor',
-    'monitor',
-    'log analytics',
-    'key vault',
-    'cosmosdb',
-    'storage',
-    'windows',
-    'dynamics',
-    'powerbi',
-    'power bi',
-    'bing',
-    'billing rp',
-    'azure advisor',
-    'advisor',
-    'azure ad notification',
-    'notification',
-    'microsoft entra',
-  ];
-
-  if (tokens.some(t => name.includes(t))) return true;
-
-  // Conservative prefixes
-  if (name.startsWith('microsoft ') || name.startsWith('azure ')) return true;
-
-  return false;
-}
-
-
-
 function deriveCategoryKey(row: Partial<IdentityRow> & { [k: string]: any }): IdentityCategory {
-  const t = normalizeIdentityType(row.identity_type);
-  const name = row.display_name || '';
-  const id = row.identity_id || '';
-
-  // 1) Backend-provided key or label
+  // Trust the backend's identity_category - it's the source of truth
+  // The backend properly categorizes identities during discovery
   const providedKey = row.identity_category_key ?? row.identity_category;
   const normalized = normalizeCategoryFromBackend(providedKey);
-  
-  // Special case: If backend explicitly says microsoft_internal, trust it
-  if (normalized === 'microsoft_internal') {
-    return 'microsoft_internal';
-  }
-  
-  // For managed identities from backend, trust them (but verify with additional checks)
-  if (normalized === 'managed_identity_system') return 'managed_identity_system';
-  if (normalized === 'managed_identity_user') return 'managed_identity_user';
-  
-  // For human users and guests, trust backend
-  if (normalized === 'human_user') return 'human_user';
-  if (normalized === 'guest') return 'guest';
-  
-  // For service_principal from backend, DON'T trust it yet - need to check if it's Microsoft Internal
 
-  // 2) Derive by identity_type
+  // If backend provided a valid category, use it directly
+  if (normalized) {
+    return normalized;
+  }
+
+  // Fallback: Derive category from identity_type if backend didn't provide category
+  // This handles legacy data or edge cases
+  const t = normalizeIdentityType(row.identity_type);
+  const name = row.display_name || '';
+
   if (t === 'user') {
     const n = safeLower(name);
     if (n.includes('#ext#') || n.includes('guest')) return 'guest';
     return 'human_user';
   }
 
-  // Managed identities (new storage)
-  if (t === 'managed_identity') {
-    // If backend gave us a label in another field, attempt to infer system vs user
-    const hint = normalizeCategoryFromBackend((row as any).identity_category_label);
-    if (hint === 'managed_identity_system' || hint === 'managed_identity_user') return hint;
+  if (t === 'managed_identity' || t === 'managed_identity_system') {
+    return 'managed_identity_system';
+  }
 
-    // System MI commonly uses this name
-    if (safeLower(name) === 'managed service identity') return 'managed_identity_system';
-
-    // Check for user-assigned patterns in name
-    const n = safeLower(name);
-    if (n.includes('user assigned') || n.includes('uamtest') || n.includes('uam')) return 'managed_identity_user';
-
-    // Default (most MI identities in Entra inventory are user-assigned)
+  if (t === 'managed_identity_user') {
     return 'managed_identity_user';
   }
 
-  if (t === 'managed_identity_system') return 'managed_identity_system';
-  if (t === 'managed_identity_user') return 'managed_identity_user';
-
-  // 3) Service principals - CRITICAL SECTION
-  // This is where we separate customer SPNs from Microsoft Internal SPNs
-  
-  if (t === 'service_principal' || normalized === 'service_principal') {
-    // Special case: "Managed Service Identity" is actually a system-assigned MI, not an SPN
-    if (safeLower(name) === 'managed service identity') return 'managed_identity_system';
-
-    // CRITICAL: Check if this is Microsoft first-party
-    // If it is, it should go to microsoft_internal, NOT service_principal
-    if (looksLikeMicrosoftFirstParty(id, name)) {
-      return 'microsoft_internal';
-    }
-
-    // If we get here, it's a genuine customer service principal
+  if (t === 'service_principal') {
     return 'service_principal';
   }
 
@@ -320,11 +209,20 @@ export default function IdentitiesPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
-    const catParam = params.get('category');
+    // Support both 'category' and 'identity_category' query params
+    const catParam = params.get('identity_category') || params.get('category');
+    const riskParam = params.get('risk_level');
+
     if (catParam) {
       const found = CATEGORY_OPTIONS.find(o => o.value === catParam);
       if (found && found.value !== 'all') {
         setCategoryFilter(found.value as any);
+      }
+    }
+    if (riskParam) {
+      const found = RISK_OPTIONS.find(o => o.value === riskParam);
+      if (found && found.value !== 'all') {
+        setRiskFilter(found.value as any);
       }
     }
   }, [location.search]);
@@ -338,22 +236,9 @@ export default function IdentitiesPage() {
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
 
-        const rows: IdentityRow[] = (data.identities || []).map((raw: any, idx: number) => {
+        const rows: IdentityRow[] = (data.identities || []).map((raw: any) => {
           const derived = deriveCategoryKey(raw);
-          
-          // Log ALL service principals and microsoft_internal to debug duplication
-          const isSPN = safeLower(raw.identity_type) === 'service_principal' || safeLower(raw.identity_category).includes('service principal');
-          const isMSInternal = safeLower(raw.identity_category).includes('microsoft') || safeLower(raw.display_name).includes('azure') || safeLower(raw.display_name).includes('microsoft');
-          
-          if (isSPN || isMSInternal) {
-            console.log(`\n[${derived.toUpperCase()}] ${raw.display_name}`);
-            console.log('  identity_type:', raw.identity_type);
-            console.log('  identity_category:', raw.identity_category);
-            console.log('  normalized category:', normalizeCategoryFromBackend(raw.identity_category));
-            console.log('  Microsoft 1P check:', looksLikeMicrosoftFirstParty(raw.identity_id, raw.display_name));
-            console.log('  → FINAL:', derived);
-          }
-          
+
           return {
             identity_id: raw.identity_id || raw.id || '',
             display_name: raw.display_name || raw.name || '',
@@ -369,15 +254,6 @@ export default function IdentitiesPage() {
           };
         });
         
-        // Summary statistics
-        const categoryCounts = rows.reduce((acc, r) => {
-          acc[r.identity_category || 'unknown'] = (acc[r.identity_category || 'unknown'] || 0) + 1;
-          return acc;
-        }, {} as Record<string, number>);
-        console.log('\n========== CATEGORY SUMMARY ==========');
-        console.log(categoryCounts);
-        console.log('======================================\n');
-
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load identities');
@@ -407,22 +283,7 @@ export default function IdentitiesPage() {
 
     if (categoryFilter !== 'all') {
       const cf = safeLower(categoryFilter);
-      console.log(`\n🔍 FILTERING by category: "${categoryFilter}" (normalized: "${cf}")`);
-      console.log(`Before filter: ${result.length} identities`);
-      
-      result = result.filter(i => {
-        const iCat = safeLower(i.identity_category);
-        const matches = iCat === cf;
-        return matches;
-      });
-      
-      console.log(`After filter: ${result.length} identities`);
-      
-      // Show first 5 results
-      console.log('First 5 filtered results:');
-      result.slice(0, 5).forEach(r => {
-        console.log(`  - ${r.display_name} [${r.identity_category}]`);
-      });
+      result = result.filter(i => safeLower(i.identity_category) === cf);
     }
 
     result.sort((a, b) => {

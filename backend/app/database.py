@@ -133,8 +133,6 @@ class Database:
 
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
-        alt_names = identity_data.get("alternative_names", []) or []
-        alt_names_json = json.dumps(alt_names)
 
         cursor.execute(
             """
@@ -149,11 +147,7 @@ class Database:
                 app_id,
                 object_id,
 
-                entra_object_type,
                 service_principal_type,
-                publisher_name,
-                app_owner_organization_id,
-                alternative_names,
 
                 created_datetime,
                 enabled,
@@ -172,7 +166,7 @@ class Database:
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
-                %s, %s, %s, %s, %s,
+                %s,
                 %s, %s, %s,
                 %s, %s,
                 %s, %s,
@@ -188,11 +182,7 @@ class Database:
                 app_id = EXCLUDED.app_id,
                 object_id = EXCLUDED.object_id,
 
-                entra_object_type = EXCLUDED.entra_object_type,
                 service_principal_type = EXCLUDED.service_principal_type,
-                publisher_name = EXCLUDED.publisher_name,
-                app_owner_organization_id = EXCLUDED.app_owner_organization_id,
-                alternative_names = EXCLUDED.alternative_names,
 
                 created_datetime = EXCLUDED.created_datetime,
                 enabled = EXCLUDED.enabled,
@@ -220,17 +210,13 @@ class Database:
                 # legacy type (keep)
                 identity_data.get("identity_type", "service_principal"),
 
-                # ✅ normalized category (new)
+                # normalized category
                 identity_data.get("identity_category", "service_principal"),
 
                 identity_data.get("app_id"),
                 identity_data.get("object_id"),
 
-                identity_data.get("entra_object_type"),
                 identity_data.get("service_principal_type"),
-                identity_data.get("publisher_name"),
-                identity_data.get("app_owner_organization_id"),
-                alt_names_json,
 
                 identity_data.get("created_datetime"),
                 identity_data.get("enabled", True),

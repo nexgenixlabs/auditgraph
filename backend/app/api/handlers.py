@@ -177,12 +177,25 @@ def get_identities():
 
         identities = []
         for row in rows:
+            display_name = row[1] or ''
+            identity_type = row[2] or ''
+            raw_category = row[3] or ''
+
+            # First normalize the category key
+            normalized_category = _normalize_category_key(raw_category)
+
+            # For service principals, check if it's actually Microsoft internal
+            # This handles legacy data that wasn't properly categorized
+            if normalized_category == 'service_principal':
+                if _is_microsoft_internal_identity(display_name, identity_type):
+                    normalized_category = 'microsoft_internal'
+
             identities.append(
                 {
                     "identity_id": row[0],
-                    "display_name": row[1],
-                    "identity_type": row[2],
-                    "identity_category": row[3],
+                    "display_name": display_name,
+                    "identity_type": identity_type,
+                    "identity_category": normalized_category,
                     "risk_level": row[4] or "info",
                     "credential_count": int(row[5] or 0),
                     "next_expiry": row[6].isoformat() if row[6] else None,
@@ -227,12 +240,21 @@ def get_identity_details(identity_id: str):
             return jsonify({"error": "Identity not found"}), 404
 
         identity_db_id = row[0]
+        display_name = row[2] or ''
+        identity_type = row[3] or ''
+        normalized_category = _normalize_category_key(row[4] or '')
+
+        # For service principals, check if it's actually Microsoft internal
+        if normalized_category == 'service_principal':
+            if _is_microsoft_internal_identity(display_name, identity_type):
+                normalized_category = 'microsoft_internal'
+
         identity = {
             "db_id": identity_db_id,
             "identity_id": row[1],
-            "display_name": row[2],
-            "identity_type": row[3],
-            "identity_category": row[4],
+            "display_name": display_name,
+            "identity_type": identity_type,
+            "identity_category": normalized_category,
             "risk_level": row[5],
             "credential_count": row[6] or 0,
             "credential_risk": row[7],
@@ -298,12 +320,21 @@ def get_risks():
 
         items = []
         for r in rows:
+            display_name = r[1] or ''
+            identity_type = r[2] or ''
+            normalized_category = _normalize_category_key(r[3] or '')
+
+            # For service principals, check if it's actually Microsoft internal
+            if normalized_category == 'service_principal':
+                if _is_microsoft_internal_identity(display_name, identity_type):
+                    normalized_category = 'microsoft_internal'
+
             items.append(
                 {
                     "identity_id": r[0],
-                    "display_name": r[1],
-                    "identity_type": r[2],
-                    "identity_category": r[3],
+                    "display_name": display_name,
+                    "identity_type": identity_type,
+                    "identity_category": normalized_category,
                     "risk_level": r[4],
                     "risk_reasons": _parse_risk_reasons(r[5]),
                 }
@@ -362,3 +393,277 @@ def trigger_discovery():
 
 def get_scheduler_status():
     return jsonify({"scheduler": "unknown"})
+
+
+def _normalize_category_key(raw_category: str) -> str:
+    """
+    Normalize category value to canonical snake_case key.
+    Handles legacy display names from old database records.
+    """
+    if not raw_category:
+        return 'unknown'
+
+    c = raw_category.lower().strip()
+
+    # Already canonical
+    if c in ('service_principal', 'managed_identity_system', 'managed_identity_user',
+             'human_user', 'guest', 'microsoft_internal', 'unknown'):
+        return c
+
+    # Legacy display name mappings
+    if c in ('service principal', 'serviceprincipal'):
+        return 'service_principal'
+    if c in ('user', 'users', 'human user'):
+        return 'human_user'
+    if c in ('guest', 'guest user'):
+        return 'guest'
+    if 'user assigned' in c or 'user-assigned' in c or c == 'managed identity (user)':
+        return 'managed_identity_user'
+    if 'system assigned' in c or 'system-assigned' in c or c == 'managed identity (system)':
+        return 'managed_identity_system'
+    if 'microsoft' in c and 'internal' in c:
+        return 'microsoft_internal'
+    if 'managed identity' in c or 'managed_identity' in c:
+        # Default managed identity to system if not specified
+        return 'managed_identity_system'
+
+    return 'unknown'
+
+
+def _is_microsoft_internal_identity(display_name: str, identity_type: str) -> bool:
+    """
+    Detect if an identity is a Microsoft internal/first-party service.
+    Uses display name patterns that reliably indicate Microsoft services.
+
+    This is used at query time to properly categorize existing data that
+    wasn't categorized during discovery.
+
+    Args:
+        display_name: The identity's display name
+        identity_type: The identity type (user, service_principal, etc.)
+
+    Returns:
+        True if this is a Microsoft internal service, False otherwise
+    """
+    if not display_name:
+        return False
+
+    # Only apply to service principals
+    if identity_type and identity_type.lower() not in ('service_principal', 'serviceprincipal'):
+        return False
+
+    name = display_name.lower().strip()
+
+    # Microsoft product/service name patterns
+    # These are reliable indicators of Microsoft first-party services
+    microsoft_patterns = [
+        # Explicit Microsoft branding
+        'microsoft ',
+        'ms-',
+        'ms ',
+
+        # Office 365 / M365
+        'office 365',
+        'office365',
+        'o365',
+        'm365 ',
+
+        # Azure services
+        'azure ',
+
+        # Specific Microsoft products
+        'sharepoint',
+        'exchange ',
+        'teams ',
+        'intune',
+        'dynamics ',
+        'power bi',
+        'powerbi',
+        'powerapps',
+        'power apps',
+        'power platform',
+        'onedrive',
+        'onenote',
+        'outlook',
+        'skype',
+        'yammer',
+        'viva ',
+        'cortana',
+        'bing',
+        'windows ',
+        'graph ',
+
+        # Azure AD / Entra
+        'aad',
+        'entra',
+        'active directory',
+
+        # Common Microsoft service patterns
+        'substrate',
+        'dataverse',
+        'common data service',
+    ]
+
+    # Check if name starts with or contains Microsoft patterns
+    for pattern in microsoft_patterns:
+        if name.startswith(pattern) or f' {pattern}' in f' {name}':
+            return True
+
+    # Additional specific service names that are Microsoft internal
+    microsoft_service_names = [
+        'managed service identity',
+        'device registration service',
+        'billing rp',
+        'signup',
+        'conferencing virtual assistant',
+        'conference auto attendant',
+        'connectors',
+        'pushchannel',
+        'narada notification service',
+        'idsproduction',
+        'ids-prod',
+        'safelinks',
+        'sway',
+        'ic3 ',
+        'ocaas',
+        'cap ',
+        'cab',
+        'oms',
+        'pim',
+        'spauthevent',
+        'subscriptionrp',
+        'weveengine',
+        'signal b2',
+        'privacy management',
+        'policy administration',
+        'request approvals',
+        'group configuration',
+        'people profile',
+        'meeting migration',
+        'media analysis',
+        'messaging bot',
+        'customer experience',
+        'customer service',
+        'compliance',
+        'sales insights',
+        'portfolios',
+        'project work',
+        'deployment scheduler',
+        'deploymentscheduler',
+        'configuration manager',
+        'cloud licensing',
+        'iam ',
+        'ip substrate',
+        'mcapi',
+        'mro ',
+        'ppe-',
+        'aci api',
+        'aciapi',
+        'apple internet accounts',
+        # Additional Microsoft services that don't follow common patterns
+        'azuresupportcenter',
+        'support center',
+        'capacitypolicyassignment',
+        'capacity policy',
+        'centralized deployment',
+        'cloudlicensingsystem',
+        'ipsubstrate',
+        'microsoft.smit',
+        '.smit',
+        'office shredding',
+        'shredding service',
+        'officeclientservice',
+        'officeservicesmanager',
+        'oneprofile',
+        'productslifecycle',
+        'products lifecycle',
+        'projectworkmanagement',
+        'salesinsights',
+        'virtual visits',
+        'windowsupdate',
+        'windows update',
+        'tenantsearchprocessors',
+        'tenant search',
+    ]
+
+    for service in microsoft_service_names:
+        if service in name:
+            return True
+
+    return False
+
+
+def get_identity_summary():
+    """
+    Get identity counts grouped by category for the dashboard.
+
+    Returns:
+        JSON with category breakdown including risk counts per category
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        # Get latest completed discovery run
+        cursor.execute("SELECT MAX(id), MAX(completed_at) FROM discovery_runs WHERE status = 'completed'")
+        row = cursor.fetchone()
+        run_id = row[0] if row else None
+        completed_at = row[1] if row else None
+
+        if not run_id:
+            return jsonify({
+                "run_id": None,
+                "completed_at": None,
+                "categories": {}
+            })
+
+        # Get individual identities to properly categorize each one
+        # This ensures Microsoft internal detection works correctly
+        cursor.execute(
+            """
+            SELECT
+                display_name,
+                identity_type,
+                COALESCE(identity_category, 'unknown') as category,
+                COALESCE(risk_level, 'unknown') as risk
+            FROM identities
+            WHERE discovery_run_id = %s
+            """,
+            (run_id,),
+        )
+        rows = cursor.fetchall()
+
+        # Build category structure with proper Microsoft internal detection
+        categories = {}
+        for display_name, identity_type, raw_cat, risk in rows:
+            # Normalize category key
+            cat = _normalize_category_key(raw_cat)
+
+            # For service principals, check if it's actually Microsoft internal
+            if cat == 'service_principal':
+                if _is_microsoft_internal_identity(display_name, identity_type):
+                    cat = 'microsoft_internal'
+
+            if cat not in categories:
+                categories[cat] = {
+                    "total": 0,
+                    "critical": 0,
+                    "high": 0,
+                    "medium": 0,
+                    "low": 0,
+                    "info": 0,
+                    "unknown": 0,
+                }
+            categories[cat]["total"] += 1
+            if risk in categories[cat]:
+                categories[cat][risk] += 1
+
+        return jsonify({
+            "run_id": run_id,
+            "completed_at": completed_at.isoformat() if completed_at else None,
+            "categories": categories
+        })
+
+    finally:
+        cursor.close()
+        db.close()
