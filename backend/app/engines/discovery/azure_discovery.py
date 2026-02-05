@@ -1,4 +1,53 @@
-"""Azure Discovery Engine - Fixed to match actual database schema"""
+"""
+Azure Discovery Engine
+
+This module contains the AzureDiscoveryEngine class that orchestrates the complete
+discovery process for Azure cloud identities. It connects to Microsoft Graph API
+and Azure Resource Manager to discover and analyze identities and their permissions.
+
+Discovery Process (executed in order):
+    1. Create discovery run record in database
+    2. Discover Azure RBAC role assignments (via Azure CLI)
+    3. Discover Entra ID directory roles (via Graph API)
+    4. Discover Service Principals with pagination (via Graph API)
+    5. Discover SPN credentials (secrets, certificates, federated)
+    6. Discover Microsoft Graph API permissions
+    7. Discover custom application role assignments
+    8. Discover users who have Azure RBAC or Entra roles
+    9. Calculate risk levels based on permissions and activity
+    10. Check credential expiration status
+    11. Check last activity/sign-in status
+    12. Save all data to PostgreSQL database
+    13. Complete discovery run with summary statistics
+
+Key Features:
+    - Async/await pattern for efficient API calls
+    - Pagination support for large tenants (999 items per page)
+    - Microsoft system SPN filtering (custom SPNs start with 'spn-')
+    - Risk calculation combining Azure RBAC and Entra roles
+    - Credential expiration tracking
+    - Activity status detection
+
+Identity Types Discovered:
+    - Service Principals (application identities)
+    - Users (with Azure RBAC or Entra role assignments)
+    - Managed Identities (system and user-assigned)
+
+Risk Level Calculation:
+    - CRITICAL: Owner/Contributor on subscription, Global Admin, etc.
+    - HIGH: Security Admin, User Access Administrator
+    - MEDIUM: Reader roles, custom roles without activity
+    - LOW/INFO: Properly scoped, active identities
+
+Usage:
+    engine = AzureDiscoveryEngine(tenant_id, client_id, client_secret)
+    result = engine.run_discovery()
+
+Dependencies:
+    - azure-identity: Azure authentication
+    - msgraph-sdk: Microsoft Graph API client
+    - Azure CLI: For RBAC role assignment discovery
+"""
 import os
 import asyncio
 from datetime import datetime
@@ -10,9 +59,35 @@ from .models import DiscoveryResult
 import json
 
 class AzureDiscoveryEngine:
+    """
+    Orchestrates Azure identity discovery across Microsoft Graph and Azure RM.
+
+    This engine connects to Azure using service principal credentials and discovers
+    all identities (SPNs, users, managed identities), their role assignments,
+    credentials, and permissions. It calculates risk levels and stores everything
+    in PostgreSQL for dashboard display.
+
+    Attributes:
+        tenant_id: Azure AD tenant ID
+        client_id: Service principal application ID for authentication
+        client_secret: Service principal secret for authentication
+        db: Database instance for storing discovery results
+        graph_client: Microsoft Graph SDK client
+        subscription_id: Target Azure subscription ID
+        subscription_name: Human-readable subscription name
+    """
+
     def __init__(self, tenant_id: str, client_id: str, client_secret: str):
+        """
+        Initialize the discovery engine with Azure credentials.
+
+        Args:
+            tenant_id: Azure AD tenant ID
+            client_id: Service principal application ID
+            client_secret: Service principal client secret
+        """
         self.tenant_id = tenant_id
-        self.client_id = client_id  
+        self.client_id = client_id
         self.client_secret = client_secret
         self.db = Database()
         
@@ -32,6 +107,15 @@ class AzureDiscoveryEngine:
         print(f"✓ Discovery Engine initialized for subscription: {self.subscription_id}")
     
     def run_discovery(self) -> DiscoveryResult:
+        """
+        Execute the full discovery process synchronously.
+
+        This is the main entry point that wraps the async discovery
+        in asyncio.run() for synchronous calling contexts (like the scheduler).
+
+        Returns:
+            DiscoveryResult or None on completion
+        """
         return asyncio.run(self._async_run_discovery())
     
     async def _async_run_discovery(self) -> DiscoveryResult:
@@ -75,6 +159,9 @@ class AzureDiscoveryEngine:
         # Step 3.6: Discover API Permissions
         permissions_map = await self._discover_permissions(service_principals)
         
+        # Step 3.7: Discover Custom App Roles
+        app_roles_map = await self._discover_app_roles(service_principals)
+        
         # Step 4: Discover users who have Azure RBAC OR Entra roles
         print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
@@ -101,7 +188,7 @@ class AzureDiscoveryEngine:
         
         # Step 9: Save to database using Database class methods
         print("\n💾 Saving identities to database...")
-        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map)
+        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map)
         print(f"  ✓ Saved {saved_count} identities")
         
         # Step 10: Complete discovery run
@@ -146,6 +233,17 @@ class AzureDiscoveryEngine:
                     if len(identities) < 10:
                         print(f"    ✓ {sp.display_name} ({sp.id})")
                     
+                    # DEBUG: Log first 3 service principals to see available fields
+                    if len(identities) < 3:
+                        print(f"\n  DEBUG SP #{len(identities)+1}: {sp.display_name}")
+                        print(f"    - service_principal_type: {getattr(sp, 'service_principal_type', 'ATTR NOT FOUND')}")
+                        print(f"    - app_owner_organization_id: {getattr(sp, 'app_owner_organization_id', 'ATTR NOT FOUND')}")
+                        print(f"    - publisher_name: {getattr(sp, 'publisher_name', 'ATTR NOT FOUND')}")
+                        print(f"    - app_id: {sp.app_id}")
+                        print(f"    - Has additional_data: {hasattr(sp, 'additional_data')}")
+                        if hasattr(sp, 'additional_data') and sp.additional_data:
+                            print(f"    - additional_data keys: {list(sp.additional_data.keys())[:10]}")
+                    
                     created = None
                     if hasattr(sp, 'created_date_time') and sp.created_date_time:
                         created = sp.created_date_time.isoformat()
@@ -153,15 +251,55 @@ class AzureDiscoveryEngine:
                         if sp.additional_data.get('createdDateTime'):
                             created = sp.additional_data.get('createdDateTime')
                     
-                    identities.append({
+                    # Determine identity type based on servicePrincipalType
+                    identity_type = 'service_principal'
+                    if hasattr(sp, 'service_principal_type'):
+                        if sp.service_principal_type == 'ManagedIdentity':
+                            identity_type = 'managed_identity'
+                    
+                    # Check if this is a Microsoft system app (filter out)
+                    identity_dict = {
                         'identity_id': sp.app_id or sp.id,
                         'object_id': sp.id,
                         'app_id': sp.app_id,
                         'display_name': sp.display_name,
-                        'identity_type': 'service_principal',
+                        'identity_type': identity_type,
                         'enabled': sp.account_enabled if hasattr(sp, 'account_enabled') else True,
                         'created_datetime': created,
-                    })
+                        'service_principal_type': sp.service_principal_type if hasattr(sp, 'service_principal_type') else None,
+                        'app_owner_organization_id': sp.app_owner_organization_id if hasattr(sp, 'app_owner_organization_id') else None,
+                        'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
+                    }
+
+                    # Classify Managed Identities (UAMI/SAMI) vs regular Service Principals
+                    sp_type = None
+                    if hasattr(sp, "service_principal_type"):
+                        sp_type = sp.service_principal_type
+                    elif hasattr(sp, "servicePrincipalType"):
+                        sp_type = getattr(sp, "servicePrincipalType")
+                    sp_type_norm = str(sp_type or "").strip().lower()
+
+                    # NOTE: In Entra, managed identities are represented as service principals with servicePrincipalType=ManagedIdentity.
+                    if sp_type_norm == "managedidentity":
+                        alt_names = []
+                        if hasattr(sp, "alternative_names") and sp.alternative_names:
+                            alt_names = list(sp.alternative_names)
+                        elif hasattr(sp, "alternativeNames") and getattr(sp, "alternativeNames"):
+                            alt_names = list(getattr(sp, "alternativeNames"))
+
+                        alt_join = " ".join([str(a) for a in alt_names]).lower()
+                        is_uami = "userassignedidentities" in alt_join
+                        identity_dict["identity_category"] = "managed_identity_user" if is_uami else "managed_identity_system"
+                        # keep identity_type aligned to category for UI filtering
+                        identity_dict["identity_type"] = identity_dict["identity_category"]
+                        identity_dict["alternative_names"] = alt_names
+                    else:
+                        identity_dict["identity_category"] = "service_principal"
+                        identity_dict["identity_type"] = "service_principal"
+                    
+                    # CRITICAL: Filter OUT Microsoft system apps during discovery
+                    if not self._is_microsoft_system_app(identity_dict):
+                        identities.append(identity_dict)
             
             return identities
         except Exception as e:
@@ -302,6 +440,92 @@ class AzureDiscoveryEngine:
         print(f"  ✓ Fetched permissions for {len(permissions_map)} service principals")
         return permissions_map
 
+    async def _discover_app_roles(self, service_principals: list) -> dict:
+        """
+        Discover custom application role assignments for service principals.
+        Returns assignments to custom apps (NOT Microsoft Graph).
+        
+        Similar to _discover_permissions but filters OUT Microsoft Graph.
+        
+        Args:
+            service_principals: List of service principal dicts
+            
+        Returns:
+            Dict mapping identity_id to list of app role assignments
+        """
+        print("\n📱 Discovering Custom App Roles...")
+        app_roles_map = {}
+        found_count = 0
+        
+        for sp in service_principals:
+            identity_id = sp.get('id')
+            if not identity_id:
+                continue
+            
+            try:
+                # Fetch app role assignments (same endpoint as permissions)
+                response = await self.graph_client.service_principals.by_service_principal_id(
+                    identity_id
+                ).app_role_assignments.get()
+                
+                assignments = response.value if response and response.value else []
+                
+                # Filter OUT Microsoft Graph (we store those separately)
+                custom_app_roles = [
+                    {
+                        'app_role_id': assignment.app_role_id,
+                        'resource_id': assignment.resource_id,
+                        'resource_display_name': assignment.resource_display_name,
+                        'principal_display_name': assignment.principal_display_name,
+                        'created_date_time': assignment.created_date_time.isoformat() if assignment.created_date_time else None,
+                    }
+                    for assignment in assignments
+                    if assignment.resource_display_name and assignment.resource_display_name.lower() != 'microsoft graph'
+                ]
+                
+                if custom_app_roles:
+                    app_roles_map[identity_id] = custom_app_roles
+                    found_count += 1
+                    print(f"    ✓ {sp.get('displayName', 'Unknown')}: {len(custom_app_roles)} app role(s)")
+                
+            except Exception as e:
+                # Silently skip if no permissions or access denied
+                continue
+        
+        if found_count > 0:
+            print(f"  ✓ Fetched app roles for {found_count} service principals")
+        else:
+            print(f"  ℹ️  No custom app role assignments found")
+        
+        return app_roles_map
+    
+    async def _discover_managed_identities(self) -> List[Dict]:
+        """
+        Discover user-assigned managed identities from Azure subscription.
+        These appear as service principals in Entra ID with servicePrincipalType = 'ManagedIdentity'.
+        
+        Note: System-assigned managed identities are tied to specific Azure resources
+        and are filtered out by _is_microsoft_system_app() since they're auto-managed.
+        
+        Returns:
+            List of managed identity dicts (already in service_principals, this is supplementary)
+        """
+        managed_identities = []
+        
+        try:
+            # Managed identities are actually already in the service principals list!
+            # They have servicePrincipalType = 'ManagedIdentity' for user-assigned
+            # We don't need a separate call - they're included in _discover_service_principals
+            
+            # This method exists for potential future enhancement (e.g., fetching from ARM API)
+            # For now, managed identities are already discovered as service principals
+            pass
+            
+        except Exception as e:
+            print(f"  Warning: Could not discover managed identities: {e}")
+        
+        return managed_identities
+    
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
         try:
             # Request createdDateTime field explicitly
@@ -413,6 +637,55 @@ class AzureDiscoveryEngine:
             print(f"  ❌ Error discovering Entra roles: {e}")
             return []
 
+
+    def _is_microsoft_system_app(self, identity: Dict) -> bool:
+        """
+        Determine if a service principal is a Microsoft system app.
+        Uses API metadata, NOT naming conventions.
+        
+        Microsoft system apps have one or more of these characteristics:
+        - appOwnerOrganizationId = Microsoft's tenant ID
+        - publisherName = 'Microsoft Services' or 'Microsoft Corporation'
+        - servicePrincipalType = 'ManagedIdentity' (system-assigned, tied to Azure resource)
+        - appId in known Microsoft app list (Office 365, Azure Portal, etc.)
+        
+        Args:
+            identity: Service principal dict from Microsoft Graph
+            
+        Returns:
+            True if Microsoft system app, False if customer-owned
+        """
+        # Microsoft's tenant ID
+        MICROSOFT_TENANT_ID = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a'
+        
+        # Check 1: Microsoft-owned tenant
+        if identity.get('appOwnerOrganizationId') == MICROSOFT_TENANT_ID:
+            return True
+        
+        # Check 2: Publisher name
+        publisher = (identity.get('publisherName') or '').lower()
+        if 'microsoft' in publisher and ('services' in publisher or 'corporation' in publisher):
+            return True
+        
+        # Check 3: System-assigned managed identity (tied to Azure resource lifecycle)
+        if identity.get('servicePrincipalType') == 'ManagedIdentity':
+            return True
+        
+        # Check 4: Known Microsoft first-party app IDs (common ones)
+        MICROSOFT_FIRST_PARTY_APPS = {
+            '00000003-0000-0000-c000-000000000000',  # Microsoft Graph
+            '00000002-0000-0000-c000-000000000000',  # Azure AD Graph (legacy)
+            '797f4846-ba00-4fd7-ba43-dac1f8f63013',  # Azure Service Management
+            '00000005-0000-0000-c000-000000000000',  # Office 365 Management
+        
+        }
+
+        if identity.get('appId') in MICROSOFT_FIRST_PARTY_APPS:
+            return True
+        
+        # Default: Assume customer-owned (discover it!)
+        return False
+
     def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict], entra_roles: List[Dict] = []) -> List[Dict]:
         actionable_identities = []
         
@@ -422,13 +695,9 @@ class AzureDiscoveryEngine:
                 actionable_identities.append(identity)
                 continue
             
-            display_name = identity.get('display_name', '').lower()
-            # INVERTED LOGIC: Assume Microsoft system UNLESS it's custom
-            # Custom SPNs follow naming convention: spn-*
-            is_custom_spn = display_name.startswith('spn-')
-            
-            # Mark as Microsoft system if NOT custom
-            is_microsoft_system = not is_custom_spn
+            # Determine if this is a Microsoft system app (not customer-owned)
+            # Use API metadata, NOT naming conventions!
+            is_microsoft_system = self._is_microsoft_system_app(identity)
             
             identity['is_microsoft_system'] = is_microsoft_system
             
@@ -553,7 +822,7 @@ class AzureDiscoveryEngine:
         print(f"    ⚪ No sign-in data: {len(identities)}")
         return identities
     
-    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None) -> int:
+    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None) -> int:
         """Save identities using Database class methods - SKIP Microsoft system SPNs"""
         saved_count = 0
         skipped_count = 0
@@ -621,6 +890,11 @@ class AzureDiscoveryEngine:
             if permissions_map and identity.get('identity_id') in permissions_map:
                 permissions = permissions_map[identity.get('identity_id')]
                 self.db.store_graph_permissions(identity_db_id, permissions)
+            
+            # Save custom app roles for this identity (SPNs only)
+            if app_roles_map and identity.get('identity_id') in app_roles_map:
+                app_roles = app_roles_map[identity.get('identity_id')]
+                self.db.store_app_roles(identity_db_id, app_roles)
             
             saved_count += 1
         

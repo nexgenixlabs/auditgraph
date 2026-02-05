@@ -1,7 +1,12 @@
-// Just add this import and component to your existing Dashboard.tsx
-
-// At the top with other imports:
+import React from 'react';
+import Dashboard from './Dashboard';
 import RiskMethodology from '../components/RiskMethodology';
 
-// Add this RIGHT BEFORE the "Critical & High Risks" section:
-<RiskMethodology />
+export default function DashboardWithInfo() {
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <RiskMethodology />
+      <Dashboard />
+    </div>
+  );
+}

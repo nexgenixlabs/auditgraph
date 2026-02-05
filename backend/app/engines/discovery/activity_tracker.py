@@ -1,8 +1,39 @@
 """
-Last activity tracking for Azure service principals
+Activity Tracking for Azure Service Principals
+
+This module provides the ActivityTracker class that queries Microsoft Graph API
+sign-in logs to determine when a service principal was last used. This information
+is critical for identifying dormant or orphaned accounts that may pose security risks.
+
+Activity Status Levels:
+    - 'active': Activity within the last 30 days (healthy)
+    - 'inactive': Activity 30-90 days ago (review recommended)
+    - 'stale': No activity in 90+ days (consider removal)
+    - 'never_used': Created > 30 days ago but never authenticated
+    - 'unknown': No sign-in data available
+
+Security Implications:
+    - Dormant accounts with high privileges are prime attack targets
+    - Never-used accounts may indicate provisioning errors or orphaned apps
+    - Regular activity review is required for HIPAA compliance (§164.308(a)(3))
+
+API Requirements:
+    - Microsoft Graph API access
+    - AuditLog.Read.All permission (for sign-in log access)
+
+Note: If AuditLog.Read.All permission is not granted, the API returns 403
+and activity status defaults to 'unknown'.
+
+Usage:
+    tracker = ActivityTracker(azure_credential)
+    last_sign_in = tracker.get_last_sign_in(app_id)
+    status = tracker.get_activity_status(last_sign_in, created_date)
 """
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+from datetime import datetime
 from typing import Optional
+
 import requests
 
 
@@ -17,6 +48,12 @@ class ActivityTracker:
             credential: Azure ClientSecretCredential object
         """
         self.credential = credential
+        # Whether the current token has access to sign-in logs.
+        # None = not yet determined, True/False after first call.
+        self.has_auditlog_access: Optional[bool] = None
+
+        # Reuse HTTP connections
+        self._session = requests.Session()
     
     def get_last_sign_in(self, app_id: str) -> Optional[datetime]:
         """
@@ -46,9 +83,10 @@ class ActivityTracker:
                 '$select': 'createdDateTime,appId,appDisplayName,servicePrincipalId'
             }
             
-            response = requests.get(url, headers=headers, params=params)
+            response = self._session.get(url, headers=headers, params=params, timeout=15)
             
             if response.status_code == 200:
+                self.has_auditlog_access = True
                 data = response.json()
                 sign_ins = data.get('value', [])
                 
@@ -62,6 +100,7 @@ class ActivityTracker:
             
             elif response.status_code == 403:
                 # Permission issue - this is expected if we don't have AuditLog.Read.All
+                self.has_auditlog_access = False
                 return None
             
             return None
@@ -88,6 +127,10 @@ class ActivityTracker:
         """
         if last_sign_in is None:
             # Check if it's truly never used or just no data
+            # If we definitively don't have audit log access, we cannot conclude never_used.
+            if self.has_auditlog_access is False:
+                return "unknown"
+
             if created_date:
                 # Handle timezone-aware datetime
                 if created_date.tzinfo is not None:

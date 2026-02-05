@@ -1,11 +1,42 @@
-// frontend/src/services/api.ts
+/**
+ * AuditGraph API Client Service
+ *
+ * This module provides typed functions for communicating with the Flask backend
+ * REST API. All functions return Promises and handle error logging.
+ *
+ * API Functions:
+ *   - getStats(): Fetch dashboard statistics from latest discovery run
+ *   - getRisks(): Fetch high-risk identities requiring attention
+ *   - getIdentities(): Fetch all identities from latest discovery run
+ *   - getIdentity(id): Fetch detailed info for a single identity
+ *
+ * Configuration:
+ *   - Base URL: Set via REACT_APP_API_BASE_URL env var, defaults to localhost:5001/api
+ *   - Content-Type: application/json
+ *
+ * Response Transformation:
+ *   The getIdentity function performs response transformation to merge
+ *   roles and graph_permissions into the identity object, as the backend
+ *   returns these as separate arrays in the response payload.
+ *
+ * Error Handling:
+ *   All functions log errors to console and re-throw for caller handling.
+ *   The UI components handle errors by displaying appropriate error states.
+ */
 import axios from 'axios';
 import { Identity } from '../types';
 
+/**
+ * Base URL for API requests.
+ * Defaults to localhost:5001/api for local development.
+ */
 const API_BASE =
   process.env.REACT_APP_API_BASE_URL ||
   'http://localhost:5001/api';
 
+/**
+ * Axios instance configured for AuditGraph API requests.
+ */
 const api = axios.create({
   baseURL: API_BASE,
   headers: {

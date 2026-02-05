@@ -1,8 +1,38 @@
 """
-Credential expiration checking for Azure service principals
+Credential Expiration Checker for Azure Service Principals
+
+This module provides the CredentialChecker class that queries Microsoft Graph API
+to check when service principal credentials (secrets and certificates) will expire.
+This is critical for preventing service outages and maintaining security hygiene.
+
+Credential Types Checked:
+    - Password Credentials (Secrets): Client secrets with configurable expiry
+    - Key Credentials (Certificates): X.509 certificates for authentication
+
+Expiration Status Levels:
+    - 'expired': Credential has already expired (immediate action needed)
+    - 'critical': Expires within 7 days (urgent)
+    - 'warning': Expires within 30 days (plan rotation)
+    - 'good': More than 30 days until expiration
+    - 'no_expiration': Federated credentials or no credentials found
+
+API Requirements:
+    - Microsoft Graph API access
+    - Application.Read.All permission (to read credential metadata)
+
+Usage:
+    checker = CredentialChecker(azure_credential)
+    expiration = checker.check_credential_expiration(app_id)
+    status = checker.get_expiration_status(expiration)
+
+Note: This checker queries credential metadata only - it does not have access
+to actual secret values or private keys.
 """
-from datetime import datetime, timedelta
-from typing import List, Optional
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
 import requests
 
 
@@ -17,6 +47,11 @@ class CredentialChecker:
             credential: Azure ClientSecretCredential object
         """
         self.credential = credential
+        # Whether the current token has access to read application credentials.
+        # None = not yet determined, True/False after first call.
+        self.has_app_read_access: Optional[bool] = None
+
+        self._session = requests.Session()
     
     def check_credential_expiration(self, app_id: str) -> Optional[datetime]:
         """
@@ -43,9 +78,10 @@ class CredentialChecker:
                 '$select': 'id,appId,displayName,passwordCredentials,keyCredentials'
             }
             
-            response = requests.get(url, headers=headers, params=params)
+            response = self._session.get(url, headers=headers, params=params, timeout=15)
             
             if response.status_code == 200:
+                self.has_app_read_access = True
                 data = response.json()
                 apps = data.get('value', [])
                 
@@ -78,10 +114,12 @@ class CredentialChecker:
                 
                 return None
             
+            if response.status_code == 403:
+                self.has_app_read_access = False
             return None
             
-        except Exception as e:
-            print(f"  ⚠️  Error checking credentials for {app_id}: {str(e)}")
+        except Exception:
+            # Keep silent at scale; caller can treat as unknown.
             return None
     
     def get_expiration_status(self, expiration_date: Optional[datetime]) -> str:
@@ -95,6 +133,7 @@ class CredentialChecker:
             Status string (expired, critical, warning, good)
         """
         if not expiration_date:
+            # Could be federated-only or no credentials, or missing permission.
             return "no_expiration"
         
         now = datetime.utcnow()

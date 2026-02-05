@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""
+CRITICAL FIX: Remove hardcoded name filtering, use source-based discovery
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    content = f.read()
+
+# Step 1: Replace hardcoded name filtering with proper Microsoft system detection
+old_filtering = '''            display_name = identity.get('display_name', '').lower()
+            # INVERTED LOGIC: Assume Microsoft system UNLESS it's custom
+            # Custom SPNs follow naming convention: spn-*
+            is_custom_spn = display_name.startswith('spn-')
+            
+            # Mark as Microsoft system if NOT custom
+            is_microsoft_system = not is_custom_spn'''
+
+new_filtering = '''            # Determine if this is a Microsoft system app (not customer-owned)
+            # Use API metadata, NOT naming conventions!
+            is_microsoft_system = self._is_microsoft_system_app(identity)'''
+
+if old_filtering in content:
+    content = content.replace(old_filtering, new_filtering)
+    print("✅ Removed hardcoded 'spn-' prefix filtering")
+else:
+    print("⚠️  Old filtering pattern not found")
+
+# Step 2: Add the _is_microsoft_system_app method
+method_to_add = '''
+    def _is_microsoft_system_app(self, identity: Dict) -> bool:
+        """
+        Determine if a service principal is a Microsoft system app.
+        Uses API metadata, NOT naming conventions.
+        
+        Microsoft system apps have one or more of these characteristics:
+        - appOwnerOrganizationId = Microsoft's tenant ID
+        - publisherName = 'Microsoft Services' or 'Microsoft Corporation'
+        - servicePrincipalType = 'ManagedIdentity' (system-assigned, tied to Azure resource)
+        - appId in known Microsoft app list (Office 365, Azure Portal, etc.)
+        
+        Args:
+            identity: Service principal dict from Microsoft Graph
+            
+        Returns:
+            True if Microsoft system app, False if customer-owned
+        """
+        # Microsoft's tenant ID
+        MICROSOFT_TENANT_ID = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a'
+        
+        # Check 1: Microsoft-owned tenant
+        if identity.get('appOwnerOrganizationId') == MICROSOFT_TENANT_ID:
+            return True
+        
+        # Check 2: Publisher name
+        publisher = (identity.get('publisherName') or '').lower()
+        if 'microsoft' in publisher and ('services' in publisher or 'corporation' in publisher):
+            return True
+        
+        # Check 3: System-assigned managed identity (tied to Azure resource lifecycle)
+        if identity.get('servicePrincipalType') == 'ManagedIdentity':
+            return True
+        
+        # Check 4: Known Microsoft first-party app IDs (common ones)
+        MICROSOFT_FIRST_PARTY_APPS = {
+            '00000003-0000-0000-c000-000000000000',  # Microsoft Graph
+            '00000002-0000-0000-c000-000000000000',  # Azure AD Graph (legacy)
+            '797f4846-ba00-4fd7-ba43-dac1f8f63013',  # Azure Service Management
+            '00000005-0000-0000-c000-000000000000',  # Office 365 Management
+        }
+        
+        if identity.get('appId') in MICROSOFT_FIRST_PARTY_APPS:
+            return True
+        
+        # Default: Assume customer-owned (discover it!)
+        return False
+
+'''
+
+# Find where to insert (before _calculate_risks)
+insertion_point = '    def _calculate_risks(self, identities: List[Dict]'
+if insertion_point in content:
+    content = content.replace(insertion_point, method_to_add + insertion_point)
+    print("✅ Added _is_microsoft_system_app() method")
+else:
+    print("⚠️  Could not find insertion point for new method")
+
+# Write back
+with open('azure_discovery.py', 'w') as f:
+    f.write(content)
+
+print("\n🎉 CRITICAL FIX APPLIED!")
+print("   - Removed hardcoded 'spn-' prefix check")
+print("   - Added proper Microsoft system app detection")
+print("   - Now discovers ALL customer-owned identities regardless of name")

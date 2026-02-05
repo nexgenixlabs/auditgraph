@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""
+Update _save_identities signature to include app_roles_map
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    content = f.read()
+
+# Update the signature with correct type hints
+old_signature = 'def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None) -> int:'
+
+new_signature = 'def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None) -> int:'
+
+if old_signature in content:
+    content = content.replace(old_signature, new_signature)
+    
+    with open('azure_discovery.py', 'w') as f:
+        f.write(content)
+    
+    print("✅ Updated _save_identities signature with app_roles_map parameter!")
+else:
+    print("⚠️  Signature already updated or pattern not found")

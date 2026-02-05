@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""
+Add _discover_app_roles method to azure_discovery.py
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    lines = f.readlines()
+
+# Check if method already exists
+content = ''.join(lines)
+if 'def _discover_app_roles' in content:
+    print("⚠️  App roles discovery method already exists!")
+    exit(0)
+
+# Find insertion point (after _discover_permissions method, before _discover_users)
+insert_line = None
+for i, line in enumerate(lines):
+    if 'async def _discover_users' in line:
+        insert_line = i
+        break
+
+if insert_line is None:
+    print("❌ Could not find _discover_users method")
+    exit(1)
+
+# New method
+new_method = '''    async def _discover_app_roles(self, service_principals: list) -> dict:
+        """
+        Discover custom application role assignments for service principals.
+        Returns assignments to custom apps (NOT Microsoft Graph).
+        
+        Similar to _discover_permissions but filters OUT Microsoft Graph.
+        
+        Args:
+            service_principals: List of service principal dicts
+            
+        Returns:
+            Dict mapping identity_id to list of app role assignments
+        """
+        print("\\n📱 Discovering Custom App Roles...")
+        app_roles_map = {}
+        found_count = 0
+        
+        for sp in service_principals:
+            identity_id = sp.get('id')
+            if not identity_id:
+                continue
+            
+            try:
+                # Fetch app role assignments (same endpoint as permissions)
+                response = await self.graph_client.service_principals.by_service_principal_id(
+                    identity_id
+                ).app_role_assignments.get()
+                
+                assignments = response.value if response and response.value else []
+                
+                # Filter OUT Microsoft Graph (we store those separately)
+                custom_app_roles = [
+                    {
+                        'app_role_id': assignment.app_role_id,
+                        'resource_id': assignment.resource_id,
+                        'resource_display_name': assignment.resource_display_name,
+                        'principal_display_name': assignment.principal_display_name,
+                        'created_date_time': assignment.created_date_time.isoformat() if assignment.created_date_time else None
+                    }
+                    for assignment in assignments
+                    if assignment.resource_display_name and 
+                       assignment.resource_display_name.lower() != 'microsoft graph'
+                ]
+                
+                if custom_app_roles:
+                    app_roles_map[identity_id] = custom_app_roles
+                    found_count += 1
+                    print(f"    ✓ {sp.get('displayName', 'Unknown')}: {len(custom_app_roles)} app role(s)")
+                
+            except Exception as e:
+                # Silently skip if no permissions or access denied
+                continue
+        
+        if found_count > 0:
+            print(f"  ✓ Fetched app roles for {found_count} service principals")
+        else:
+            print(f"  ℹ️  No custom app role assignments found")
+        
+        return app_roles_map
+    
+'''
+
+# Insert before _discover_users
+lines.insert(insert_line, new_method)
+
+# Write back
+with open('azure_discovery.py', 'w') as f:
+    f.writelines(lines)
+
+print("✅ Added _discover_app_roles() method to azure_discovery.py!")
+print(f"   Inserted at line {insert_line}")

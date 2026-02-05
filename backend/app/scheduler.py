@@ -1,6 +1,37 @@
 """
 AuditGraph Scheduled Discovery
-Runs discovery automatically on a schedule (daily at 4am UTC)
+
+This module manages automated background discovery runs using APScheduler.
+It provides functions to start, stop, and manually trigger discovery jobs,
+enabling continuous monitoring of Azure identity security posture.
+
+Key Functions:
+    - start_scheduler(): Initialize and start the background scheduler
+    - stop_scheduler(): Gracefully shutdown the scheduler
+    - run_scheduled_discovery(): Execute a discovery run (called by scheduler)
+    - trigger_manual_discovery(): Immediately run discovery (API endpoint)
+    - get_next_run_time(): Get the next scheduled execution time
+
+Schedule Configuration:
+    - Discovery runs every 6 hours (configurable via CronTrigger)
+    - Job ID: 'discovery_every_6h'
+    - Timezone: UTC
+
+Lifecycle Management:
+    - Scheduler is started when Flask app initializes (create_app)
+    - Scheduler is stopped via atexit hook on app shutdown
+    - Singleton pattern prevents multiple scheduler instances
+
+Error Handling:
+    - Discovery failures are logged but don't crash the scheduler
+    - Missing credentials are logged and the job exits gracefully
+    - TODO: Email notifications for success/failure (Week 7 Part 2)
+
+Usage:
+    # Typically called from main.py
+    from app.scheduler import start_scheduler, stop_scheduler
+    start_scheduler()
+    atexit.register(stop_scheduler)
 """
 import os
 import logging
@@ -88,9 +119,9 @@ def start_scheduler():
     logger.info("=" * 70)
     
     # Create scheduler
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(timezone="UTC")
     
-    # Schedule: Daily at 4:00 AM UTC
+    # Schedule: Every 6 hours (UTC)
     trigger = CronTrigger(hour="*/6", minute=0, timezone="UTC")
     
     scheduler.add_job(
@@ -99,6 +130,9 @@ def start_scheduler():
         id='discovery_every_6h',
         name='Identity Discovery (Every 6 Hours)',
         replace_existing=True
+    ,
+        max_instances=1,
+        coalesce=True
     )
     
     # Start the scheduler

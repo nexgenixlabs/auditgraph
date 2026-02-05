@@ -1,6 +1,37 @@
 """
 Drift Detection Engine
-Compares discovery runs to detect changes in identities and permissions
+
+This module provides the DriftDetector class that compares two discovery runs
+to identify security-relevant changes in the Azure environment. Drift detection
+is essential for monitoring unauthorized changes, detecting privilege escalation,
+and maintaining compliance.
+
+Change Types Detected:
+    - New Identities: SPNs, users, or managed identities added since last run
+    - Removed Identities: Identities deleted or deprovisioned
+    - Permission Changes: Role assignments added or removed
+    - Risk Changes: Risk level escalations or de-escalations
+    - Credential Changes: Credential status deterioration (warning -> expired)
+
+Use Cases:
+    - Security Monitoring: Detect unauthorized privilege grants
+    - Compliance Auditing: Track changes for audit trails
+    - Change Management: Verify expected vs unexpected changes
+    - Incident Response: Identify compromised account activity
+
+Report Format:
+    {
+        'new_identities': [...],
+        'removed_identities': [...],
+        'permission_changes': [...],
+        'risk_changes': [...],
+        'credential_changes': [...]
+    }
+
+Usage:
+    detector = DriftDetector(db)
+    changes = detector.compare_runs(current_run_id, previous_run_id)
+    detector.print_drift_report(changes, current_run_id, previous_run_id)
 """
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime

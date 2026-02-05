@@ -1,50 +1,72 @@
-import os
-# backend/app/main.py
-from pathlib import Path
-from dotenv import load_dotenv
-
-# -------------------------------------------------------------------
-# Load environment variables BEFORE importing modules that connect to DB
-# -------------------------------------------------------------------
-BACKEND_DIR = Path(__file__).resolve().parents[1]  # .../backend
-load_dotenv(BACKEND_DIR / ".env.local")            # local dev (real creds) - ignored by git
-load_dotenv(BACKEND_DIR / ".env")                  # optional fallback
-load_dotenv(BACKEND_DIR / ".env.example")          # safe fallback (placeholders)
-
-from flask import Flask
+from flask import Flask, jsonify
 from flask_cors import CORS
-from app.api.routes import api_bp
-from app.scheduler import start_scheduler, stop_scheduler
-import atexit
+from datetime import datetime
 
-def create_app() -> Flask:
+from app.api.handlers import (
+    get_stats,
+    get_identities,
+    get_identity_details,
+    get_risks,            # ✅ add this import
+)
+
+def create_app():
     app = Flask(__name__)
-    
-    # Keep React dashboard working (allow localhost + your LAN IP for dev)
-    CORS(
-        app,
-        resources={
-            r"/api/*": {
-                "origins": [
-                    "http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                    "http://192.168.1.200:3000",
-                ]
-            }
-        },
-    )
-    
-    # Register API routes
-    app.register_blueprint(api_bp, url_prefix="/api")
-    
-    # Start the scheduler when app starts
-    start_scheduler()
-    
-    # Stop the scheduler when app shuts down
-    atexit.register(stop_scheduler)
-    
+    CORS(app, resources={r"/*": {"origins": "*"}})
+
+    # -----------------------
+    # Health
+    # -----------------------
+    @app.get("/api/health")
+    @app.get("/health")
+    def health():
+        return jsonify({
+            "service": "AuditGraph API",
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+    # -----------------------
+    # Summary endpoints
+    # -----------------------
+    @app.get("/api/summary")
+    def summary():
+        return get_stats()
+
+    @app.get("/api/dashboard/summary")
+    def dashboard_summary():
+        return get_stats()
+
+    # UI expects this
+    @app.get("/api/identity-summary")
+    def identity_summary():
+        return get_stats()
+
+    # Optional alias
+    @app.get("/api/stats")
+    def stats_alias():
+        return get_stats()
+
+    # -----------------------
+    # Risks (Dashboard needs it)
+    # -----------------------
+    @app.get("/api/risks")
+    def risks():
+        return get_risks()
+
+    # -----------------------
+    # Identities
+    # -----------------------
+    @app.get("/api/identities")
+    def identities():
+        return get_identities()
+
+    @app.get("/api/identities/<identity_id>")
+    def identity_details(identity_id):
+        return get_identity_details(identity_id)
+
     return app
+
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=5001, debug=os.getenv("FLASK_DEBUG", "False").lower() == "true")
+    app.run(host="0.0.0.0", port=5001, debug=True)

@@ -1,15 +1,49 @@
-// src/components/StatsCard.tsx
+/**
+ * StatsCard Component
+ *
+ * A reusable card component for displaying a single statistic with
+ * optional icon, trend indicator, and color theming. Used on the
+ * Dashboard to show key metrics like total identities, risk counts, etc.
+ *
+ * Features:
+ *   - Title and value display
+ *   - Optional emoji/icon on the right side
+ *   - Optional trend indicator (up/down/neutral)
+ *   - Color theming (blue, red, yellow, green, gray)
+ *
+ * Usage:
+ *   <StatsCard
+ *     title="Critical Risks"
+ *     value={5}
+ *     icon="🔴"
+ *     color="red"
+ *     trend="up"
+ *   />
+ */
 import React from 'react';
 
+/**
+ * Props for the StatsCard component.
+ */
 interface StatsCardProps {
+  /** Card title/label */
   title: string;
+  /** Statistic value (number or formatted string) */
   value: number | string;
+  /** Optional emoji or icon to display */
   icon?: string;
+  /** Optional trend indicator */
   trend?: 'up' | 'down' | 'neutral';
+  /** Color theme for the card */
   color?: 'blue' | 'red' | 'yellow' | 'green' | 'gray';
 }
 
-const StatsCard: React.FC<StatsCardProps> = ({ 
+/**
+ * Stats card component for displaying metrics.
+ *
+ * Renders a colored card with title, value, optional icon, and trend indicator.
+ */
+const StatsCard: React.FC<StatsCardProps> = ({
   title, 
   value, 
   icon, 

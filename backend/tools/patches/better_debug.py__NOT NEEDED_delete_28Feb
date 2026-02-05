@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""
+Better debug - show fields for first SP regardless of name
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    content = f.read()
+
+# Find and update the debug section
+old_debug = '''                    # DEBUG: Log first Microsoft app we encounter
+                    if len(identities) == 0 and 'Microsoft' in sp.display_name:
+                        print(f"\\n  DEBUG: First Microsoft app fields:")
+                        print(f"    - display_name: {sp.display_name}")
+                        print(f"    - service_principal_type: {getattr(sp, 'service_principal_type', 'NOT FOUND')}")
+                        print(f"    - app_owner_organization_id: {getattr(sp, 'app_owner_organization_id', 'NOT FOUND')}")
+                        print(f"    - publisher_name: {getattr(sp, 'publisher_name', 'NOT FOUND')}")
+                        print(f"    - app_id: {sp.app_id}")'''
+
+new_debug = '''                    # DEBUG: Log first 3 service principals to see available fields
+                    if len(identities) < 3:
+                        print(f"\\n  DEBUG SP #{len(identities)+1}: {sp.display_name}")
+                        print(f"    - service_principal_type: {getattr(sp, 'service_principal_type', 'ATTR NOT FOUND')}")
+                        print(f"    - app_owner_organization_id: {getattr(sp, 'app_owner_organization_id', 'ATTR NOT FOUND')}")
+                        print(f"    - publisher_name: {getattr(sp, 'publisher_name', 'ATTR NOT FOUND')}")
+                        print(f"    - app_id: {sp.app_id}")
+                        print(f"    - Has additional_data: {hasattr(sp, 'additional_data')}")
+                        if hasattr(sp, 'additional_data') and sp.additional_data:
+                            print(f"    - additional_data keys: {list(sp.additional_data.keys())[:10]}")'''
+
+if old_debug in content:
+    content = content.replace(old_debug, new_debug)
+    print("✅ Updated debug logging")
+else:
+    print("⚠️  Could not find old debug code")
+
+with open('azure_discovery.py', 'w') as f:
+    f.write(content)
+
+print("Better debug added")

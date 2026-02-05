@@ -1,5 +1,35 @@
+/**
+ * RiskMethodology Component
+ *
+ * An expandable information component that explains how AuditGraph
+ * calculates risk scores for identities. Provides transparency into
+ * the risk assessment methodology for users.
+ *
+ * Content Sections:
+ *   - Framework: References to NIST CSF and HIPAA Security Rule
+ *   - Risk Level Definitions: Detailed explanation of each level
+ *     - CRITICAL (80-100): Immediate action required
+ *     - HIGH (60-79): Review within 7 days
+ *     - MEDIUM (40-59): Monitor and right-size
+ *     - LOW (20-39): Routine monitoring
+ *     - INFO (0-19): Informational only
+ *   - Scoring Factors: Point values for different risk indicators
+ *   - References: Compliance framework citations
+ *
+ * Interaction:
+ *   - Click to expand/collapse the methodology panel
+ *   - Toggle button shows ▶ when collapsed, ▼ when expanded
+ *
+ * Usage:
+ *   <RiskMethodology />  // Renders collapsible info panel
+ */
 import React, { useState } from 'react';
 
+/**
+ * Expandable panel explaining the risk scoring methodology.
+ *
+ * Uses local state to track expand/collapse status.
+ */
 const RiskMethodology: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
 

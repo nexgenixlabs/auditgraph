@@ -1,0 +1,22 @@
+-- Table for custom application role assignments (not Microsoft Graph)
+CREATE TABLE IF NOT EXISTS sp_app_roles (
+    id SERIAL PRIMARY KEY,
+    identity_db_id INTEGER NOT NULL,
+    app_role_id VARCHAR(255) NOT NULL,
+    resource_id VARCHAR(255),
+    resource_display_name TEXT,
+    principal_display_name TEXT,
+    created_date_time TIMESTAMP,
+    risk_level VARCHAR(20) DEFAULT 'medium',
+    discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (identity_db_id) REFERENCES identities(id) ON DELETE CASCADE,
+    UNIQUE(identity_db_id, app_role_id, resource_id)
+);
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_app_roles_identity ON sp_app_roles(identity_db_id);
+CREATE INDEX IF NOT EXISTS idx_app_roles_risk ON sp_app_roles(risk_level);
+CREATE INDEX IF NOT EXISTS idx_app_roles_resource ON sp_app_roles(resource_display_name);
+
+-- Comment
+COMMENT ON TABLE sp_app_roles IS 'Custom application role assignments for service principals (excludes Microsoft Graph permissions)';

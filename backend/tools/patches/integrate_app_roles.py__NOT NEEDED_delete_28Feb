@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""
+Integrate app roles discovery into main flow
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    content = f.read()
+
+# Check if already integrated
+if 'app_roles_map = await self._discover_app_roles' in content:
+    print("⚠️  App roles already integrated!")
+    exit(0)
+
+# Find where to add the call (after permissions discovery, before users discovery)
+old_code = '''        permissions_map = await self._discover_permissions(service_principals)
+        
+        # Step 4: Discover users who have Azure RBAC OR Entra roles'''
+
+new_code = '''        permissions_map = await self._discover_permissions(service_principals)
+        
+        # Step 3.7: Discover Custom App Roles
+        app_roles_map = await self._discover_app_roles(service_principals)
+        
+        # Step 4: Discover users who have Azure RBAC OR Entra roles'''
+
+if old_code in content:
+    content = content.replace(old_code, new_code)
+    
+    with open('azure_discovery.py', 'w') as f:
+        f.write(content)
+    
+    print("✅ Integrated app roles discovery into main flow!")
+    print("   Added as Step 3.7 (line ~78)")
+else:
+    print("❌ Could not find insertion point")
+    exit(1)

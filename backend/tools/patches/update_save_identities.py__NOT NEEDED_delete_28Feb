@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""
+Update _save_identities to accept and store app_roles_map
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    content = f.read()
+
+# Step 1: Update the function call to include app_roles_map
+old_call = 'saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map)'
+new_call = 'saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map)'
+
+if old_call in content:
+    content = content.replace(old_call, new_call)
+    print("✅ Updated _save_identities call to include app_roles_map")
+else:
+    print("⚠️  Call already updated or not found")
+
+# Step 2: Update the function signature
+old_signature = 'def _save_identities(self, run_id: int, identities: list, all_role_assignments: list, credentials_map: dict = None, permissions_map: dict = None) -> int:'
+new_signature = 'def _save_identities(self, run_id: int, identities: list, all_role_assignments: list, credentials_map: dict = None, permissions_map: dict = None, app_roles_map: dict = None) -> int:'
+
+if old_signature in content:
+    content = content.replace(old_signature, new_signature)
+    print("✅ Updated _save_identities signature to include app_roles_map parameter")
+else:
+    print("⚠️  Signature already updated or not found")
+
+# Step 3: Add app roles storage logic after permissions storage
+old_storage = '''            # Save API permissions for this identity (SPNs only)
+            if permissions_map and identity.get('identity_id') in permissions_map:
+                permissions = permissions_map[identity.get('identity_id')]
+                self.db.store_graph_permissions(identity_db_id, permissions)
+            
+            saved_count += 1'''
+
+new_storage = '''            # Save API permissions for this identity (SPNs only)
+            if permissions_map and identity.get('identity_id') in permissions_map:
+                permissions = permissions_map[identity.get('identity_id')]
+                self.db.store_graph_permissions(identity_db_id, permissions)
+            
+            # Save custom app roles for this identity (SPNs only)
+            if app_roles_map and identity.get('identity_id') in app_roles_map:
+                app_roles = app_roles_map[identity.get('identity_id')]
+                self.db.store_app_roles(identity_db_id, app_roles)
+            
+            saved_count += 1'''
+
+if old_storage in content:
+    content = content.replace(old_storage, new_storage)
+    print("✅ Added app roles storage logic to _save_identities")
+else:
+    print("⚠️  Storage logic already added or not found")
+
+# Write back
+with open('azure_discovery.py', 'w') as f:
+    f.write(content)
+
+print("\n🎉 _save_identities fully updated for app roles!")

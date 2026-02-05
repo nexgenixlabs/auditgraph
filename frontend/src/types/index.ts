@@ -1,5 +1,35 @@
-// src/types/index.ts
+/**
+ * AuditGraph TypeScript Type Definitions
+ *
+ * This module defines all TypeScript interfaces used throughout the React
+ * frontend application. These types ensure type safety when working with
+ * API responses and component props.
+ *
+ * Core Domain Types:
+ *   - Identity: Azure identity (SPN, user, managed identity)
+ *   - RoleAssignment: Azure RBAC role assignment
+ *   - GraphPermission: Microsoft Graph API permission
+ *   - DiscoveryRun: Discovery execution record
+ *   - Stats: Dashboard statistics summary
+ *
+ * API Response Types:
+ *   - StatsResponse: Response from /api/stats
+ *   - IdentitiesResponse: Response from /api/identities
+ *   - RisksResponse: Response from /api/risks
+ *   - RunsResponse: Response from /api/runs
+ *   - DriftReport: Response from /api/drift/:run_id
+ *
+ * These types mirror the backend data models and ensure consistent
+ * data handling across the frontend application.
+ */
 
+/**
+ * Represents a discovered Azure identity.
+ *
+ * Identities can be service principals, users, or managed identities.
+ * Each identity has associated role assignments, permissions, and
+ * risk assessment data.
+ */
 export interface Identity {
   identity_id: string;
   display_name: string;

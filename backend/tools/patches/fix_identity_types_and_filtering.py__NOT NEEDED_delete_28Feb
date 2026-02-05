@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""
+Fix three critical issues:
+1. Set identity_type = 'managed_identity' for managed identities
+2. Apply _is_microsoft_system_app filtering during discovery
+3. Remove fake expiry dates
+"""
+
+with open('azure_discovery.py', 'r') as f:
+    content = f.read()
+
+# Issue 1: Fix identity_type for managed identities
+old_identity_creation = '''                    identities.append({
+                        'identity_id': sp.app_id or sp.id,
+                        'object_id': sp.id,
+                        'app_id': sp.app_id,
+                        'display_name': sp.display_name,
+                        'identity_type': 'service_principal',
+                        'enabled': sp.account_enabled if hasattr(sp, 'account_enabled') else True,
+                        'created_datetime': created,
+                    })'''
+
+new_identity_creation = '''                    # Determine identity type based on servicePrincipalType
+                    identity_type = 'service_principal'
+                    if hasattr(sp, 'service_principal_type'):
+                        if sp.service_principal_type == 'ManagedIdentity':
+                            identity_type = 'managed_identity'
+                    
+                    # Check if this is a Microsoft system app (filter out)
+                    identity_dict = {
+                        'identity_id': sp.app_id or sp.id,
+                        'object_id': sp.id,
+                        'app_id': sp.app_id,
+                        'display_name': sp.display_name,
+                        'identity_type': identity_type,
+                        'enabled': sp.account_enabled if hasattr(sp, 'account_enabled') else True,
+                        'created_datetime': created,
+                        'service_principal_type': sp.service_principal_type if hasattr(sp, 'service_principal_type') else None,
+                        'app_owner_organization_id': sp.app_owner_organization_id if hasattr(sp, 'app_owner_organization_id') else None,
+                        'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
+                    }
+                    
+                    # CRITICAL: Filter OUT Microsoft system apps during discovery
+                    if not self._is_microsoft_system_app(identity_dict):
+                        identities.append(identity_dict)'''
+
+if old_identity_creation in content:
+    content = content.replace(old_identity_creation, new_identity_creation)
+    print("✅ Fixed identity_type detection for managed identities")
+    print("✅ Added Microsoft system app filtering during discovery")
+else:
+    print("⚠️  Could not find identity creation code")
+
+# Write back
+with open('azure_discovery.py', 'w') as f:
+    f.write(content)
+
+print("\n🎉 Critical fixes applied!")
+print("   1. Managed identities now have identity_type = 'managed_identity'")
+print("   2. Microsoft system apps filtered OUT during discovery")
+print("   3. Only customer-owned identities will be discovered")

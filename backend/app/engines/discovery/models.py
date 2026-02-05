@@ -1,5 +1,33 @@
 """
-Data models for discovered Azure identities
+Data Models for Azure Identity Discovery
+
+This module defines the core data structures used throughout the AuditGraph
+discovery and analysis pipeline. It includes dataclasses for identities,
+role assignments, and discovery results, as well as enums for type safety.
+
+Key Models:
+    - Identity: Represents a discovered Azure identity (SPN, user, managed identity)
+    - RoleAssignment: Represents an Azure RBAC role assignment
+    - DiscoveryResult: Container for all discovery run results and statistics
+    - IdentityType: Enum of identity types (service_principal, user, etc.)
+    - RiskLevel: Enum of risk levels (critical, high, medium, low, info)
+
+Microsoft System SPN Detection:
+    The module includes logic to detect and filter Microsoft first-party
+    service principals (like Microsoft Graph, Office 365) which are
+    system-managed and should not be flagged as security risks.
+
+    Detection is based on:
+    - Known Microsoft app IDs (e.g., 00000003-0000-0000-c000-000000000000)
+    - Display name patterns (starting with Microsoft, Azure, Office, etc.)
+
+Risk Calculation:
+    The Identity.calculate_risk() method evaluates:
+    - Privilege level (Owner, Contributor, User Access Administrator)
+    - Scope breadth (subscription vs resource group vs resource)
+    - Credential expiration status
+    - Activity status (orphaned identities with no assignments)
+    - Microsoft system SPN status (not flagged as risks)
 """
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -7,7 +35,7 @@ from typing import List, Optional, Dict
 from enum import Enum
 
 
-# Microsoft System SPN Detection
+# Microsoft System SPN Detection - Known first-party application IDs
 MICROSOFT_SYSTEM_APPS = {
     # Common Microsoft first-party app IDs
     '00000003-0000-0000-c000-000000000000',  # Microsoft Graph
@@ -123,6 +151,17 @@ class IdentityType(Enum):
     GROUP = "group"
 
 
+class IdentityCategory(Enum):
+    """Canonical identity categories used by the UI and database"""
+    SERVICE_PRINCIPAL = "service_principal"
+    MANAGED_IDENTITY_SYSTEM = "managed_identity_system"
+    MANAGED_IDENTITY_USER = "managed_identity_user"
+    HUMAN_USER = "human_user"
+    GUEST = "guest"
+    MICROSOFT_INTERNAL = "microsoft_internal"
+    UNKNOWN = "unknown"
+
+
 class RiskLevel(Enum):
     """Risk levels for identities"""
     CRITICAL = "critical"
@@ -130,6 +169,7 @@ class RiskLevel(Enum):
     MEDIUM = "medium"
     LOW = "low"
     INFO = "info"
+    UNKNOWN = "unknown"
 
 
 @dataclass
