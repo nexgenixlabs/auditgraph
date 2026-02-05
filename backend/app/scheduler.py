@@ -13,8 +13,9 @@ Key Functions:
     - get_next_run_time(): Get the next scheduled execution time
 
 Schedule Configuration:
-    - Discovery runs every 6 hours (configurable via CronTrigger)
-    - Job ID: 'discovery_every_6h'
+    - Discovery interval configurable via DISCOVERY_INTERVAL_HOURS env var (default: 12)
+    - Supported values: 6, 12, 24 hours
+    - Job ID: 'scheduled_discovery'
     - Timezone: UTC
 
 Lifecycle Management:
@@ -25,7 +26,7 @@ Lifecycle Management:
 Error Handling:
     - Discovery failures are logged but don't crash the scheduler
     - Missing credentials are logged and the job exits gracefully
-    - TODO: Email notifications for success/failure (Week 7 Part 2)
+    - Email notifications sent when identity changes are detected
 
 Usage:
     # Typically called from main.py
@@ -41,6 +42,10 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+from app.engines.drift_detector import DriftDetector
+from app.services.email_service import EmailService
+from app.database import Database
+from typing import Dict
 
 # Load environment
 load_dotenv()
@@ -90,13 +95,117 @@ def run_scheduled_discovery():
         
         logger.info("✅ SCHEDULED DISCOVERY COMPLETED SUCCESSFULLY")
         logger.info("=" * 70)
-        
-        # TODO: Send email notification (Week 7 Part 2)
-        
+
+        # Check for identity changes and send email notification
+        _send_change_notification_if_needed()
+
     except Exception as e:
         logger.error(f"❌ SCHEDULED DISCOVERY FAILED: {str(e)}")
         logger.exception(e)
-        # TODO: Send failure notification (Week 7 Part 2)
+
+
+def _send_change_notification_if_needed():
+    """
+    Compare the two most recent discovery runs and send email if changes detected.
+    Called after each successful discovery run.
+    """
+    try:
+        db = Database()
+
+        # Get the two most recent completed runs
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE status = 'completed'
+            ORDER BY id DESC
+            LIMIT 2
+        """)
+        runs = cursor.fetchall()
+        cursor.close()
+
+        if len(runs) < 2:
+            logger.info("Not enough discovery runs for comparison - skipping change notification")
+            db.close()
+            return
+
+        current_run_id = runs[0][0]
+        previous_run_id = runs[1][0]
+
+        logger.info(f"Comparing runs: #{current_run_id} vs #{previous_run_id}")
+
+        # Compare runs for identity changes
+        detector = DriftDetector(db)
+        changes = detector.compare_runs(current_run_id, previous_run_id)
+
+        # Check if there are identity changes (new or removed)
+        new_count = len(changes.get('new_identities', []))
+        removed_count = len(changes.get('removed_identities', []))
+        has_identity_changes = new_count > 0 or removed_count > 0
+
+        if has_identity_changes:
+            logger.info(f"Identity changes detected: {new_count} added, {removed_count} removed")
+
+            # Get category counts for both runs
+            category_counts = _get_category_counts(db, current_run_id, previous_run_id)
+
+            # Send email notification
+            email_service = EmailService()
+            success = email_service.send_identity_change_report(
+                changes=changes,
+                current_run_id=current_run_id,
+                previous_run_id=previous_run_id,
+                category_counts=category_counts
+            )
+
+            if success:
+                logger.info("Identity change report email sent successfully")
+            else:
+                logger.warning("Failed to send identity change report email")
+        else:
+            logger.info("No identity changes detected - no email notification needed")
+
+        db.close()
+
+    except Exception as e:
+        logger.error(f"Error during change detection/notification: {e}")
+        logger.exception(e)
+
+
+def _get_category_counts(db: Database, current_run_id: int, previous_run_id: int) -> Dict:
+    """
+    Get identity counts by category for both runs.
+
+    Args:
+        db: Database instance
+        current_run_id: Latest discovery run ID
+        previous_run_id: Previous discovery run ID
+
+    Returns:
+        {
+            'before': {'service_principal': 10, 'human_user': 5, ...},
+            'after': {'service_principal': 12, 'human_user': 5, ...}
+        }
+    """
+    cursor = db.conn.cursor()
+
+    counts = {'before': {}, 'after': {}}
+
+    for run_id, key in [(previous_run_id, 'before'), (current_run_id, 'after')]:
+        cursor.execute("""
+            SELECT
+                COALESCE(identity_category, 'unknown') as category,
+                COUNT(*) as count
+            FROM identities
+            WHERE discovery_run_id = %s
+            GROUP BY identity_category
+        """, (run_id,))
+
+        for row in cursor.fetchall():
+            category = row[0] or 'unknown'
+            counts[key][category] = row[1]
+
+    cursor.close()
+    return counts
 
 
 # Global scheduler instance
@@ -117,20 +226,25 @@ def start_scheduler():
     logger.info("=" * 70)
     logger.info("INITIALIZING DISCOVERY SCHEDULER")
     logger.info("=" * 70)
-    
+
     # Create scheduler
     scheduler = BackgroundScheduler(timezone="UTC")
-    
-    # Schedule: Every 6 hours (UTC)
-    trigger = CronTrigger(hour="*/6", minute=0, timezone="UTC")
-    
+
+    # Get configurable interval (default: 12 hours)
+    interval_hours = int(os.getenv('DISCOVERY_INTERVAL_HOURS', '12'))
+    if interval_hours not in [6, 12, 24]:
+        logger.warning(f"Invalid DISCOVERY_INTERVAL_HOURS={interval_hours}, using 12")
+        interval_hours = 12
+
+    # Schedule based on interval
+    trigger = CronTrigger(hour=f"*/{interval_hours}", minute=0, timezone="UTC")
+
     scheduler.add_job(
         func=run_scheduled_discovery,
         trigger=trigger,
-        id='discovery_every_6h',
-        name='Identity Discovery (Every 6 Hours)',
-        replace_existing=True
-    ,
+        id='scheduled_discovery',
+        name=f'Identity Discovery (Every {interval_hours} Hours)',
+        replace_existing=True,
         max_instances=1,
         coalesce=True
     )
@@ -139,10 +253,10 @@ def start_scheduler():
     scheduler.start()
     
     logger.info("✅ Scheduler started")
-    logger.info("📅 Schedule: Every 6 hours")
-    
+    logger.info(f"📅 Schedule: Every {interval_hours} hours")
+
     # Get next run time
-    job = scheduler.get_job('discovery_every_6h')
+    job = scheduler.get_job('scheduled_discovery')
     if job:
         next_run = job.next_run_time
         logger.info(f"🕐 Next scheduled run: {next_run}")
@@ -174,10 +288,10 @@ def get_next_run_time():
     if scheduler is None:
         return None
     
-    job = scheduler.get_job('discovery_every_6h')
+    job = scheduler.get_job('scheduled_discovery')
     if job:
         return job.next_run_time
-    
+
     return None
 
 

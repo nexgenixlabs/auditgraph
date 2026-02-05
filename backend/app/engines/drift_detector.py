@@ -91,10 +91,11 @@ class DriftDetector:
         
         # Get identities with their role assignments
         cursor.execute("""
-            SELECT 
+            SELECT
                 i.identity_id,
                 i.display_name,
                 i.identity_type,
+                i.identity_category,
                 i.risk_level,
                 i.credential_status,
                 i.activity_status,
@@ -109,7 +110,7 @@ class DriftDetector:
             FROM identities i
             LEFT JOIN role_assignments r ON r.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
-            GROUP BY i.id, i.identity_id, i.display_name, i.identity_type, 
+            GROUP BY i.id, i.identity_id, i.display_name, i.identity_type, i.identity_category,
                      i.risk_level, i.credential_status, i.activity_status, i.credential_expiration
         """, (run_id,))
         
@@ -119,11 +120,12 @@ class DriftDetector:
                 'identity_id': row[0],
                 'display_name': row[1],
                 'identity_type': row[2],
-                'risk_level': row[3],
-                'credential_status': row[4],
-                'activity_status': row[5],
-                'credential_expiration': row[6],
-                'roles': row[7] if row[7] else []
+                'identity_category': row[3],
+                'risk_level': row[4],
+                'credential_status': row[5],
+                'activity_status': row[6],
+                'credential_expiration': row[7],
+                'roles': row[8] if row[8] else []
             }
         
         cursor.close()

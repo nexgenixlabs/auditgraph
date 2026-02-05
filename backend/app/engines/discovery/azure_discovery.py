@@ -661,12 +661,13 @@ class AzureDiscoveryEngine:
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
         Determine if a service principal is a Microsoft first-party app.
-        Uses API metadata for reliable detection.
+        Uses multiple detection methods for comprehensive coverage.
 
-        Microsoft first-party apps have one or more of these characteristics:
-        - appOwnerOrganizationId = Microsoft's tenant ID
-        - publisherName = 'Microsoft Services' or 'Microsoft Corporation'
-        - appId in known Microsoft first-party app list
+        Detection methods (in order):
+        1. appOwnerOrganizationId = Microsoft's tenant ID (most reliable)
+        2. publisherName contains Microsoft patterns
+        3. appId in known Microsoft first-party app list
+        4. Display name matches Microsoft patterns (fallback for legacy apps)
 
         NOTE: Managed Identities (both SAMI and UAMI) are NOT filtered here.
         They are customer-owned Azure resources and should be tracked.
@@ -678,7 +679,6 @@ class AzureDiscoveryEngine:
             True if Microsoft first-party app, False if customer-owned
         """
         # Skip managed identities - they are customer-owned, not Microsoft apps
-        # They have their own category (managed_identity_system / managed_identity_user)
         sp_type = (identity.get('service_principal_type') or identity.get('servicePrincipalType') or '').lower()
         if sp_type == 'managedidentity':
             return False
@@ -694,7 +694,6 @@ class AzureDiscoveryEngine:
         # Check 2: Publisher name indicates Microsoft
         publisher = (identity.get('publisher_name') or identity.get('publisherName') or '').lower()
         if publisher:
-            # Strong Microsoft publisher patterns
             microsoft_publishers = [
                 'microsoft services',
                 'microsoft corporation',
@@ -704,9 +703,7 @@ class AzureDiscoveryEngine:
                 return True
 
         # Check 3: Known Microsoft first-party app IDs
-        # These are well-documented Microsoft service principals
         MICROSOFT_FIRST_PARTY_APP_IDS = {
-            # Core Microsoft services
             '00000001-0000-0000-c000-000000000000',  # Azure ESTS
             '00000002-0000-0000-c000-000000000000',  # Azure AD Graph (legacy)
             '00000003-0000-0000-c000-000000000000',  # Microsoft Graph
@@ -719,12 +716,8 @@ class AzureDiscoveryEngine:
             '0000000a-0000-0000-c000-000000000000',  # Microsoft Intune
             '0000000c-0000-0000-c000-000000000000',  # Microsoft App Access Panel
             '00000012-0000-0000-c000-000000000000',  # Microsoft Rights Management Services
-
-            # Azure services
             '797f4846-ba00-4fd7-ba43-dac1f8f63013',  # Azure Service Management
             'c44b4083-3bb0-49c1-b47d-974e53cbdf3c',  # Azure Portal
-
-            # Office services
             '00000002-0000-0ff1-ce00-000000000000',  # Office 365 Exchange Online
             '00000003-0000-0ff1-ce00-000000000000',  # Office 365 SharePoint Online
         }
@@ -733,7 +726,83 @@ class AzureDiscoveryEngine:
         if app_id and app_id in MICROSOFT_FIRST_PARTY_APP_IDS:
             return True
 
-        # Default: Assume customer-owned (track it!)
+        # Check 4: Display name pattern matching (catches most Microsoft apps)
+        display_name = (identity.get('display_name') or identity.get('displayName') or '').lower()
+
+        # Customer apps typically have custom naming patterns
+        # Check for customer naming conventions FIRST (whitelist approach)
+        customer_prefixes = ['spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-']
+        for prefix in customer_prefixes:
+            if display_name.startswith(prefix):
+                return False  # Definitely customer-owned
+
+        # Known third-party apps (not Microsoft, not customer)
+        third_party_apps = ['apple internet accounts']
+        if display_name in third_party_apps:
+            return False  # Track as customer (3rd party integration)
+
+        # Microsoft app patterns - comprehensive list
+        microsoft_keywords = [
+            # Core Microsoft brands
+            'microsoft', 'azure', 'office', 'o365', 'm365', 'sharepoint', 'onedrive',
+            'teams', 'outlook', 'exchange', 'dynamics', 'powerbi', 'power bi',
+            'powerapps', 'power apps', 'powerautomate', 'intune', 'defender',
+            'sentinel', 'purview', 'entra', 'windows', 'xbox', 'skype', 'yammer',
+            'viva', 'bing', 'cortana', 'onenote', 'planner', 'visio', 'project',
+
+            # Azure/AD specific
+            'aad', 'activedirectory', 'active directory', 'azuread', 'graph',
+            'arm', 'subscription', 'resourcemanager', 'keyvault', 'storageaccount',
+
+            # Services patterns
+            'substrate', 'demeter', 'kaizala', 'whiteboard', 'sway', 'bookings',
+            'stream', 'forms', 'lists', 'todo', 'clipchamp', 'loop', 'mesh',
+            'copilot', 'ic3', 'pim', 'mip', 'aip', 'rms', 'dlp',
+
+            # Infrastructure
+            'provisioning', 'configuration', 'licensing', 'compliance', 'policy',
+            'migration', 'sync', 'registration', 'protection', 'discovery',
+            'connector', 'gateway', 'portal', 'admin', 'management',
+            'shell', 'wcss', 'shredding', 'mro', 'oms',
+
+            # Service types
+            'tenant', 'directory', 'identity', 'authentication', 'authorization',
+            'token', 'certificate', 'credential', 'secret',
+
+            # Communication
+            'conferencing', 'calling', 'pstn', 'meeting', 'attendant', 'bot',
+            'notification', 'push', 'signal', 'channel',
+
+            # Data/Analytics
+            'reporting', 'analytics', 'telemetry', 'insights', 'diagnostic',
+
+            # Security
+            'security', 'safelinks', 'encryption', 'privacy', 'audit',
+            'ediscovery', 'retention', 'archiv',
+
+            # Other Microsoft services
+            'ocaas', 'mcapi', 'smit', 'cap ', 'ids-', 'ppe-',
+            'signup', 'client interaction', 'experience management',
+            'worker service', 'lifecycle', 'profile', 'people',
+            'approval', 'request', 'support', 'help',
+            'common data service', 'dataverse', 'cds',
+            'customer service', 'sales', 'marketing',
+            'portfolios', 'projectwork', 'weve', 'weveengine',
+            'windowsupdate', 'update service',
+            'virtual visits', 'billing rp', 'aci', 'spauthevent',
+            'customer experience', 'experience platform',
+
+            # Generic Microsoft service patterns
+            'service', 'processor', 'handler', 'proxy', 'agent',
+            'scheduler', 'deployer', 'cab', 'capacity', ' rp',
+        ]
+
+        # Check if display name contains any Microsoft keyword
+        for keyword in microsoft_keywords:
+            if keyword in display_name:
+                return True
+
+        # Default: Assume customer-owned if no Microsoft patterns found
         return False
 
     def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict], entra_roles: List[Dict] = []) -> List[Dict]:
