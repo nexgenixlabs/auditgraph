@@ -12,6 +12,14 @@ type IdentityCategory =
   | 'microsoft_internal'
   | 'unknown';
 
+interface Owner {
+  owner_object_id: string;
+  owner_display_name?: string;
+  owner_upn?: string;
+  owner_type?: string;
+  is_primary_owner?: boolean;
+}
+
 interface IdentityDetailsResponse {
   run_id: number;
   identity: {
@@ -20,6 +28,7 @@ interface IdentityDetailsResponse {
     identity_type?: string;
     identity_category?: IdentityCategory;
     risk_level?: RiskLevel;
+    risk_score?: number;  // NEW: Points-based risk score
     risk_reasons?: string[];
 
     credential_status?: string;
@@ -36,10 +45,21 @@ interface IdentityDetailsResponse {
     app_id?: string | null;
 
     tags?: any;
+
+    // NEW: Multi-cloud fields
+    cloud?: string;
+    normalized_identity_type?: string;
+    principal_id?: string;
+    tenant_or_org_id?: string;
+    owner_display_name?: string | null;
+    owner_count?: number;
+    api_permission_count?: number;
+    app_role_count?: number;
   };
   roles: any[];
   graph_permissions: any[];
   app_roles: any[];
+  owners: Owner[];  // NEW: Ownership tracking
 }
 
 function safeLower(v: any) {
@@ -195,6 +215,14 @@ export default function IdentityDetail() {
 
                 <div className="flex flex-wrap items-center gap-2 mt-3">
                   {riskBadge(identity.risk_level)}
+                  {identity.risk_score !== undefined && (
+                    <span className="px-2 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">
+                      {identity.risk_score} pts
+                    </span>
+                  )}
+                  <span className="px-2 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
+                    {identity.cloud || 'azure'}
+                  </span>
                   <span className="px-2 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-700">
                     {categoryLabel(identity.identity_category)}
                   </span>
@@ -216,7 +244,9 @@ export default function IdentityDetail() {
                 <div><span className="font-semibold">Last Sign-in:</span> {formatDate(identity.last_sign_in)}</div>
                 <div><span className="font-semibold">Activity:</span> {identity.activity_status || 'unknown'}</div>
                 <div><span className="font-semibold">Credential:</span> {identity.credential_status || 'Unknown'}</div>
-                <div><span className="font-semibold">Credential Expiry:</span> {formatDate(identity.credential_expiration)}</div>
+                <div><span className="font-semibold">Owner:</span> {identity.owner_display_name || <span className="text-gray-400">No owner</span>}</div>
+                <div><span className="font-semibold">API Permissions:</span> {identity.api_permission_count ?? 0}</div>
+                <div><span className="font-semibold">App Roles:</span> {identity.app_role_count ?? 0}</div>
               </div>
             </div>
 
@@ -309,7 +339,7 @@ export default function IdentityDetail() {
           </div>
 
           {/* App Roles */}
-          <div className="bg-white border rounded-2xl p-6">
+          <div className="bg-white border rounded-2xl p-6 mb-4">
             <div className="text-lg font-semibold text-gray-900 mb-3">Application Role Assignments</div>
             {(data?.app_roles || []).length === 0 ? (
               <div className="text-sm text-gray-500">No custom app role assignments discovered.</div>
@@ -322,6 +352,35 @@ export default function IdentityDetail() {
                       {riskBadge(r.risk_level)}
                     </div>
                     <div className="text-xs text-gray-500 mt-1 break-all">{r.resource_id}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Owners (Accountability) */}
+          <div className="bg-white border rounded-2xl p-6">
+            <div className="text-lg font-semibold text-gray-900 mb-3">Ownership / Accountability</div>
+            {(data?.owners || []).length === 0 ? (
+              <div className="text-sm text-gray-500">No owners discovered for this identity.</div>
+            ) : (
+              <div className="space-y-2">
+                {data!.owners.map((o: Owner, idx: number) => (
+                  <div key={idx} className="border rounded-lg p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-semibold text-gray-900">
+                        {o.owner_display_name || o.owner_upn || o.owner_object_id}
+                      </div>
+                      {o.is_primary_owner && (
+                        <span className="px-2 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                          Primary
+                        </span>
+                      )}
+                    </div>
+                    {o.owner_upn && (
+                      <div className="text-xs text-gray-500 mt-1">{o.owner_upn}</div>
+                    )}
+                    <div className="text-xs text-gray-400 mt-1">Type: {o.owner_type || 'user'}</div>
                   </div>
                 ))}
               </div>

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown';
+type IdentityStatus = 'active' | 'disabled' | 'deleted';
 
 type IdentityCategory =
   | 'service_principal'
@@ -15,25 +16,55 @@ type IdentityCategory =
 interface IdentityRow {
   identity_id: string;
   display_name: string;
-
-  // legacy and canonical
   identity_type?: string;
   identity_category?: IdentityCategory;
-  identity_category_label?: string;
 
-  risk_level?: RiskLevel;
+  // Multi-cloud
+  cloud?: string;
 
+  // Dates
   created_datetime?: string | null;
-  activity_status?: string | null;
+  last_seen_auth?: string | null;
+  last_sign_in?: string | null;
 
-  credential_count?: number;
-  next_expiry?: string | null;
-  credential_risk?: string | null;
-  credential_status?: string | null;
-  credential_expiration?: string | null;
-
+  // Permissions & Roles
+  api_permission_count?: number;
   role_count?: number;
+  app_role_count?: number;
+
+  // Credentials
+  credential_count?: number;
+  credential_expiration?: string | null;
+  next_expiry?: string | null;
+  credential_status?: string | null;
+
+  // Ownership
+  owner_display_name?: string | null;
+  owner_count?: number;
+
+  // Status
+  status?: IdentityStatus;
+  enabled?: boolean;
+
+  // Risk
+  risk_level?: RiskLevel;
+  risk_score?: number;
 }
+
+// All sortable fields
+type SortField =
+  | 'display_name'
+  | 'cloud'
+  | 'identity_id'
+  | 'created_datetime'
+  | 'last_seen_auth'
+  | 'api_permission_count'
+  | 'role_count'
+  | 'credential_expiration'
+  | 'app_role_count'
+  | 'owner_display_name'
+  | 'status'
+  | 'risk_level';
 
 const CATEGORY_OPTIONS: { value: IdentityCategory | 'all'; label: string }[] = [
   { value: 'all', label: 'All Categories' },
@@ -43,7 +74,6 @@ const CATEGORY_OPTIONS: { value: IdentityCategory | 'all'; label: string }[] = [
   { value: 'human_user', label: 'Human User' },
   { value: 'guest', label: 'Guest' },
   { value: 'microsoft_internal', label: 'Microsoft Internal' },
-  { value: 'unknown', label: 'Unknown' },
 ];
 
 const RISK_OPTIONS: { value: RiskLevel | 'all'; label: string }[] = [
@@ -53,143 +83,132 @@ const RISK_OPTIONS: { value: RiskLevel | 'all'; label: string }[] = [
   { value: 'medium', label: 'Medium' },
   { value: 'low', label: 'Low' },
   { value: 'info', label: 'Info' },
-  { value: 'unknown', label: 'Unknown' },
 ];
 
-function safeLower(v: any) {
+function safeLower(v: any): string {
   return String(v ?? '').toLowerCase();
 }
 
-// Normalize identity_type coming from the API, which may vary across versions
-// (e.g., "managed identity", "ManagedIdentity", etc.).
-function normalizeIdentityType(raw?: any): string {
-  const v = safeLower(raw).replace(/[\s-]+/g, '_').trim();
-  if (!v) return '';
-
-  // Canonical values
-  if (v === 'service_principal' || v === 'serviceprincipal') return 'service_principal';
-  if (v === 'managed_identity' || v === 'managedidentity') return 'managed_identity';
-  if (v === 'user') return 'user';
-  if (v === 'managed_identity_system') return 'managed_identity_system';
-  if (v === 'managed_identity_user') return 'managed_identity_user';
-
-  // Common variants
-  if (v === 'service' || v === 'spn' || v.includes('service_principal')) return 'service_principal';
-  if (v.includes('managed_identity') || v.includes('managedidentity') || v.includes('managed_identity')) return 'managed_identity';
-  if (v.includes('managed_identity_system') || v.includes('system_assigned')) return 'managed_identity_system';
-  if (v.includes('managed_identity_user') || v.includes('user_assigned')) return 'managed_identity_user';
-
-  return v;
-}
-
-// Backend may send identity_category as a label (e.g., "User Assigned Identity")
-// Normalize common variants to canonical UI keys.
-function normalizeCategoryFromBackend(raw?: any): IdentityCategory | undefined {
+function normalizeCategoryFromBackend(raw?: any): IdentityCategory {
   const v = safeLower(raw).trim();
-  if (!v) return undefined;
+  if (!v) return 'unknown';
 
-  // Already canonical?
-  if (CATEGORY_OPTIONS.some(o => o.value === (v as any))) return v as IdentityCategory;
-
-  // USER VARIANTS
-  if (v === 'user' || v === 'users') return 'human_user';
-  if (v === 'human user' || v === 'human_user') return 'human_user';
-  
-  // GUEST VARIANTS
-  if (v === 'guest' || v === 'guest user') return 'guest';
-
-  // USER ASSIGNED MANAGED IDENTITY VARIANTS
-  if (
-    v === 'user assigned identity' ||
-    v === 'managed identity (user)' ||
-    v === 'managed identity (user assigned)' ||
-    v.includes('user assigned') ||
-    v.includes('user-assigned') ||
-    v.includes('userassigned')
-  ) return 'managed_identity_user';
-
-  // SYSTEM ASSIGNED MANAGED IDENTITY VARIANTS
-  if (
-    v === 'system assigned identity' ||
-    v === 'managed identity (system)' ||
-    v === 'managed identity (system assigned)' ||
-    v.includes('system assigned') ||
-    v.includes('system-assigned') ||
-    v.includes('systemassigned')
-  ) return 'managed_identity_system';
-
-  // MICROSOFT INTERNAL VARIANTS
-  if (v === 'microsoft internal' || v === 'microsoft-internal' || v === 'microsoft_internal') return 'microsoft_internal';
-
-  // SERVICE PRINCIPAL VARIANTS
-  if (v === 'service principal' || v === 'service_principal' || v === 'serviceprincipal') return 'service_principal';
-
-  return undefined;
-}
-
-function deriveCategoryKey(row: Partial<IdentityRow> & { [k: string]: any }): IdentityCategory {
-  // Trust the backend's identity_category - it's the source of truth
-  // The backend properly categorizes identities during discovery
-  const providedKey = row.identity_category_key ?? row.identity_category;
-  const normalized = normalizeCategoryFromBackend(providedKey);
-
-  // If backend provided a valid category, use it directly
-  if (normalized) {
-    return normalized;
+  if (['service_principal', 'managed_identity_system', 'managed_identity_user',
+       'human_user', 'guest', 'microsoft_internal'].includes(v)) {
+    return v as IdentityCategory;
   }
 
-  // Fallback: Derive category from identity_type if backend didn't provide category
-  // This handles legacy data or edge cases
-  const t = normalizeIdentityType(row.identity_type);
-  const name = row.display_name || '';
-
-  if (t === 'user') {
-    const n = safeLower(name);
-    if (n.includes('#ext#') || n.includes('guest')) return 'guest';
-    return 'human_user';
-  }
-
-  if (t === 'managed_identity' || t === 'managed_identity_system') {
-    return 'managed_identity_system';
-  }
-
-  if (t === 'managed_identity_user') {
-    return 'managed_identity_user';
-  }
-
-  if (t === 'service_principal') {
-    return 'service_principal';
-  }
+  if (v === 'user' || v === 'human user') return 'human_user';
+  if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
+  if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
+  if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
+  if (v.includes('microsoft')) return 'microsoft_internal';
 
   return 'unknown';
 }
 
-function categoryLabel(cat?: IdentityCategory): string {
-  const match = CATEGORY_OPTIONS.find(o => o.value === cat);
-  return match?.label || 'Unknown';
-}
-
-function riskBadge(r?: RiskLevel) {
-  const risk = safeLower(r);
-  const styles: Record<string, string> = {
-    critical: 'bg-red-100 text-red-800',
-    high: 'bg-orange-100 text-orange-800',
-    medium: 'bg-yellow-100 text-yellow-800',
-    low: 'bg-green-100 text-green-800',
-    info: 'bg-blue-100 text-blue-800',
-    unknown: 'bg-gray-100 text-gray-600',
-  };
-  const cls = styles[risk] || styles.unknown;
-  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium uppercase ${cls}`}>{risk || 'unknown'}</span>;
-}
-
-function formatDate(d?: string | null) {
+function formatDate(d?: string | null): string {
   if (!d) return '—';
   try {
-    return new Date(d).toLocaleString();
+    const date = new Date(d);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   } catch {
     return d;
   }
+}
+
+function formatDateTime(d?: string | null): string {
+  if (!d) return '—';
+  try {
+    const date = new Date(d);
+    return date.toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+  } catch {
+    return d;
+  }
+}
+
+// Column header with sort arrows
+function SortHeader({
+  label,
+  field,
+  currentField,
+  currentDir,
+  onSort
+}: {
+  label: string;
+  field: SortField;
+  currentField: SortField;
+  currentDir: 'asc' | 'desc';
+  onSort: (f: SortField) => void;
+}) {
+  const isActive = currentField === field;
+  return (
+    <th
+      className="px-3 py-3 cursor-pointer select-none hover:bg-gray-100 whitespace-nowrap"
+      onClick={() => onSort(field)}
+    >
+      <div className="flex items-center gap-1">
+        <span>{label}</span>
+        <span className={`text-xs ${isActive ? 'text-blue-600' : 'text-gray-400'}`}>
+          {isActive ? (currentDir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </div>
+    </th>
+  );
+}
+
+// Cloud badge
+function CloudBadge({ cloud }: { cloud?: string }) {
+  const c = safeLower(cloud) || 'azure';
+  const colors: Record<string, string> = {
+    azure: 'bg-blue-100 text-blue-700',
+    aws: 'bg-orange-100 text-orange-700',
+    gcp: 'bg-red-100 text-red-700',
+  };
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium uppercase ${colors[c] || colors.azure}`}>
+      {c}
+    </span>
+  );
+}
+
+// Status badge
+function StatusBadge({ status, enabled }: { status?: string; enabled?: boolean }) {
+  const isActive = status === 'active' || (status === undefined && enabled !== false);
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+      isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+    }`}>
+      {isActive ? 'Active' : 'Disabled'}
+    </span>
+  );
+}
+
+// Risk badge
+function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
+  const risk = safeLower(level);
+  const styles: Record<string, string> = {
+    critical: 'bg-red-100 text-red-800 border-red-200',
+    high: 'bg-orange-100 text-orange-800 border-orange-200',
+    medium: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    low: 'bg-green-100 text-green-800 border-green-200',
+    info: 'bg-blue-100 text-blue-800 border-blue-200',
+  };
+  const cls = styles[risk] || 'bg-gray-100 text-gray-600 border-gray-200';
+
+  return (
+    <div className="flex items-center gap-1">
+      <span className={`px-2 py-0.5 rounded text-xs font-medium uppercase border ${cls}`}>
+        {risk || 'unknown'}
+      </span>
+      {score !== undefined && score > 0 && (
+        <span className="text-xs text-gray-500 font-mono">({score})</span>
+      )}
+    </div>
+  );
 }
 
 export default function IdentitiesPage() {
@@ -201,32 +220,29 @@ export default function IdentitiesPage() {
   const [riskFilter, setRiskFilter] = useState<RiskLevel | 'all'>('all');
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
 
-  const [sortField, setSortField] = useState<'display_name' | 'identity_category' | 'risk_level' | 'role_count'>('display_name');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [sortField, setSortField] = useState<SortField>('risk_level');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Parse URL params
   useEffect(() => {
     const params = new URLSearchParams(location.search);
-    // Support both 'category' and 'identity_category' query params
     const catParam = params.get('identity_category') || params.get('category');
     const riskParam = params.get('risk_level');
 
     if (catParam) {
       const found = CATEGORY_OPTIONS.find(o => o.value === catParam);
-      if (found && found.value !== 'all') {
-        setCategoryFilter(found.value as any);
-      }
+      if (found && found.value !== 'all') setCategoryFilter(found.value as IdentityCategory);
     }
     if (riskParam) {
       const found = RISK_OPTIONS.find(o => o.value === riskParam);
-      if (found && found.value !== 'all') {
-        setRiskFilter(found.value as any);
-      }
+      if (found && found.value !== 'all') setRiskFilter(found.value as RiskLevel);
     }
   }, [location.search]);
 
+  // Fetch data
   useEffect(() => {
     let cancelled = false;
 
@@ -236,24 +252,37 @@ export default function IdentitiesPage() {
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
 
-        const rows: IdentityRow[] = (data.identities || []).map((raw: any) => {
-          const derived = deriveCategoryKey(raw);
+        const rows: IdentityRow[] = (data.identities || []).map((raw: any) => ({
+          identity_id: raw.identity_id || raw.id || '',
+          display_name: raw.display_name || raw.name || '',
+          identity_type: raw.identity_type,
+          identity_category: normalizeCategoryFromBackend(raw.identity_category),
 
-          return {
-            identity_id: raw.identity_id || raw.id || '',
-            display_name: raw.display_name || raw.name || '',
-            identity_type: raw.identity_type || raw.type,
-            identity_category: derived,
-            identity_category_label: categoryLabel(derived),
-            risk_level: safeLower(raw.risk_level || raw.risk || 'unknown') as RiskLevel,
-            created_datetime: raw.created_datetime || raw.created || null,
-            activity_status: raw.activity_status || raw.status || null,
-            credential_count: raw.credential_count ?? 0,
-            next_expiry: raw.next_expiry || raw.credential_expiration || null,
-            role_count: raw.role_count ?? 0,
-          };
-        });
-        
+          cloud: raw.cloud || 'azure',
+
+          created_datetime: raw.created_datetime || null,
+          last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
+          last_sign_in: raw.last_sign_in || null,
+
+          api_permission_count: raw.api_permission_count ?? 0,
+          role_count: raw.role_count ?? 0,
+          app_role_count: raw.app_role_count ?? 0,
+
+          credential_count: raw.credential_count ?? 0,
+          credential_expiration: raw.credential_expiration || raw.next_expiry || null,
+          next_expiry: raw.next_expiry || null,
+          credential_status: raw.credential_status,
+
+          owner_display_name: raw.owner_display_name || null,
+          owner_count: raw.owner_count ?? 0,
+
+          status: raw.status || (raw.enabled === false ? 'disabled' : 'active'),
+          enabled: raw.enabled,
+
+          risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
+          risk_score: raw.risk_score ?? 0,
+        }));
+
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load identities');
@@ -263,82 +292,106 @@ export default function IdentitiesPage() {
     }
 
     load();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
+  // Filter and sort
   const filtered = useMemo(() => {
     let result = [...identities];
 
+    // Search filter
     const s = safeLower(search);
     if (s) {
-      result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s));
+      result = result.filter(i =>
+        safeLower(i.display_name).includes(s) ||
+        safeLower(i.identity_id).includes(s) ||
+        safeLower(i.owner_display_name).includes(s)
+      );
     }
 
+    // Risk filter
     if (riskFilter !== 'all') {
-      const rf = safeLower(riskFilter);
-      result = result.filter(i => safeLower(i.risk_level) === rf);
+      result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
     }
 
+    // Category filter
     if (categoryFilter !== 'all') {
-      const cf = safeLower(categoryFilter);
-      result = result.filter(i => safeLower(i.identity_category) === cf);
+      result = result.filter(i => i.identity_category === categoryFilter);
     }
 
+    // Sort
     result.sort((a, b) => {
-      let aValue: any;
-      let bValue: any;
+      let aVal: any;
+      let bVal: any;
 
       switch (sortField) {
-        case 'risk_level': {
-          const riskOrder: Record<string, number> = {
-            critical: 6,
-            high: 5,
-            medium: 4,
-            low: 3,
-            info: 2,
-            unknown: 1,
-          };
-          aValue = riskOrder[safeLower(a.risk_level)] || 0;
-          bValue = riskOrder[safeLower(b.risk_level)] || 0;
-          break;
-        }
-        case 'role_count':
-          aValue = a.role_count ?? 0;
-          bValue = b.role_count ?? 0;
-          break;
-        case 'identity_category':
-          aValue = safeLower(a.identity_category);
-          bValue = safeLower(b.identity_category);
-          break;
         case 'display_name':
+          aVal = safeLower(a.display_name);
+          bVal = safeLower(b.display_name);
+          break;
+        case 'cloud':
+          aVal = safeLower(a.cloud);
+          bVal = safeLower(b.cloud);
+          break;
+        case 'identity_id':
+          aVal = safeLower(a.identity_id);
+          bVal = safeLower(b.identity_id);
+          break;
+        case 'created_datetime':
+          aVal = a.created_datetime ? new Date(a.created_datetime).getTime() : 0;
+          bVal = b.created_datetime ? new Date(b.created_datetime).getTime() : 0;
+          break;
+        case 'last_seen_auth':
+          aVal = a.last_seen_auth ? new Date(a.last_seen_auth).getTime() : 0;
+          bVal = b.last_seen_auth ? new Date(b.last_seen_auth).getTime() : 0;
+          break;
+        case 'api_permission_count':
+          aVal = a.api_permission_count ?? 0;
+          bVal = b.api_permission_count ?? 0;
+          break;
+        case 'role_count':
+          aVal = a.role_count ?? 0;
+          bVal = b.role_count ?? 0;
+          break;
+        case 'credential_expiration':
+          aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
+          bVal = b.credential_expiration ? new Date(b.credential_expiration).getTime() : Infinity;
+          break;
+        case 'app_role_count':
+          aVal = a.app_role_count ?? 0;
+          bVal = b.app_role_count ?? 0;
+          break;
+        case 'owner_display_name':
+          aVal = a.owner_display_name ? safeLower(a.owner_display_name) : 'zzz';
+          bVal = b.owner_display_name ? safeLower(b.owner_display_name) : 'zzz';
+          break;
+        case 'status':
+          aVal = a.status === 'active' ? 0 : 1;
+          bVal = b.status === 'active' ? 0 : 1;
+          break;
+        case 'risk_level':
         default:
-          aValue = safeLower(a.display_name);
-          bValue = safeLower(b.display_name);
+          const riskOrder: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1, unknown: 0 };
+          aVal = riskOrder[safeLower(a.risk_level)] || 0;
+          bVal = riskOrder[safeLower(b.risk_level)] || 0;
       }
 
-      if (aValue < bValue) return sortDir === 'asc' ? -1 : 1;
-      if (aValue > bValue) return sortDir === 'asc' ? 1 : -1;
+      if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
 
     return result;
   }, [identities, search, riskFilter, categoryFilter, sortField, sortDir]);
 
-  function toggleSort(field: typeof sortField) {
+  function handleSort(field: SortField) {
     if (field === sortField) {
-      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'));
-      return;
+      setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      // Default sort direction based on field type
+      setSortDir(['risk_level', 'api_permission_count', 'role_count', 'app_role_count', 'owner_count'].includes(field) ? 'desc' : 'asc');
     }
-    setSortField(field);
-    setSortDir(field === 'risk_level' ? 'desc' : 'asc');
-  }
-
-  function clearAll() {
-    setSearch('');
-    setRiskFilter('all');
-    setCategoryFilter('all');
   }
 
   function openIdentity(id: string) {
@@ -346,30 +399,30 @@ export default function IdentitiesPage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-5">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">All Identities</h2>
-          <p className="text-sm text-gray-600">Filter by identity category and risk to focus your review.</p>
+          <p className="text-sm text-gray-600">Multi-cloud identity inventory with full sorting</p>
         </div>
-        <div className="text-sm text-gray-600">
+        <div className="text-sm text-gray-600 font-medium">
           {loading ? 'Loading…' : `${filtered.length} of ${identities.length} identities`}
         </div>
       </div>
 
       {/* Filters */}
-      <div className="bg-white border rounded-2xl p-4 mb-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="bg-white border rounded-xl p-4 mb-4 shadow-sm">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
             <label className="block text-xs font-semibold text-gray-700 mb-1">Search</label>
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search identities…"
-              className="w-full border rounded-lg px-3 py-2 text-sm"
+              placeholder="Name, ID, or Owner…"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             />
           </div>
-
           <div>
             <label className="block text-xs font-semibold text-gray-700 mb-1">Risk Level</label>
             <select
@@ -377,99 +430,155 @@ export default function IdentitiesPage() {
               onChange={(e) => setRiskFilter(e.target.value as any)}
               className="w-full border rounded-lg px-3 py-2 text-sm"
             >
-              {RISK_OPTIONS.map(o => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
+              {RISK_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
-
           <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">Identity Category</label>
+            <label className="block text-xs font-semibold text-gray-700 mb-1">Category</label>
             <select
               value={categoryFilter}
               onChange={(e) => setCategoryFilter(e.target.value as any)}
               className="w-full border rounded-lg px-3 py-2 text-sm"
             >
-              {CATEGORY_OPTIONS.map(o => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
+              {CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
-        </div>
-
-        <div className="flex items-center justify-between mt-4">
-          <div className="text-xs text-gray-500">
-            Tip: "Service principals" are **not** managed identities. Use the category filter to separate them.
+          <div className="flex items-end">
+            <button
+              onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); }}
+              className="w-full px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50"
+            >
+              Clear Filters
+            </button>
           </div>
-          <button onClick={clearAll} className="text-xs text-blue-600 hover:underline">
-            Clear all
-          </button>
         </div>
       </div>
 
       {/* Table */}
-      <div className="bg-white border rounded-2xl overflow-hidden">
+      <div className="bg-white border rounded-xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
-          <table className="min-w-full">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-left text-xs font-semibold text-gray-600">
-                <th className="px-4 py-3 cursor-pointer select-none" onClick={() => toggleSort('display_name')}>
-                  Identity Name {sortField === 'display_name' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th className="px-4 py-3 cursor-pointer select-none" onClick={() => toggleSort('identity_category')}>
-                  Category {sortField === 'identity_category' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th className="px-4 py-3 cursor-pointer select-none" onClick={() => toggleSort('risk_level')}>
-                  Risk {sortField === 'risk_level' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th className="px-4 py-3">Roles</th>
-                <th className="px-4 py-3">Credentials</th>
-                <th className="px-4 py-3">Created</th>
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-50 border-b text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+              <tr>
+                <SortHeader label="Identity Name" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Identity ID" field="identity_id" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="API Perms" field="api_permission_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Roles" field="role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Secrets/Expiry" field="credential_expiration" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="App Roles" field="app_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Owner" field="owner_display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
             </thead>
-
-            <tbody className="divide-y">
+            <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td className="px-4 py-6 text-sm text-gray-600" colSpan={6}>Loading identities…</td></tr>
+                <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-500">Loading identities…</td></tr>
               ) : error ? (
-                <tr><td className="px-4 py-6 text-sm text-red-600" colSpan={6}>{error}</td></tr>
+                <tr><td colSpan={12} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td className="px-4 py-6 text-sm text-gray-600" colSpan={6}>No identities match your filters.</td></tr>
+                <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-500">No identities match your filters.</td></tr>
               ) : (
                 filtered.map((i) => (
                   <tr
                     key={i.identity_id}
-                    className="hover:bg-gray-50 cursor-pointer"
+                    className="hover:bg-blue-50 cursor-pointer transition-colors"
                     onClick={() => openIdentity(i.identity_id)}
                   >
-                    <td className="px-4 py-3">
-                      <div className="text-sm font-medium text-gray-900">{i.display_name}</div>
-                      <div className="text-xs text-gray-500">{i.identity_id}</div>
+                    {/* Identity Name */}
+                    <td className="px-3 py-3">
+                      <div className="font-medium text-gray-900 truncate max-w-[200px]" title={i.display_name}>
+                        {i.display_name}
+                      </div>
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-700">
-                      {categoryLabel(i.identity_category)}
+
+                    {/* Cloud */}
+                    <td className="px-3 py-3">
+                      <CloudBadge cloud={i.cloud} />
                     </td>
-                    <td className="px-4 py-3">
-                      {riskBadge(i.risk_level)}
+
+                    {/* Identity ID */}
+                    <td className="px-3 py-3">
+                      <code className="text-xs text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+                        {i.identity_id.substring(0, 8)}…
+                      </code>
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-700">
-                      {i.role_count ?? 0}
+
+                    {/* Created */}
+                    <td className="px-3 py-3 text-gray-600 whitespace-nowrap">
+                      {formatDate(i.created_datetime)}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-700">
-                      {i.credential_count ?? 0}
-                      {i.next_expiry ? (
-                        <div className="text-xs text-gray-500">Next: {formatDate(i.next_expiry)}</div>
+
+                    {/* Last Used */}
+                    <td className="px-3 py-3 text-gray-600 whitespace-nowrap">
+                      {formatDateTime(i.last_seen_auth)}
+                    </td>
+
+                    {/* API Perms */}
+                    <td className="px-3 py-3 text-center">
+                      <span className={`font-medium ${(i.api_permission_count ?? 0) > 0 ? 'text-purple-700' : 'text-gray-400'}`}>
+                        {i.api_permission_count ?? 0}
+                      </span>
+                    </td>
+
+                    {/* Roles */}
+                    <td className="px-3 py-3 text-center">
+                      <span className={`font-medium ${(i.role_count ?? 0) > 0 ? 'text-blue-700' : 'text-gray-400'}`}>
+                        {i.role_count ?? 0}
+                      </span>
+                    </td>
+
+                    {/* Secrets/Expiry */}
+                    <td className="px-3 py-3">
+                      <div className="text-xs">
+                        <span className="text-gray-600">{i.credential_count ?? 0} secret(s)</span>
+                        {i.credential_expiration && (
+                          <div className="text-orange-600">{formatDate(i.credential_expiration)}</div>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* App Roles */}
+                    <td className="px-3 py-3 text-center">
+                      <span className={`font-medium ${(i.app_role_count ?? 0) > 0 ? 'text-indigo-700' : 'text-gray-400'}`}>
+                        {i.app_role_count ?? 0}
+                      </span>
+                    </td>
+
+                    {/* Owner */}
+                    <td className="px-3 py-3">
+                      {i.owner_display_name ? (
+                        <span className="text-green-700 text-xs truncate max-w-[100px] block" title={i.owner_display_name}>
+                          {i.owner_display_name}
+                        </span>
                       ) : (
-                        <div className="text-xs text-gray-400">No expiry</div>
+                        <span className="text-gray-400 text-xs">No owner</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-700">{formatDate(i.created_datetime)}</td>
+
+                    {/* Status */}
+                    <td className="px-3 py-3">
+                      <StatusBadge status={i.status} enabled={i.enabled} />
+                    </td>
+
+                    {/* Risk */}
+                    <td className="px-3 py-3">
+                      <RiskBadge level={i.risk_level} score={i.risk_score} />
+                    </td>
                   </tr>
                 ))
               )}
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Footer info */}
+      <div className="mt-4 text-xs text-gray-500 text-center">
+        Click any column header to sort. Click any row to view details.
       </div>
     </div>
   );
