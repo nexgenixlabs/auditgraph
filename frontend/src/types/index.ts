@@ -83,6 +83,11 @@ export interface Identity {
   owner_display_name?: string | null;
   owner_count?: number;
   owners?: Owner[];
+
+  // Risk scoring fields (enhanced Phase 10C)
+  risk_score?: number;
+  api_permission_count?: number;
+  app_role_count?: number;
 }
 
 /**

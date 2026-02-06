@@ -177,9 +177,12 @@ class AzureDiscoveryEngine:
         
         all_identities = service_principals + users + managed_identities
         
-        # Step 6: Calculate risks
+        # Step 6: Calculate risks (enhanced points-based scoring)
         print("\n⚠️  Calculating Risk Levels...")
-        identities_with_risks = self._calculate_risks(all_identities, role_assignments, entra_roles)
+        identities_with_risks = self._calculate_risks(
+            all_identities, role_assignments, entra_roles,
+            permissions_map, app_roles_map, credentials_map
+        )
         
         # Step 7: Check credentials
         print("\n🔑 Checking Credential Expiration...")
@@ -903,17 +906,39 @@ class AzureDiscoveryEngine:
         # Default: Assume customer-owned if no Microsoft patterns found
         return False
 
-    def _calculate_risks(self, identities: List[Dict], role_assignments: List[Dict], entra_roles: List[Dict] = []) -> List[Dict]:
+    def _calculate_risks(
+        self,
+        identities: List[Dict],
+        role_assignments: List[Dict],
+        entra_roles: List[Dict] = [],
+        permissions_map: Dict[str, List[Dict]] = None,
+        app_roles_map: Dict[str, List[Dict]] = None,
+        credentials_map: Dict[str, List[Dict]] = None
+    ) -> List[Dict]:
         """
-        Calculate risk levels for all identities.
+        Enhanced points-based risk calculation for all identities.
 
-        All identities are returned (including Microsoft internal), but:
-        - Microsoft internal identities get 'info' risk level (not actionable)
-        - Customer identities get proper risk assessment
+        Risk Score Breakdown:
+        - Entra ID Roles: Global Admin (100), Privileged Role Admin (90), App Admin (80), Security Admin (60)
+        - Azure RBAC: Owner on subscription (100), Contributor on subscription (80), User Access Admin (70)
+        - API Permissions: Write permissions (60), Read-all permissions (40)
+        - Orphaned permissions: API access without role justification (30)
+        - App Roles: Admin app roles (50)
+        - Usage: Never used with credentials (40), Dormant 90+ days (20)
+        - Credentials: Expired credentials (35)
+
+        Risk Levels:
+        - 120+ points = CRITICAL
+        - 70-119 points = HIGH
+        - 40-69 points = MEDIUM
+        - 0-39 points = LOW/INFO
         """
+        permissions_map = permissions_map or {}
+        app_roles_map = app_roles_map or {}
+        credentials_map = credentials_map or {}
+
         # Process ALL identities - don't filter any out
         for identity in identities:
-            # Set identity_category for users if not already set
             if identity.get('identity_type') == 'user':
                 if not identity.get('identity_category'):
                     identity['identity_category'] = 'human_user'
@@ -921,123 +946,216 @@ class AzureDiscoveryEngine:
 
         # Calculate risks for all identities
         for identity in identities:
-            identity_roles = [ra for ra in role_assignments if ra['principal_id'] == identity['object_id']]
-            
-            risk_level = 'info'
-            risk_reasons = ['No elevated privileges']
-            
-            # Check Entra ID directory roles FIRST (higher privilege)
-            identity_entra_roles = [er for er in entra_roles if er['principal_id'] == identity['object_id']]
+            identity_id = identity.get('identity_id')
+            object_id = identity.get('object_id')
 
-            # Critical Entra ID roles (check but don't break - collect all roles)
-            entra_risk_level = 'info'
-            entra_risk_reason = None
-            
-            for entra_role in identity_entra_roles:
-                role_name_lower = entra_role['role_name'].lower()
-                if 'global administrator' in role_name_lower:
-                    entra_risk_level = 'critical'
-                    entra_risk_reason = 'Entra ID Global Administrator'
-                    break  # Global Admin is highest, no need to check more
-                elif 'privileged role administrator' in role_name_lower:
-                    entra_risk_level = 'critical'
-                    entra_risk_reason = 'Entra ID Privileged Role Administrator'
-                elif 'application administrator' in role_name_lower or 'cloud application administrator' in role_name_lower:
-                    if entra_risk_level != 'critical':
-                        entra_risk_level = 'critical'
-                        entra_risk_reason = f"Entra ID {entra_role['role_name']}"
-                elif 'user administrator' in role_name_lower or 'security administrator' in role_name_lower:
-                    if entra_risk_level not in ['critical']:
-                        entra_risk_level = 'high'
-                        entra_risk_reason = f"Entra ID {entra_role['role_name']}"
-            
-            # Set initial risk from Entra roles
-            if entra_risk_reason:
-                risk_level = entra_risk_level
-                risk_reasons = [entra_risk_reason]
-            
-            # Store Entra roles for display
-            identity['entra_roles'] = identity_entra_roles
-            
-            # Then check Azure RBAC roles
-            # Check Azure RBAC roles and combine with Entra assessment
-            azure_risk_level = 'info'
-            azure_risk_reason = None
-            
-            for role in identity_roles:
-                role_name = role['role_name'].lower()
-                scope_type = role['scope_type']
-                
-                if 'owner' in role_name and scope_type == 'subscription':
-                    azure_risk_level = 'critical'
-                    azure_risk_reason = f"Azure Owner on subscription"
-                    break
-                elif 'contributor' in role_name and scope_type == 'subscription':
-                    azure_risk_level = 'critical'
-                    azure_risk_reason = f"Azure Contributor on subscription"
-                elif 'user access administrator' in role_name:
-                    if azure_risk_level != 'critical':
-                        azure_risk_level = 'critical'
-                        azure_risk_reason = f"Azure User Access Administrator"
-                elif any(x in role_name for x in ['reader', 'monitoring']):
-                    if azure_risk_level not in ['critical', 'high']:
-                        azure_risk_level = 'medium'
-                        azure_risk_reason = f"Azure {role['role_name']}"
-            
-            # Combine risks: Keep highest risk level, list both reasons
-            if azure_risk_reason:
-                # If both are critical, show Entra first (higher privilege)
-                if risk_level == 'critical' and azure_risk_level == 'critical':
-                    risk_reasons.append(azure_risk_reason)
-                # If Azure is more critical than current, upgrade
-                elif azure_risk_level == 'critical' and risk_level != 'critical':
-                    risk_level = 'critical'
-                    if risk_reasons[0] != 'No elevated privileges':
-                        risk_reasons.append(azure_risk_reason)
-                    else:
-                        risk_reasons = [azure_risk_reason]
-                # If same level, append
-                elif azure_risk_level == risk_level:
-                    risk_reasons.append(azure_risk_reason)
-                # If Azure is higher than current non-critical
-                elif risk_level == 'info':
-                    risk_level = azure_risk_level
-                    risk_reasons = [azure_risk_reason]
-            
-            # Check if identity has NO roles (neither Azure RBAC nor Entra)
+            # Gather all data for this identity
+            identity_roles = [ra for ra in role_assignments if ra['principal_id'] == object_id]
+            identity_entra_roles = [er for er in entra_roles if er['principal_id'] == object_id]
+            identity_permissions = permissions_map.get(identity_id, [])
+            identity_app_roles = app_roles_map.get(identity_id, [])
+            identity_credentials = credentials_map.get(identity_id, [])
+
+            # Initialize scoring
+            risk_score = 0
+            risk_reasons = []
+
             is_microsoft = identity.get('is_microsoft_system', False)
             identity_category = identity.get('identity_category', '')
 
-            if len(identity_roles) == 0 and len(identity_entra_roles) == 0:
-                if is_microsoft or identity_category == 'microsoft_internal':
-                    # Microsoft internal identities without roles are normal - not a risk
-                    risk_level = 'info'
-                    risk_reasons = ['Microsoft internal service (no customer action needed)']
-                else:
-                    # Customer identities without roles may be orphaned
-                    risk_level = 'medium'
-                    risk_reasons = ['No role assignments (orphaned custom identity)']
-
-            # Override risk for Microsoft internal identities - they're informational only
+            # Skip detailed scoring for Microsoft internal identities
             if is_microsoft or identity_category == 'microsoft_internal':
+                identity['risk_level'] = 'info'
+                identity['risk_score'] = 0
+                identity['risk_reasons'] = ['Microsoft internal service (no customer action needed)']
+                identity['roles'] = identity_roles
+                identity['entra_roles'] = identity_entra_roles
+                identity['role_count'] = len(identity_roles)
+                identity['api_permission_count'] = len(identity_permissions)
+                identity['app_role_count'] = len(identity_app_roles)
+                continue
+
+            # ============================================================
+            # 1. Entra ID Directory Roles (highest privilege)
+            # ============================================================
+            for entra_role in identity_entra_roles:
+                role_name_lower = entra_role['role_name'].lower()
+                if 'global administrator' in role_name_lower:
+                    risk_score += 100
+                    risk_reasons.append('Entra ID Global Administrator')
+                elif 'privileged role administrator' in role_name_lower:
+                    risk_score += 90
+                    risk_reasons.append('Entra ID Privileged Role Administrator')
+                elif 'application administrator' in role_name_lower or 'cloud application administrator' in role_name_lower:
+                    risk_score += 80
+                    risk_reasons.append(f"Entra ID {entra_role['role_name']}")
+                elif 'user administrator' in role_name_lower:
+                    risk_score += 60
+                    risk_reasons.append('Entra ID User Administrator')
+                elif 'security administrator' in role_name_lower:
+                    risk_score += 60
+                    risk_reasons.append('Entra ID Security Administrator')
+                elif 'exchange administrator' in role_name_lower or 'sharepoint administrator' in role_name_lower:
+                    risk_score += 50
+                    risk_reasons.append(f"Entra ID {entra_role['role_name']}")
+
+            # ============================================================
+            # 2. Azure RBAC Roles
+            # ============================================================
+            for role in identity_roles:
+                role_name = role['role_name'].lower()
+                scope_type = role['scope_type']
+
+                if 'owner' in role_name:
+                    if scope_type == 'subscription':
+                        risk_score += 100
+                        risk_reasons.append('Owner role on subscription')
+                    elif scope_type == 'resource_group':
+                        risk_score += 60
+                        risk_reasons.append('Owner role on resource group')
+                    else:
+                        risk_score += 30
+                        risk_reasons.append(f"Owner role on {scope_type}")
+                elif 'contributor' in role_name:
+                    if scope_type == 'subscription':
+                        risk_score += 80
+                        risk_reasons.append('Contributor role on subscription')
+                    elif scope_type == 'resource_group':
+                        risk_score += 40
+                        risk_reasons.append('Contributor role on resource group')
+                elif 'user access administrator' in role_name:
+                    risk_score += 70
+                    risk_reasons.append('User Access Administrator role')
+                elif 'key vault' in role_name and ('administrator' in role_name or 'officer' in role_name):
+                    risk_score += 50
+                    risk_reasons.append(f"Key Vault privileged role: {role['role_name']}")
+
+            # ============================================================
+            # 3. API Permissions (Graph API)
+            # ============================================================
+            write_permissions = []
+            read_all_permissions = []
+
+            for perm in identity_permissions:
+                perm_name = (perm.get('permission_name') or '').lower()
+                if '.write' in perm_name or '.readwrite' in perm_name:
+                    write_permissions.append(perm.get('permission_name'))
+                elif '.read.all' in perm_name or 'readall' in perm_name:
+                    read_all_permissions.append(perm.get('permission_name'))
+
+            if write_permissions:
+                risk_score += 60
+                risk_reasons.append(f"Has {len(write_permissions)} write permission(s) to Graph API")
+
+            if read_all_permissions and not write_permissions:
+                risk_score += 40
+                risk_reasons.append(f"Has {len(read_all_permissions)} read-all permission(s)")
+
+            # ============================================================
+            # 4. Orphaned Permissions (API access without role justification)
+            # ============================================================
+            has_roles = len(identity_roles) > 0 or len(identity_entra_roles) > 0
+            has_permissions = len(identity_permissions) > 0
+
+            if not has_roles and has_permissions:
+                risk_score += 30
+                risk_reasons.append('API permissions without role justification (orphaned)')
+
+            # ============================================================
+            # 5. App Roles (Custom application roles)
+            # ============================================================
+            admin_app_roles = []
+            for app_role in identity_app_roles:
+                role_value = (app_role.get('app_role_value') or app_role.get('resource_display_name') or '').lower()
+                if any(keyword in role_value for keyword in ['admin', 'owner', 'full', 'write', 'manage']):
+                    admin_app_roles.append(app_role)
+
+            if admin_app_roles:
+                risk_score += 50
+                risk_reasons.append(f"Has {len(admin_app_roles)} administrative app role(s)")
+            elif identity_app_roles:
+                risk_score += 20
+                risk_reasons.append(f"Has {len(identity_app_roles)} app role assignment(s)")
+
+            # ============================================================
+            # 6. Credential Status
+            # ============================================================
+            has_expired = False
+            has_expiring_soon = False
+            for cred in identity_credentials:
+                end_date = cred.get('end_datetime')
+                if end_date:
+                    from datetime import datetime, timezone
+                    try:
+                        if isinstance(end_date, str):
+                            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                        else:
+                            end_dt = end_date
+                        now = datetime.now(timezone.utc)
+                        if end_dt < now:
+                            has_expired = True
+                        elif (end_dt - now).days < 30:
+                            has_expiring_soon = True
+                    except:
+                        pass
+
+            if has_expired:
+                risk_score += 35
+                risk_reasons.append('Has expired credentials')
+            elif has_expiring_soon:
+                risk_score += 15
+                risk_reasons.append('Has credentials expiring within 30 days')
+
+            # ============================================================
+            # 7. No roles and no permissions (truly orphaned)
+            # ============================================================
+            if not has_roles and not has_permissions and not identity_app_roles:
+                if identity.get('identity_type') != 'user':
+                    risk_score += 25
+                    risk_reasons.append('No role assignments (potentially orphaned identity)')
+
+            # ============================================================
+            # Convert score to risk level
+            # ============================================================
+            if risk_score >= 120:
+                risk_level = 'critical'
+            elif risk_score >= 70:
+                risk_level = 'high'
+            elif risk_score >= 40:
+                risk_level = 'medium'
+            elif risk_score > 0:
+                risk_level = 'low'
+            else:
                 risk_level = 'info'
-                if not risk_reasons or risk_reasons[0] == 'No elevated privileges':
-                    risk_reasons = ['Microsoft internal service (no customer action needed)']
+                risk_reasons = ['No elevated privileges detected']
 
+            # Store results
             identity['risk_level'] = risk_level
-            identity['risk_reasons'] = risk_reasons
+            identity['risk_score'] = risk_score
+            identity['risk_reasons'] = risk_reasons if risk_reasons else ['No elevated privileges detected']
             identity['roles'] = identity_roles
-            identity['role_count'] = len(identity_roles)
+            identity['entra_roles'] = identity_entra_roles
+            identity['role_count'] = len(identity_roles) + len(identity_entra_roles)
+            identity['api_permission_count'] = len(identity_permissions)
+            identity['app_role_count'] = len(identity_app_roles)
 
-            if risk_level in ['critical', 'high'] and not is_microsoft:
+            # Print high-risk identities
+            if risk_level in ['critical', 'high']:
                 emoji = '🚨' if risk_level == 'critical' else '🟠'
-                print(f"    {emoji} {identity['display_name']}: {risk_level.upper()}")
-                print(f"       - {risk_reasons[0]}")
+                print(f"    {emoji} {identity['display_name']}: {risk_level.upper()} ({risk_score} pts)")
+                for reason in risk_reasons[:3]:  # Show top 3 reasons
+                    print(f"       • {reason}")
 
-        # Count by category for summary
+        # Summary
         customer_count = sum(1 for i in identities if not i.get('is_microsoft_system', False))
         microsoft_count = sum(1 for i in identities if i.get('is_microsoft_system', False))
-        print(f"  📊 Returning {len(identities)} identities ({customer_count} customer, {microsoft_count} Microsoft internal)")
+        critical_count = sum(1 for i in identities if i.get('risk_level') == 'critical')
+        high_count = sum(1 for i in identities if i.get('risk_level') == 'high')
+
+        print(f"\n  📊 Risk Summary:")
+        print(f"     Total: {len(identities)} ({customer_count} customer, {microsoft_count} Microsoft)")
+        print(f"     🔴 Critical: {critical_count}  🟠 High: {high_count}")
+
         return identities
     
     def _check_credentials(self, identities: List[Dict]) -> List[Dict]:

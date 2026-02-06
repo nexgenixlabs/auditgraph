@@ -159,10 +159,14 @@ class Database:
                 is_microsoft_system,
 
                 risk_level,
+                risk_score,
                 risk_reasons,
 
                 credential_expiration,
                 credential_status,
+
+                api_permission_count,
+                app_role_count,
 
                 last_sign_in,
                 activity_status,
@@ -183,6 +187,7 @@ class Database:
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
                 %s,
+                %s, %s, %s,
                 %s, %s, %s,
                 %s, %s,
                 %s, %s,
@@ -206,10 +211,14 @@ class Database:
                 is_microsoft_system = EXCLUDED.is_microsoft_system,
 
                 risk_level = EXCLUDED.risk_level,
+                risk_score = EXCLUDED.risk_score,
                 risk_reasons = EXCLUDED.risk_reasons,
 
                 credential_expiration = EXCLUDED.credential_expiration,
                 credential_status = EXCLUDED.credential_status,
+
+                api_permission_count = EXCLUDED.api_permission_count,
+                app_role_count = EXCLUDED.app_role_count,
 
                 last_sign_in = EXCLUDED.last_sign_in,
                 activity_status = EXCLUDED.activity_status,
@@ -252,10 +261,14 @@ class Database:
                 identity_data.get("is_microsoft_system", False),
 
                 identity_data.get("risk_level"),
+                identity_data.get("risk_score", 0),
                 identity_data.get("risk_reasons", []),
 
                 identity_data.get("credential_expiration"),
                 identity_data.get("credential_status"),
+
+                identity_data.get("api_permission_count", 0),
+                identity_data.get("app_role_count", 0),
 
                 identity_data.get("last_sign_in"),
                 identity_data.get("activity_status"),

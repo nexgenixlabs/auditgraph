@@ -152,7 +152,11 @@ def get_identities():
                 i.last_seen_auth,
                 -- Ownership fields
                 i.owner_display_name,
-                COALESCE(i.owner_count, 0) as owner_count
+                COALESCE(i.owner_count, 0) as owner_count,
+                -- Risk scoring fields
+                COALESCE(i.risk_score, 0) as risk_score,
+                COALESCE(i.api_permission_count, 0) as api_permission_count,
+                COALESCE(i.app_role_count, 0) as app_role_count
             FROM identities i
             WHERE i.discovery_run_id = %s
         """
@@ -231,6 +235,10 @@ def get_identities():
                     # Ownership fields
                     "owner_display_name": row[22],
                     "owner_count": int(row[23] or 0),
+                    # Risk scoring fields
+                    "risk_score": int(row[24] or 0),
+                    "api_permission_count": int(row[25] or 0),
+                    "app_role_count": int(row[26] or 0),
                 }
             )
 
@@ -266,7 +274,11 @@ def get_identity_details(identity_id: str):
                    last_seen_auth,
                    -- Ownership fields
                    owner_display_name,
-                   COALESCE(owner_count, 0) as owner_count
+                   COALESCE(owner_count, 0) as owner_count,
+                   -- Risk scoring fields
+                   COALESCE(risk_score, 0) as risk_score,
+                   COALESCE(api_permission_count, 0) as api_permission_count,
+                   COALESCE(app_role_count, 0) as app_role_count
             FROM identities
             WHERE identity_id = %s
             ORDER BY discovery_run_id DESC
@@ -315,6 +327,10 @@ def get_identity_details(identity_id: str):
             # Ownership fields
             "owner_display_name": row[22],
             "owner_count": int(row[23] or 0),
+            # Risk scoring fields
+            "risk_score": int(row[24] or 0),
+            "api_permission_count": int(row[25] or 0),
+            "app_role_count": int(row[26] or 0),
         }
 
         # ✅ FIXED: clean try/except blocks
