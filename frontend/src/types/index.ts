@@ -78,6 +78,24 @@ export interface Identity {
   status?: IdentityStatus;
   last_seen_auth?: string | null;
   tags?: Record<string, string>;
+
+  // Ownership fields
+  owner_display_name?: string | null;
+  owner_count?: number;
+  owners?: Owner[];
+}
+
+/**
+ * Represents an owner of an application/service principal.
+ * Used for accountability tracking.
+ */
+export interface Owner {
+  owner_object_id: string;
+  owner_display_name?: string;
+  owner_upn?: string;
+  owner_type: 'user' | 'servicePrincipal' | 'group';
+  ownership_type: 'application' | 'servicePrincipal';
+  is_primary_owner?: boolean;
 }
 
 export interface RoleAssignment {

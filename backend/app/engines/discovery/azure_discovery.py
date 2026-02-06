@@ -161,7 +161,10 @@ class AzureDiscoveryEngine:
         
         # Step 3.7: Discover Custom App Roles
         app_roles_map = await self._discover_app_roles(service_principals)
-        
+
+        # Step 3.8: Discover Application Owners
+        ownership_map = await self._discover_ownership(service_principals)
+
         # Step 4: Discover users who have Azure RBAC OR Entra roles
         print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
@@ -188,7 +191,7 @@ class AzureDiscoveryEngine:
         
         # Step 9: Save to database using Database class methods
         print("\n💾 Saving identities to database...")
-        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map)
+        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map)
         print(f"  ✓ Saved {saved_count} identities")
         
         # Step 10: Complete discovery run
@@ -513,7 +516,93 @@ class AzureDiscoveryEngine:
             print(f"  ℹ️  No custom app role assignments found")
         
         return app_roles_map
-    
+
+    async def _discover_ownership(self, service_principals: list) -> dict:
+        """
+        Discover owners for service principals via their application registration.
+
+        Each SPN may have an associated application registration with owners.
+        Owners are typically the humans who created or manage the application.
+
+        Microsoft Graph API: GET /applications/{app-id}/owners
+
+        Returns:
+            Dict mapping identity_id -> list of owner dicts
+        """
+        print("\n👤 Discovering Application Owners...")
+        ownership_map = {}
+        found_count = 0
+        error_count = 0
+
+        for sp in service_principals:
+            identity_id = sp.get('identity_id')
+            app_id = sp.get('app_id')
+
+            # Skip if no app_id (e.g., managed identities don't have app registrations)
+            if not app_id:
+                continue
+
+            # Skip Microsoft internal apps
+            if sp.get('is_microsoft_system'):
+                continue
+
+            try:
+                # Get the application by appId, then get its owners
+                # First, find the application object ID from the appId
+                from msgraph.generated.applications.applications_request_builder import ApplicationsRequestBuilder
+                from kiota_abstractions.base_request_configuration import RequestConfiguration
+
+                query_params = ApplicationsRequestBuilder.ApplicationsRequestBuilderGetQueryParameters(
+                    filter=f"appId eq '{app_id}'",
+                    select=['id', 'displayName']
+                )
+                request_config = RequestConfiguration(query_parameters=query_params)
+
+                apps = await self.graph_client.applications.get(request_configuration=request_config)
+
+                if apps and apps.value and len(apps.value) > 0:
+                    app_object_id = apps.value[0].id
+
+                    # Now get the owners
+                    owners_response = await self.graph_client.applications.by_application_id(app_object_id).owners.get()
+
+                    if owners_response and owners_response.value:
+                        owners = []
+                        is_first = True
+                        for owner in owners_response.value:
+                            owner_data = {
+                                'owner_object_id': owner.id,
+                                'owner_display_name': getattr(owner, 'display_name', None),
+                                'owner_upn': getattr(owner, 'user_principal_name', None) or getattr(owner, 'mail', None),
+                                'owner_type': 'user' if hasattr(owner, 'user_principal_name') else 'servicePrincipal',
+                                'is_primary_owner': is_first,
+                                'ownership_type': 'application',
+                            }
+                            owners.append(owner_data)
+                            is_first = False
+
+                        if owners:
+                            ownership_map[identity_id] = owners
+                            found_count += 1
+
+                            if found_count <= 5:
+                                print(f"    ✓ {sp.get('display_name', 'Unknown')}: {len(owners)} owner(s)")
+
+            except Exception as e:
+                error_count += 1
+                if error_count <= 3:
+                    print(f"    ⚠️  Could not get owners for {sp.get('display_name', 'Unknown')}: {str(e)[:50]}")
+
+        if found_count > 0:
+            print(f"  ✓ Found owners for {found_count} applications")
+        else:
+            print(f"  ℹ️  No application owners found")
+
+        if error_count > 3:
+            print(f"  ⚠️  {error_count} errors occurred (showing first 3)")
+
+        return ownership_map
+
     async def _discover_managed_identities(self) -> List[Dict]:
         """
         Discover user-assigned managed identities from Azure subscription.
@@ -968,7 +1057,7 @@ class AzureDiscoveryEngine:
         print(f"    ⚪ No sign-in data: {len(identities)}")
         return identities
     
-    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None) -> int:
+    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None) -> int:
         """Save all identities to database with proper categorization"""
         saved_count = 0
         microsoft_count = 0
@@ -1040,7 +1129,12 @@ class AzureDiscoveryEngine:
             if app_roles_map and identity.get('identity_id') in app_roles_map:
                 app_roles = app_roles_map[identity.get('identity_id')]
                 self.db.store_app_roles(identity_db_id, app_roles)
-            
+
+            # Save ownership for this identity (SPNs only)
+            if ownership_map and identity.get('identity_id') in ownership_map:
+                owners = ownership_map[identity.get('identity_id')]
+                self.db.store_ownership(identity_db_id, owners)
+
             saved_count += 1
 
         if microsoft_count > 0:

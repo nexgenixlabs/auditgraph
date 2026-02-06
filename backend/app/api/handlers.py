@@ -149,7 +149,10 @@ def get_identities():
                 COALESCE(i.source_normalized, 'entra') as source,
                 COALESCE(i.is_federated, false) as is_federated,
                 COALESCE(i.status, 'active') as status,
-                i.last_seen_auth
+                i.last_seen_auth,
+                -- Ownership fields
+                i.owner_display_name,
+                COALESCE(i.owner_count, 0) as owner_count
             FROM identities i
             WHERE i.discovery_run_id = %s
         """
@@ -225,6 +228,9 @@ def get_identities():
                     "is_federated": row[19] or False,
                     "status": row[20] or "active",
                     "last_seen_auth": row[21].isoformat() if row[21] else None,
+                    # Ownership fields
+                    "owner_display_name": row[22],
+                    "owner_count": int(row[23] or 0),
                 }
             )
 
@@ -257,7 +263,10 @@ def get_identity_details(identity_id: str):
                    COALESCE(source_normalized, 'entra') as source,
                    COALESCE(is_federated, false) as is_federated,
                    COALESCE(status, 'active') as status,
-                   last_seen_auth
+                   last_seen_auth,
+                   -- Ownership fields
+                   owner_display_name,
+                   COALESCE(owner_count, 0) as owner_count
             FROM identities
             WHERE identity_id = %s
             ORDER BY discovery_run_id DESC
@@ -303,6 +312,9 @@ def get_identity_details(identity_id: str):
             "is_federated": row[19] or False,
             "status": row[20] or "active",
             "last_seen_auth": row[21].isoformat() if row[21] else None,
+            # Ownership fields
+            "owner_display_name": row[22],
+            "owner_count": int(row[23] or 0),
         }
 
         # ✅ FIXED: clean try/except blocks
@@ -318,6 +330,12 @@ def get_identity_details(identity_id: str):
             print(f"Error getting app roles: {e}")
             app_roles = []
 
+        try:
+            owners = db.get_ownership(identity_db_id)
+        except Exception as e:
+            print(f"Error getting owners: {e}")
+            owners = []
+
         roles = db.get_identity_roles_enriched(identity_db_id)
 
         return jsonify(
@@ -326,6 +344,7 @@ def get_identity_details(identity_id: str):
                 "roles": roles,
                 "graph_permissions": graph_permissions,
                 "app_roles": app_roles,
+                "owners": owners,
             }
         )
 

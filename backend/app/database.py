@@ -657,6 +657,106 @@ class Database:
         cursor.close()
         return permissions
 
+    # ========================================================================
+    # Ownership Management Methods
+    # ========================================================================
+
+    def store_ownership(self, identity_db_id: int, owners: list):
+        """
+        Store ownership information for a service principal.
+        Updates the sp_ownership table and denormalized fields on identities.
+        """
+        if not owners:
+            return
+
+        cursor = self.conn.cursor()
+
+        for owner in owners:
+            cursor.execute(
+                """
+                INSERT INTO sp_ownership (
+                    identity_db_id,
+                    owner_object_id,
+                    owner_display_name,
+                    owner_upn,
+                    owner_type,
+                    ownership_type,
+                    is_primary_owner
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (identity_db_id, owner_object_id)
+                DO UPDATE SET
+                    owner_display_name = EXCLUDED.owner_display_name,
+                    owner_upn = EXCLUDED.owner_upn,
+                    owner_type = EXCLUDED.owner_type,
+                    is_primary_owner = EXCLUDED.is_primary_owner,
+                    discovered_at = NOW()
+            """,
+                (
+                    identity_db_id,
+                    owner.get("owner_object_id"),
+                    owner.get("owner_display_name"),
+                    owner.get("owner_upn"),
+                    owner.get("owner_type", "user"),
+                    owner.get("ownership_type", "application"),
+                    owner.get("is_primary_owner", False),
+                ),
+            )
+
+        # Update denormalized owner fields on identity
+        primary_owner = next((o for o in owners if o.get("is_primary_owner")), owners[0] if owners else None)
+        if primary_owner:
+            cursor.execute(
+                """
+                UPDATE identities
+                SET owner_display_name = %s,
+                    owner_count = %s
+                WHERE id = %s
+            """,
+                (
+                    primary_owner.get("owner_display_name") or primary_owner.get("owner_upn"),
+                    len(owners),
+                    identity_db_id,
+                ),
+            )
+
+        cursor.close()
+        self.conn.commit()
+
+    def get_ownership(self, identity_db_id: int) -> list:
+        """Get owners for an identity"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                owner_object_id,
+                owner_display_name,
+                owner_upn,
+                owner_type,
+                ownership_type,
+                is_primary_owner
+            FROM sp_ownership
+            WHERE identity_db_id = %s
+            ORDER BY is_primary_owner DESC, owner_display_name
+        """,
+            (identity_db_id,),
+        )
+
+        owners = []
+        for row in cursor.fetchall():
+            owners.append(
+                {
+                    "owner_object_id": row[0],
+                    "owner_display_name": row[1],
+                    "owner_upn": row[2],
+                    "owner_type": row[3],
+                    "ownership_type": row[4],
+                    "is_primary_owner": row[5],
+                }
+            )
+
+        cursor.close()
+        return owners
+
     def close(self):
         """Close database connection"""
         if self.conn:
