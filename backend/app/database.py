@@ -318,14 +318,18 @@ class Database:
         return mapping.get(category, "app")
 
     def save_role_assignment(self, identity_db_id: int, role_data: Dict):
-        """Save a role assignment to the database"""
+        """Save a role assignment to the database with usage intelligence"""
         cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT INTO role_assignments (
                 identity_db_id, role_name, scope, scope_type,
-                principal_id, assignment_id, created_on
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                principal_id, assignment_id, created_on,
+                -- Usage intelligence fields
+                scope_exists, usage_status, days_since_assigned,
+                redundant_with, role_type, risk_level, why_critical,
+                resource_type, resource_name
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
                 identity_db_id,
@@ -335,25 +339,46 @@ class Database:
                 role_data.get("principal_id"),
                 role_data.get("assignment_id"),
                 role_data.get("created_on"),
+                # Usage intelligence fields
+                role_data.get("scope_exists", True),
+                role_data.get("usage_status", "unknown"),
+                role_data.get("days_since_assigned"),
+                role_data.get("redundant_with"),
+                role_data.get("role_type", "azure"),
+                role_data.get("risk_level"),
+                role_data.get("why_critical"),
+                role_data.get("resource_type"),
+                role_data.get("resource_name"),
             ),
         )
         self.conn.commit()
         cursor.close()
 
     def save_entra_role_assignment(self, identity_db_id: int, entra_role_data: Dict):
-        """Save an Entra ID directory role assignment to the database"""
+        """Save an Entra ID directory role assignment to the database with usage intelligence"""
         cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT INTO entra_role_assignments (
-                identity_db_id, role_name, role_definition_id, directory_scope
-            ) VALUES (%s, %s, %s, %s)
+                identity_db_id, role_name, role_definition_id, directory_scope,
+                -- Usage intelligence fields
+                usage_status, assigned_on, days_since_assigned,
+                redundant_with, role_type, risk_level, why_critical
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
                 identity_db_id,
                 entra_role_data.get("role_name"),
                 entra_role_data.get("role_definition_id"),
                 entra_role_data.get("directory_scope"),
+                # Usage intelligence fields
+                entra_role_data.get("usage_status", "unknown"),
+                entra_role_data.get("assigned_on"),
+                entra_role_data.get("days_since_assigned"),
+                entra_role_data.get("redundant_with"),
+                entra_role_data.get("role_type", "entra"),
+                entra_role_data.get("risk_level"),
+                entra_role_data.get("why_critical"),
             ),
         )
         self.conn.commit()
@@ -383,25 +408,32 @@ class Database:
         Get all role assignments for an identity with intelligence data
 
         Returns:
-            List of roles with intelligence (risk level, descriptions, etc.)
+            List of roles with intelligence (risk level, descriptions, usage status, etc.)
         """
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Get Azure RBAC roles with intelligence
+        # Get Azure RBAC roles with intelligence and usage status
         cursor.execute(
             """
             SELECT
-                'azure' as role_type,
+                COALESCE(ra.role_type, 'azure') as role_type,
                 ra.role_name,
                 ra.scope,
                 ra.scope_type,
                 ra.created_on,
                 rp.privileged,
-                rp.risk_level,
+                COALESCE(ra.risk_level, rp.risk_level) as risk_level,
                 rp.description,
-                rp.why_critical,
+                COALESCE(ra.why_critical, rp.why_critical) as why_critical,
                 ral.last_activity_date,
-                ral.days_since_last_use
+                ral.days_since_last_use,
+                -- Usage intelligence fields
+                COALESCE(ra.scope_exists, true) as scope_exists,
+                COALESCE(ra.usage_status, 'unknown') as usage_status,
+                ra.days_since_assigned,
+                ra.redundant_with,
+                ra.resource_type,
+                ra.resource_name
             FROM role_assignments ra
             LEFT JOIN role_permissions rp
                 ON rp.role_name = ra.role_name AND rp.role_type = 'azure'
@@ -415,21 +447,28 @@ class Database:
 
         azure_roles = [dict(row) for row in cursor.fetchall()]
 
-        # Get Entra roles with intelligence
+        # Get Entra roles with intelligence and usage status
         cursor.execute(
             """
             SELECT
-                'entra' as role_type,
+                COALESCE(era.role_type, 'entra') as role_type,
                 era.role_name,
                 era.directory_scope as scope,
                 'directory' as scope_type,
-                NULL as created_on,
+                era.assigned_on as created_on,
                 rp.privileged,
-                rp.risk_level,
+                COALESCE(era.risk_level, rp.risk_level) as risk_level,
                 rp.description,
-                rp.why_critical,
+                COALESCE(era.why_critical, rp.why_critical) as why_critical,
                 ral.last_activity_date,
-                ral.days_since_last_use
+                ral.days_since_last_use,
+                -- Usage intelligence fields
+                true as scope_exists,
+                COALESCE(era.usage_status, 'unknown') as usage_status,
+                era.days_since_assigned,
+                era.redundant_with,
+                NULL as resource_type,
+                NULL as resource_name
             FROM entra_role_assignments era
             LEFT JOIN role_permissions rp
                 ON rp.role_name = era.role_name AND rp.role_type = 'entra'

@@ -127,6 +127,32 @@ function riskBadge(level?: string) {
   return <span className={`${base} bg-gray-100 text-gray-700`}>UNKNOWN</span>;
 }
 
+function usageStatusBadge(status?: string, redundantWith?: string) {
+  const v = safeLower(status);
+  const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
+
+  if (v === 'orphaned') {
+    return <span className={`${base} bg-red-100 text-red-700`}>Orphaned</span>;
+  }
+  if (v === 'definitely_unused') {
+    return <span className={`${base} bg-red-100 text-red-700`}>Unused</span>;
+  }
+  if (v === 'likely_unused') {
+    return <span className={`${base} bg-orange-100 text-orange-700`}>Likely Unused</span>;
+  }
+  if (v === 'possibly_overprivileged') {
+    return (
+      <span className={`${base} bg-yellow-100 text-yellow-700`} title={redundantWith ? `Redundant with: ${redundantWith}` : ''}>
+        Over-Privileged
+      </span>
+    );
+  }
+  if (v === 'assumed_active') {
+    return <span className={`${base} bg-green-100 text-green-700`}>Active</span>;
+  }
+  return <span className={`${base} bg-gray-100 text-gray-500`}>Unknown</span>;
+}
+
 function categoryLabel(catRaw?: any, typeRaw?: any) {
   const cat = normalizeCategoryFromBackend(catRaw) || safeLower(catRaw);
   const t = safeLower(typeRaw);
@@ -280,9 +306,26 @@ export default function IdentityDetail() {
                       <li key={idx} className="border rounded-lg p-3">
                         <div className="flex items-center justify-between gap-2">
                           <div className="font-semibold">{r.role_name}</div>
-                          {riskBadge(r.risk_level)}
+                          <div className="flex items-center gap-1">
+                            {usageStatusBadge(r.usage_status, r.redundant_with)}
+                            {riskBadge(r.risk_level)}
+                          </div>
                         </div>
                         <div className="text-xs text-gray-500 mt-1 break-all">{r.scope}</div>
+                        <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
+                          {r.days_since_assigned != null && (
+                            <span>Assigned {r.days_since_assigned} days ago</span>
+                          )}
+                          {r.resource_type && (
+                            <span>• {r.resource_type}</span>
+                          )}
+                          {!r.scope_exists && (
+                            <span className="text-red-600">• Resource deleted</span>
+                          )}
+                          {r.redundant_with && (
+                            <span className="text-yellow-600">• Redundant with {r.redundant_with}</span>
+                          )}
+                        </div>
                         {r.why_critical ? (
                           <div className="text-xs text-gray-700 mt-2">{r.why_critical}</div>
                         ) : null}
@@ -302,9 +345,20 @@ export default function IdentityDetail() {
                       <li key={idx} className="border rounded-lg p-3">
                         <div className="flex items-center justify-between gap-2">
                           <div className="font-semibold">{r.role_name}</div>
-                          {riskBadge(r.risk_level)}
+                          <div className="flex items-center gap-1">
+                            {usageStatusBadge(r.usage_status, r.redundant_with)}
+                            {riskBadge(r.risk_level)}
+                          </div>
                         </div>
                         <div className="text-xs text-gray-500 mt-1 break-all">{r.scope}</div>
+                        <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
+                          {r.days_since_assigned != null && (
+                            <span>Assigned {r.days_since_assigned} days ago</span>
+                          )}
+                          {r.redundant_with && (
+                            <span className="text-yellow-600">• Redundant with {r.redundant_with}</span>
+                          )}
+                        </div>
                         {r.why_critical ? (
                           <div className="text-xs text-gray-700 mt-2">{r.why_critical}</div>
                         ) : null}

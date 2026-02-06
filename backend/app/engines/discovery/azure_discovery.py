@@ -689,7 +689,8 @@ class AzureDiscoveryEngine:
     def _discover_role_assignments(self) -> List[Dict[str, Any]]:
         import subprocess
         import json
-        
+        from datetime import datetime, timezone
+
         try:
             result = subprocess.run(
                 ['az', 'role', 'assignment', 'list', '--all'],
@@ -697,30 +698,182 @@ class AzureDiscoveryEngine:
                 text=True,
                 check=True
             )
-            
+
             assignments = json.loads(result.stdout)
-            
+
             role_assignments = []
             for assignment in assignments:
                 principal_id = assignment.get('principalId')
                 if principal_id:
                     if len(role_assignments) < 10:
                         print(f"    ✓ {assignment.get('principalName', 'Unknown')}: {assignment['roleDefinitionName']}")
-                    
+
                     scope = assignment.get('scope', '')
+                    scope_type = 'subscription' if '/resourceGroups/' not in scope else 'resource_group' if scope.count('/') <= 4 else 'resource'
+                    role_name = assignment['roleDefinitionName']
+                    created_on = assignment.get('createdOn')
+
+                    # Calculate days since assigned
+                    days_since_assigned = None
+                    if created_on:
+                        try:
+                            created_dt = datetime.fromisoformat(created_on.replace('Z', '+00:00'))
+                            days_since_assigned = (datetime.now(timezone.utc) - created_dt).days
+                        except:
+                            pass
+
+                    # Calculate role-level risk
+                    risk_level, why_critical = self._calculate_role_risk(role_name, scope_type)
+
+                    # Extract resource info from scope
+                    resource_type, resource_name = self._parse_scope(scope)
+
                     role_assignments.append({
                         'principal_id': principal_id,
                         'assignment_id': assignment.get('id'),
-                        'role_name': assignment['roleDefinitionName'],
+                        'role_name': role_name,
                         'scope': scope,
-                        'scope_type': 'subscription' if '/resourceGroups/' not in scope else 'resource_group' if scope.count('/') <= 4 else 'resource',
-                        'created_on': assignment.get('createdOn'),
+                        'scope_type': scope_type,
+                        'created_on': created_on,
+                        # Usage intelligence fields
+                        'scope_exists': True,  # Assume exists (ARM returned it)
+                        'usage_status': 'unknown',  # Will be calculated later
+                        'days_since_assigned': days_since_assigned,
+                        'redundant_with': None,  # Will be calculated later
+                        'role_type': 'azure',
+                        'risk_level': risk_level,
+                        'why_critical': why_critical,
+                        'resource_type': resource_type,
+                        'resource_name': resource_name,
                     })
-            
+
             return role_assignments
         except Exception as e:
             print(f"  ❌ Error: {e}")
             return []
+
+    def _calculate_role_risk(self, role_name: str, scope_type: str) -> tuple:
+        """Calculate risk level and explanation for a role assignment"""
+        role_lower = role_name.lower()
+
+        # Critical roles
+        if 'owner' in role_lower:
+            if scope_type == 'subscription':
+                return ('critical', 'Owner role grants full control over all subscription resources including IAM')
+            elif scope_type == 'resource_group':
+                return ('high', 'Owner role grants full control over resource group and all contained resources')
+            return ('medium', 'Owner role grants full control over the resource')
+
+        if 'user access administrator' in role_lower:
+            return ('critical', 'Can grant any role to any user - privilege escalation risk')
+
+        if 'contributor' in role_lower:
+            if scope_type == 'subscription':
+                return ('high', 'Contributor can create/modify/delete all resources in subscription')
+            elif scope_type == 'resource_group':
+                return ('medium', 'Contributor can modify all resources in resource group')
+            return ('low', 'Contributor access on specific resource')
+
+        # Key Vault privileged roles
+        if 'key vault' in role_lower:
+            if any(x in role_lower for x in ['administrator', 'officer', 'crypto']):
+                return ('high', 'Can manage Key Vault secrets, keys, or certificates')
+
+        # Storage privileged roles
+        if 'storage' in role_lower:
+            if 'owner' in role_lower or 'contributor' in role_lower:
+                return ('medium', 'Can access/modify storage account data')
+
+        # Reader roles are low risk
+        if 'reader' in role_lower:
+            return ('low', 'Read-only access')
+
+        return ('info', None)
+
+    def _parse_scope(self, scope: str) -> tuple:
+        """Extract resource type and name from ARM scope"""
+        if not scope:
+            return (None, None)
+
+        parts = scope.split('/')
+
+        # Subscription level
+        if '/resourceGroups/' not in scope:
+            return ('subscription', parts[-1] if len(parts) > 2 else None)
+
+        # Resource group level
+        if scope.count('/') <= 4:
+            rg_idx = parts.index('resourceGroups') if 'resourceGroups' in parts else -1
+            if rg_idx >= 0 and rg_idx + 1 < len(parts):
+                return ('resourceGroup', parts[rg_idx + 1])
+
+        # Resource level - get provider and type
+        if '/providers/' in scope:
+            try:
+                provider_idx = parts.index('providers')
+                if provider_idx + 2 < len(parts):
+                    resource_type = parts[provider_idx + 1] + '/' + parts[provider_idx + 2]
+                    resource_name = parts[-1]
+                    return (resource_type, resource_name)
+            except:
+                pass
+
+        return (None, parts[-1] if parts else None)
+
+    def _calculate_entra_role_risk(self, role_name: str) -> tuple:
+        """Calculate risk level and explanation for an Entra directory role"""
+        role_lower = role_name.lower()
+
+        # Critical Entra roles
+        if 'global administrator' in role_lower:
+            return ('critical', 'Full control over entire Entra ID tenant and all Azure resources')
+
+        if 'privileged role administrator' in role_lower:
+            return ('critical', 'Can assign any Entra role to any user - privilege escalation')
+
+        if 'privileged authentication administrator' in role_lower:
+            return ('critical', 'Can reset passwords and MFA for all users including Global Admins')
+
+        # High risk roles
+        if 'application administrator' in role_lower or 'cloud application administrator' in role_lower:
+            return ('high', 'Can manage all application registrations and service principals')
+
+        if 'user administrator' in role_lower:
+            return ('high', 'Can manage all users and groups, reset passwords')
+
+        if 'security administrator' in role_lower:
+            return ('high', 'Can manage security settings and policies')
+
+        if 'exchange administrator' in role_lower:
+            return ('high', 'Full access to Exchange Online including all mailboxes')
+
+        if 'sharepoint administrator' in role_lower:
+            return ('high', 'Full access to SharePoint Online including all sites')
+
+        if 'intune administrator' in role_lower:
+            return ('high', 'Can manage all Intune policies and device configurations')
+
+        if 'conditional access administrator' in role_lower:
+            return ('high', 'Can modify authentication policies')
+
+        # Medium risk roles
+        if 'helpdesk administrator' in role_lower or 'password administrator' in role_lower:
+            return ('medium', 'Can reset passwords for non-admin users')
+
+        if 'groups administrator' in role_lower:
+            return ('medium', 'Can manage all groups including security groups')
+
+        if 'teams administrator' in role_lower:
+            return ('medium', 'Full access to Teams administration')
+
+        # Low risk roles
+        if 'reader' in role_lower:
+            return ('low', 'Read-only access to directory data')
+
+        if 'reports reader' in role_lower or 'usage summary reports reader' in role_lower:
+            return ('low', 'Can view usage reports')
+
+        return ('info', None)
     
     async def _discover_entra_roles(self) -> List[Dict[str, Any]]:
         """Discover Entra ID directory role assignments for given principals"""
@@ -741,11 +894,22 @@ class AzureDiscoveryEngine:
                         except:
                             role_name = "Unknown Role"
                         
+                        # Calculate Entra role risk level
+                        risk_level, why_critical = self._calculate_entra_role_risk(role_name)
+
                         entra_roles.append({
                             'principal_id': assignment.principal_id,
                             'role_name': role_name,
                             'role_definition_id': assignment.role_definition_id,
                             'directory_scope': assignment.directory_scope_id or '/',
+                            # Usage intelligence fields
+                            'usage_status': 'unknown',
+                            'assigned_on': None,  # Entra doesn't expose this easily
+                            'days_since_assigned': None,
+                            'redundant_with': None,
+                            'role_type': 'entra',
+                            'risk_level': risk_level,
+                            'why_critical': why_critical,
                         })
                         
                         if len(entra_roles) <= 10:
@@ -905,6 +1069,149 @@ class AzureDiscoveryEngine:
 
         # Default: Assume customer-owned if no Microsoft patterns found
         return False
+
+    def _calculate_role_usage_status(
+        self,
+        identity: Dict,
+        roles: List[Dict],
+        entra_roles: List[Dict]
+    ) -> tuple:
+        """
+        Calculate usage status for each role based on inference.
+
+        Usage Status Logic:
+        - orphaned: Role scope points to deleted resource (scope_exists=False)
+        - definitely_unused: Identity disabled OR credentials expired OR never signed in
+        - likely_unused: No sign-in in 90+ days AND role assigned 90+ days ago
+        - possibly_overprivileged: Has broader role that makes this one redundant
+        - assumed_active: Recent sign-in, recent role assignment
+
+        Returns:
+            (updated_roles, updated_entra_roles) with usage_status populated
+        """
+        # Get identity status indicators
+        is_disabled = not identity.get('enabled', True)
+        last_sign_in = identity.get('last_sign_in')
+        credential_status = identity.get('credential_status', '')
+
+        # Calculate days since sign-in
+        days_since_signin = None
+        if last_sign_in:
+            try:
+                from datetime import datetime, timezone
+                if isinstance(last_sign_in, str):
+                    signin_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00'))
+                else:
+                    signin_dt = last_sign_in
+                days_since_signin = (datetime.now(timezone.utc) - signin_dt).days
+            except:
+                pass
+
+        has_expired_creds = credential_status and 'expired' in credential_status.lower()
+        never_signed_in = last_sign_in is None
+
+        # Check for redundant roles (Owner makes Contributor redundant, etc.)
+        role_hierarchy = {
+            'owner': ['contributor', 'reader'],
+            'contributor': ['reader'],
+            'user access administrator': [],
+            'global administrator': ['privileged role administrator', 'user administrator', 'application administrator'],
+            'privileged role administrator': ['application administrator', 'user administrator'],
+        }
+
+        # Get all role names for this identity
+        azure_role_names = [r['role_name'].lower() for r in roles]
+        entra_role_names = [r['role_name'].lower() for r in entra_roles]
+        all_role_names = azure_role_names + entra_role_names
+
+        # Update Azure RBAC roles
+        for role in roles:
+            role_name_lower = role['role_name'].lower()
+            days_assigned = role.get('days_since_assigned')
+
+            # Check for orphaned (scope doesn't exist)
+            if not role.get('scope_exists', True):
+                role['usage_status'] = 'orphaned'
+                continue
+
+            # Check if identity is definitely unused
+            if is_disabled:
+                role['usage_status'] = 'definitely_unused'
+                role['why_critical'] = (role.get('why_critical') or '') + ' Identity is disabled.'
+                continue
+
+            if has_expired_creds:
+                role['usage_status'] = 'definitely_unused'
+                role['why_critical'] = (role.get('why_critical') or '') + ' Credentials are expired.'
+                continue
+
+            if never_signed_in:
+                role['usage_status'] = 'definitely_unused'
+                role['why_critical'] = (role.get('why_critical') or '') + ' Identity has never signed in.'
+                continue
+
+            # Check for likely unused (dormant)
+            if days_since_signin and days_since_signin > 90 and days_assigned and days_assigned > 90:
+                role['usage_status'] = 'likely_unused'
+                continue
+
+            # Check for redundant roles
+            for broader_role, lesser_roles in role_hierarchy.items():
+                if broader_role in all_role_names and role_name_lower in lesser_roles:
+                    # Check if same scope (for Azure RBAC)
+                    broader_assignments = [r for r in roles if broader_role in r['role_name'].lower()]
+                    for broader in broader_assignments:
+                        if role.get('scope', '').startswith(broader.get('scope', 'xxx')):
+                            role['usage_status'] = 'possibly_overprivileged'
+                            role['redundant_with'] = broader['role_name']
+                            break
+                    if role.get('usage_status') == 'possibly_overprivileged':
+                        break
+
+            # Default: assumed active
+            if role.get('usage_status', 'unknown') == 'unknown':
+                if days_since_signin and days_since_signin < 30:
+                    role['usage_status'] = 'assumed_active'
+                elif days_assigned and days_assigned < 30:
+                    role['usage_status'] = 'assumed_active'
+                else:
+                    role['usage_status'] = 'unknown'
+
+        # Update Entra roles similarly
+        for role in entra_roles:
+            role_name_lower = role['role_name'].lower()
+            days_assigned = role.get('days_since_assigned')
+
+            if is_disabled:
+                role['usage_status'] = 'definitely_unused'
+                continue
+
+            if has_expired_creds:
+                role['usage_status'] = 'definitely_unused'
+                continue
+
+            if never_signed_in:
+                role['usage_status'] = 'definitely_unused'
+                continue
+
+            if days_since_signin and days_since_signin > 90:
+                role['usage_status'] = 'likely_unused'
+                continue
+
+            # Check for redundant Entra roles
+            for broader_role, lesser_roles in role_hierarchy.items():
+                if broader_role in entra_role_names and role_name_lower in lesser_roles:
+                    role['usage_status'] = 'possibly_overprivileged'
+                    role['redundant_with'] = broader_role.title()
+                    break
+
+            if role.get('usage_status', 'unknown') == 'unknown':
+                if days_since_signin and days_since_signin < 30:
+                    role['usage_status'] = 'assumed_active'
+                else:
+                    role['usage_status'] = 'unknown'
+
+        return (roles, entra_roles)
 
     def _calculate_risks(
         self,
@@ -1128,6 +1435,11 @@ class AzureDiscoveryEngine:
             else:
                 risk_level = 'info'
                 risk_reasons = ['No elevated privileges detected']
+
+            # Calculate role usage status (inference-based)
+            identity_roles, identity_entra_roles = self._calculate_role_usage_status(
+                identity, identity_roles, identity_entra_roles
+            )
 
             # Store results
             identity['risk_level'] = risk_level
