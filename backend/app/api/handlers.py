@@ -139,7 +139,17 @@ def get_identities():
                     SELECT COUNT(*)
                     FROM entra_role_assignments era
                     WHERE era.identity_db_id = i.id
-                ) as role_count
+                ) as role_count,
+                -- Multi-cloud normalized fields
+                COALESCE(i.cloud, 'azure') as cloud,
+                i.identity_type_normalized,
+                i.canonical_name,
+                i.principal_id,
+                i.tenant_or_org_id,
+                COALESCE(i.source_normalized, 'entra') as source,
+                COALESCE(i.is_federated, false) as is_federated,
+                COALESCE(i.status, 'active') as status,
+                i.last_seen_auth
             FROM identities i
             WHERE i.discovery_run_id = %s
         """
@@ -205,6 +215,16 @@ def get_identities():
                     "created_datetime": row[10].isoformat() if row[10] else None,
                     "activity_status": row[11] or "unknown",
                     "role_count": int(row[12] or 0),
+                    # Multi-cloud normalized fields
+                    "cloud": row[13] or "azure",
+                    "normalized_identity_type": row[14],
+                    "canonical_name": row[15],
+                    "principal_id": row[16],
+                    "tenant_or_org_id": row[17],
+                    "source": row[18] or "entra",
+                    "is_federated": row[19] or False,
+                    "status": row[20] or "active",
+                    "last_seen_auth": row[21].isoformat() if row[21] else None,
                 }
             )
 
@@ -227,7 +247,17 @@ def get_identity_details(identity_id: str):
             """
             SELECT id, identity_id, display_name, identity_type, identity_category, risk_level,
                    credential_count, credential_risk, credential_status, credential_expiration,
-                   created_datetime, activity_status, risk_reasons
+                   created_datetime, activity_status, risk_reasons,
+                   -- Multi-cloud normalized fields
+                   COALESCE(cloud, 'azure') as cloud,
+                   identity_type_normalized,
+                   canonical_name,
+                   principal_id,
+                   tenant_or_org_id,
+                   COALESCE(source_normalized, 'entra') as source,
+                   COALESCE(is_federated, false) as is_federated,
+                   COALESCE(status, 'active') as status,
+                   last_seen_auth
             FROM identities
             WHERE identity_id = %s
             ORDER BY discovery_run_id DESC
@@ -263,6 +293,16 @@ def get_identity_details(identity_id: str):
             "created_datetime": row[10].isoformat() if row[10] else None,
             "activity_status": row[11],
             "risk_reasons": _parse_risk_reasons(row[12]),
+            # Multi-cloud normalized fields
+            "cloud": row[13] or "azure",
+            "normalized_identity_type": row[14],
+            "canonical_name": row[15],
+            "principal_id": row[16],
+            "tenant_or_org_id": row[17],
+            "source": row[18] or "entra",
+            "is_federated": row[19] or False,
+            "status": row[20] or "active",
+            "last_seen_auth": row[21].isoformat() if row[21] else None,
         }
 
         # ✅ FIXED: clean try/except blocks

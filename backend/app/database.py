@@ -134,6 +134,11 @@ class Database:
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
+        # Calculate normalized fields for multi-cloud support
+        identity_type_normalized = self._get_normalized_type(identity_data)
+        is_federated = identity_data.get("is_federated", False) or identity_data.get("identity_category") == "guest"
+        status = "active" if identity_data.get("enabled", True) else "disabled"
+
         cursor.execute(
             """
             INSERT INTO identities (
@@ -162,7 +167,18 @@ class Database:
                 last_sign_in,
                 activity_status,
 
-                tags
+                tags,
+
+                -- Multi-cloud normalized fields
+                cloud,
+                identity_type_normalized,
+                canonical_name,
+                principal_id,
+                tenant_or_org_id,
+                source_normalized,
+                is_federated,
+                status,
+                last_seen_auth
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -171,7 +187,8 @@ class Database:
                 %s, %s,
                 %s, %s,
                 %s, %s,
-                %s
+                %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -198,6 +215,18 @@ class Database:
                 activity_status = EXCLUDED.activity_status,
 
                 tags = EXCLUDED.tags,
+
+                -- Multi-cloud normalized fields
+                cloud = EXCLUDED.cloud,
+                identity_type_normalized = EXCLUDED.identity_type_normalized,
+                canonical_name = EXCLUDED.canonical_name,
+                principal_id = EXCLUDED.principal_id,
+                tenant_or_org_id = EXCLUDED.tenant_or_org_id,
+                source_normalized = EXCLUDED.source_normalized,
+                is_federated = EXCLUDED.is_federated,
+                status = EXCLUDED.status,
+                last_seen_auth = EXCLUDED.last_seen_auth,
+
                 created_at = NOW()
             RETURNING id
         """,
@@ -232,6 +261,17 @@ class Database:
                 identity_data.get("activity_status"),
 
                 tags_json,
+
+                # Multi-cloud normalized fields
+                identity_data.get("cloud", "azure"),
+                identity_type_normalized,
+                identity_data.get("display_name"),  # canonical_name = display_name
+                identity_data.get("object_id"),  # principal_id = object_id for Azure
+                identity_data.get("tenant_id"),  # tenant_or_org_id
+                identity_data.get("source", "entra"),  # source_normalized
+                is_federated,
+                status,
+                identity_data.get("last_sign_in"),  # last_seen_auth = last_sign_in
             ),
         )
 
@@ -240,6 +280,29 @@ class Database:
         cursor.close()
 
         return identity_db_id
+
+    def _get_normalized_type(self, identity_data: Dict) -> str:
+        """
+        Map identity_category to normalized identity_type for multi-cloud support
+
+        Mapping:
+            service_principal -> app
+            managed_identity_system -> workload
+            managed_identity_user -> workload
+            human_user -> human
+            guest -> human
+            microsoft_internal -> system
+        """
+        mapping = {
+            "service_principal": "app",
+            "managed_identity_system": "workload",
+            "managed_identity_user": "workload",
+            "human_user": "human",
+            "guest": "human",
+            "microsoft_internal": "system",
+        }
+        category = identity_data.get("identity_category", "")
+        return mapping.get(category, "app")
 
     def save_role_assignment(self, identity_db_id: int, role_data: Dict):
         """Save a role assignment to the database"""

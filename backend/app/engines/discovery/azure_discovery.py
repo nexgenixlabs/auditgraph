@@ -270,6 +270,10 @@ class AzureDiscoveryEngine:
                         'service_principal_type': sp.service_principal_type if hasattr(sp, 'service_principal_type') else None,
                         'app_owner_organization_id': sp.app_owner_organization_id if hasattr(sp, 'app_owner_organization_id') else None,
                         'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
+                        # Multi-cloud normalized fields
+                        'cloud': 'azure',
+                        'tenant_id': self.tenant_id,
+                        'source': 'entra',
                     }
 
                     # Classify identity into the correct category
@@ -578,6 +582,11 @@ class AzureDiscoveryEngine:
                         'identity_category': 'guest' if is_guest else 'human_user',
                         'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
                         'created_datetime': created,
+                        # Multi-cloud normalized fields
+                        'cloud': 'azure',
+                        'tenant_id': self.tenant_id,
+                        'source': 'entra',
+                        'is_federated': is_guest,  # Guest users are federated
                     })
 
             return identities

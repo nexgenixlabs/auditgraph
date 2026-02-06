@@ -6,7 +6,7 @@
  * API responses and component props.
  *
  * Core Domain Types:
- *   - Identity: Azure identity (SPN, user, managed identity)
+ *   - Identity: Cloud identity (Azure, AWS, GCP)
  *   - RoleAssignment: Azure RBAC role assignment
  *   - GraphPermission: Microsoft Graph API permission
  *   - DiscoveryRun: Discovery execution record
@@ -23,34 +23,61 @@
  * data handling across the frontend application.
  */
 
+// Multi-cloud type definitions
+export type CloudProvider = 'azure' | 'aws' | 'gcp';
+export type NormalizedIdentityType = 'human' | 'workload' | 'app' | 'group' | 'role' | 'system';
+export type IdentityStatus = 'active' | 'disabled' | 'deleted';
+
 /**
- * Represents a discovered Azure identity.
+ * Represents a discovered cloud identity.
  *
- * Identities can be service principals, users, or managed identities.
+ * Identities can be service principals, users, managed identities, etc.
+ * Supports multi-cloud: Azure, AWS, GCP.
  * Each identity has associated role assignments, permissions, and
  * risk assessment data.
  */
 export interface Identity {
+  // Core identity fields
   identity_id: string;
   display_name: string;
   identity_type: string;
+  identity_category?: string;  // Legacy category (kept for backwards compatibility)
   source?: string;
   risk_level: string;
+
+  // Credential fields
   credential_status?: string;
   credential_count?: number;
   next_expiry?: string;
   credential_risk?: string;
-  activity_status?: string;
   credential_expiration?: string;
+
+  // Activity fields
+  activity_status?: string;
   created_datetime?: string;
+  last_sign_in?: string;
+
+  // Role fields
   role_count?: number;
+  roles?: RoleAssignment[];
+  graph_permissions?: GraphPermission[];
+
+  // Azure-specific fields (legacy)
   app_id?: string;
   object_id?: string;
   risk_reasons?: string;
-  last_sign_in?: string;
   enabled?: boolean;
-  roles?: RoleAssignment[];
-  graph_permissions?: GraphPermission[];
+
+  // Multi-cloud normalized fields
+  cloud?: CloudProvider;
+  normalized_identity_type?: NormalizedIdentityType;
+  canonical_name?: string;
+  principal_id?: string;
+  tenant_or_org_id?: string;
+  is_federated?: boolean;
+  status?: IdentityStatus;
+  last_seen_auth?: string | null;
+  tags?: Record<string, string>;
 }
 
 export interface RoleAssignment {
