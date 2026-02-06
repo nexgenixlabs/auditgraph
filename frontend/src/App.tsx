@@ -4,15 +4,15 @@
  * Sets up:
  * - React Router routes
  * - Global navigation bar
- * - Front Page (Overview blocks)
+ * - Front Page (Overview - Enterprise Risk Intelligence)
  *
  * Routes:
- *   /                  - Overview (graphical blocks by identity type)
- *   /dashboard          - Existing Dashboard page (risk summary)
+ *   /                  - Overview (global risk, cloud comparison, categories)
+ *   /dashboard          - Dashboard (heat map, detailed analytics)
  *   /identities         - Identity list
- *   /identities/:id     - Identity detail
+ *   /identities/:id     - Identity detail (5-tab architecture)
  */
-import React from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   BrowserRouter as Router,
   Routes,
@@ -25,113 +25,251 @@ import {
 import Dashboard from './pages/Dashboard';
 import Identities from './pages/Identities';
 import IdentityDetail from './pages/IdentityDetail';
+import {
+  GlobalRiskCards,
+  CloudComparison,
+  CategoryRiskGrid,
+  CriticalIdentitiesList,
+} from './components/overview';
 
-/**
- * Front page: identity-type blocks.
- * This is intentionally “lightweight” for now:
- * - It routes users into /identities with query params
- * - Identities page can later read these query params and apply filters automatically
- */
+// ============================================================
+// Overview Page - Enterprise Risk Intelligence
+// ============================================================
+
+interface StatsResponse {
+  total_discovery_runs: number;
+  latest_run: {
+    id: number;
+    completed_at: string | null;
+    total_identities: number;
+    critical_count: number;
+    high_count: number;
+    medium_count: number;
+  } | null;
+}
+
+interface IdentitySummaryResponse {
+  run_id: number;
+  completed_at: string | null;
+  categories: Record<
+    string,
+    { total: number; critical: number; high: number; medium: number; low: number; info: number }
+  >;
+}
+
+interface RisksResponse {
+  run_id: number;
+  count: number;
+  risks: Array<{
+    identity_id: string;
+    display_name: string;
+    identity_category?: string;
+    risk_level: string;
+    risk_score?: number;
+    risk_reason: string[] | string;
+  }>;
+}
+
 const Overview: React.FC = () => {
   const navigate = useNavigate();
 
-  const go = (identityType: string) => {
-    // This is the contract we will implement in Identities.tsx next:
-    // read identityType from query params and apply the filter.
-    navigate(`/identities?identityType=${encodeURIComponent(identityType)}`);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
+  const [risks, setRisks] = useState<RisksResponse | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const [statsRes, summaryRes, risksRes] = await Promise.all([
+          fetch('/api/stats'),
+          fetch('/api/identity-summary'),
+          fetch('/api/risks'),
+        ]);
+
+        if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
+        if (!summaryRes.ok) throw new Error(`Summary API error: ${summaryRes.status}`);
+        if (!risksRes.ok) throw new Error(`Risks API error: ${risksRes.status}`);
+
+        const [statsJson, summaryJson, risksJson] = await Promise.all([
+          statsRes.json(),
+          summaryRes.json(),
+          risksRes.json(),
+        ]);
+
+        if (!cancelled) {
+          setStats(statsJson);
+          setSummary(summaryJson);
+          setRisks(risksJson);
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message || 'Failed to load overview data');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Compute global risk counts
+  const riskCounts = useMemo(() => {
+    const latest = stats?.latest_run;
+    return {
+      critical: latest?.critical_count ?? 0,
+      high: latest?.high_count ?? 0,
+      medium: latest?.medium_count ?? 0,
+      low: (latest?.total_identities ?? 0) - (latest?.critical_count ?? 0) - (latest?.high_count ?? 0) - (latest?.medium_count ?? 0),
+      total: latest?.total_identities ?? 0,
+    };
+  }, [stats]);
+
+  // Compute cloud risk data (currently Azure only)
+  const cloudData = useMemo(() => {
+    const cats = summary?.categories || {};
+    let total = 0, critical = 0, high = 0, medium = 0, low = 0;
+
+    Object.values(cats).forEach((cat) => {
+      total += cat.total;
+      critical += cat.critical;
+      high += cat.high;
+      medium += cat.medium;
+      low += cat.low + cat.info;
+    });
+
+    return [{
+      cloud: 'azure' as const,
+      total,
+      critical,
+      high,
+      medium,
+      low,
+    }];
+  }, [summary]);
+
+  // Compute category data
+  const categoryData = useMemo(() => {
+    const cats = summary?.categories || {};
+    const orderedKeys = [
+      'service_principal',
+      'managed_identity_system',
+      'managed_identity_user',
+      'human_user',
+      'guest',
+      'microsoft_internal',
+    ];
+
+    return orderedKeys.map((key) => {
+      const cat = cats[key] || { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+      return {
+        key,
+        total: cat.total,
+        critical: cat.critical,
+        high: cat.high,
+        medium: cat.medium,
+        low: cat.low,
+        info: cat.info,
+      };
+    });
+  }, [summary]);
+
+  // Critical identities list
+  const criticalIdentities = useMemo(() => {
+    return (risks?.risks || []).map((r) => ({
+      identity_id: r.identity_id,
+      display_name: r.display_name,
+      identity_category: r.identity_category,
+      risk_level: r.risk_level,
+      risk_score: r.risk_score,
+      risk_reason: r.risk_reason,
+    }));
+  }, [risks]);
+
+  // Navigation handlers
+  const handleRiskCardClick = (level: string) => {
+    navigate(`/identities?risk_level=${level}`);
   };
 
-  const Block: React.FC<{
-    title: string;
-    subtitle: string;
-    identityType: string;
-    hint?: string;
-  }> = ({ title, subtitle, identityType, hint }) => (
-    <button
-      onClick={() => go(identityType)}
-      className="text-left bg-white border rounded-2xl shadow-sm hover:shadow-md transition p-5 w-full"
-    >
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-lg font-semibold text-gray-900">{title}</div>
-          <div className="text-sm text-gray-600 mt-1">{subtitle}</div>
-          {hint ? (
-            <div className="text-xs text-gray-500 mt-3">{hint}</div>
-          ) : null}
-        </div>
-        <div className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-700">
-          View
+  const handleCloudClick = (cloud: string) => {
+    navigate(`/identities?cloud=${cloud}`);
+  };
+
+  const handleCategoryClick = (category: string, riskLevel?: string) => {
+    let url = `/identities?identity_category=${encodeURIComponent(category)}`;
+    if (riskLevel) {
+      url += `&risk_level=${encodeURIComponent(riskLevel)}`;
+    }
+    navigate(url);
+  };
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="animate-pulse space-y-6">
+          <div className="h-8 bg-gray-200 rounded w-64" />
+          <div className="grid grid-cols-4 gap-4">
+            {[1, 2, 3, 4].map((i) => <div key={i} className="h-24 bg-gray-100 rounded-xl" />)}
+          </div>
+          <div className="h-48 bg-gray-100 rounded-xl" />
+          <div className="grid grid-cols-3 gap-4">
+            {[1, 2, 3, 4, 5, 6].map((i) => <div key={i} className="h-40 bg-gray-100 rounded-xl" />)}
+          </div>
         </div>
       </div>
-    </button>
-  );
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
+          <div className="font-semibold">Error loading overview</div>
+          <div className="text-sm mt-1">{error}</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">Identity Overview</h2>
-        <p className="text-sm text-gray-600 mt-1">
-          Choose an identity category to view risks, roles, credentials, and activity evidence.
-        </p>
-      </div>
-
-      {/* Blocks grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        <Block
-          title="Service Principals"
-          subtitle="Enterprise apps, app registrations, workload identities"
-          identityType="service_principal"
-          hint="Includes app roles, Graph permissions, credential hygiene, exposed APIs"
-        />
-        <Block
-          title="Managed Identity (System)"
-          subtitle="System-assigned managed identities bound to Azure resources"
-          identityType="managed_identity_system"
-          hint="We will ensure these do NOT appear under Service Principals in UI"
-        />
-        <Block
-          title="Managed Identity (User)"
-          subtitle="User-assigned managed identities reusable across resources"
-          identityType="managed_identity_user"
-          hint="We will separate these cleanly from SPNs in backend + UI"
-        />
-        <Block
-          title="Human Users"
-          subtitle="Employees and standard members"
-          identityType="human_user"
-          hint="We’ll surface disabled users with privileged roles as critical"
-        />
-        <Block
-          title="Guest Users"
-          subtitle="B2B / external collaboration identities"
-          identityType="guest"
-          hint="Risk signals: dormant guests, privileged access, missing sponsor/owner"
-        />
-        <Block
-          title="Microsoft Internal"
-          subtitle="First-party / internal service principals"
-          identityType="microsoft_internal"
-          hint="We’ll keep visibility but tune risk scoring + reduce false positives"
-        />
-      </div>
-
-      {/* Quick path */}
-      <div className="mt-8 bg-white border rounded-2xl p-5">
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-          <div>
-            <div className="font-semibold text-gray-900">Want the full risk dashboard?</div>
-            <div className="text-sm text-gray-600">
-              Go to the risk posture view (existing dashboard).
-            </div>
-          </div>
-          <Link
-            to="/dashboard"
-            className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition"
-          >
-            Open Dashboard
-          </Link>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">Identity Risk Overview</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Multi-cloud identity security posture at a glance
+          </p>
+        </div>
+        <div className="text-xs text-gray-500">
+          Last updated: {stats?.latest_run?.completed_at
+            ? new Date(stats.latest_run.completed_at).toLocaleString()
+            : 'Never'}
         </div>
       </div>
+
+      {/* Section 1: Global Risk Cards */}
+      <div>
+        <div className="text-sm font-semibold text-gray-700 mb-3">Global Risk Summary</div>
+        <GlobalRiskCards counts={riskCounts} onCardClick={handleRiskCardClick} />
+      </div>
+
+      {/* Section 2: Cloud Risk Comparison */}
+      <CloudComparison data={cloudData} onCloudClick={handleCloudClick} />
+
+      {/* Section 3: Category Risk Grid */}
+      <div>
+        <div className="text-sm font-semibold text-gray-700 mb-3">Risk by Identity Category</div>
+        <CategoryRiskGrid categories={categoryData} onCategoryClick={handleCategoryClick} />
+      </div>
+
+      {/* Section 4: Critical Identities */}
+      <CriticalIdentitiesList identities={criticalIdentities} loading={loading} />
     </div>
   );
 };

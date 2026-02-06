@@ -8,6 +8,7 @@ from app.api.handlers import (
     get_identity_details,
     get_risks,
     get_identity_summary,
+    get_dashboard_posture,
 )
 
 def create_app():
@@ -46,6 +47,13 @@ def create_app():
     @app.get("/api/stats")
     def stats_alias():
         return get_stats()
+
+    # -----------------------
+    # Dashboard posture (credential health, trends)
+    # -----------------------
+    @app.get("/api/dashboard/posture")
+    def dashboard_posture():
+        return get_dashboard_posture()
 
     # -----------------------
     # Risks (Dashboard needs it)

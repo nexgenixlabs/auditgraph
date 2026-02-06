@@ -793,40 +793,53 @@ class AzureDiscoveryEngine:
             return []
 
     def _calculate_role_risk(self, role_name: str, scope_type: str) -> tuple:
-        """Calculate risk level and explanation for a role assignment"""
+        """Calculate risk level and explanation for a role assignment with compliance context"""
         role_lower = role_name.lower()
 
         # Critical roles
         if 'owner' in role_lower:
             if scope_type == 'subscription':
-                return ('critical', 'Owner role grants full control over all subscription resources including IAM')
+                return ('critical', 'Owner on Subscription: Full control including IAM - violates SOC2 least privilege, PCI-DSS 7.1, HIPAA §164.312(a)(1) access controls')
             elif scope_type == 'resource_group':
-                return ('high', 'Owner role grants full control over resource group and all contained resources')
-            return ('medium', 'Owner role grants full control over the resource')
+                return ('high', 'Owner on Resource Group: Full control over all resources - review for SOC2 least privilege, consider scope reduction')
+            return ('medium', 'Owner on resource: Full control - verify business justification per SOC2 access review requirements')
 
         if 'user access administrator' in role_lower:
-            return ('critical', 'Can grant any role to any user - privilege escalation risk')
+            return ('critical', 'User Access Administrator: Can grant any role - privilege escalation risk, violates SOC2 separation of duties, PCI-DSS 7.1')
 
         if 'contributor' in role_lower:
             if scope_type == 'subscription':
-                return ('high', 'Contributor can create/modify/delete all resources in subscription')
+                return ('high', 'Contributor on Subscription: Can modify all resources - violates SOC2 least privilege, PCI-DSS 7.2 access restrictions')
             elif scope_type == 'resource_group':
-                return ('medium', 'Contributor can modify all resources in resource group')
-            return ('low', 'Contributor access on specific resource')
+                return ('medium', 'Contributor on Resource Group: Broad modification access - review for SOC2 least privilege compliance')
+            return ('low', 'Contributor on resource: Scoped access - verify business justification')
 
         # Key Vault privileged roles
         if 'key vault' in role_lower:
             if any(x in role_lower for x in ['administrator', 'officer', 'crypto']):
-                return ('high', 'Can manage Key Vault secrets, keys, or certificates')
+                return ('high', 'Key Vault Admin/Officer: Access to secrets/keys/certificates - HIPAA encryption controls (§164.312(a)(2)(iv)), PCI-DSS 3.5 key management')
 
         # Storage privileged roles
         if 'storage' in role_lower:
             if 'owner' in role_lower or 'contributor' in role_lower:
-                return ('medium', 'Can access/modify storage account data')
+                return ('medium', 'Storage access: Can read/modify data - potential PII/PHI exposure, review for HIPAA/GDPR data access controls')
+
+        # SQL/Database roles
+        if 'sql' in role_lower or 'cosmos' in role_lower or 'database' in role_lower:
+            if 'contributor' in role_lower or 'admin' in role_lower:
+                return ('high', 'Database Admin: Access to sensitive data stores - HIPAA ePHI risk, PCI-DSS cardholder data controls, GDPR Art. 32')
+
+        # Network security roles
+        if 'network' in role_lower and 'contributor' in role_lower:
+            return ('medium', 'Network Contributor: Can modify network security - SOC2 network security controls, review firewall/NSG changes')
+
+        # Virtual Machine roles
+        if 'virtual machine' in role_lower and ('contributor' in role_lower or 'admin' in role_lower):
+            return ('medium', 'VM Admin: Can access compute resources - potential data exposure, SOC2 system access controls')
 
         # Reader roles are low risk
         if 'reader' in role_lower:
-            return ('low', 'Read-only access')
+            return ('low', 'Read-only access: Limited risk but review for data sensitivity per SOC2 access monitoring')
 
         return ('info', None)
 
@@ -861,57 +874,72 @@ class AzureDiscoveryEngine:
         return (None, parts[-1] if parts else None)
 
     def _calculate_entra_role_risk(self, role_name: str) -> tuple:
-        """Calculate risk level and explanation for an Entra directory role"""
+        """Calculate risk level and explanation for an Entra directory role with compliance context"""
         role_lower = role_name.lower()
 
         # Critical Entra roles
         if 'global administrator' in role_lower:
-            return ('critical', 'Full control over entire Entra ID tenant and all Azure resources')
+            return ('critical', 'Global Administrator: Full tenant control - violates SOC2 least privilege, HIPAA §164.312 access controls, PCI-DSS 7.1 need-to-know')
 
         if 'privileged role administrator' in role_lower:
-            return ('critical', 'Can assign any Entra role to any user - privilege escalation')
+            return ('critical', 'Privileged Role Admin: Can assign any role - privilege escalation, violates SOC2 separation of duties, PCI-DSS 7.1')
 
         if 'privileged authentication administrator' in role_lower:
-            return ('critical', 'Can reset passwords and MFA for all users including Global Admins')
+            return ('critical', 'Privileged Auth Admin: Can reset MFA for all users - account takeover risk, HIPAA §164.312(d) authentication controls')
 
         # High risk roles
         if 'application administrator' in role_lower or 'cloud application administrator' in role_lower:
-            return ('high', 'Can manage all application registrations and service principals')
+            return ('high', 'Application Admin: Can manage all apps/SPNs - potential data access via app credentials, HIPAA BAA concerns')
 
         if 'user administrator' in role_lower:
-            return ('high', 'Can manage all users and groups, reset passwords')
+            return ('high', 'User Administrator: Can create users/reset passwords - SOC2 access control risk, PCI-DSS 8.1 user ID management')
 
         if 'security administrator' in role_lower:
-            return ('high', 'Can manage security settings and policies')
+            return ('high', 'Security Administrator: Can modify security policies - SOC2 change management, affects HIPAA/PCI security controls')
 
         if 'exchange administrator' in role_lower:
-            return ('high', 'Full access to Exchange Online including all mailboxes')
+            return ('high', 'Exchange Administrator: Full mailbox access - HIPAA ePHI exposure via email, SOC2 confidentiality controls')
 
         if 'sharepoint administrator' in role_lower:
-            return ('high', 'Full access to SharePoint Online including all sites')
+            return ('high', 'SharePoint Administrator: Full document access - PII/PHI exposure risk, GDPR Art. 32 data protection')
 
         if 'intune administrator' in role_lower:
-            return ('high', 'Can manage all Intune policies and device configurations')
+            return ('high', 'Intune Administrator: Device management - can access/wipe devices, SOC2 endpoint security controls')
 
         if 'conditional access administrator' in role_lower:
-            return ('high', 'Can modify authentication policies')
+            return ('high', 'Conditional Access Admin: Can bypass MFA policies - authentication security risk, HIPAA §164.312(d)')
+
+        if 'billing administrator' in role_lower:
+            return ('high', 'Billing Administrator: Access to payment/financial data - PCI-DSS cardholder data exposure risk')
+
+        if 'compliance administrator' in role_lower:
+            return ('high', 'Compliance Administrator: Can modify compliance settings - SOC2/HIPAA audit control risk')
 
         # Medium risk roles
         if 'helpdesk administrator' in role_lower or 'password administrator' in role_lower:
-            return ('medium', 'Can reset passwords for non-admin users')
+            return ('medium', 'Helpdesk/Password Admin: Can reset non-admin passwords - social engineering risk, SOC2 access controls')
 
         if 'groups administrator' in role_lower:
-            return ('medium', 'Can manage all groups including security groups')
+            return ('medium', 'Groups Administrator: Can modify security groups - affects access controls, SOC2 group management')
 
         if 'teams administrator' in role_lower:
-            return ('medium', 'Full access to Teams administration')
+            return ('medium', 'Teams Administrator: Access to all Teams data - potential PII/confidential data exposure')
+
+        if 'authentication administrator' in role_lower:
+            return ('medium', 'Authentication Admin: Can reset MFA for non-admins - account security risk, HIPAA §164.312(d)')
+
+        if 'license administrator' in role_lower:
+            return ('medium', 'License Administrator: Can manage licenses - no direct data access but operational impact')
 
         # Low risk roles
         if 'reader' in role_lower:
-            return ('low', 'Read-only access to directory data')
+            return ('low', 'Directory Reader: Read-only access - limited risk but review for SOC2 access monitoring')
 
         if 'reports reader' in role_lower or 'usage summary reports reader' in role_lower:
-            return ('low', 'Can view usage reports')
+            return ('low', 'Reports Reader: Can view usage reports - minimal risk, audit trail access')
+
+        if 'message center reader' in role_lower:
+            return ('low', 'Message Center Reader: Can view service messages - informational access only')
 
         return ('info', None)
     
@@ -1329,22 +1357,25 @@ class AzureDiscoveryEngine:
                 role_name_lower = entra_role['role_name'].lower()
                 if 'global administrator' in role_name_lower:
                     risk_score += 100
-                    risk_reasons.append('Entra ID Global Administrator')
+                    risk_reasons.append('Global Administrator: Full tenant control - violates SOC2 least privilege, HIPAA access controls (§164.312), PCI-DSS requirement 7')
                 elif 'privileged role administrator' in role_name_lower:
                     risk_score += 90
-                    risk_reasons.append('Entra ID Privileged Role Administrator')
+                    risk_reasons.append('Privileged Role Admin: Can assign any role - privilege escalation risk, violates SOC2 separation of duties')
                 elif 'application administrator' in role_name_lower or 'cloud application administrator' in role_name_lower:
                     risk_score += 80
-                    risk_reasons.append(f"Entra ID {entra_role['role_name']}")
+                    risk_reasons.append(f"{entra_role['role_name']}: Can manage all apps/SPNs - potential data access via credentials, HIPAA BAA concerns")
                 elif 'user administrator' in role_name_lower:
                     risk_score += 60
-                    risk_reasons.append('Entra ID User Administrator')
+                    risk_reasons.append('User Administrator: Can reset passwords, create users - SOC2 access control risk, PCI-DSS 8.1 violation')
                 elif 'security administrator' in role_name_lower:
                     risk_score += 60
-                    risk_reasons.append('Entra ID Security Administrator')
-                elif 'exchange administrator' in role_name_lower or 'sharepoint administrator' in role_name_lower:
+                    risk_reasons.append('Security Administrator: Can modify security policies - violates SOC2 change management controls')
+                elif 'exchange administrator' in role_name_lower:
                     risk_score += 50
-                    risk_reasons.append(f"Entra ID {entra_role['role_name']}")
+                    risk_reasons.append('Exchange Administrator: Full mailbox access - HIPAA ePHI exposure risk, SOC2 confidentiality')
+                elif 'sharepoint administrator' in role_name_lower:
+                    risk_score += 50
+                    risk_reasons.append('SharePoint Administrator: Full document access - potential PII/PHI exposure, GDPR Art. 32 risk')
 
             # ============================================================
             # 2. Azure RBAC Roles
@@ -1356,26 +1387,26 @@ class AzureDiscoveryEngine:
                 if 'owner' in role_name:
                     if scope_type == 'subscription':
                         risk_score += 100
-                        risk_reasons.append('Owner role on subscription')
+                        risk_reasons.append('Owner on Subscription: Full control including IAM - violates SOC2 least privilege, PCI-DSS 7.1, HIPAA §164.312(a)(1)')
                     elif scope_type == 'resource_group':
                         risk_score += 60
-                        risk_reasons.append('Owner role on resource group')
+                        risk_reasons.append('Owner on Resource Group: Can delete all resources, modify access - SOC2 availability risk')
                     else:
                         risk_score += 30
                         risk_reasons.append(f"Owner role on {scope_type}")
                 elif 'contributor' in role_name:
                     if scope_type == 'subscription':
                         risk_score += 80
-                        risk_reasons.append('Contributor role on subscription')
+                        risk_reasons.append('Contributor on Subscription: Can create/modify/delete all resources - violates SOC2 least privilege, PCI-DSS 7.2 access restrictions')
                     elif scope_type == 'resource_group':
                         risk_score += 40
-                        risk_reasons.append('Contributor role on resource group')
+                        risk_reasons.append('Contributor on Resource Group: Broad resource modification access - review for SOC2 least privilege compliance')
                 elif 'user access administrator' in role_name:
                     risk_score += 70
-                    risk_reasons.append('User Access Administrator role')
+                    risk_reasons.append('User Access Administrator: Can grant any role to any user - privilege escalation risk, violates SOC2 separation of duties, PCI-DSS 7.1')
                 elif 'key vault' in role_name and ('administrator' in role_name or 'officer' in role_name):
                     risk_score += 50
-                    risk_reasons.append(f"Key Vault privileged role: {role['role_name']}")
+                    risk_reasons.append(f"Key Vault Admin/Officer: Access to secrets/keys/certificates - HIPAA encryption key controls (§164.312(a)(2)(iv)), PCI-DSS 3.5 key management")
 
             # ============================================================
             # 3. API Permissions (Graph API)
@@ -1392,11 +1423,11 @@ class AzureDiscoveryEngine:
 
             if write_permissions:
                 risk_score += 60
-                risk_reasons.append(f"Has {len(write_permissions)} write permission(s) to Graph API")
+                risk_reasons.append(f"Graph API Write Access: {len(write_permissions)} write permission(s) - can modify tenant data, SOC2 change management, HIPAA §164.312(c) integrity controls")
 
             if read_all_permissions and not write_permissions:
                 risk_score += 40
-                risk_reasons.append(f"Has {len(read_all_permissions)} read-all permission(s)")
+                risk_reasons.append(f"Graph API Read-All Access: {len(read_all_permissions)} permission(s) - broad data access, potential PII/PHI exposure, GDPR Art. 32")
 
             # ============================================================
             # 4. Orphaned Permissions (API access without role justification)

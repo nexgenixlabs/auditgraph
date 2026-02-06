@@ -100,13 +100,19 @@ def get_identities():
         risk_level: Filter by risk level (critical, high, medium, low, info)
         identity_type: Filter by type (user, service_principal, managed_identity, group, unknown)
         identity_category: Filter by category (e.g., User Assigned Identity)
+        cloud: Filter by cloud provider (azure, aws, gcp)
         search: Filter by display_name contains
+        limit: Max results to return (default: no limit)
+        offset: Skip N results (default: 0)
     """
     db = _db()
     risk_filter = request.args.get("risk_level")
     type_filter = request.args.get("identity_type")
-    category_filter = request.args.get("identity_category")  # ✅ FIXED
+    category_filter = request.args.get("identity_category")
+    cloud_filter = request.args.get("cloud")
     search = request.args.get("search")
+    limit = request.args.get("limit", type=int)
+    offset = request.args.get("offset", default=0, type=int)
 
     cursor = db.conn.cursor()
 
@@ -187,9 +193,18 @@ def get_identities():
             query += " AND i.identity_type = %s"
             params.append(type_filter)
 
+        if cloud_filter:
+            query += " AND COALESCE(i.cloud, 'azure') = %s"
+            params.append(cloud_filter.lower())
+
         if search:
             query += " AND LOWER(i.display_name) LIKE %s"
             params.append(f"%{search.lower()}%")
+
+        # Get total count before pagination
+        count_query = f"SELECT COUNT(*) FROM ({query}) sub"
+        cursor.execute(count_query, params)
+        total_count = cursor.fetchone()[0]
 
         query += """
             ORDER BY
@@ -202,6 +217,10 @@ def get_identities():
                 END,
                 i.display_name
         """
+
+        if limit:
+            query += " LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -262,7 +281,12 @@ def get_identities():
                 }
             )
 
-        return jsonify({"count": len(identities), "identities": identities})
+        result = {"count": len(identities), "total": total_count, "identities": identities}
+        if limit:
+            result["limit"] = limit
+            result["offset"] = offset
+            result["has_more"] = (offset + len(identities)) < total_count
+        return jsonify(result)
 
     finally:
         cursor.close()
@@ -686,6 +710,123 @@ def _is_microsoft_internal_identity(display_name: str, identity_type: str) -> bo
             return True
 
     return False
+
+
+def get_dashboard_posture():
+    """
+    Dashboard posture data: credential health, dormant counts, posture score,
+    and previous run comparison for trend indicators.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        # Get latest two completed runs for trend comparison
+        cursor.execute(
+            """
+            SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
+            FROM discovery_runs
+            WHERE status = 'completed'
+            ORDER BY id DESC
+            LIMIT 2
+            """
+        )
+        runs = cursor.fetchall()
+
+        if not runs:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        current_run_id = runs[0][0]
+        current_run = {
+            "id": runs[0][0],
+            "completed_at": runs[0][1].isoformat() if runs[0][1] else None,
+            "total_identities": runs[0][2] or 0,
+            "critical_count": runs[0][3] or 0,
+            "high_count": runs[0][4] or 0,
+            "medium_count": runs[0][5] or 0,
+        }
+
+        previous_run = None
+        if len(runs) > 1:
+            previous_run = {
+                "id": runs[1][0],
+                "completed_at": runs[1][1].isoformat() if runs[1][1] else None,
+                "total_identities": runs[1][2] or 0,
+                "critical_count": runs[1][3] or 0,
+                "high_count": runs[1][4] or 0,
+                "medium_count": runs[1][5] or 0,
+            }
+
+        # Credential health breakdown
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
+                    AND credential_expiration < NOW()) as expired,
+                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
+                    AND credential_expiration >= NOW()
+                    AND credential_expiration < NOW() + INTERVAL '30 days') as expiring_soon,
+                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
+                    AND credential_expiration >= NOW() + INTERVAL '30 days') as healthy,
+                COUNT(*) FILTER (WHERE credential_count = 0
+                    OR credential_count IS NULL) as no_credentials
+            FROM identities
+            WHERE discovery_run_id = %s
+            """,
+            (current_run_id,),
+        )
+        cred_row = cursor.fetchone()
+        credential_health = {
+            "expired": cred_row[0] or 0,
+            "expiring_soon": cred_row[1] or 0,
+            "healthy": cred_row[2] or 0,
+            "no_credentials": cred_row[3] or 0,
+        }
+
+        # Dormant identities (stale activity)
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM identities
+            WHERE discovery_run_id = %s
+              AND activity_status = 'stale'
+            """,
+            (current_run_id,),
+        )
+        dormant_count = cursor.fetchone()[0] or 0
+
+        # No-owner count
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM identities
+            WHERE discovery_run_id = %s
+              AND (owner_count = 0 OR owner_count IS NULL)
+              AND COALESCE(identity_category, '') NOT IN ('human_user', 'guest', 'microsoft_internal')
+            """,
+            (current_run_id,),
+        )
+        no_owner_count = cursor.fetchone()[0] or 0
+
+        # Posture score: % of identities at low/info risk
+        total = current_run["total_identities"] or 1
+        high_risk = (current_run["critical_count"] + current_run["high_count"]
+                     + current_run["medium_count"])
+        posture_score = round(((total - high_risk) / total) * 100, 1)
+
+        return jsonify({
+            "current_run": current_run,
+            "previous_run": previous_run,
+            "posture_score": posture_score,
+            "credential_health": credential_health,
+            "dormant_count": dormant_count,
+            "no_owner_count": no_owner_count,
+            "expiring_credentials_count": credential_health["expiring_soon"],
+        })
+
+    finally:
+        cursor.close()
+        db.close()
 
 
 def get_identity_summary():

@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
+import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth } from '../components/dashboard';
 
 type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown';
 
@@ -50,6 +51,35 @@ interface IdentitySummaryResponse {
   >;
 }
 
+interface PostureResponse {
+  current_run: {
+    id: number;
+    completed_at: string | null;
+    total_identities: number;
+    critical_count: number;
+    high_count: number;
+    medium_count: number;
+  };
+  previous_run: {
+    id: number;
+    completed_at: string | null;
+    total_identities: number;
+    critical_count: number;
+    high_count: number;
+    medium_count: number;
+  } | null;
+  posture_score: number;
+  credential_health: {
+    expired: number;
+    expiring_soon: number;
+    healthy: number;
+    no_credentials: number;
+  };
+  dormant_count: number;
+  no_owner_count: number;
+  expiring_credentials_count: number;
+}
+
 function safeLower(v: any) {
   return String(v ?? '').toLowerCase();
 }
@@ -91,6 +121,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
   const [risks, setRisks] = useState<RisksResponse | null>(null);
+  const [posture, setPosture] = useState<PostureResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -100,10 +131,11 @@ export default function Dashboard() {
       setLoading(true);
       setError(null);
       try {
-        const [statsRes, summaryRes, risksRes] = await Promise.all([
+        const [statsRes, summaryRes, risksRes, postureRes] = await Promise.all([
           fetch('/api/stats'),
           fetch('/api/identity-summary'),
           fetch('/api/risks'),
+          fetch('/api/dashboard/posture'),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
@@ -116,10 +148,17 @@ export default function Dashboard() {
           risksRes.json(),
         ]);
 
+        // Posture endpoint is optional - don't fail if unavailable
+        let postureJson: PostureResponse | null = null;
+        if (postureRes.ok) {
+          postureJson = await postureRes.json();
+        }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
           setRisks(risksJson);
+          setPosture(postureJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -153,12 +192,25 @@ export default function Dashboard() {
     });
   }, [summary]);
 
-  const openCategory = (cat: string, riskLevel?: string) => {
-    let url = `/identities?identity_category=${encodeURIComponent(cat)}`;
-    if (riskLevel) {
-      url += `&risk_level=${encodeURIComponent(riskLevel)}`;
-    }
-    navigate(url);
+  // Calculate overall risk counts for donut chart
+  const riskCounts = useMemo(() => {
+    const cats = summary?.categories || {};
+    let critical = 0, high = 0, medium = 0, low = 0, info = 0, total = 0;
+
+    Object.values(cats).forEach((cat: any) => {
+      critical += cat.critical || 0;
+      high += cat.high || 0;
+      medium += cat.medium || 0;
+      low += cat.low || 0;
+      info += cat.info || 0;
+      total += cat.total || 0;
+    });
+
+    return { critical, high, medium, low, info, total };
+  }, [summary]);
+
+  const handleSegmentClick = (level: string) => {
+    navigate(`/identities?risk_level=${level}`);
   };
 
   return (
@@ -179,19 +231,20 @@ export default function Dashboard() {
       <RiskMethodology />
 
       {loading ? (
-        <div className="bg-white border rounded-2xl p-6 text-gray-600">Loading…</div>
+        <div className="animate-pulse space-y-4">
+          <div className="grid grid-cols-4 gap-4">
+            {[1, 2, 3, 4].map(i => <div key={i} className="h-24 bg-gray-100 rounded-xl" />)}
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            {[1, 2, 3].map(i => <div key={i} className="h-48 bg-gray-100 rounded-xl" />)}
+          </div>
+        </div>
       ) : error ? (
         <div className="bg-white border rounded-2xl p-6 text-red-600">{error}</div>
       ) : (
         <>
           {/* Top Stats */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-            <StatsCard
-              title="Latest Run"
-              value={latest?.id ?? '—'}
-              icon="🗄️"
-              color="gray"
-            />
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
             <StatsCard
               title="Total Identities"
               value={latest?.total_identities ?? 0}
@@ -210,77 +263,51 @@ export default function Dashboard() {
               icon="🟠"
               color="yellow"
             />
+            <StatsCard
+              title="Discovery Runs"
+              value={stats?.total_discovery_runs ?? 0}
+              icon="🔄"
+              color="gray"
+            />
           </div>
 
-          {/* Category Blocks */}
-          <div className="mb-5">
-            <div className="text-sm font-semibold text-gray-900 mb-2">Identity Categories</div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {categoryCards.map((c) => (
-                <div
-                  key={c.key}
-                  className="text-left bg-white border rounded-2xl p-5 hover:shadow-md transition"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-base font-semibold text-gray-900">{categoryLabel(c.key)}</div>
-                      <div className="text-xs text-gray-500 mt-1">{c.total} identities</div>
-                    </div>
-                    <button
-                      onClick={() => openCategory(c.key)}
-                      className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200"
-                    >
-                      View All
-                    </button>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2 mt-4">
-                    {c.critical > 0 && (
-                      <button
-                        onClick={() => openCategory(c.key, 'critical')}
-                        className="text-xs px-2 py-1 rounded-full bg-red-50 text-red-700 hover:bg-red-100 cursor-pointer"
-                      >
-                        Critical: {c.critical}
-                      </button>
-                    )}
-                    {c.high > 0 && (
-                      <button
-                        onClick={() => openCategory(c.key, 'high')}
-                        className="text-xs px-2 py-1 rounded-full bg-orange-50 text-orange-700 hover:bg-orange-100 cursor-pointer"
-                      >
-                        High: {c.high}
-                      </button>
-                    )}
-                    {c.medium > 0 && (
-                      <button
-                        onClick={() => openCategory(c.key, 'medium')}
-                        className="text-xs px-2 py-1 rounded-full bg-yellow-50 text-yellow-700 hover:bg-yellow-100 cursor-pointer"
-                      >
-                        Medium: {c.medium}
-                      </button>
-                    )}
-                    {c.low > 0 && (
-                      <button
-                        onClick={() => openCategory(c.key, 'low')}
-                        className="text-xs px-2 py-1 rounded-full bg-green-50 text-green-700 hover:bg-green-100 cursor-pointer"
-                      >
-                        Low: {c.low}
-                      </button>
-                    )}
-                    {c.info > 0 && (
-                      <button
-                        onClick={() => openCategory(c.key, 'info')}
-                        className="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 hover:bg-blue-100 cursor-pointer"
-                      >
-                        Info: {c.info}
-                      </button>
-                    )}
-                    {c.total === 0 && (
-                      <span className="text-xs text-gray-400">No identities</span>
-                    )}
-                  </div>
+          {/* Posture Score + Credential Health + Quick Actions */}
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+            {posture ? (
+              <>
+                <PostureScore
+                  score={posture.posture_score}
+                  currentRun={posture.current_run}
+                  previousRun={posture.previous_run}
+                />
+                <CredentialHealth
+                  expired={posture.credential_health.expired}
+                  expiringSoon={posture.credential_health.expiring_soon}
+                  healthy={posture.credential_health.healthy}
+                  noCredentials={posture.credential_health.no_credentials}
+                />
+              </>
+            ) : (
+              <>
+                <div className="bg-white border rounded-xl p-5 text-sm text-gray-400 col-span-2">
+                  Posture data unavailable
                 </div>
-              ))}
+              </>
+            )}
+            <QuickActions
+              criticalCount={latest?.critical_count ?? 0}
+              expiringCount={posture?.expiring_credentials_count ?? 0}
+              dormantCount={posture?.dormant_count ?? 0}
+            />
+          </div>
+
+          {/* Heat Map + Donut Chart Row */}
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+            <div className="xl:col-span-2">
+              <RiskHeatMap categories={categoryCards} />
+            </div>
+            <div>
+              <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick} />
             </div>
           </div>
 
@@ -294,10 +321,10 @@ export default function Dashboard() {
             </div>
 
             {(risks?.risks || []).length === 0 ? (
-              <div className="text-sm text-gray-500">No critical/high/medium risks found.</div>
+              <div className="text-sm text-gray-500">No critical/high risks found.</div>
             ) : (
               <div className="space-y-3">
-                {risks!.risks.slice(0, 12).map((r, idx) => (
+                {risks!.risks.slice(0, 8).map((r, idx) => (
                   <Link
                     key={`${r.identity_id}-${idx}`}
                     to={`/identities/${encodeURIComponent(r.identity_id)}`}
