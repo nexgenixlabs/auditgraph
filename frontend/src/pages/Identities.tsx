@@ -30,6 +30,10 @@ interface IdentityRow {
   // Permissions & Roles
   api_permission_count?: number;
   role_count?: number;
+  rbac_role_count?: number;
+  entra_role_count?: number;
+  rbac_max_risk?: RiskLevel;
+  entra_max_risk?: RiskLevel;
   app_role_count?: number;
 
   // Credentials
@@ -59,7 +63,8 @@ type SortField =
   | 'created_datetime'
   | 'last_seen_auth'
   | 'api_permission_count'
-  | 'role_count'
+  | 'entra_role_count'
+  | 'rbac_role_count'
   | 'credential_expiration'
   | 'app_role_count'
   | 'owner_display_name'
@@ -266,6 +271,10 @@ export default function IdentitiesPage() {
 
           api_permission_count: raw.api_permission_count ?? 0,
           role_count: raw.role_count ?? 0,
+          rbac_role_count: raw.rbac_role_count ?? 0,
+          entra_role_count: raw.entra_role_count ?? 0,
+          rbac_max_risk: safeLower(raw.rbac_max_risk || 'info') as RiskLevel,
+          entra_max_risk: safeLower(raw.entra_max_risk || 'info') as RiskLevel,
           app_role_count: raw.app_role_count ?? 0,
 
           credential_count: raw.credential_count ?? 0,
@@ -349,9 +358,13 @@ export default function IdentitiesPage() {
           aVal = a.api_permission_count ?? 0;
           bVal = b.api_permission_count ?? 0;
           break;
-        case 'role_count':
-          aVal = a.role_count ?? 0;
-          bVal = b.role_count ?? 0;
+        case 'entra_role_count':
+          aVal = a.entra_role_count ?? 0;
+          bVal = b.entra_role_count ?? 0;
+          break;
+        case 'rbac_role_count':
+          aVal = a.rbac_role_count ?? 0;
+          bVal = b.rbac_role_count ?? 0;
           break;
         case 'credential_expiration':
           aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
@@ -390,7 +403,7 @@ export default function IdentitiesPage() {
     } else {
       setSortField(field);
       // Default sort direction based on field type
-      setSortDir(['risk_level', 'api_permission_count', 'role_count', 'app_role_count', 'owner_count'].includes(field) ? 'desc' : 'asc');
+      setSortDir(['risk_level', 'api_permission_count', 'entra_role_count', 'rbac_role_count', 'app_role_count'].includes(field) ? 'desc' : 'asc');
     }
   }
 
@@ -466,7 +479,8 @@ export default function IdentitiesPage() {
                 <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="API Perms" field="api_permission_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Roles" field="role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Entra Roles" field="entra_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="RBAC Roles" field="rbac_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Secrets/Expiry" field="credential_expiration" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="App Roles" field="app_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Owner" field="owner_display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
@@ -476,11 +490,11 @@ export default function IdentitiesPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-500">Loading identities…</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-500">Loading identities…</td></tr>
               ) : error ? (
-                <tr><td colSpan={12} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-500">No identities match your filters.</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-500">No identities match your filters.</td></tr>
               ) : (
                 filtered.map((i) => (
                   <tr
@@ -524,11 +538,28 @@ export default function IdentitiesPage() {
                       </span>
                     </td>
 
-                    {/* Roles */}
-                    <td className="px-3 py-3 text-center">
-                      <span className={`font-medium ${(i.role_count ?? 0) > 0 ? 'text-blue-700' : 'text-gray-400'}`}>
-                        {i.role_count ?? 0}
-                      </span>
+                    {/* Entra Roles */}
+                    <td className="px-3 py-3">
+                      {(i.entra_role_count ?? 0) > 0 ? (
+                        <div className="flex items-center gap-1">
+                          <span className="font-medium text-indigo-700">{i.entra_role_count}</span>
+                          <RiskBadge level={i.entra_max_risk} />
+                        </div>
+                      ) : (
+                        <span className="text-gray-400">0</span>
+                      )}
+                    </td>
+
+                    {/* RBAC Roles */}
+                    <td className="px-3 py-3">
+                      {(i.rbac_role_count ?? 0) > 0 ? (
+                        <div className="flex items-center gap-1">
+                          <span className="font-medium text-blue-700">{i.rbac_role_count}</span>
+                          <RiskBadge level={i.rbac_max_risk} />
+                        </div>
+                      ) : (
+                        <span className="text-gray-400">0</span>
+                      )}
                     </td>
 
                     {/* Secrets/Expiry */}

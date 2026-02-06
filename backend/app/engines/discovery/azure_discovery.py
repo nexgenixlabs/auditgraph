@@ -229,7 +229,8 @@ class AzureDiscoveryEngine:
             query_params = ServicePrincipalsRequestBuilder.ServicePrincipalsRequestBuilderGetQueryParameters(
                 top=999,  # Get up to 999 per page
                 select=['id', 'appId', 'displayName', 'accountEnabled', 'createdDateTime',
-                        'servicePrincipalType', 'alternativeNames', 'appOwnerOrganizationId', 'publisherName']
+                        'servicePrincipalType', 'alternativeNames', 'appOwnerOrganizationId', 'publisherName',
+                        'signInActivity']  # Include sign-in activity
             )
             request_config = RequestConfiguration(query_parameters=query_params)
             
@@ -265,6 +266,16 @@ class AzureDiscoveryEngine:
                             identity_type = 'managed_identity'
                     
                     # Check if this is a Microsoft system app (filter out)
+                    # Extract sign-in activity if available
+                    last_sign_in = None
+                    if hasattr(sp, 'sign_in_activity') and sp.sign_in_activity:
+                        sia = sp.sign_in_activity
+                        # Use last_sign_in_date_time or last_non_interactive_sign_in_date_time
+                        if hasattr(sia, 'last_sign_in_date_time') and sia.last_sign_in_date_time:
+                            last_sign_in = sia.last_sign_in_date_time.isoformat()
+                        elif hasattr(sia, 'last_non_interactive_sign_in_date_time') and sia.last_non_interactive_sign_in_date_time:
+                            last_sign_in = sia.last_non_interactive_sign_in_date_time.isoformat()
+
                     identity_dict = {
                         'identity_id': sp.app_id or sp.id,
                         'object_id': sp.id,
@@ -273,6 +284,7 @@ class AzureDiscoveryEngine:
                         'identity_type': identity_type,
                         'enabled': sp.account_enabled if hasattr(sp, 'account_enabled') else True,
                         'created_datetime': created,
+                        'last_sign_in': last_sign_in,
                         'service_principal_type': sp.service_principal_type if hasattr(sp, 'service_principal_type') else None,
                         'app_owner_organization_id': sp.app_owner_organization_id if hasattr(sp, 'app_owner_organization_id') else None,
                         'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
@@ -640,13 +652,31 @@ class AzureDiscoveryEngine:
         """
         try:
             from msgraph.generated.users.users_request_builder import UsersRequestBuilder
-            query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
-                select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType']
-            )
-            request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
-                query_parameters=query_params
-            )
-            users_response = await self.graph_client.users.get(request_configuration=request_config)
+
+            # Try with signInActivity first (requires Premium license)
+            # Fall back to basic fields if not available
+            try:
+                query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
+                    select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType',
+                            'signInActivity']
+                )
+                request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
+                    query_parameters=query_params
+                )
+                users_response = await self.graph_client.users.get(request_configuration=request_config)
+                print("  ✓ Sign-in activity available (Premium license)")
+            except Exception as e:
+                if '403' in str(e) or 'premium' in str(e).lower():
+                    print("  ⚠️  Sign-in activity requires Premium license - using basic user data")
+                    query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
+                        select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType']
+                    )
+                    request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
+                        query_parameters=query_params
+                    )
+                    users_response = await self.graph_client.users.get(request_configuration=request_config)
+                else:
+                    raise e
 
             identities = []
             for user in users_response.value:
@@ -664,6 +694,15 @@ class AzureDiscoveryEngine:
                     user_type = getattr(user, 'user_type', None) or ''
                     is_guest = user_type.lower() == 'guest' if user_type else False
 
+                    # Extract sign-in activity if available
+                    last_sign_in = None
+                    if hasattr(user, 'sign_in_activity') and user.sign_in_activity:
+                        sia = user.sign_in_activity
+                        if hasattr(sia, 'last_sign_in_date_time') and sia.last_sign_in_date_time:
+                            last_sign_in = sia.last_sign_in_date_time.isoformat()
+                        elif hasattr(sia, 'last_non_interactive_sign_in_date_time') and sia.last_non_interactive_sign_in_date_time:
+                            last_sign_in = sia.last_non_interactive_sign_in_date_time.isoformat()
+
                     identities.append({
                         'identity_id': user.id,
                         'object_id': user.id,
@@ -674,6 +713,7 @@ class AzureDiscoveryEngine:
                         'identity_category': 'guest' if is_guest else 'human_user',
                         'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
                         'created_datetime': created,
+                        'last_sign_in': last_sign_in,
                         # Multi-cloud normalized fields
                         'cloud': 'azure',
                         'tenant_id': self.tenant_id,
@@ -1479,12 +1519,86 @@ class AzureDiscoveryEngine:
         return identities
     
     def _check_activity(self, identities: List[Dict]) -> List[Dict]:
+        """
+        Calculate activity status based on sign-in data.
+
+        Activity Status:
+        - active: Signed in within last 30 days
+        - inactive: Signed in 30-90 days ago
+        - stale: Signed in 90+ days ago
+        - never_used: Never signed in
+        - unknown: No sign-in data available
+        """
+        from datetime import datetime, timezone
+
         print(f"  Checking {len(identities)} identities...")
+
+        active_count = 0
+        inactive_count = 0
+        stale_count = 0
+        never_used_count = 0
+        unknown_count = 0
+
         for identity in identities:
-            identity['last_sign_in'] = None
-            identity['activity_status'] = 'unknown'
+            last_sign_in = identity.get('last_sign_in')
+
+            if last_sign_in:
+                try:
+                    if isinstance(last_sign_in, str):
+                        signin_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00'))
+                    else:
+                        signin_dt = last_sign_in
+
+                    days_since = (datetime.now(timezone.utc) - signin_dt).days
+
+                    if days_since <= 30:
+                        identity['activity_status'] = 'active'
+                        active_count += 1
+                    elif days_since <= 90:
+                        identity['activity_status'] = 'inactive'
+                        inactive_count += 1
+                    else:
+                        identity['activity_status'] = 'stale'
+                        stale_count += 1
+                except:
+                    identity['activity_status'] = 'unknown'
+                    unknown_count += 1
+            else:
+                # No sign-in data - check if identity is new (created recently)
+                created = identity.get('created_datetime')
+                if created:
+                    try:
+                        if isinstance(created, str):
+                            created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                        else:
+                            created_dt = created
+                        days_old = (datetime.now(timezone.utc) - created_dt).days
+                        if days_old < 7:
+                            # New identity, no sign-in expected yet
+                            identity['activity_status'] = 'unknown'
+                            unknown_count += 1
+                        else:
+                            identity['activity_status'] = 'never_used'
+                            never_used_count += 1
+                    except:
+                        identity['activity_status'] = 'never_used'
+                        never_used_count += 1
+                else:
+                    identity['activity_status'] = 'never_used'
+                    never_used_count += 1
+
         print(f"\n  Summary:")
-        print(f"    ⚪ No sign-in data: {len(identities)}")
+        if active_count > 0:
+            print(f"    🟢 Active (30 days): {active_count}")
+        if inactive_count > 0:
+            print(f"    🟡 Inactive (30-90 days): {inactive_count}")
+        if stale_count > 0:
+            print(f"    🟠 Stale (90+ days): {stale_count}")
+        if never_used_count > 0:
+            print(f"    🔴 Never used: {never_used_count}")
+        if unknown_count > 0:
+            print(f"    ⚪ Unknown: {unknown_count}")
+
         return identities
     
     def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None) -> int:

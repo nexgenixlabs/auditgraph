@@ -135,11 +135,24 @@ def get_identities():
                     SELECT COUNT(*)
                     FROM role_assignments ra
                     WHERE ra.identity_db_id = i.id
-                ) + (
+                ) as rbac_role_count,
+                (
                     SELECT COUNT(*)
                     FROM entra_role_assignments era
                     WHERE era.identity_db_id = i.id
-                ) as role_count,
+                ) as entra_role_count,
+                (
+                    SELECT MAX(ra.risk_level)
+                    FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                    AND ra.risk_level IS NOT NULL
+                ) as rbac_max_risk,
+                (
+                    SELECT MAX(era.risk_level)
+                    FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                    AND era.risk_level IS NOT NULL
+                ) as entra_max_risk,
                 -- Multi-cloud normalized fields
                 COALESCE(i.cloud, 'azure') as cloud,
                 i.identity_type_normalized,
@@ -150,6 +163,7 @@ def get_identities():
                 COALESCE(i.is_federated, false) as is_federated,
                 COALESCE(i.status, 'active') as status,
                 i.last_seen_auth,
+                i.last_sign_in,
                 -- Ownership fields
                 i.owner_display_name,
                 COALESCE(i.owner_count, 0) as owner_count,
@@ -221,24 +235,30 @@ def get_identities():
                     "credential_expiration": row[9].isoformat() if row[9] else None,
                     "created_datetime": row[10].isoformat() if row[10] else None,
                     "activity_status": row[11] or "unknown",
-                    "role_count": int(row[12] or 0),
+                    # Separate role counts with risk levels
+                    "rbac_role_count": int(row[12] or 0),
+                    "entra_role_count": int(row[13] or 0),
+                    "role_count": int(row[12] or 0) + int(row[13] or 0),
+                    "rbac_max_risk": row[14] or "info",
+                    "entra_max_risk": row[15] or "info",
                     # Multi-cloud normalized fields
-                    "cloud": row[13] or "azure",
-                    "normalized_identity_type": row[14],
-                    "canonical_name": row[15],
-                    "principal_id": row[16],
-                    "tenant_or_org_id": row[17],
-                    "source": row[18] or "entra",
-                    "is_federated": row[19] or False,
-                    "status": row[20] or "active",
-                    "last_seen_auth": row[21].isoformat() if row[21] else None,
+                    "cloud": row[16] or "azure",
+                    "normalized_identity_type": row[17],
+                    "canonical_name": row[18],
+                    "principal_id": row[19],
+                    "tenant_or_org_id": row[20],
+                    "source": row[21] or "entra",
+                    "is_federated": row[22] or False,
+                    "status": row[23] or "active",
+                    "last_seen_auth": row[24].isoformat() if row[24] else None,
+                    "last_sign_in": row[25].isoformat() if row[25] else None,
                     # Ownership fields
-                    "owner_display_name": row[22],
-                    "owner_count": int(row[23] or 0),
+                    "owner_display_name": row[26],
+                    "owner_count": int(row[27] or 0),
                     # Risk scoring fields
-                    "risk_score": int(row[24] or 0),
-                    "api_permission_count": int(row[25] or 0),
-                    "app_role_count": int(row[26] or 0),
+                    "risk_score": int(row[28] or 0),
+                    "api_permission_count": int(row[29] or 0),
+                    "app_role_count": int(row[30] or 0),
                 }
             )
 

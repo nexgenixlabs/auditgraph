@@ -153,8 +153,12 @@ export default function Dashboard() {
     });
   }, [summary]);
 
-  const openCategory = (cat: string) => {
-    navigate(`/identities?identity_category=${encodeURIComponent(cat)}`);
+  const openCategory = (cat: string, riskLevel?: string) => {
+    let url = `/identities?identity_category=${encodeURIComponent(cat)}`;
+    if (riskLevel) {
+      url += `&risk_level=${encodeURIComponent(riskLevel)}`;
+    }
+    navigate(url);
   };
 
   return (
@@ -213,9 +217,8 @@ export default function Dashboard() {
             <div className="text-sm font-semibold text-gray-900 mb-2">Identity Categories</div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {categoryCards.map((c) => (
-                <button
+                <div
                   key={c.key}
-                  onClick={() => openCategory(c.key)}
                   className="text-left bg-white border rounded-2xl p-5 hover:shadow-md transition"
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -223,19 +226,60 @@ export default function Dashboard() {
                       <div className="text-base font-semibold text-gray-900">{categoryLabel(c.key)}</div>
                       <div className="text-xs text-gray-500 mt-1">{c.total} identities</div>
                     </div>
-                    <div className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-700">
-                      View
-                    </div>
+                    <button
+                      onClick={() => openCategory(c.key)}
+                      className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    >
+                      View All
+                    </button>
                   </div>
 
                   <div className="flex flex-wrap gap-2 mt-4">
-                    <span className="text-xs px-2 py-1 rounded-full bg-red-50 text-red-700">Critical: {c.critical}</span>
-                    <span className="text-xs px-2 py-1 rounded-full bg-orange-50 text-orange-700">High: {c.high}</span>
-                    <span className="text-xs px-2 py-1 rounded-full bg-yellow-50 text-yellow-700">Medium: {c.medium}</span>
-                    <span className="text-xs px-2 py-1 rounded-full bg-green-50 text-green-700">Low: {c.low}</span>
-                    <span className="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700">Info: {c.info}</span>
+                    {c.critical > 0 && (
+                      <button
+                        onClick={() => openCategory(c.key, 'critical')}
+                        className="text-xs px-2 py-1 rounded-full bg-red-50 text-red-700 hover:bg-red-100 cursor-pointer"
+                      >
+                        Critical: {c.critical}
+                      </button>
+                    )}
+                    {c.high > 0 && (
+                      <button
+                        onClick={() => openCategory(c.key, 'high')}
+                        className="text-xs px-2 py-1 rounded-full bg-orange-50 text-orange-700 hover:bg-orange-100 cursor-pointer"
+                      >
+                        High: {c.high}
+                      </button>
+                    )}
+                    {c.medium > 0 && (
+                      <button
+                        onClick={() => openCategory(c.key, 'medium')}
+                        className="text-xs px-2 py-1 rounded-full bg-yellow-50 text-yellow-700 hover:bg-yellow-100 cursor-pointer"
+                      >
+                        Medium: {c.medium}
+                      </button>
+                    )}
+                    {c.low > 0 && (
+                      <button
+                        onClick={() => openCategory(c.key, 'low')}
+                        className="text-xs px-2 py-1 rounded-full bg-green-50 text-green-700 hover:bg-green-100 cursor-pointer"
+                      >
+                        Low: {c.low}
+                      </button>
+                    )}
+                    {c.info > 0 && (
+                      <button
+                        onClick={() => openCategory(c.key, 'info')}
+                        className="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 hover:bg-blue-100 cursor-pointer"
+                      >
+                        Info: {c.info}
+                      </button>
+                    )}
+                    {c.total === 0 && (
+                      <span className="text-xs text-gray-400">No identities</span>
+                    )}
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           </div>
