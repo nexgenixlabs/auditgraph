@@ -176,7 +176,16 @@ def get_identities():
                 -- Risk scoring fields
                 COALESCE(i.risk_score, 0) as risk_score,
                 COALESCE(i.api_permission_count, 0) as api_permission_count,
-                COALESCE(i.app_role_count, 0) as app_role_count
+                COALESCE(i.app_role_count, 0) as app_role_count,
+                -- Graph API max risk
+                (
+                    SELECT MAX(gp.risk_level)
+                    FROM graph_api_permissions gp
+                    WHERE gp.identity_db_id = i.id
+                    AND gp.risk_level IS NOT NULL
+                ) as graph_max_risk,
+                i.enabled,
+                i.last_sign_in
             FROM identities i
             WHERE i.discovery_run_id = %s
         """
@@ -278,6 +287,9 @@ def get_identities():
                     "risk_score": int(row[28] or 0),
                     "api_permission_count": int(row[29] or 0),
                     "app_role_count": int(row[30] or 0),
+                    "graph_max_risk": row[31] or "info",
+                    "enabled": row[32] if row[32] is not None else True,
+                    "last_sign_in": row[33].isoformat() if row[33] else None,
                 }
             )
 
@@ -398,6 +410,29 @@ def get_identity_details(identity_id: str):
 
         roles = db.get_identity_roles_enriched(identity_db_id)
 
+        # Gather compliance and attack intelligence for each role
+        role_intelligence = []
+        seen_roles = set()
+        for role in roles:
+            rn = role.get("role_name", "")
+            if rn in seen_roles:
+                continue
+            seen_roles.add(rn)
+            try:
+                attacks = db.get_role_attack_patterns(rn)
+            except Exception:
+                attacks = []
+            try:
+                hipaa = db.get_role_hipaa_violations(rn)
+            except Exception:
+                hipaa = []
+            if attacks or hipaa:
+                role_intelligence.append({
+                    "role_name": rn,
+                    "attack_patterns": attacks,
+                    "hipaa_violations": hipaa,
+                })
+
         return jsonify(
             {
                 "identity": identity,
@@ -405,6 +440,7 @@ def get_identity_details(identity_id: str):
                 "graph_permissions": graph_permissions,
                 "app_roles": app_roles,
                 "owners": owners,
+                "role_intelligence": role_intelligence,
             }
         )
 

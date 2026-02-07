@@ -20,60 +20,50 @@ interface IdentityRow {
   display_name: string;
   identity_type?: string;
   identity_category?: IdentityCategory;
-
-  // Multi-cloud
   cloud?: string;
-
-  // Dates
   created_datetime?: string | null;
   last_seen_auth?: string | null;
   last_sign_in?: string | null;
-
-  // Permissions & Roles
   api_permission_count?: number;
   role_count?: number;
   rbac_role_count?: number;
   entra_role_count?: number;
   rbac_max_risk?: RiskLevel;
   entra_max_risk?: RiskLevel;
+  graph_max_risk?: RiskLevel;
   app_role_count?: number;
-
-  // Credentials
   credential_count?: number;
   credential_expiration?: string | null;
-  next_expiry?: string | null;
   credential_status?: string | null;
-
-  // Ownership
   owner_display_name?: string | null;
   owner_count?: number;
-
-  // Status
   status?: IdentityStatus;
   enabled?: boolean;
-
-  // Risk
   risk_level?: RiskLevel;
   risk_score?: number;
+  activity_status?: string;
 }
 
-// Consolidated sort fields for the cleaned-up column model
 type SortField =
   | 'display_name'
+  | 'identity_type'
   | 'identity_category'
   | 'cloud'
   | 'risk_level'
-  | 'role_count'
+  | 'entra_role_count'
+  | 'rbac_role_count'
   | 'api_permission_count'
+  | 'privilege_tier'
   | 'credential_expiration'
-  | 'owner_display_name'
-  | 'status';
+  | 'created_datetime'
+  | 'last_seen_auth'
+  | 'dormant';
 
 const CATEGORY_OPTIONS: { value: IdentityCategory | 'all'; label: string }[] = [
   { value: 'all', label: 'All Categories' },
   { value: 'service_principal', label: 'Service Principal' },
-  { value: 'managed_identity_system', label: 'System Assigned Identity' },
-  { value: 'managed_identity_user', label: 'User Assigned Identity' },
+  { value: 'managed_identity_system', label: 'System Assigned MI' },
+  { value: 'managed_identity_user', label: 'User Assigned MI' },
   { value: 'human_user', label: 'Human User' },
   { value: 'guest', label: 'Guest' },
   { value: 'microsoft_internal', label: 'Microsoft Internal' },
@@ -88,6 +78,8 @@ const RISK_OPTIONS: { value: RiskLevel | 'all'; label: string }[] = [
   { value: 'info', label: 'Info' },
 ];
 
+// ─── Helpers ───────────────────────────────────────────────────────
+
 function safeLower(v: any): string {
   return String(v ?? '').toLowerCase();
 }
@@ -95,150 +87,49 @@ function safeLower(v: any): string {
 function normalizeCategoryFromBackend(raw?: any): IdentityCategory {
   const v = safeLower(raw).trim();
   if (!v) return 'unknown';
-
   if (['service_principal', 'managed_identity_system', 'managed_identity_user',
-       'human_user', 'guest', 'microsoft_internal'].includes(v)) {
+       'human_user', 'guest', 'microsoft_internal'].includes(v))
     return v as IdentityCategory;
-  }
-
   if (v === 'user' || v === 'human user') return 'human_user';
   if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
   if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
   if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
   if (v.includes('microsoft')) return 'microsoft_internal';
-
   return 'unknown';
 }
 
 function formatDate(d?: string | null): string {
   if (!d) return '—';
-  try {
-    const date = new Date(d);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return d;
-  }
+  try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
+  catch { return d; }
 }
 
-// Column header with sort arrows
-function SortHeader({
-  label,
-  field,
-  currentField,
-  currentDir,
-  onSort
-}: {
-  label: string;
-  field: SortField;
-  currentField: SortField;
-  currentDir: 'asc' | 'desc';
-  onSort: (f: SortField) => void;
-}) {
-  const isActive = currentField === field;
-  return (
-    <th
-      className="px-3 py-3 cursor-pointer select-none hover:bg-gray-100 whitespace-nowrap"
-      onClick={() => onSort(field)}
-    >
-      <div className="flex items-center gap-1">
-        <span>{label}</span>
-        <span className={`text-xs ${isActive ? 'text-blue-600' : 'text-gray-400'}`}>
-          {isActive ? (currentDir === 'asc' ? '▲' : '▼') : '↕'}
-        </span>
-      </div>
-    </th>
-  );
+const RISK_ORDER: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1, unknown: 0 };
+
+function computePrivilegeTier(row: IdentityRow): number {
+  const rbac = RISK_ORDER[safeLower(row.rbac_max_risk)] || 0;
+  const entra = RISK_ORDER[safeLower(row.entra_max_risk)] || 0;
+  const graph = RISK_ORDER[safeLower(row.graph_max_risk)] || 0;
+  const maxRisk = Math.max(rbac, entra, graph);
+  if (maxRisk >= 5) return 0;
+  if (maxRisk >= 4) return 1;
+  if (maxRisk >= 3) return 2;
+  return 3;
 }
 
-// Cloud badge
-function CloudBadge({ cloud }: { cloud?: string }) {
-  const c = safeLower(cloud) || 'azure';
-  const colors: Record<string, string> = {
-    azure: 'bg-blue-100 text-blue-700',
-    aws: 'bg-orange-100 text-orange-700',
-    gcp: 'bg-red-100 text-red-700',
-  };
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium uppercase ${colors[c] || colors.azure}`}>
-      {c}
-    </span>
-  );
+function getDormantStatus(row: IdentityRow): 'yes' | 'idle' | 'no' | 'unknown' {
+  const act = safeLower(row.activity_status);
+  if (act === 'stale') return 'yes';
+  if (act === 'inactive') return 'idle';
+  if (act === 'active') return 'no';
+  return 'unknown';
 }
 
-// Status badge
-function StatusBadge({ status, enabled }: { status?: string; enabled?: boolean }) {
-  const isActive = status === 'active' || (status === undefined && enabled !== false);
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-      isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-    }`}>
-      {isActive ? 'Active' : 'Disabled'}
-    </span>
-  );
-}
-
-// Risk badge
-function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
-  const risk = safeLower(level);
-  const styles: Record<string, string> = {
-    critical: 'bg-red-100 text-red-800 border-red-200',
-    high: 'bg-orange-100 text-orange-800 border-orange-200',
-    medium: 'bg-yellow-100 text-yellow-800 border-yellow-200',
-    low: 'bg-green-100 text-green-800 border-green-200',
-    info: 'bg-blue-100 text-blue-800 border-blue-200',
-  };
-  const cls = styles[risk] || 'bg-gray-100 text-gray-600 border-gray-200';
-
-  return (
-    <div className="flex items-center gap-1">
-      <span className={`px-2 py-0.5 rounded text-xs font-medium uppercase border ${cls}`}>
-        {risk || 'unknown'}
-      </span>
-      {score !== undefined && score > 0 && (
-        <span className="text-xs text-gray-500 font-mono">({score})</span>
-      )}
-    </div>
-  );
-}
-
-// Mini risk dot for inline use
-function RiskDot({ level }: { level?: string }) {
-  const risk = safeLower(level);
-  const colors: Record<string, string> = {
-    critical: 'bg-red-500',
-    high: 'bg-orange-500',
-    medium: 'bg-yellow-400',
-    low: 'bg-green-400',
-    info: 'bg-blue-400',
-  };
-  return <span className={`inline-block w-2 h-2 rounded-full ${colors[risk] || 'bg-gray-300'}`} />;
-}
-
-// Category badge
-function CategoryBadge({ category }: { category?: IdentityCategory }) {
-  const labels: Record<string, { label: string; color: string }> = {
-    service_principal: { label: 'Service Principal', color: 'bg-purple-50 text-purple-700' },
-    managed_identity_system: { label: 'System MI', color: 'bg-cyan-50 text-cyan-700' },
-    managed_identity_user: { label: 'User MI', color: 'bg-teal-50 text-teal-700' },
-    human_user: { label: 'Human', color: 'bg-indigo-50 text-indigo-700' },
-    guest: { label: 'Guest', color: 'bg-pink-50 text-pink-700' },
-    microsoft_internal: { label: 'Microsoft', color: 'bg-sky-50 text-sky-700' },
-  };
-
-  const info = labels[category || ''] || { label: 'Unknown', color: 'bg-gray-50 text-gray-600' };
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${info.color}`}>
-      {info.label}
-    </span>
-  );
-}
-
-// Category label helper
 function getCategoryLabel(cat?: IdentityCategory): string {
   const labels: Record<string, string> = {
     service_principal: 'Service Principal',
-    managed_identity_system: 'System Assigned MI',
-    managed_identity_user: 'User Assigned MI',
+    managed_identity_system: 'System MI',
+    managed_identity_user: 'User MI',
     human_user: 'Human User',
     guest: 'Guest',
     microsoft_internal: 'Microsoft Internal',
@@ -246,98 +137,172 @@ function getCategoryLabel(cat?: IdentityCategory): string {
   return labels[cat || ''] || 'Unknown';
 }
 
+function getComplianceRelevance(i: IdentityRow): string {
+  const frameworks: string[] = [];
+  const risk = i.risk_level || 'unknown';
+  const hasPrivilegedRoles = (i.entra_role_count ?? 0) > 0 || (i.rbac_role_count ?? 0) > 0;
+  if (risk === 'critical' || risk === 'high') frameworks.push('SOC2', 'HIPAA', 'PCI-DSS');
+  else if (risk === 'medium' && hasPrivilegedRoles) frameworks.push('SOC2');
+  if ((i.identity_category === 'human_user' || i.identity_category === 'guest') && hasPrivilegedRoles)
+    frameworks.push('HIPAA §164.312');
+  return frameworks.length > 0 ? Array.from(new Set(frameworks)).join(', ') : 'Low Priority';
+}
+
+// ─── Small presentational components ───────────────────────────────
+
+function SortHeader({ label, field, currentField, currentDir, onSort }: {
+  label: string; field: SortField; currentField: SortField; currentDir: 'asc' | 'desc'; onSort: (f: SortField) => void;
+}) {
+  const isActive = currentField === field;
+  return (
+    <th className="px-2 py-2.5 cursor-pointer select-none hover:bg-gray-100 whitespace-nowrap text-xs" onClick={() => onSort(field)}>
+      <div className="flex items-center gap-0.5">
+        <span>{label}</span>
+        <span className={`text-[10px] ${isActive ? 'text-blue-600' : 'text-gray-400'}`}>
+          {isActive ? (currentDir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </div>
+    </th>
+  );
+}
+
+function CloudBadge({ cloud }: { cloud?: string }) {
+  const c = safeLower(cloud) || 'azure';
+  const colors: Record<string, string> = { azure: 'bg-blue-100 text-blue-700', aws: 'bg-orange-100 text-orange-700', gcp: 'bg-red-100 text-red-700' };
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${colors[c] || colors.azure}`}>{c}</span>;
+}
+
+function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
+  const risk = safeLower(level);
+  const styles: Record<string, string> = {
+    critical: 'bg-red-100 text-red-800', high: 'bg-orange-100 text-orange-800',
+    medium: 'bg-yellow-100 text-yellow-800', low: 'bg-green-100 text-green-800', info: 'bg-blue-100 text-blue-800',
+  };
+  return (
+    <div className="flex items-center gap-1">
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${styles[risk] || 'bg-gray-100 text-gray-600'}`}>
+        {risk || '?'}
+      </span>
+      {score !== undefined && score > 0 && <span className="text-[10px] text-gray-400 font-mono">{score}</span>}
+    </div>
+  );
+}
+
+function RiskDot({ level }: { level?: string }) {
+  const colors: Record<string, string> = {
+    critical: 'bg-red-500', high: 'bg-orange-500', medium: 'bg-yellow-400', low: 'bg-green-400', info: 'bg-blue-400',
+  };
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${colors[safeLower(level)] || 'bg-gray-300'}`} />;
+}
+
+function TierBadge({ tier }: { tier: number }) {
+  const cfg: Record<number, { label: string; color: string }> = {
+    0: { label: 'T0', color: 'bg-red-100 text-red-800 border-red-300' },
+    1: { label: 'T1', color: 'bg-orange-100 text-orange-800 border-orange-300' },
+    2: { label: 'T2', color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
+    3: { label: 'T3', color: 'bg-gray-100 text-gray-600 border-gray-300' },
+  };
+  const c = cfg[tier] || cfg[3];
+  return (
+    <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${c.color}`} title={`Privilege Tier ${tier}`}>
+      {c.label}
+    </span>
+  );
+}
+
+function DormantBadge({ status }: { status: 'yes' | 'idle' | 'no' | 'unknown' }) {
+  if (status === 'yes') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">90d+</span>;
+  if (status === 'idle') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 text-yellow-700">30-90d</span>;
+  if (status === 'no') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">Active</span>;
+  return <span className="text-[10px] text-gray-300">—</span>;
+}
+
+function CategoryBadge({ category }: { category?: IdentityCategory }) {
+  const map: Record<string, { label: string; color: string }> = {
+    service_principal: { label: 'SPN', color: 'bg-purple-50 text-purple-700' },
+    managed_identity_system: { label: 'Sys MI', color: 'bg-cyan-50 text-cyan-700' },
+    managed_identity_user: { label: 'Usr MI', color: 'bg-teal-50 text-teal-700' },
+    human_user: { label: 'Human', color: 'bg-indigo-50 text-indigo-700' },
+    guest: { label: 'Guest', color: 'bg-pink-50 text-pink-700' },
+    microsoft_internal: { label: 'MSFT', color: 'bg-sky-50 text-sky-700' },
+  };
+  const info = map[category || ''] || { label: '?', color: 'bg-gray-50 text-gray-600' };
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${info.color}`}>{info.label}</span>;
+}
+
+function TypeLabel({ type }: { type?: string }) {
+  const t = safeLower(type);
+  const labels: Record<string, string> = {
+    serviceprincipal: 'App',
+    service_principal: 'App',
+    user: 'User',
+    group: 'Group',
+    managed_identity: 'MI',
+  };
+  return <span className="text-[11px] text-gray-600">{labels[t] || type || '—'}</span>;
+}
+
+// ─── Main component ────────────────────────────────────────────────
+
 export default function IdentitiesPage() {
   const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-
   const [search, setSearch] = useState('');
   const [riskFilter, setRiskFilter] = useState<RiskLevel | 'all'>('all');
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
-
   const [sortField, setSortField] = useState<SortField>('risk_level');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-
-  // Selection state for export
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Parse URL params - reset filters based on URL
+  // URL param sync
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const catParam = params.get('identity_category') || params.get('category');
     const riskParam = params.get('risk_level');
-
-    if (catParam) {
-      const found = CATEGORY_OPTIONS.find(o => o.value === catParam);
-      if (found && found.value !== 'all') {
-        setCategoryFilter(found.value as IdentityCategory);
-      } else {
-        setCategoryFilter('all');
-      }
-    } else {
-      setCategoryFilter('all');
-    }
-
-    if (riskParam) {
-      const found = RISK_OPTIONS.find(o => o.value === riskParam);
-      if (found && found.value !== 'all') {
-        setRiskFilter(found.value as RiskLevel);
-      } else {
-        setRiskFilter('all');
-      }
-    } else {
-      setRiskFilter('all');
-    }
+    setCategoryFilter(catParam && CATEGORY_OPTIONS.find(o => o.value === catParam) ? catParam as IdentityCategory : 'all');
+    setRiskFilter(riskParam && RISK_OPTIONS.find(o => o.value === riskParam) ? riskParam as RiskLevel : 'all');
   }, [location.search]);
 
-  // Fetch data
+  // Fetch
   useEffect(() => {
     let cancelled = false;
-
     async function load() {
       try {
         const resp = await fetch('http://localhost:5001/api/identities');
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
-
         const rows: IdentityRow[] = (data.identities || []).map((raw: any) => ({
-          identity_id: raw.identity_id || raw.id || '',
-          display_name: raw.display_name || raw.name || '',
+          identity_id: raw.identity_id || '',
+          display_name: raw.display_name || '',
           identity_type: raw.identity_type,
           identity_category: normalizeCategoryFromBackend(raw.identity_category),
-
           cloud: raw.cloud || 'azure',
-
           created_datetime: raw.created_datetime || null,
           last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
           last_sign_in: raw.last_sign_in || null,
-
           api_permission_count: raw.api_permission_count ?? 0,
           role_count: raw.role_count ?? 0,
           rbac_role_count: raw.rbac_role_count ?? 0,
           entra_role_count: raw.entra_role_count ?? 0,
           rbac_max_risk: safeLower(raw.rbac_max_risk || 'info') as RiskLevel,
           entra_max_risk: safeLower(raw.entra_max_risk || 'info') as RiskLevel,
+          graph_max_risk: safeLower(raw.graph_max_risk || 'info') as RiskLevel,
           app_role_count: raw.app_role_count ?? 0,
-
           credential_count: raw.credential_count ?? 0,
           credential_expiration: raw.credential_expiration || raw.next_expiry || null,
-          next_expiry: raw.next_expiry || null,
           credential_status: raw.credential_status,
-
           owner_display_name: raw.owner_display_name || null,
           owner_count: raw.owner_count ?? 0,
-
           status: raw.status || (raw.enabled === false ? 'disabled' : 'active'),
           enabled: raw.enabled,
-
           risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
           risk_score: raw.risk_score ?? 0,
+          activity_status: raw.activity_status || 'unknown',
         }));
-
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load identities');
@@ -345,559 +310,313 @@ export default function IdentitiesPage() {
         if (!cancelled) setLoading(false);
       }
     }
-
     load();
     return () => { cancelled = true; };
   }, []);
 
-  // Filter and sort
+  // Filter & sort
   const filtered = useMemo(() => {
     let result = [...identities];
-
-    // Search filter
     const s = safeLower(search);
-    if (s) {
-      result = result.filter(i =>
-        safeLower(i.display_name).includes(s) ||
-        safeLower(i.identity_id).includes(s) ||
-        safeLower(i.owner_display_name).includes(s)
-      );
-    }
+    if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
+    if (riskFilter !== 'all') result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
+    if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
 
-    // Risk filter
-    if (riskFilter !== 'all') {
-      result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
-    }
-
-    // Category filter
-    if (categoryFilter !== 'all') {
-      result = result.filter(i => i.identity_category === categoryFilter);
-    }
-
-    // Sort
     result.sort((a, b) => {
-      let aVal: any;
-      let bVal: any;
-
+      let aVal: any, bVal: any;
       switch (sortField) {
-        case 'display_name':
-          aVal = safeLower(a.display_name);
-          bVal = safeLower(b.display_name);
-          break;
-        case 'identity_category':
-          aVal = safeLower(a.identity_category);
-          bVal = safeLower(b.identity_category);
-          break;
-        case 'cloud':
-          aVal = safeLower(a.cloud);
-          bVal = safeLower(b.cloud);
-          break;
-        case 'role_count':
-          aVal = (a.entra_role_count ?? 0) + (a.rbac_role_count ?? 0);
-          bVal = (b.entra_role_count ?? 0) + (b.rbac_role_count ?? 0);
-          break;
-        case 'api_permission_count':
-          aVal = (a.api_permission_count ?? 0) + (a.app_role_count ?? 0);
-          bVal = (b.api_permission_count ?? 0) + (b.app_role_count ?? 0);
-          break;
+        case 'display_name': aVal = safeLower(a.display_name); bVal = safeLower(b.display_name); break;
+        case 'identity_type': aVal = safeLower(a.identity_type); bVal = safeLower(b.identity_type); break;
+        case 'identity_category': aVal = safeLower(a.identity_category); bVal = safeLower(b.identity_category); break;
+        case 'cloud': aVal = safeLower(a.cloud); bVal = safeLower(b.cloud); break;
+        case 'entra_role_count': aVal = a.entra_role_count ?? 0; bVal = b.entra_role_count ?? 0; break;
+        case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
+        case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
+        case 'privilege_tier': aVal = computePrivilegeTier(a); bVal = computePrivilegeTier(b); break;
         case 'credential_expiration':
           aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
           bVal = b.credential_expiration ? new Date(b.credential_expiration).getTime() : Infinity;
           break;
-        case 'owner_display_name':
-          aVal = a.owner_display_name ? safeLower(a.owner_display_name) : 'zzz';
-          bVal = b.owner_display_name ? safeLower(b.owner_display_name) : 'zzz';
+        case 'created_datetime':
+          aVal = a.created_datetime ? new Date(a.created_datetime).getTime() : 0;
+          bVal = b.created_datetime ? new Date(b.created_datetime).getTime() : 0;
           break;
-        case 'status':
-          aVal = a.status === 'active' ? 0 : 1;
-          bVal = b.status === 'active' ? 0 : 1;
+        case 'last_seen_auth':
+          aVal = a.last_seen_auth ? new Date(a.last_seen_auth).getTime() : 0;
+          bVal = b.last_seen_auth ? new Date(b.last_seen_auth).getTime() : 0;
+          break;
+        case 'dormant':
+          const dormOrder: Record<string, number> = { yes: 3, idle: 2, no: 1, unknown: 0 };
+          aVal = dormOrder[getDormantStatus(a)] || 0;
+          bVal = dormOrder[getDormantStatus(b)] || 0;
           break;
         case 'risk_level':
         default:
-          const riskOrder: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1, unknown: 0 };
-          aVal = riskOrder[safeLower(a.risk_level)] || 0;
-          bVal = riskOrder[safeLower(b.risk_level)] || 0;
+          aVal = RISK_ORDER[safeLower(a.risk_level)] || 0;
+          bVal = RISK_ORDER[safeLower(b.risk_level)] || 0;
       }
-
       if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
       if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
-
     return result;
   }, [identities, search, riskFilter, categoryFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
-    if (field === sortField) {
-      setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
-    } else {
+    if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
+    else {
       setSortField(field);
-      setSortDir(['risk_level', 'role_count', 'api_permission_count'].includes(field) ? 'desc' : 'asc');
+      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant'].includes(field) ? 'desc' : 'asc');
     }
   }
 
-  function openIdentity(id: string) {
-    navigate(`/identities/${encodeURIComponent(id)}`);
-  }
-
-  // Selection helpers
-  function toggleSelect(id: string) {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }
-
-  function selectAll() {
-    if (selectedIds.size === filtered.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(filtered.map(i => i.identity_id)));
-    }
-  }
-
+  function toggleSelect(id: string) { setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+  function selectAll() { selectedIds.size === filtered.length ? setSelectedIds(new Set()) : setSelectedIds(new Set(filtered.map(i => i.identity_id))); }
   function selectCompliance() {
-    const complianceIds = filtered
-      .filter(i =>
-        i.risk_level === 'critical' ||
-        i.risk_level === 'high' ||
-        (i.risk_level === 'medium' && ((i.entra_role_count ?? 0) > 0 || (i.rbac_role_count ?? 0) > 0))
-      )
-      .map(i => i.identity_id);
-    setSelectedIds(new Set(complianceIds));
+    setSelectedIds(new Set(filtered.filter(i => i.risk_level === 'critical' || i.risk_level === 'high' || (i.risk_level === 'medium' && ((i.entra_role_count ?? 0) > 0 || (i.rbac_role_count ?? 0) > 0))).map(i => i.identity_id)));
   }
 
-  function clearSelection() {
-    setSelectedIds(new Set());
-  }
+  const selectedIdentities = useMemo(() => selectedIds.size === 0 ? [] : filtered.filter(i => selectedIds.has(i.identity_id)), [filtered, selectedIds]);
 
-  // Get selected identities for export
-  const selectedIdentities = useMemo(() => {
-    if (selectedIds.size === 0) return [];
-    return filtered.filter(i => selectedIds.has(i.identity_id));
-  }, [filtered, selectedIds]);
-
-  // Helper to determine compliance relevance
-  function getComplianceRelevance(i: IdentityRow): string {
-    const frameworks: string[] = [];
-    const risk = i.risk_level || 'unknown';
-    const hasPrivilegedRoles = (i.entra_role_count ?? 0) > 0 || (i.rbac_role_count ?? 0) > 0;
-
-    if (risk === 'critical' || risk === 'high') {
-      frameworks.push('SOC2', 'HIPAA', 'PCI-DSS');
-    } else if (risk === 'medium' && hasPrivilegedRoles) {
-      frameworks.push('SOC2');
-    }
-
-    if (i.identity_category === 'human_user' || i.identity_category === 'guest') {
-      if (hasPrivilegedRoles) frameworks.push('HIPAA §164.312');
-    }
-
-    return frameworks.length > 0 ? Array.from(new Set(frameworks)).join(', ') : 'Low Priority';
-  }
-
-  // Export to CSV
+  // Export CSV
   function exportToCSV() {
-    if (selectedIds.size === 0) {
-      alert('Please select identities to export. Use checkboxes or "Select for GRC" button.');
-      return;
-    }
-
-    const headers = [
-      'Display Name', 'Identity ID', 'Category', 'Cloud', 'Risk Level', 'Risk Score',
-      'Compliance Relevance', 'Status', 'Entra Roles', 'RBAC Roles',
-      'API Permissions', 'App Roles', 'Created', 'Last Sign-in', 'Owner',
-    ];
-
+    if (selectedIds.size === 0) { alert('Select identities first.'); return; }
+    const headers = ['Display Name','Identity ID','Type','Category','Cloud','Risk','Score','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
     const rows = selectedIdentities.map(i => [
-      i.display_name, i.identity_id, getCategoryLabel(i.identity_category),
+      i.display_name, i.identity_id, i.identity_type || '', getCategoryLabel(i.identity_category),
       i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), i.risk_score ?? 0,
-      getComplianceRelevance(i), i.enabled === false ? 'Disabled' : 'Active',
-      i.entra_role_count ?? 0, i.rbac_role_count ?? 0, i.api_permission_count ?? 0,
-      i.app_role_count ?? 0, i.created_datetime || '', i.last_seen_auth || 'N/A (Premium required)',
-      i.owner_display_name || 'No owner',
+      `T${computePrivilegeTier(i)}`, i.entra_role_count ?? 0, i.rbac_role_count ?? 0,
+      i.api_permission_count ?? 0, i.credential_expiration || '', i.created_datetime || '',
+      i.last_seen_auth || 'N/A', getDormantStatus(i), getComplianceRelevance(i), i.owner_display_name || '',
     ]);
-
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
-    ].join('\n');
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const csv = [headers.join(','), ...rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `auditgraph-grc-report-${new Date().toISOString().split('T')[0]}.csv`;
-    link.click();
+    const a = document.createElement('a'); a.href = url; a.download = `auditgraph-report-${new Date().toISOString().split('T')[0]}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
-  // Export to PDF (GRC Audit Report)
+  // Export PDF
   function exportToPDF() {
-    if (selectedIds.size === 0) {
-      alert('Please select identities to export. Use checkboxes or "Select for GRC" button.');
-      return;
-    }
-
+    if (selectedIds.size === 0) { alert('Select identities first.'); return; }
     const doc = new jsPDF({ orientation: 'landscape' });
-
-    doc.setFontSize(20);
-    doc.setTextColor(30, 64, 175);
-    doc.text('AuditGraph GRC Compliance Report', 14, 20);
-
-    doc.setFontSize(10);
-    doc.setTextColor(100);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 28);
-    doc.text(`Selected Identities: ${selectedIdentities.length}`, 14, 34);
-
+    doc.setFontSize(18); doc.setTextColor(30, 64, 175); doc.text('AuditGraph GRC Compliance Report', 14, 18);
+    doc.setFontSize(9); doc.setTextColor(100);
+    doc.text(`Generated: ${new Date().toLocaleString()} | Identities: ${selectedIdentities.length}`, 14, 25);
     const critical = selectedIdentities.filter(i => i.risk_level === 'critical').length;
     const high = selectedIdentities.filter(i => i.risk_level === 'high').length;
-    const medium = selectedIdentities.filter(i => i.risk_level === 'medium').length;
-    doc.text(`Risk Summary: ${critical} Critical, ${high} High, ${medium} Medium`, 14, 40);
-
-    doc.setFontSize(9);
-    doc.setTextColor(80);
-    doc.text('Applicable Frameworks: SOC2 (Least Privilege), HIPAA §164.312 (Access Controls), PCI-DSS 7.1 (Need-to-Know)', 14, 46);
-
-    const tableData = selectedIdentities.map(i => [
-      i.display_name.substring(0, 25) + (i.display_name.length > 25 ? '...' : ''),
-      getCategoryLabel(i.identity_category),
-      (i.risk_level || 'unknown').toUpperCase(),
-      String(i.risk_score ?? 0),
-      getComplianceRelevance(i),
-      String((i.entra_role_count ?? 0) + (i.rbac_role_count ?? 0)),
-      String((i.api_permission_count ?? 0) + (i.app_role_count ?? 0)),
-      i.enabled === false ? 'Disabled' : 'Active',
-    ]);
+    doc.text(`Risk: ${critical} Critical, ${high} High | Frameworks: SOC2, HIPAA, PCI-DSS, NIST 800-53`, 14, 30);
 
     autoTable(doc, {
-      startY: 52,
-      head: [['Identity', 'Category', 'Risk', 'Score', 'Compliance', 'Roles', 'Perms', 'Status']],
-      body: tableData,
-      styles: { fontSize: 8, cellPadding: 2 },
+      startY: 35,
+      head: [['Identity', 'Category', 'Risk', 'Score', 'Tier', 'Roles', 'Perms', 'Dormant', 'Compliance']],
+      body: selectedIdentities.map(i => [
+        i.display_name.substring(0, 28) + (i.display_name.length > 28 ? '..' : ''),
+        getCategoryLabel(i.identity_category), (i.risk_level || '?').toUpperCase(),
+        String(i.risk_score ?? 0), `T${computePrivilegeTier(i)}`,
+        String((i.entra_role_count ?? 0) + (i.rbac_role_count ?? 0)),
+        String(i.api_permission_count ?? 0), getDormantStatus(i).toUpperCase(),
+        getComplianceRelevance(i),
+      ]),
+      styles: { fontSize: 7, cellPadding: 1.5 },
       headStyles: { fillColor: [30, 64, 175], textColor: 255 },
       alternateRowStyles: { fillColor: [245, 247, 250] },
-      columnStyles: {
-        0: { cellWidth: 45 },
-        1: { cellWidth: 35 },
-        2: { cellWidth: 18, halign: 'center' },
-        3: { cellWidth: 15, halign: 'center' },
-        4: { cellWidth: 45 },
-        5: { cellWidth: 15, halign: 'center' },
-        6: { cellWidth: 15, halign: 'center' },
-        7: { cellWidth: 20, halign: 'center' },
-      },
-      didParseCell: function(data) {
+      didParseCell: (data) => {
         if (data.column.index === 2 && data.section === 'body') {
-          const risk = String(data.cell.raw).toLowerCase();
-          if (risk === 'critical') {
-            data.cell.styles.fillColor = [254, 226, 226];
-            data.cell.styles.textColor = [185, 28, 28];
-          } else if (risk === 'high') {
-            data.cell.styles.fillColor = [255, 237, 213];
-            data.cell.styles.textColor = [194, 65, 12];
-          } else if (risk === 'medium') {
-            data.cell.styles.fillColor = [254, 249, 195];
-            data.cell.styles.textColor = [161, 98, 7];
-          }
+          const r = String(data.cell.raw).toLowerCase();
+          if (r === 'critical') { data.cell.styles.fillColor = [254,226,226]; data.cell.styles.textColor = [185,28,28]; }
+          else if (r === 'high') { data.cell.styles.fillColor = [255,237,213]; data.cell.styles.textColor = [194,65,12]; }
         }
       },
     });
-
-    const pageCount = (doc as any).getNumberOfPages();
-    for (let i = 1; i <= pageCount; i++) {
-      (doc as any).setPage(i);
-      doc.setFontSize(8);
-      doc.setTextColor(150);
-      doc.text(
-        `AuditGraph - GRC Compliance Report | Page ${i} of ${pageCount}`,
-        doc.internal.pageSize.width / 2,
-        doc.internal.pageSize.height - 10,
-        { align: 'center' }
-      );
-    }
-
-    doc.save(`auditgraph-grc-compliance-report-${new Date().toISOString().split('T')[0]}.pdf`);
+    doc.save(`auditgraph-grc-report-${new Date().toISOString().split('T')[0]}.pdf`);
   }
+
+  const colSpan = 14; // checkbox + 13 data cols
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-5">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">All Identities</h2>
-          <p className="text-sm text-gray-600">Multi-cloud identity inventory with full sorting</p>
+          <p className="text-sm text-gray-500">Full identity inventory — click any row for deep-dive</p>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="text-sm text-gray-600 font-medium">
-            {loading ? 'Loading…' : `${filtered.length} of ${identities.length} identities`}
-            {selectedIds.size > 0 && (
-              <span className="ml-2 text-blue-600 font-semibold">
-                ({selectedIds.size} selected)
-              </span>
-            )}
-          </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm text-gray-600">
+            {loading ? 'Loading…' : `${filtered.length} of ${identities.length}`}
+            {selectedIds.size > 0 && <span className="ml-1 text-blue-600 font-semibold">({selectedIds.size} sel)</span>}
+          </span>
           {!loading && filtered.length > 0 && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={selectCompliance}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-purple-700 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100 transition"
-                title="Select identities relevant for HIPAA, PCI-DSS, SOC2 compliance audits"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-                Select for GRC
+            <>
+              <button onClick={selectCompliance} className="px-2.5 py-1 text-xs font-medium text-purple-700 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100" title="Select GRC-relevant identities">
+                GRC Select
               </button>
               {selectedIds.size > 0 && (
-                <button
-                  onClick={clearSelection}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 transition"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  Clear
-                </button>
+                <button onClick={() => setSelectedIds(new Set())} className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100">Clear</button>
               )}
-              <div className="w-px h-6 bg-gray-300" />
-              <button
-                onClick={exportToCSV}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
-                title="Export to CSV"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                CSV
-              </button>
-              <button
-                onClick={exportToPDF}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
-                title="Export PDF Report"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                </svg>
-                PDF Report
-              </button>
-            </div>
+              <span className="w-px h-5 bg-gray-300" />
+              <button onClick={exportToCSV} className="px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">CSV</button>
+              <button onClick={exportToPDF} className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">PDF</button>
+            </>
           )}
         </div>
       </div>
 
       {/* Filters */}
-      <div className="bg-white border rounded-xl p-4 mb-4 shadow-sm">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">Search</label>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Name, ID, or Owner…"
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">Risk Level</label>
-            <select
-              value={riskFilter}
-              onChange={(e) => setRiskFilter(e.target.value as any)}
-              className="w-full border rounded-lg px-3 py-2 text-sm"
-            >
-              {RISK_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">Category</label>
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value as any)}
-              className="w-full border rounded-lg px-3 py-2 text-sm"
-            >
-              {CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-          <div className="flex items-end">
-            <button
-              onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); }}
-              className="w-full px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50"
-            >
-              Clear Filters
-            </button>
-          </div>
+      <div className="bg-white border rounded-xl p-3 mb-3 shadow-sm">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, ID, owner…"
+            className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
+          <select value={riskFilter} onChange={e => setRiskFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
+            {RISK_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
+            {CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); }}
+            className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
+            Clear
+          </button>
         </div>
       </div>
 
-      {/* Table - Cleaned up 9-column model */}
+      {/* Table */}
       <div className="bg-white border rounded-xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 border-b text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+          <table className="min-w-full text-[12px]">
+            <thead className="bg-gray-50 border-b text-left font-semibold text-gray-600 uppercase tracking-wider">
               <tr>
-                <th className="px-3 py-3 w-10">
-                  <input
-                    type="checkbox"
-                    checked={filtered.length > 0 && selectedIds.size === filtered.length}
-                    onChange={selectAll}
-                    className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
-                    title="Select all visible identities"
-                  />
+                <th className="px-2 py-2.5 w-8">
+                  <input type="checkbox" checked={filtered.length > 0 && selectedIds.size === filtered.length} onChange={selectAll}
+                    className="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer" />
                 </th>
                 <SortHeader label="Identity Name" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Type" field="identity_type" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Category" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Roles" field="role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Permissions" field="api_permission_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Secrets / Expiry" field="credential_expiration" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Owner" field="owner_display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Entra" field="entra_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="RBAC" field="rbac_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Graph API" field="api_permission_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Tier" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Secret/Expiry" field="credential_expiration" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Dormant" field="dormant" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">Loading identities…</td></tr>
+                <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-gray-500">Loading…</td></tr>
               ) : error ? (
-                <tr><td colSpan={10} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
+                <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">No identities match your filters.</td></tr>
-              ) : (
-                filtered.map((i) => {
-                  const totalRoles = (i.entra_role_count ?? 0) + (i.rbac_role_count ?? 0);
-                  const totalPerms = (i.api_permission_count ?? 0) + (i.app_role_count ?? 0);
+                <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-gray-500">No identities match filters.</td></tr>
+              ) : filtered.map(i => {
+                const tier = computePrivilegeTier(i);
+                const dormant = getDormantStatus(i);
+                return (
+                  <tr key={i.identity_id}
+                    className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''}`}
+                    onClick={() => navigate(`/identities/${encodeURIComponent(i.identity_id)}`)}
+                  >
+                    {/* Checkbox */}
+                    <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
+                      <input type="checkbox" checked={selectedIds.has(i.identity_id)} onChange={() => toggleSelect(i.identity_id)}
+                        className="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer" />
+                    </td>
 
-                  return (
-                    <tr
-                      key={i.identity_id}
-                      className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''}`}
-                      onClick={() => openIdentity(i.identity_id)}
-                    >
-                      {/* Checkbox */}
-                      <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(i.identity_id)}
-                          onChange={() => toggleSelect(i.identity_id)}
-                          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
-                        />
-                      </td>
+                    {/* Name */}
+                    <td className="px-2 py-2 max-w-[180px]">
+                      <div className="font-medium text-gray-900 truncate" title={i.display_name}>{i.display_name}</div>
+                      <div className="text-[10px] text-gray-400 font-mono">{i.identity_id.substring(0, 8)}…</div>
+                    </td>
 
-                      {/* Identity Name */}
-                      <td className="px-3 py-3">
-                        <div className="font-medium text-gray-900 truncate max-w-[220px]" title={i.display_name}>
-                          {i.display_name}
+                    {/* Type */}
+                    <td className="px-2 py-2"><TypeLabel type={i.identity_type} /></td>
+
+                    {/* Category */}
+                    <td className="px-2 py-2"><CategoryBadge category={i.identity_category} /></td>
+
+                    {/* Cloud */}
+                    <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
+
+                    {/* Risk */}
+                    <td className="px-2 py-2"><RiskBadge level={i.risk_level} score={i.risk_score} /></td>
+
+                    {/* Entra Roles */}
+                    <td className="px-2 py-2 text-center">
+                      {(i.entra_role_count ?? 0) > 0 ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <RiskDot level={i.entra_max_risk} />
+                          <span className="font-semibold text-indigo-700">{i.entra_role_count}</span>
                         </div>
-                        <div className="text-xs text-gray-400 font-mono mt-0.5">{i.identity_id.substring(0, 8)}…</div>
-                      </td>
+                      ) : <span className="text-gray-300">0</span>}
+                    </td>
 
-                      {/* Category */}
-                      <td className="px-3 py-3">
-                        <CategoryBadge category={i.identity_category} />
-                      </td>
+                    {/* RBAC Roles */}
+                    <td className="px-2 py-2 text-center">
+                      {(i.rbac_role_count ?? 0) > 0 ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <RiskDot level={i.rbac_max_risk} />
+                          <span className="font-semibold text-blue-700">{i.rbac_role_count}</span>
+                        </div>
+                      ) : <span className="text-gray-300">0</span>}
+                    </td>
 
-                      {/* Cloud */}
-                      <td className="px-3 py-3">
-                        <CloudBadge cloud={i.cloud} />
-                      </td>
+                    {/* Graph API */}
+                    <td className="px-2 py-2 text-center">
+                      {(i.api_permission_count ?? 0) > 0 ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <RiskDot level={i.graph_max_risk} />
+                          <span className="font-semibold text-purple-700">{i.api_permission_count}</span>
+                        </div>
+                      ) : <span className="text-gray-300">0</span>}
+                    </td>
 
-                      {/* Risk */}
-                      <td className="px-3 py-3">
-                        <RiskBadge level={i.risk_level} score={i.risk_score} />
-                      </td>
+                    {/* Privilege Tier */}
+                    <td className="px-2 py-2 text-center"><TierBadge tier={tier} /></td>
 
-                      {/* Roles (combined Entra + RBAC) */}
-                      <td className="px-3 py-3">
-                        {totalRoles > 0 ? (
-                          <div className="space-y-0.5">
-                            {(i.entra_role_count ?? 0) > 0 && (
-                              <div className="flex items-center gap-1 text-xs">
-                                <RiskDot level={i.entra_max_risk} />
-                                <span className="text-indigo-700 font-medium">{i.entra_role_count}</span>
-                                <span className="text-gray-400">Entra</span>
-                              </div>
-                            )}
-                            {(i.rbac_role_count ?? 0) > 0 && (
-                              <div className="flex items-center gap-1 text-xs">
-                                <RiskDot level={i.rbac_max_risk} />
-                                <span className="text-blue-700 font-medium">{i.rbac_role_count}</span>
-                                <span className="text-gray-400">RBAC</span>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-gray-300 text-xs">—</span>
-                        )}
-                      </td>
+                    {/* Secret/Expiry */}
+                    <td className="px-2 py-2">
+                      {i.identity_category === 'human_user' || i.identity_category === 'guest' ? (
+                        <span className="text-gray-300">N/A</span>
+                      ) : (
+                        <div>
+                          <span className="text-gray-600">{i.credential_count ?? 0}</span>
+                          {i.credential_expiration && (
+                            <div className="text-[10px] text-orange-600">{formatDate(i.credential_expiration)}</div>
+                          )}
+                        </div>
+                      )}
+                    </td>
 
-                      {/* Permissions (combined API + App Roles) */}
-                      <td className="px-3 py-3">
-                        {totalPerms > 0 ? (
-                          <div className="space-y-0.5">
-                            {(i.api_permission_count ?? 0) > 0 && (
-                              <div className="text-xs">
-                                <span className="text-purple-700 font-medium">{i.api_permission_count}</span>
-                                <span className="text-gray-400 ml-1">API</span>
-                              </div>
-                            )}
-                            {(i.app_role_count ?? 0) > 0 && (
-                              <div className="text-xs">
-                                <span className="text-indigo-700 font-medium">{i.app_role_count}</span>
-                                <span className="text-gray-400 ml-1">App</span>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-gray-300 text-xs">—</span>
-                        )}
-                      </td>
+                    {/* Created */}
+                    <td className="px-2 py-2 text-gray-600 whitespace-nowrap">{formatDate(i.created_datetime)}</td>
 
-                      {/* Secrets/Expiry */}
-                      <td className="px-3 py-3">
-                        {i.identity_category === 'human_user' || i.identity_category === 'guest' ? (
-                          <span className="text-xs text-gray-300">N/A</span>
-                        ) : (
-                          <div className="text-xs">
-                            <span className="text-gray-600">{i.credential_count ?? 0} secret(s)</span>
-                            {i.credential_expiration && (
-                              <div className="text-orange-600">{formatDate(i.credential_expiration)}</div>
-                            )}
-                          </div>
-                        )}
-                      </td>
+                    {/* Last Used */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {i.last_seen_auth ? (
+                        <span className="text-gray-600">{formatDate(i.last_seen_auth)}</span>
+                      ) : (
+                        <span className="text-gray-300 italic" title="Requires Azure AD Premium P1/P2">P1/P2</span>
+                      )}
+                    </td>
 
-                      {/* Owner */}
-                      <td className="px-3 py-3">
-                        {i.owner_display_name ? (
-                          <span className="text-green-700 text-xs truncate max-w-[100px] block" title={i.owner_display_name}>
-                            {i.owner_display_name}
-                          </span>
-                        ) : (
-                          <span className="text-gray-300 text-xs">No owner</span>
-                        )}
-                      </td>
-
-                      {/* Status */}
-                      <td className="px-3 py-3">
-                        <StatusBadge status={i.status} enabled={i.enabled} />
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
+                    {/* Dormant */}
+                    <td className="px-2 py-2 text-center"><DormantBadge status={dormant} /></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </div>
 
-      {/* Footer info */}
-      <div className="mt-4 text-xs text-gray-500 text-center">
-        Click any column header to sort. Click any row to view details.
+      <div className="mt-3 text-[11px] text-gray-400 text-center">
+        Tier: T0 = Global Admin / Critical | T1 = High privilege | T2 = Medium | T3 = Standard.
+        Dormant: 90d+ = stale, 30-90d = idle.
       </div>
     </div>
   );
