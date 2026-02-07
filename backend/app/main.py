@@ -9,6 +9,7 @@ from app.api.handlers import (
     get_risks,
     get_identity_summary,
     get_dashboard_posture,
+    get_dashboard_compliance,
     get_overview_insights,
 )
 
@@ -55,6 +56,13 @@ def create_app():
     @app.get("/api/dashboard/posture")
     def dashboard_posture():
         return get_dashboard_posture()
+
+    # -----------------------
+    # Dashboard compliance scorecard
+    # -----------------------
+    @app.get("/api/dashboard/compliance")
+    def dashboard_compliance():
+        return get_dashboard_compliance()
 
     # -----------------------
     # Overview insights (tier distribution, action items)

@@ -1,21 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
-import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth } from '../components/dashboard';
-
-type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown';
-
-type IdentityCategory =
-  | 'service_principal'
-  | 'managed_identity_system'
-  | 'managed_identity_user'
-  | 'human_user'
-  | 'guest'
-  | 'microsoft_internal'
-  | 'unknown';
+import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard } from '../components/dashboard';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -27,19 +16,6 @@ interface StatsResponse {
     high_count: number;
     medium_count: number;
   } | null;
-}
-
-interface RisksResponse {
-  run_id?: number;
-  count: number;
-  items: Array<{
-    identity_id: string;
-    display_name: string;
-    identity_type?: string;
-    identity_category?: IdentityCategory;
-    risk_level: RiskLevel;
-    risk_reasons: string[] | string;
-  }>;
 }
 
 interface IdentitySummaryResponse {
@@ -80,48 +56,14 @@ interface PostureResponse {
   expiring_credentials_count: number;
 }
 
-function safeLower(v: any) {
-  return String(v ?? '').toLowerCase();
-}
-
-function riskBadge(level?: string) {
-  const v = safeLower(level);
-  const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
-  if (v === 'critical') return <span className={`${base} bg-red-100 text-red-700`}>CRITICAL</span>;
-  if (v === 'high') return <span className={`${base} bg-orange-100 text-orange-700`}>HIGH</span>;
-  if (v === 'medium') return <span className={`${base} bg-yellow-100 text-yellow-700`}>MEDIUM</span>;
-  if (v === 'low') return <span className={`${base} bg-green-100 text-green-700`}>LOW</span>;
-  if (v === 'info') return <span className={`${base} bg-blue-100 text-blue-700`}>INFO</span>;
-  return <span className={`${base} bg-gray-100 text-gray-700`}>UNKNOWN</span>;
-}
-
-function categoryLabel(cat: string) {
-  switch (cat) {
-    case 'service_principal':
-      return 'Service Principal';
-    case 'managed_identity_system':
-      return 'Managed Identity (System)';
-    case 'managed_identity_user':
-      return 'Managed Identity (User)';
-    case 'human_user':
-      return 'Human User';
-    case 'guest':
-      return 'Guest';
-    case 'microsoft_internal':
-      return 'Microsoft Internal';
-    default:
-      return 'Unknown';
-  }
-}
-
 export default function Dashboard() {
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
-  const [risks, setRisks] = useState<RisksResponse | null>(null);
   const [posture, setPosture] = useState<PostureResponse | null>(null);
+  const [compliance, setCompliance] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -131,21 +73,19 @@ export default function Dashboard() {
       setLoading(true);
       setError(null);
       try {
-        const [statsRes, summaryRes, risksRes, postureRes] = await Promise.all([
+        const [statsRes, summaryRes, postureRes, complianceRes] = await Promise.all([
           fetch('/api/stats'),
           fetch('/api/identity-summary'),
-          fetch('/api/risks'),
           fetch('/api/dashboard/posture'),
+          fetch('/api/dashboard/compliance'),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
         if (!summaryRes.ok) throw new Error(`Summary API error: ${summaryRes.status}`);
-        if (!risksRes.ok) throw new Error(`Risks API error: ${risksRes.status}`);
 
-        const [statsJson, summaryJson, risksJson] = await Promise.all([
+        const [statsJson, summaryJson] = await Promise.all([
           statsRes.json(),
           summaryRes.json(),
-          risksRes.json(),
         ]);
 
         // Posture endpoint is optional - don't fail if unavailable
@@ -154,11 +94,13 @@ export default function Dashboard() {
           postureJson = await postureRes.json();
         }
 
+        const complianceJson = complianceRes.ok ? await complianceRes.json() : null;
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
-          setRisks(risksJson);
           setPosture(postureJson);
+          setCompliance(complianceJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -311,44 +253,8 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Critical & High Risks */}
-          <div className="bg-white border rounded-2xl p-6">
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-lg font-semibold text-gray-900">Critical & High Risks</div>
-              <Link to="/identities?risk_level=critical" className="text-sm text-blue-600 hover:underline">
-                View Critical →
-              </Link>
-            </div>
-
-            {(risks?.items || []).length === 0 ? (
-              <div className="text-sm text-gray-500">No critical/high risks found.</div>
-            ) : (
-              <div className="space-y-3">
-                {risks!.items.slice(0, 8).map((r: any, idx: number) => (
-                  <Link
-                    key={`${r.identity_id}-${idx}`}
-                    to={`/identities/${encodeURIComponent(r.identity_id)}`}
-                    className="block border rounded-xl p-4 hover:bg-gray-50 transition"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-semibold text-gray-900">{r.display_name}</div>
-                        <div className="text-xs text-gray-500 break-all">{r.identity_id}</div>
-                        {r.identity_category ? (
-                          <div className="text-xs text-gray-600 mt-1">{categoryLabel(r.identity_category)}</div>
-                        ) : null}
-                      </div>
-                      <div>{riskBadge(r.risk_level)}</div>
-                    </div>
-
-                    <div className="text-xs text-gray-700 mt-3">
-                      {Array.isArray(r.risk_reasons) ? r.risk_reasons.join(' • ') : String(r.risk_reasons || '')}
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </div>
+          {/* Compliance Scorecard */}
+          <ComplianceScorecard data={compliance} loading={loading} />
         </>
       )}
     </div>

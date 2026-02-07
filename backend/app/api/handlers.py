@@ -974,6 +974,231 @@ def get_overview_insights():
         db.close()
 
 
+def get_dashboard_compliance():
+    """
+    Compliance scorecard: SOC 2, HIPAA, PCI-DSS, NIST 800-53.
+    Evaluates pass/warn/fail per control area based on current identity posture.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        latest_run = cursor.fetchone()[0]
+        if not latest_run:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        # Gather key metrics
+        # T0 count
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                    AND LOWER(era.role_name) IN (
+                        'global administrator', 'privileged role administrator',
+                        'privileged authentication administrator',
+                        'application administrator', 'cloud application administrator',
+                        'hybrid identity administrator'
+                    ))
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                    AND LOWER(ra.role_name) IN ('owner', 'user access administrator')
+                    AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
+                         AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'))
+            )
+        """, (latest_run,))
+        t0_count = cursor.fetchone()[0]
+
+        # Dormant privileged (T0/T1 with stale/never_used)
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+            AND i.activity_status IN ('stale', 'never_used')
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+            )
+        """, (latest_run,))
+        dormant_privileged = cursor.fetchone()[0]
+
+        # Expired credentials
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+            AND i.credential_status = 'expired'
+        """, (latest_run,))
+        expired_creds = cursor.fetchone()[0]
+
+        # Expiring within 30 days
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+            AND i.credential_expiration IS NOT NULL
+            AND i.credential_expiration > NOW()
+            AND i.credential_expiration < NOW() + INTERVAL '30 days'
+        """, (latest_run,))
+        expiring_creds = cursor.fetchone()[0]
+
+        # Unowned SPNs
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+            AND LOWER(COALESCE(i.identity_category, '')) = 'service_principal'
+            AND COALESCE(i.owner_count, 0) = 0
+        """, (latest_run,))
+        unowned_spns = cursor.fetchone()[0]
+
+        # Total identities
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+        """, (latest_run,))
+        total = cursor.fetchone()[0]
+
+        # HIPAA violations count
+        cursor.execute("""
+            SELECT COUNT(DISTINCT rhm.role_name)
+            FROM role_hipaa_mappings rhm
+            WHERE EXISTS (
+                SELECT 1 FROM entra_role_assignments era
+                JOIN identities i ON era.identity_db_id = i.id
+                WHERE i.discovery_run_id = %s AND era.role_name = rhm.role_name
+            ) OR EXISTS (
+                SELECT 1 FROM role_assignments ra
+                JOIN identities i ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = %s AND ra.role_name = rhm.role_name
+            )
+        """, (latest_run, latest_run))
+        hipaa_roles_with_violations = cursor.fetchone()[0]
+
+        # Build scorecard
+        def status(pass_cond, warn_cond):
+            if pass_cond:
+                return "pass"
+            if warn_cond:
+                return "warn"
+            return "fail"
+
+        scorecard = {
+            "soc2": {
+                "name": "SOC 2",
+                "controls": [
+                    {
+                        "id": "CC6.1",
+                        "name": "Logical Access Controls",
+                        "status": status(t0_count <= 2, t0_count <= 5),
+                        "detail": f"{t0_count} Control Plane (T0) accounts" + (" — exceeds recommended max of 2" if t0_count > 2 else " — within limits"),
+                    },
+                    {
+                        "id": "CC6.2",
+                        "name": "Access Reviews",
+                        "status": status(dormant_privileged == 0, dormant_privileged <= 2),
+                        "detail": f"{dormant_privileged} dormant privileged account{'s' if dormant_privileged != 1 else ''} need review",
+                    },
+                    {
+                        "id": "CC6.3",
+                        "name": "Asset Ownership",
+                        "status": status(unowned_spns == 0, unowned_spns <= 3),
+                        "detail": f"{unowned_spns} service principal{'s' if unowned_spns != 1 else ''} without owners",
+                    },
+                    {
+                        "id": "CC7.2",
+                        "name": "Credential Management",
+                        "status": status(expired_creds == 0 and expiring_creds == 0, expired_creds == 0),
+                        "detail": f"{expired_creds} expired, {expiring_creds} expiring within 30d",
+                    },
+                ],
+            },
+            "hipaa": {
+                "name": "HIPAA",
+                "controls": [
+                    {
+                        "id": "§164.312(a)",
+                        "name": "Access Control",
+                        "status": status(t0_count <= 2, t0_count <= 5),
+                        "detail": f"{t0_count} identities with full tenant access",
+                    },
+                    {
+                        "id": "§164.312(d)",
+                        "name": "Authentication",
+                        "status": status(expired_creds == 0, expiring_creds <= 3),
+                        "detail": f"{expired_creds} expired credentials" + (f", {expiring_creds} expiring" if expiring_creds > 0 else ""),
+                    },
+                    {
+                        "id": "§164.308(a)(3)",
+                        "name": "Workforce Security",
+                        "status": status(dormant_privileged == 0, dormant_privileged <= 2),
+                        "detail": f"{dormant_privileged} dormant privileged account{'s' if dormant_privileged != 1 else ''}",
+                    },
+                    {
+                        "id": "§164.312(b)",
+                        "name": "Audit Controls",
+                        "status": "pass" if hipaa_roles_with_violations == 0 else "warn",
+                        "detail": f"{hipaa_roles_with_violations} role{'s' if hipaa_roles_with_violations != 1 else ''} with HIPAA violation mappings in use",
+                    },
+                ],
+            },
+            "pci_dss": {
+                "name": "PCI-DSS",
+                "controls": [
+                    {
+                        "id": "Req 7.1",
+                        "name": "Limit Access",
+                        "status": status(t0_count <= 2, t0_count <= 5),
+                        "detail": f"{t0_count} accounts with unrestricted access",
+                    },
+                    {
+                        "id": "Req 8.1",
+                        "name": "Credential Lifecycle",
+                        "status": status(expired_creds == 0 and expiring_creds == 0, expired_creds == 0),
+                        "detail": f"{expired_creds} expired, {expiring_creds} expiring credentials",
+                    },
+                    {
+                        "id": "Req 8.6",
+                        "name": "Service Account Controls",
+                        "status": status(unowned_spns == 0, unowned_spns <= 3),
+                        "detail": f"{unowned_spns} unmanaged service account{'s' if unowned_spns != 1 else ''}",
+                    },
+                ],
+            },
+            "nist": {
+                "name": "NIST 800-53",
+                "controls": [
+                    {
+                        "id": "AC-2",
+                        "name": "Account Management",
+                        "status": status(dormant_privileged == 0, dormant_privileged <= 2),
+                        "detail": f"{dormant_privileged} dormant account{'s' if dormant_privileged != 1 else ''} requiring action",
+                    },
+                    {
+                        "id": "AC-6",
+                        "name": "Least Privilege",
+                        "status": status(t0_count <= 2, t0_count <= 5),
+                        "detail": f"{t0_count} T0 identities (target: ≤2)",
+                    },
+                    {
+                        "id": "IA-5",
+                        "name": "Authenticator Management",
+                        "status": status(expired_creds == 0, expiring_creds <= 3),
+                        "detail": f"{expired_creds + expiring_creds} credential{'s' if (expired_creds + expiring_creds) != 1 else ''} need attention",
+                    },
+                    {
+                        "id": "CM-8",
+                        "name": "Asset Inventory",
+                        "status": status(unowned_spns == 0, unowned_spns <= 3),
+                        "detail": f"{total} identities tracked, {unowned_spns} unowned",
+                    },
+                ],
+            },
+        }
+
+        # Compute overall scores per framework
+        for fw in scorecard.values():
+            controls = fw["controls"]
+            passes = sum(1 for c in controls if c["status"] == "pass")
+            fw["score"] = round(passes / len(controls) * 100) if controls else 0
+            fw["pass_count"] = passes
+            fw["total_controls"] = len(controls)
+
+        return jsonify(scorecard)
+    finally:
+        cursor.close()
+        db.close()
+
+
 def get_dashboard_posture():
     """
     Dashboard posture data: credential health, dormant counts, posture score,
