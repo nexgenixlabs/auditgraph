@@ -46,7 +46,8 @@ Usage:
 Dependencies:
     - azure-identity: Azure authentication
     - msgraph-sdk: Microsoft Graph API client
-    - Azure CLI: For RBAC role assignment discovery
+    - azure-mgmt-authorization: RBAC role assignment discovery (SDK-based, no CLI)
+    - azure-mgmt-resource: Subscription discovery
 """
 import os
 import asyncio
@@ -54,6 +55,8 @@ from datetime import datetime
 from typing import Dict, List, Any, Set
 from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
+from azure.mgmt.authorization import AuthorizationManagementClient
+from azure.mgmt.resource import SubscriptionClient
 from app.database import Database
 from .models import DiscoveryResult
 import json
@@ -91,21 +94,47 @@ class AzureDiscoveryEngine:
         self.client_secret = client_secret
         self.db = Database()
         
-        credential = ClientSecretCredential(
+        self.credential = ClientSecretCredential(
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret
         )
-        
+
         self.graph_client = GraphServiceClient(
-            credentials=credential,
+            credentials=self.credential,
             scopes=['https://graph.microsoft.com/.default']
         )
-        
-        self.subscription_id = os.getenv('AZURE_SUBSCRIPTION_ID')
-        self.subscription_name = os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')
-        print(f"✓ Discovery Engine initialized for subscription: {self.subscription_id}")
+
+        # Auto-discover all accessible subscriptions
+        self.subscriptions = self._discover_subscriptions()
+        sub_names = [f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions]
+        print(f"✓ Discovery Engine initialized for {len(self.subscriptions)} subscription(s): {', '.join(sub_names) or 'none'}")
     
+    def _discover_subscriptions(self) -> List[Dict[str, str]]:
+        """Auto-discover all Azure subscriptions accessible to the service principal."""
+        try:
+            sub_client = SubscriptionClient(self.credential)
+            subs = []
+            for sub in sub_client.subscriptions.list():
+                if sub.state and sub.state.lower() in ('enabled', 'warned'):
+                    subs.append({
+                        'id': sub.subscription_id,
+                        'name': sub.display_name or sub.subscription_id,
+                    })
+            if not subs:
+                # Fallback to env var if SDK returns nothing
+                env_sub = os.getenv('AZURE_SUBSCRIPTION_ID')
+                if env_sub:
+                    subs.append({'id': env_sub, 'name': os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')})
+            return subs
+        except Exception as e:
+            print(f"  ⚠️ Subscription discovery failed: {e}")
+            # Fallback to env var
+            env_sub = os.getenv('AZURE_SUBSCRIPTION_ID')
+            if env_sub:
+                return [{'id': env_sub, 'name': os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')}]
+            return []
+
     def run_discovery(self) -> DiscoveryResult:
         """
         Execute the full discovery process synchronously.
@@ -117,17 +146,21 @@ class AzureDiscoveryEngine:
             DiscoveryResult or None on completion
         """
         return asyncio.run(self._async_run_discovery())
-    
+
     async def _async_run_discovery(self) -> DiscoveryResult:
+        sub_summary = ", ".join(f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions) or "No subscriptions"
         print("\n" + "="*60)
         print("🔍 AuditGraph Discovery Engine")
         print("="*60)
-        print(f"\nTarget: {self.subscription_name} ({self.subscription_id})")
+        print(f"\nSubscriptions: {sub_summary}")
         print(f"Started: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
         
         # Create discovery run using Database class method
         print("📝 Creating discovery run...")
-        run_id = self.db.create_discovery_run(self.subscription_id, self.subscription_name)
+        # Store all subscription IDs as comma-separated for the run record
+        all_sub_ids = ",".join(s['id'] for s in self.subscriptions) if self.subscriptions else os.getenv('AZURE_SUBSCRIPTION_ID', '')
+        all_sub_names = ", ".join(s['name'] for s in self.subscriptions) if self.subscriptions else os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')
+        run_id = self.db.create_discovery_run(all_sub_ids, all_sub_names)
         print(f"  ✓ Discovery run created (ID: {run_id})")
         
         # Step 1: Get role assignments FIRST
@@ -165,6 +198,12 @@ class AzureDiscoveryEngine:
         # Step 3.8: Discover Application Owners
         ownership_map = await self._discover_ownership(service_principals)
 
+        # Step 3.9: Discover PIM Assignments
+        pim_map = await self._discover_pim_assignments()
+
+        # Step 3.10: Discover Conditional Access Policies
+        ca_policies = await self._discover_conditional_access()
+
         # Step 4: Discover users who have Azure RBAC OR Entra roles
         print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
@@ -194,7 +233,7 @@ class AzureDiscoveryEngine:
         
         # Step 9: Save to database using Database class methods
         print("\n💾 Saving identities to database...")
-        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map)
+        saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map, pim_map, ca_policies)
         print(f"  ✓ Saved {saved_count} identities")
         
         # Step 10: Complete discovery run
@@ -618,6 +657,304 @@ class AzureDiscoveryEngine:
 
         return ownership_map
 
+    async def _discover_pim_assignments(self) -> dict:
+        """
+        Discover PIM eligible role assignments and active activations.
+
+        Uses Microsoft Graph API:
+        - roleEligibilityScheduleInstances — eligible roles
+        - roleAssignmentScheduleInstances — active activations (filter: Activated)
+        - roleAssignmentScheduleRequests — history with justification/ticket
+
+        Requires Azure AD P2 license. Handle 403 gracefully.
+
+        Returns:
+            Dict mapping object_id -> { 'eligible': [...], 'activations': [...] }
+        """
+        print("\n🔒 Discovering PIM Assignments...")
+        pim_map = {}  # keyed by principal object_id
+
+        # Cache role definitions to avoid redundant API calls
+        role_def_cache = {}
+
+        async def _get_role_name(role_definition_id: str) -> str:
+            if role_definition_id in role_def_cache:
+                return role_def_cache[role_definition_id]
+            try:
+                role_def = await self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(role_definition_id).get()
+                name = role_def.display_name if role_def else "Unknown Role"
+            except Exception:
+                name = "Unknown Role"
+            role_def_cache[role_definition_id] = name
+            return name
+
+        # --- Eligible assignments ---
+        eligible_count = 0
+        try:
+            eligible_response = await self.graph_client.role_management.directory.role_eligibility_schedule_instances.get()
+            if eligible_response and eligible_response.value:
+                for item in eligible_response.value:
+                    principal_id = item.principal_id
+                    role_def_id = item.role_definition_id
+                    role_name = await _get_role_name(role_def_id)
+
+                    if principal_id not in pim_map:
+                        pim_map[principal_id] = {'eligible': [], 'activations': []}
+
+                    is_permanent = item.end_date_time is None
+                    pim_map[principal_id]['eligible'].append({
+                        'role_name': role_name,
+                        'role_definition_id': role_def_id,
+                        'directory_scope': getattr(item, 'directory_scope_id', '/') or '/',
+                        'assignment_type': 'permanent_eligible' if is_permanent else 'time_bound_eligible',
+                        'start_datetime': item.start_date_time.isoformat() if item.start_date_time else None,
+                        'end_datetime': item.end_date_time.isoformat() if item.end_date_time else None,
+                        'member_type': getattr(item, 'member_type', None),
+                    })
+                    eligible_count += 1
+
+            print(f"  ✓ Found {eligible_count} PIM eligible assignments")
+
+        except Exception as e:
+            err_str = str(e)
+            if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
+                print(f"  ℹ️  PIM eligible assignments: requires Azure AD P2 license (403)")
+            else:
+                print(f"  ⚠️  PIM eligible assignments error: {err_str[:80]}")
+
+        # --- Active activations ---
+        activation_count = 0
+        try:
+            activations_response = await self.graph_client.role_management.directory.role_assignment_schedule_instances.get()
+            if activations_response and activations_response.value:
+                for item in activations_response.value:
+                    # Only track activated (JIT) assignments, skip permanently assigned
+                    assignment_type = getattr(item, 'assignment_type', None)
+                    if assignment_type and assignment_type.lower() == 'assigned':
+                        continue
+
+                    principal_id = item.principal_id
+                    role_def_id = item.role_definition_id
+                    role_name = await _get_role_name(role_def_id)
+
+                    if principal_id not in pim_map:
+                        pim_map[principal_id] = {'eligible': [], 'activations': []}
+
+                    pim_map[principal_id]['activations'].append({
+                        'role_name': role_name,
+                        'role_definition_id': role_def_id,
+                        'directory_scope': getattr(item, 'directory_scope_id', '/') or '/',
+                        'status': 'Active',
+                        'activation_start': item.start_date_time.isoformat() if item.start_date_time else None,
+                        'activation_end': item.end_date_time.isoformat() if item.end_date_time else None,
+                    })
+                    activation_count += 1
+
+            print(f"  ✓ Found {activation_count} active PIM activations")
+
+        except Exception as e:
+            err_str = str(e)
+            if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
+                print(f"  ℹ️  PIM activations: requires Azure AD P2 license (403)")
+            else:
+                print(f"  ⚠️  PIM activations error: {err_str[:80]}")
+
+        # --- Activation history (requests with justification/ticket) ---
+        try:
+            from kiota_abstractions.base_request_configuration import RequestConfiguration
+
+            requests_response = await self.graph_client.role_management.directory.role_assignment_schedule_requests.get()
+            if requests_response and requests_response.value:
+                for item in requests_response.value:
+                    principal_id = item.principal_id
+                    if principal_id not in pim_map:
+                        continue  # only enrich identities we already know about
+
+                    # Find matching activation and enrich with justification/ticket
+                    role_def_id = item.role_definition_id
+                    justification = getattr(item, 'justification', None)
+                    ticket_info = getattr(item, 'ticket_info', None)
+                    ticket_number = getattr(ticket_info, 'ticket_number', None) if ticket_info else None
+                    ticket_system = getattr(ticket_info, 'ticket_system', None) if ticket_info else None
+                    is_approval_required = False
+                    created_dt = getattr(item, 'created_date_time', None)
+
+                    for act in pim_map[principal_id]['activations']:
+                        if act['role_definition_id'] == role_def_id and not act.get('justification'):
+                            act['justification'] = justification
+                            act['ticket_number'] = ticket_number
+                            act['ticket_system'] = ticket_system
+                            act['is_approval_required'] = is_approval_required
+                            act['created_datetime'] = created_dt.isoformat() if created_dt else None
+                            break
+
+        except Exception as e:
+            err_str = str(e)
+            if '403' not in err_str and 'Forbidden' not in err_str:
+                print(f"  ⚠️  PIM request history error: {err_str[:80]}")
+
+        if pim_map:
+            print(f"  ✓ PIM data found for {len(pim_map)} principals")
+        else:
+            print(f"  ℹ️  No PIM data found (Azure AD P2 required)")
+
+        return pim_map
+
+    async def _discover_conditional_access(self) -> list:
+        """
+        Discover Conditional Access policies via Microsoft Graph API.
+
+        Uses: graph_client.identity.conditional_access.policies.get()
+        Requires: Policy.Read.All permission. Handle 403 gracefully.
+
+        Returns:
+            List of parsed CA policy dicts
+        """
+        print("\n🛡️  Discovering Conditional Access Policies...")
+        policies = []
+
+        try:
+            ca_response = await self.graph_client.identity.conditional_access.policies.get()
+            if ca_response and ca_response.value:
+                for policy in ca_response.value:
+                    state = getattr(policy, 'state', None)
+                    if state and hasattr(state, 'value'):
+                        state = state.value
+                    state = str(state or 'unknown').lower()
+
+                    # Parse conditions
+                    conditions = getattr(policy, 'conditions', None)
+                    users_cond = getattr(conditions, 'users', None) if conditions else None
+                    apps_cond = getattr(conditions, 'applications', None) if conditions else None
+                    client_app_types = getattr(conditions, 'client_app_types', []) if conditions else []
+                    if client_app_types and hasattr(client_app_types[0], 'value'):
+                        client_app_types = [str(c.value) for c in client_app_types]
+                    else:
+                        client_app_types = [str(c) for c in (client_app_types or [])]
+
+                    include_users = []
+                    exclude_users = []
+                    targets_all_users = False
+                    has_exclusions = False
+
+                    if users_cond:
+                        inc = getattr(users_cond, 'include_users', []) or []
+                        exc = getattr(users_cond, 'exclude_users', []) or []
+                        include_users = [str(u) for u in inc]
+                        exclude_users = [str(u) for u in exc]
+                        targets_all_users = 'All' in include_users
+                        has_exclusions = len(exclude_users) > 0
+
+                    include_applications = []
+                    if apps_cond:
+                        inc_apps = getattr(apps_cond, 'include_applications', []) or []
+                        include_applications = [str(a) for a in inc_apps]
+
+                    # Parse grant controls
+                    grant = getattr(policy, 'grant_controls', None)
+                    requires_mfa = False
+                    grant_dict = {}
+                    if grant:
+                        built_in = getattr(grant, 'built_in_controls', []) or []
+                        if built_in and hasattr(built_in[0], 'value'):
+                            built_in = [str(c.value) for c in built_in]
+                        else:
+                            built_in = [str(c) for c in built_in]
+                        requires_mfa = 'mfa' in [b.lower() for b in built_in]
+                        grant_dict = {'built_in_controls': built_in}
+
+                    # Legacy auth detection
+                    allows_legacy_auth = 'exchangeActiveSync' in client_app_types or 'other' in client_app_types
+
+                    modified = getattr(policy, 'modified_date_time', None)
+
+                    policies.append({
+                        'policy_id': policy.id,
+                        'display_name': policy.display_name or 'Unnamed',
+                        'state': state,
+                        'include_users': include_users,
+                        'exclude_users': exclude_users,
+                        'include_applications': include_applications,
+                        'client_app_types': client_app_types,
+                        'grant_controls': grant_dict,
+                        'session_controls': {},
+                        'requires_mfa': requires_mfa,
+                        'targets_all_users': targets_all_users,
+                        'has_exclusions': has_exclusions,
+                        'allows_legacy_auth': allows_legacy_auth,
+                        'modified_datetime': modified.isoformat() if modified else None,
+                    })
+
+            print(f"  ✓ Found {len(policies)} Conditional Access policies")
+            enabled = sum(1 for p in policies if p['state'] == 'enabled')
+            mfa = sum(1 for p in policies if p['requires_mfa'] and p['state'] == 'enabled')
+            print(f"    Enabled: {enabled}, MFA-enforcing: {mfa}")
+
+        except Exception as e:
+            err_str = str(e)
+            if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
+                print(f"  ℹ️  Conditional Access: requires Policy.Read.All permission (403)")
+            else:
+                print(f"  ⚠️  Conditional Access error: {err_str[:80]}")
+
+        return policies
+
+    def _compute_ca_coverage(self, ca_policies: list, identities: list) -> dict:
+        """
+        Compute per-identity CA coverage using a simplified heuristic.
+
+        If any enabled policy targets 'All' users and the identity is not excluded -> covered.
+
+        Returns:
+            Dict mapping object_id -> coverage dict
+        """
+        coverage_map = {}
+
+        # Build set of exclude user IDs from all-users policies
+        all_user_policies = [p for p in ca_policies if p.get('targets_all_users') and p.get('state') == 'enabled']
+        mfa_all_user_policies = [p for p in all_user_policies if p.get('requires_mfa')]
+
+        # Build global exclude set
+        global_excludes = set()
+        for p in all_user_policies:
+            for uid in p.get('exclude_users', []):
+                global_excludes.add(uid)
+
+        for identity in identities:
+            object_id = identity.get('object_id')
+            if not object_id:
+                continue
+
+            is_excluded = object_id in global_excludes
+            applicable = len(all_user_policies)
+            excluded_from = sum(1 for p in all_user_policies if object_id in p.get('exclude_users', []))
+
+            if applicable == 0:
+                coverage_status = 'no_coverage'
+                mfa_enforced = False
+            elif is_excluded:
+                coverage_status = 'excluded'
+                mfa_enforced = False
+            else:
+                mfa_enforced = len(mfa_all_user_policies) > 0 and not is_excluded
+                coverage_status = 'covered'
+
+            risk_flags = []
+            if is_excluded and applicable > 0:
+                risk_flags.append('excluded_from_ca_policy')
+            if not mfa_enforced and applicable > 0:
+                risk_flags.append('no_mfa_enforced')
+
+            coverage_map[object_id] = {
+                'coverage_status': coverage_status,
+                'mfa_enforced': mfa_enforced,
+                'applicable_policy_count': applicable,
+                'excluded_from_count': excluded_from,
+                'risk_flags': risk_flags,
+            }
+
+        return coverage_map
+
     async def _discover_managed_identities(self) -> List[Dict]:
         """
         Discover user-assigned managed identities from Azure subscription.
@@ -727,59 +1064,74 @@ class AzureDiscoveryEngine:
             return []
     
     def _discover_role_assignments(self) -> List[Dict[str, Any]]:
-        import subprocess
-        import json
+        """Discover RBAC role assignments across ALL accessible subscriptions using Azure SDK."""
         from datetime import datetime, timezone
 
-        try:
-            result = subprocess.run(
-                ['az', 'role', 'assignment', 'list', '--all'],
-                capture_output=True,
-                text=True,
-                check=True
-            )
+        role_assignments = []
+        printed = 0
 
-            assignments = json.loads(result.stdout)
+        for sub in self.subscriptions:
+            sub_id = sub['id']
+            sub_name = sub['name']
+            print(f"\n  📋 Subscription: {sub_name} ({sub_id[:8]}...)")
 
-            role_assignments = []
-            for assignment in assignments:
-                principal_id = assignment.get('principalId')
-                if principal_id:
-                    if len(role_assignments) < 10:
-                        print(f"    ✓ {assignment.get('principalName', 'Unknown')}: {assignment['roleDefinitionName']}")
+            try:
+                auth_client = AuthorizationManagementClient(self.credential, sub_id)
 
-                    scope = assignment.get('scope', '')
-                    scope_type = 'subscription' if '/resourceGroups/' not in scope else 'resource_group' if scope.count('/') <= 4 else 'resource'
-                    role_name = assignment['roleDefinitionName']
-                    created_on = assignment.get('createdOn')
+                for assignment in auth_client.role_assignments.list_for_subscription():
+                    principal_id = assignment.principal_id
+                    if not principal_id:
+                        continue
 
-                    # Calculate days since assigned
+                    scope = assignment.scope or ''
+                    role_def_id = assignment.role_definition_id or ''
+
+                    # Get role name from role definition
+                    role_name = 'Unknown'
+                    try:
+                        role_def = auth_client.role_definitions.get_by_id(role_def_id)
+                        role_name = role_def.role_name or role_def.display_name or 'Unknown'
+                    except Exception:
+                        # Extract role name from the ID as fallback
+                        pass
+
+                    scope_type = 'subscription'
+                    scope_lower = scope.lower()
+                    if '/providers/' in scope_lower and '/resourcegroups/' in scope_lower:
+                        scope_type = 'resource'
+                    elif '/resourcegroups/' in scope_lower:
+                        scope_type = 'resource_group'
+
+                    created_on = None
                     days_since_assigned = None
-                    if created_on:
+                    if hasattr(assignment, 'created_on') and assignment.created_on:
+                        created_on = assignment.created_on.isoformat()
                         try:
-                            created_dt = datetime.fromisoformat(created_on.replace('Z', '+00:00'))
-                            days_since_assigned = (datetime.now(timezone.utc) - created_dt).days
-                        except:
+                            days_since_assigned = (datetime.now(timezone.utc) - assignment.created_on).days
+                        except Exception:
                             pass
 
-                    # Calculate role-level risk
                     risk_level, why_critical = self._calculate_role_risk(role_name, scope_type)
-
-                    # Extract resource info from scope
                     resource_type, resource_name = self._parse_scope(scope)
+
+                    if printed < 15:
+                        print(f"    ✓ {role_name} → {scope.split('/')[-1][:30] if scope else 'root'}")
+                        printed += 1
+                    elif printed == 15:
+                        print(f"    ... (listing remaining silently)")
+                        printed += 1
 
                     role_assignments.append({
                         'principal_id': principal_id,
-                        'assignment_id': assignment.get('id'),
+                        'assignment_id': assignment.id,
                         'role_name': role_name,
                         'scope': scope,
                         'scope_type': scope_type,
                         'created_on': created_on,
-                        # Usage intelligence fields
-                        'scope_exists': True,  # Assume exists (ARM returned it)
-                        'usage_status': 'unknown',  # Will be calculated later
+                        'scope_exists': True,
+                        'usage_status': 'unknown',
                         'days_since_assigned': days_since_assigned,
-                        'redundant_with': None,  # Will be calculated later
+                        'redundant_with': None,
                         'role_type': 'azure',
                         'risk_level': risk_level,
                         'why_critical': why_critical,
@@ -787,10 +1139,12 @@ class AzureDiscoveryEngine:
                         'resource_name': resource_name,
                     })
 
-            return role_assignments
-        except Exception as e:
-            print(f"  ❌ Error: {e}")
-            return []
+            except Exception as e:
+                print(f"  ⚠️ Error discovering roles for subscription {sub_name}: {e}")
+                continue
+
+        print(f"\n  Total: {len(role_assignments)} role assignments across {len(self.subscriptions)} subscription(s)")
+        return role_assignments
 
     def _calculate_role_risk(self, role_name: str, scope_type: str) -> tuple:
         """Calculate risk level and explanation for a role assignment with compliance context"""
@@ -1632,7 +1986,7 @@ class AzureDiscoveryEngine:
 
         return identities
     
-    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None) -> int:
+    def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None, pim_map: Dict[str, Dict] = None, ca_policies: List[Dict] = None) -> int:
         """Save all identities to database with proper categorization"""
         saved_count = 0
         microsoft_count = 0
@@ -1710,10 +2064,46 @@ class AzureDiscoveryEngine:
                 owners = ownership_map[identity.get('identity_id')]
                 self.db.store_ownership(identity_db_id, owners)
 
+            # Save PIM data for this identity (keyed by object_id)
+            object_id = identity.get('object_id')
+            if pim_map and object_id and object_id in pim_map:
+                pim_data = pim_map[object_id]
+                for eligible in pim_data.get('eligible', []):
+                    self.db.save_pim_eligible(identity_db_id, eligible)
+                for activation in pim_data.get('activations', []):
+                    self.db.save_pim_activation(identity_db_id, activation)
+                self.db.update_identity_pim_summary(identity_db_id)
+
             saved_count += 1
 
         if microsoft_count > 0:
             print(f"  ℹ️  Included {microsoft_count} Microsoft internal identities (categorized separately)")
+
+        # Save CA policies and compute coverage after all identities are saved
+        if ca_policies:
+            print(f"\n🛡️  Saving {len(ca_policies)} CA policies and computing coverage...")
+            for policy in ca_policies:
+                self.db.save_ca_policy(run_id, policy)
+
+            # Compute per-identity coverage
+            ca_coverage_map = self._compute_ca_coverage(ca_policies, identities)
+            if ca_coverage_map:
+                # Need to re-resolve identity_db_ids for coverage
+                cursor = self.db.conn.cursor()
+                cursor.execute(
+                    "SELECT id, object_id FROM identities WHERE discovery_run_id = %s AND object_id IS NOT NULL",
+                    (run_id,),
+                )
+                id_map = {row[1]: row[0] for row in cursor.fetchall()}
+                cursor.close()
+
+                for object_id, coverage in ca_coverage_map.items():
+                    db_id = id_map.get(object_id)
+                    if db_id:
+                        self.db.save_ca_identity_coverage(db_id, coverage)
+
+                covered = sum(1 for c in ca_coverage_map.values() if c['coverage_status'] == 'covered')
+                print(f"  ✓ CA coverage computed: {covered}/{len(ca_coverage_map)} identities covered")
 
         return saved_count
     

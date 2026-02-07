@@ -4,6 +4,7 @@ AuditGraph REST API - Handlers
 This module contains all HTTP endpoint handler functions for the AuditGraph API.
 """
 
+import os
 from datetime import datetime
 from flask import jsonify, request
 from dotenv import load_dotenv
@@ -247,7 +248,11 @@ def get_identities():
                         AND gp.risk_level IN ('critical', 'high')
                     ) THEN 2
                     ELSE 3
-                END as privilege_tier
+                END as privilege_tier,
+                COALESCE(i.pim_eligible_count, 0) as pim_eligible_count,
+                COALESCE(i.has_permanent_assignment, false) as has_permanent_assignment,
+                i.ca_coverage_status,
+                COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced
             FROM identities i
             WHERE i.discovery_run_id = %s
         """
@@ -353,6 +358,10 @@ def get_identities():
                     "enabled": row[32] if row[32] is not None else True,
                     "last_sign_in": row[33].isoformat() if row[33] else None,
                     "privilege_tier": int(row[34]) if row[34] is not None else 3,
+                    "pim_eligible_count": int(row[35] or 0),
+                    "has_permanent_assignment": bool(row[36]) if row[36] is not None else False,
+                    "ca_coverage_status": row[37] or None,
+                    "ca_mfa_enforced": bool(row[38]) if row[38] is not None else False,
                 }
             )
 
@@ -397,7 +406,9 @@ def get_identity_details(identity_id: str):
                    -- Risk scoring fields
                    COALESCE(risk_score, 0) as risk_score,
                    COALESCE(api_permission_count, 0) as api_permission_count,
-                   COALESCE(app_role_count, 0) as app_role_count
+                   COALESCE(app_role_count, 0) as app_role_count,
+                   ca_coverage_status,
+                   COALESCE(ca_mfa_enforced, false) as ca_mfa_enforced
             FROM identities
             WHERE identity_id = %s
             ORDER BY discovery_run_id DESC
@@ -450,6 +461,8 @@ def get_identity_details(identity_id: str):
             "risk_score": int(row[24] or 0),
             "api_permission_count": int(row[25] or 0),
             "app_role_count": int(row[26] or 0),
+            "ca_coverage_status": row[27] or None,
+            "ca_mfa_enforced": bool(row[28]) if row[28] is not None else False,
         }
 
         # ✅ FIXED: clean try/except blocks
@@ -605,12 +618,33 @@ def get_drift_report(run_id: int):
 
 
 def trigger_discovery():
-    # Stub (keep existing behavior if you have it elsewhere)
-    return jsonify({"status": "not_implemented"}), 501
+    """Trigger a manual discovery run in a background thread."""
+    import threading
+    from app.scheduler import trigger_manual_discovery
+
+    def _run():
+        try:
+            trigger_manual_discovery()
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return jsonify({"status": "started", "message": "Discovery run triggered. Check /api/runs for progress."}), 202
 
 
 def get_scheduler_status():
-    return jsonify({"scheduler": "unknown"})
+    """Return current scheduler status and next run time."""
+    from app.scheduler import get_next_run_time, scheduler as _sched
+
+    next_run = get_next_run_time()
+    is_running = _sched is not None
+
+    return jsonify({
+        "scheduler": "running" if is_running else "stopped",
+        "next_run": next_run.isoformat() if next_run else None,
+        "interval_hours": int(os.getenv('DISCOVERY_INTERVAL_HOURS', '12')),
+    })
 
 
 def _normalize_category_key(raw_category: str) -> str:
@@ -1380,10 +1414,51 @@ def get_identity_summary():
             if risk in categories[cat]:
                 categories[cat][risk] += 1
 
+        # Count monitored resources per cloud (subscriptions, accounts, projects)
+        # Azure: distinct subscription IDs from role_assignments scopes
+        cursor.execute("""
+            SELECT COUNT(DISTINCT
+                CASE
+                    WHEN ra.scope LIKE '/subscriptions/%%'
+                    THEN SPLIT_PART(ra.scope, '/', 3)
+                END
+            )
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND ra.scope LIKE '/subscriptions/%%'
+        """, (run_id,))
+        azure_sub_count = cursor.fetchone()[0] or 0
+
+        # Also get the distinct subscription names/IDs for the detail view
+        cursor.execute("""
+            SELECT DISTINCT SPLIT_PART(ra.scope, '/', 3) as sub_id
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND ra.scope LIKE '/subscriptions/%%'
+            ORDER BY sub_id
+        """, (run_id,))
+        azure_subs = [r[0] for r in cursor.fetchall() if r[0]]
+
         return jsonify({
             "run_id": run_id,
             "completed_at": completed_at.isoformat() if completed_at else None,
-            "categories": categories
+            "categories": categories,
+            "monitored_resources": {
+                "azure": {
+                    "subscriptions": azure_sub_count,
+                    "subscription_ids": azure_subs,
+                },
+                "aws": {
+                    "accounts": 0,
+                    "account_ids": [],
+                },
+                "gcp": {
+                    "projects": 0,
+                    "project_ids": [],
+                },
+            }
         })
 
     finally:
@@ -1442,6 +1517,23 @@ def _parse_arm_scope(scope):
     return sub_id, rg_name, res_type, res_name
 
 
+def _build_scope_label(scope):
+    """Build a human-readable label from an ARM scope path."""
+    sub_id, rg_name, res_type, res_name = _parse_arm_scope(scope)
+    if not sub_id:
+        return "Entire Directory" if not scope or scope == "/" else scope
+    parts = []
+    # Short sub ID (first 8 chars)
+    parts.append(f"Sub: {sub_id[:8]}...")
+    if rg_name:
+        parts.append(f"RG: {rg_name}")
+    if res_name:
+        # Extract short resource type (e.g. "storageAccounts" from "Microsoft.Storage/storageAccounts")
+        short_type = res_type.split("/")[-1] if res_type else ""
+        parts.append(f"{short_type}: {res_name}")
+    return " / ".join(parts)
+
+
 def get_identity_graph_data(identity_id):
     """
     Return trust relationships, effective scope, secret exposure analysis,
@@ -1481,6 +1573,7 @@ def get_identity_graph_data(identity_id):
         credentials = db.get_identity_credentials(db_id)
         owners = db.get_ownership(db_id)
         graph_perms = db.get_graph_permissions(db_id)
+        app_roles = db.get_app_roles(db_id)
 
         is_dormant = ident["activity_status"] in ("stale", "never_used")
         has_priv_roles = any(r.get("risk_level") in ("critical", "high") for r in roles)
@@ -1729,58 +1822,155 @@ def get_identity_graph_data(identity_id):
                 "data": {"label": ol, "owner_type": primary["owner_type"], "upn": primary.get("owner_upn")}})
             exec_edges.append({"id": "e-owner-id", "source": "owner", "target": "identity", "label": "manages"})
 
-        # Technical mode (full graph)
+        # Technical mode — hierarchical ARM tree layout
         tech_nodes = [{"id": "identity", "type": "identity", "position": {"x": cx, "y": cy},
             "data": {"label": ident["display_name"], "risk_level": ident["risk_level"],
                      "risk_score": ident["risk_score"], "category": ident["identity_category"]}}]
         tech_edges = []
 
-        for i, o in enumerate(ownership_edges[:5]):
+        # Role risk lookup for badge coloring in the tree
+        role_risk_map = {}
+        for r in role_edges:
+            role_risk_map[r["role_name"]] = r.get("risk_level", "low")
+
+        # ── Left column: owners + federated trusts ──
+        left_y = 80
+        for i, o in enumerate(ownership_edges):
             nid = f"owner-{i}"
             tech_nodes.append({"id": nid, "type": "owner",
-                "position": {"x": cx - 350, "y": 80 + i * 80},
+                "position": {"x": cx - 350, "y": left_y},
                 "data": {"label": o["owner_display_name"], "owner_type": o["owner_type"], "upn": o.get("owner_upn")}})
             tech_edges.append({"id": f"e-{nid}-id", "source": nid, "target": "identity", "label": "manages"})
+            left_y += 80
 
-        for i, ft in enumerate(federated_trusts[:5]):
+        for i, ft in enumerate(federated_trusts):
             nid = f"fed-{i}"
             tech_nodes.append({"id": nid, "type": "federated_trust",
-                "position": {"x": cx - 350, "y": cy + 120 + i * 80},
+                "position": {"x": cx - 350, "y": left_y},
                 "data": {"label": ft["issuer_label"], "subject": ft["subject"], "trust_risk": ft["trust_risk"]}})
             tech_edges.append({"id": f"e-{nid}-id", "source": nid, "target": "identity",
                 "label": "can act as", "animated": True, "style": {"stroke": "#f59e0b"}})
+            left_y += 80
 
-        seen_roles = {}
-        for r in role_edges:
-            rn = r["role_name"]
-            if rn not in seen_roles:
-                seen_roles[rn] = r
-        for i, (rn, r) in enumerate(list(seen_roles.items())[:10]):
-            nid = f"role-{i}"
-            tech_nodes.append({"id": nid, "type": "role",
-                "position": {"x": cx + 300, "y": 30 + i * 70},
-                "data": {"label": rn, "role_type": r["role_type"], "risk_level": r["risk_level"], "scope_type": r["scope_type"]}})
-            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid, "label": "has role"})
+        # ── Entra Directory branch (upper-right) ──
+        right_y = 30
+        if entra_scopes:
+            entra_nid = "entra-dir"
+            tech_nodes.append({"id": entra_nid, "type": "entra_directory",
+                "position": {"x": cx + 280, "y": right_y},
+                "data": {"label": "Entra Directory", "count": len(entra_scopes)}})
+            tech_edges.append({"id": "e-id-entra", "source": "identity", "target": entra_nid,
+                "label": "directory roles", "style": {"stroke": "#6366f1"}})
+            right_y += 55
 
-            if r["scope"] and r["role_type"] == "azure":
-                scope_short = r["scope"].split("/")[-1] if "/" in r["scope"] else r["scope"]
-                if len(scope_short) > 20:
-                    scope_short = scope_short[:17] + "..."
-                sid = f"scope-{i}"
-                tech_nodes.append({"id": sid, "type": "scope",
-                    "position": {"x": cx + 620, "y": 30 + i * 70},
-                    "data": {"label": scope_short, "scope_type": r["scope_type"], "full_scope": r["scope"]}})
-                tech_edges.append({"id": f"e-{nid}-{sid}", "source": nid, "target": sid,
-                    "label": "scoped to", "style": {"strokeDasharray": "5,5"}})
+            for i, es in enumerate(entra_scopes):
+                es_nid = f"entra-role-{i}"
+                tech_nodes.append({"id": es_nid, "type": "role",
+                    "position": {"x": cx + 530, "y": right_y},
+                    "data": {"label": es["role_name"], "role_type": "entra",
+                             "risk_level": es.get("risk_level", "low"), "scope_type": "directory",
+                             "scope": es.get("directory_scope", "/")}})
+                tech_edges.append({"id": f"e-entra-{es_nid}", "source": entra_nid, "target": es_nid,
+                    "label": es["scope_label"]})
+                right_y += 50
 
-        for i, c in enumerate(secret_exposure[:8]):
+            right_y += 30  # gap before ARM tree
+
+        # ── ARM hierarchy tree (uses scope_hierarchy) ──
+        arm_y = max(right_y, 40)
+
+        for si, sub_entry in enumerate(scope_hierarchy):
+            sub_nid = f"sub-{si}"
+            sub_label = sub_entry["subscription_id"][:12] + "..."
+            tech_nodes.append({"id": sub_nid, "type": "subscription",
+                "position": {"x": cx + 280, "y": arm_y},
+                "data": {"label": sub_label, "full_id": sub_entry["subscription_id"]}})
+            tech_edges.append({"id": f"e-id-{sub_nid}", "source": "identity", "target": sub_nid,
+                "label": "accesses", "style": {"stroke": "#3b82f6"}})
+            arm_y += 55
+
+            # Subscription-level role badges
+            for ri, role_name in enumerate(sub_entry.get("subscription_level_roles", [])):
+                role_nid = f"sub-{si}-role-{ri}"
+                tech_nodes.append({"id": role_nid, "type": "role",
+                    "position": {"x": cx + 400, "y": arm_y},
+                    "data": {"label": role_name, "role_type": "azure",
+                             "risk_level": role_risk_map.get(role_name, "low"),
+                             "scope_type": "subscription"}})
+                tech_edges.append({"id": f"e-{sub_nid}-{role_nid}", "source": sub_nid, "target": role_nid,
+                    "label": "grants"})
+                arm_y += 40
+
+            # Resource groups under this subscription
+            for rgi, rg in enumerate(sub_entry.get("resource_groups", [])):
+                rg_nid = f"sub-{si}-rg-{rgi}"
+                tech_nodes.append({"id": rg_nid, "type": "resource_group",
+                    "position": {"x": cx + 530, "y": arm_y},
+                    "data": {"label": rg["name"]}})
+                tech_edges.append({"id": f"e-{sub_nid}-{rg_nid}", "source": sub_nid, "target": rg_nid})
+                arm_y += 50
+
+                # RG-level role badges
+                for ri, role_name in enumerate(rg.get("roles", [])):
+                    role_nid = f"sub-{si}-rg-{rgi}-role-{ri}"
+                    tech_nodes.append({"id": role_nid, "type": "role",
+                        "position": {"x": cx + 620, "y": arm_y},
+                        "data": {"label": role_name, "role_type": "azure",
+                                 "risk_level": role_risk_map.get(role_name, "low"),
+                                 "scope_type": "resource_group"}})
+                    tech_edges.append({"id": f"e-{rg_nid}-{role_nid}", "source": rg_nid, "target": role_nid,
+                        "label": "grants"})
+                    arm_y += 35
+
+                # Resources under this RG
+                for resi, res in enumerate(rg.get("resources", [])):
+                    res_nid = f"sub-{si}-rg-{rgi}-res-{resi}"
+                    short_type = res["type"].split("/")[-1] if "/" in res["type"] else res["type"]
+                    tech_nodes.append({"id": res_nid, "type": "resource",
+                        "position": {"x": cx + 780, "y": arm_y},
+                        "data": {"label": res["name"], "resource_type": short_type, "full_type": res["type"]}})
+                    tech_edges.append({"id": f"e-{rg_nid}-{res_nid}", "source": rg_nid, "target": res_nid})
+                    arm_y += 45
+
+                arm_y += 15  # spacing between RGs
+
+            arm_y += 25  # spacing between subscriptions
+
+        # ── Permissions (Graph API + App Roles) ──
+        perm_y = arm_y + 20
+        for i, p in enumerate(graph_perms):
+            nid = f"perm-{i}"
+            tech_nodes.append({"id": nid, "type": "permission",
+                "position": {"x": cx + 280, "y": perm_y},
+                "data": {"label": p["permission_name"], "permission_type": "graph_api",
+                         "resource": p.get("resource_name", "Microsoft Graph"),
+                         "risk_level": p.get("risk_level", "info")}})
+            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid, "label": "has permission"})
+            perm_y += 55
+
+        for i, ar in enumerate(app_roles):
+            nid = f"approle-{i}"
+            tech_nodes.append({"id": nid, "type": "permission",
+                "position": {"x": cx + 280, "y": perm_y},
+                "data": {"label": ar.get("role_display_name") or ar.get("app_role_id", "App Role"),
+                         "permission_type": "app_role",
+                         "resource": ar.get("resource_display_name", "Application"),
+                         "risk_level": ar.get("risk_level", "info")}})
+            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid, "label": "app role"})
+            perm_y += 55
+
+        # ── Credentials at bottom ──
+        bottom_y = max(perm_y, left_y, cy + 200) + 40
+        cred_start_x = cx - min(len(secret_exposure), 6) * 65
+        for i, c in enumerate(secret_exposure):
             nid = f"cred-{i}"
             tech_nodes.append({"id": nid, "type": "credential",
-                "position": {"x": cx - 200 + i * 130, "y": cy + 200},
+                "position": {"x": cred_start_x + i * 130, "y": bottom_y},
                 "data": {"label": c["display_name"] or c["credential_type"],
                          "credential_type": c["credential_type"], "exposure_risk": c["exposure_risk"],
                          "status": c["status"], "age_days": c.get("age_days"), "days_to_expiry": c.get("days_to_expiry")}})
-            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid, "label": "holds"})
+            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid,
+                "sourceHandle": "bottom", "label": "holds"})
 
         graph = {
             "executive_nodes": exec_nodes, "executive_edges": exec_edges,
@@ -1797,6 +1987,77 @@ def get_identity_graph_data(identity_id):
             "secret_exposure": secret_exposure,
             "graph": graph,
         })
+
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_identity_pim_data(identity_id):
+    """
+    Get PIM (Privileged Identity Management) data for an identity.
+    Returns eligible assignments, activation history, and overuse metrics.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        # Resolve identity_db_id from identity_id
+        cursor.execute("""
+            SELECT i.id FROM identities i
+            JOIN (SELECT MAX(id) as rid FROM discovery_runs WHERE status = 'completed') dr
+            ON i.discovery_run_id = dr.rid
+            WHERE i.identity_id = %s
+            LIMIT 1
+        """, (identity_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"eligible_assignments": [], "activations": [], "overuse_metrics": {
+                "activation_frequency_30d": 0, "always_active_pattern": False, "total_active_hours_30d": 0
+            }})
+
+        identity_db_id = row[0]
+        pim_data = db.get_pim_data(identity_db_id)
+
+        # Serialize datetimes
+        for item in pim_data["eligible_assignments"]:
+            for key in ("start_datetime", "end_datetime"):
+                if item.get(key) and hasattr(item[key], "isoformat"):
+                    item[key] = item[key].isoformat()
+
+        for item in pim_data["activations"]:
+            for key in ("activation_start", "activation_end", "created_datetime"):
+                if item.get(key) and hasattr(item[key], "isoformat"):
+                    item[key] = item[key].isoformat()
+
+        return jsonify(pim_data)
+
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_dashboard_ca_summary():
+    """
+    Get Conditional Access summary for dashboard.
+    Returns policy counts, coverage percentages, and weak policy flags.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        latest_run = cursor.fetchone()[0]
+
+        if not latest_run:
+            return jsonify({
+                "total_policies": 0, "enabled_policies": 0,
+                "coverage": {"covered": 0, "excluded": 0, "no_coverage": 0, "coverage_pct": 0},
+                "weak_policy_flags": []
+            })
+
+        summary = db.get_ca_summary(latest_run)
+        return jsonify(summary)
 
     finally:
         cursor.close()

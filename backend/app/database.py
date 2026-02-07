@@ -809,6 +809,349 @@ class Database:
         cursor.close()
         return owners
 
+    # ========================================================================
+    # PIM (Privileged Identity Management) Methods
+    # ========================================================================
+
+    def save_pim_eligible(self, identity_db_id: int, data: Dict):
+        """UPSERT a PIM eligible role assignment"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO pim_eligible_assignments (
+                identity_db_id, role_name, role_definition_id, directory_scope,
+                assignment_type, start_datetime, end_datetime, member_type
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (identity_db_id, role_definition_id, directory_scope)
+            DO UPDATE SET
+                role_name = EXCLUDED.role_name,
+                assignment_type = EXCLUDED.assignment_type,
+                start_datetime = EXCLUDED.start_datetime,
+                end_datetime = EXCLUDED.end_datetime,
+                member_type = EXCLUDED.member_type,
+                discovered_at = NOW()
+        """,
+            (
+                identity_db_id,
+                data.get("role_name"),
+                data.get("role_definition_id"),
+                data.get("directory_scope", "/"),
+                data.get("assignment_type", "eligible"),
+                data.get("start_datetime"),
+                data.get("end_datetime"),
+                data.get("member_type"),
+            ),
+        )
+        self.conn.commit()
+        cursor.close()
+
+    def save_pim_activation(self, identity_db_id: int, data: Dict):
+        """INSERT a PIM activation record"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO pim_activations (
+                identity_db_id, role_name, role_definition_id, directory_scope,
+                status, activation_start, activation_end,
+                justification, ticket_number, ticket_system,
+                is_approval_required, created_datetime
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+            (
+                identity_db_id,
+                data.get("role_name"),
+                data.get("role_definition_id"),
+                data.get("directory_scope", "/"),
+                data.get("status"),
+                data.get("activation_start"),
+                data.get("activation_end"),
+                data.get("justification"),
+                data.get("ticket_number"),
+                data.get("ticket_system"),
+                data.get("is_approval_required", False),
+                data.get("created_datetime"),
+            ),
+        )
+        self.conn.commit()
+        cursor.close()
+
+    def update_identity_pim_summary(self, identity_db_id: int):
+        """Update denormalized PIM counts on identities table"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            WITH pim_summary AS (
+                SELECT
+                    COUNT(*) as eligible_count,
+                    COUNT(*) FILTER (WHERE end_datetime IS NULL) > 0 as has_permanent
+                FROM pim_eligible_assignments
+                WHERE identity_db_id = %s
+            ),
+            active_summary AS (
+                SELECT COUNT(*) as active_count
+                FROM pim_activations
+                WHERE identity_db_id = %s AND status = 'Active'
+            )
+            UPDATE identities
+            SET pim_eligible_count = pim_summary.eligible_count,
+                pim_active_count = active_summary.active_count,
+                has_permanent_assignment = pim_summary.has_permanent
+            FROM pim_summary, active_summary
+            WHERE identities.id = %s
+        """,
+            (identity_db_id, identity_db_id, identity_db_id),
+        )
+        self.conn.commit()
+        cursor.close()
+
+    def get_pim_data(self, identity_db_id: int) -> Dict:
+        """Get PIM eligible assignments, activations, and overuse metrics"""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Eligible assignments
+        cursor.execute(
+            """
+            SELECT role_name, role_definition_id, directory_scope,
+                   assignment_type, start_datetime, end_datetime, member_type
+            FROM pim_eligible_assignments
+            WHERE identity_db_id = %s
+            ORDER BY role_name
+        """,
+            (identity_db_id,),
+        )
+        eligible = [dict(row) for row in cursor.fetchall()]
+
+        # Activations
+        cursor.execute(
+            """
+            SELECT role_name, role_definition_id, directory_scope,
+                   status, activation_start, activation_end,
+                   justification, ticket_number, ticket_system,
+                   is_approval_required, created_datetime
+            FROM pim_activations
+            WHERE identity_db_id = %s
+            ORDER BY created_datetime DESC NULLS LAST
+        """,
+            (identity_db_id,),
+        )
+        activations = [dict(row) for row in cursor.fetchall()]
+
+        # Overuse metrics: activations in last 30 days
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) as activation_frequency_30d,
+                COALESCE(SUM(
+                    EXTRACT(EPOCH FROM (
+                        LEAST(activation_end, NOW()) - activation_start
+                    )) / 3600.0
+                ), 0) as total_active_hours_30d
+            FROM pim_activations
+            WHERE identity_db_id = %s
+              AND activation_start >= NOW() - INTERVAL '30 days'
+        """,
+            (identity_db_id,),
+        )
+        metrics_row = cursor.fetchone()
+
+        freq = int(metrics_row["activation_frequency_30d"]) if metrics_row else 0
+        hours = float(metrics_row["total_active_hours_30d"]) if metrics_row else 0.0
+        # 30 days * 24 hours = 720 hours; >80% = 576 hours
+        always_active = hours > 576
+
+        cursor.close()
+
+        return {
+            "eligible_assignments": eligible,
+            "activations": activations,
+            "overuse_metrics": {
+                "activation_frequency_30d": freq,
+                "always_active_pattern": always_active,
+                "total_active_hours_30d": round(hours, 1),
+            },
+        }
+
+    # ========================================================================
+    # Conditional Access Methods
+    # ========================================================================
+
+    def save_ca_policy(self, run_id: int, policy: Dict):
+        """UPSERT a Conditional Access policy"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO ca_policies (
+                discovery_run_id, policy_id, display_name, state,
+                include_users, exclude_users, include_applications,
+                client_app_types, grant_controls, session_controls,
+                requires_mfa, targets_all_users, has_exclusions,
+                allows_legacy_auth, modified_datetime
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (discovery_run_id, policy_id)
+            DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                state = EXCLUDED.state,
+                include_users = EXCLUDED.include_users,
+                exclude_users = EXCLUDED.exclude_users,
+                include_applications = EXCLUDED.include_applications,
+                client_app_types = EXCLUDED.client_app_types,
+                grant_controls = EXCLUDED.grant_controls,
+                session_controls = EXCLUDED.session_controls,
+                requires_mfa = EXCLUDED.requires_mfa,
+                targets_all_users = EXCLUDED.targets_all_users,
+                has_exclusions = EXCLUDED.has_exclusions,
+                allows_legacy_auth = EXCLUDED.allows_legacy_auth,
+                modified_datetime = EXCLUDED.modified_datetime
+        """,
+            (
+                run_id,
+                policy.get("policy_id"),
+                policy.get("display_name"),
+                policy.get("state"),
+                json.dumps(policy.get("include_users", [])),
+                json.dumps(policy.get("exclude_users", [])),
+                json.dumps(policy.get("include_applications", [])),
+                json.dumps(policy.get("client_app_types", [])),
+                json.dumps(policy.get("grant_controls", {})),
+                json.dumps(policy.get("session_controls", {})),
+                policy.get("requires_mfa", False),
+                policy.get("targets_all_users", False),
+                policy.get("has_exclusions", False),
+                policy.get("allows_legacy_auth", False),
+                policy.get("modified_datetime"),
+            ),
+        )
+        self.conn.commit()
+        cursor.close()
+
+    def save_ca_identity_coverage(self, identity_db_id: int, coverage: Dict):
+        """UPSERT CA coverage for an identity"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO ca_identity_coverage (
+                identity_db_id, coverage_status, mfa_enforced,
+                applicable_policy_count, excluded_from_count, risk_flags
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (identity_db_id)
+            DO UPDATE SET
+                coverage_status = EXCLUDED.coverage_status,
+                mfa_enforced = EXCLUDED.mfa_enforced,
+                applicable_policy_count = EXCLUDED.applicable_policy_count,
+                excluded_from_count = EXCLUDED.excluded_from_count,
+                risk_flags = EXCLUDED.risk_flags
+        """,
+            (
+                identity_db_id,
+                coverage.get("coverage_status", "no_coverage"),
+                coverage.get("mfa_enforced", False),
+                coverage.get("applicable_policy_count", 0),
+                coverage.get("excluded_from_count", 0),
+                json.dumps(coverage.get("risk_flags", [])),
+            ),
+        )
+        # Also update denormalized fields on identity
+        cursor.execute(
+            """
+            UPDATE identities
+            SET ca_coverage_status = %s, ca_mfa_enforced = %s
+            WHERE id = %s
+        """,
+            (
+                coverage.get("coverage_status", "no_coverage"),
+                coverage.get("mfa_enforced", False),
+                identity_db_id,
+            ),
+        )
+        self.conn.commit()
+        cursor.close()
+
+    def get_ca_summary(self, run_id: int) -> Dict:
+        """Get CA summary for dashboard"""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Policy counts
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) as total_policies,
+                COUNT(*) FILTER (WHERE state = 'enabled') as enabled_policies,
+                COUNT(*) FILTER (WHERE state = 'disabled') as disabled_policies,
+                COUNT(*) FILTER (WHERE requires_mfa AND state = 'enabled') as mfa_policies
+            FROM ca_policies
+            WHERE discovery_run_id = %s
+        """,
+            (run_id,),
+        )
+        policy_row = cursor.fetchone() or {}
+
+        # Coverage counts
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE ca_coverage_status = 'covered') as covered,
+                COUNT(*) FILTER (WHERE ca_coverage_status = 'partial') as partial,
+                COUNT(*) FILTER (WHERE ca_coverage_status = 'excluded') as excluded,
+                COUNT(*) FILTER (WHERE ca_coverage_status = 'no_coverage' OR ca_coverage_status IS NULL) as no_coverage,
+                COUNT(*) as total
+            FROM identities
+            WHERE discovery_run_id = %s
+        """,
+            (run_id,),
+        )
+        cov_row = cursor.fetchone() or {}
+
+        total = int(cov_row.get("total", 0)) or 1
+        covered = int(cov_row.get("covered", 0))
+        coverage_pct = round((covered / total) * 100, 1) if total > 0 else 0
+
+        # Weak policy flags
+        weak_flags = []
+        cursor.execute(
+            """
+            SELECT COUNT(*) as cnt FROM ca_policies
+            WHERE discovery_run_id = %s AND state = 'enabled'
+            AND targets_all_users = true AND requires_mfa = false
+        """,
+            (run_id,),
+        )
+        no_mfa_row = cursor.fetchone()
+        if no_mfa_row and int(no_mfa_row["cnt"]) > 0:
+            weak_flags.append({"flag": "no_mfa_for_all_users", "count": int(no_mfa_row["cnt"]), "severity": "critical"})
+
+        cursor.execute(
+            "SELECT COUNT(*) as cnt FROM ca_policies WHERE discovery_run_id = %s AND state = 'disabled'",
+            (run_id,),
+        )
+        disabled_row = cursor.fetchone()
+        if disabled_row and int(disabled_row["cnt"]) > 0:
+            weak_flags.append({"flag": "ca_policy_disabled", "count": int(disabled_row["cnt"]), "severity": "high"})
+
+        cursor.execute(
+            "SELECT COUNT(*) as cnt FROM ca_policies WHERE discovery_run_id = %s AND allows_legacy_auth = true AND state = 'enabled'",
+            (run_id,),
+        )
+        legacy_row = cursor.fetchone()
+        if legacy_row and int(legacy_row["cnt"]) > 0:
+            weak_flags.append({"flag": "legacy_auth_enabled", "count": int(legacy_row["cnt"]), "severity": "high"})
+
+        cursor.close()
+
+        return {
+            "total_policies": int(policy_row.get("total_policies", 0)),
+            "enabled_policies": int(policy_row.get("enabled_policies", 0)),
+            "disabled_policies": int(policy_row.get("disabled_policies", 0)),
+            "mfa_policies": int(policy_row.get("mfa_policies", 0)),
+            "coverage": {
+                "covered": covered,
+                "partial": int(cov_row.get("partial", 0)),
+                "excluded": int(cov_row.get("excluded", 0)),
+                "no_coverage": int(cov_row.get("no_coverage", 0)),
+                "coverage_pct": coverage_pct,
+            },
+            "weak_policy_flags": weak_flags,
+        }
+
     def close(self):
         """Close database connection"""
         if self.conn:

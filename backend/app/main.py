@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from datetime import datetime
+import atexit
 
 from app.api.handlers import (
     get_stats,
@@ -12,7 +13,14 @@ from app.api.handlers import (
     get_dashboard_compliance,
     get_overview_insights,
     get_identity_graph_data,
+    get_identity_pim_data,
+    get_dashboard_ca_summary,
+    get_discovery_runs,
+    get_drift_report,
+    trigger_discovery,
+    get_scheduler_status,
 )
+from app.scheduler import start_scheduler, stop_scheduler
 
 def create_app():
     app = Flask(__name__)
@@ -96,6 +104,50 @@ def create_app():
     @app.get("/api/identities/<identity_id>/graph-data")
     def identity_graph_data(identity_id):
         return get_identity_graph_data(identity_id)
+
+    # -----------------------
+    # Identity PIM data (eligible roles, activations, overuse)
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/pim")
+    def identity_pim_data(identity_id):
+        return get_identity_pim_data(identity_id)
+
+    # -----------------------
+    # Conditional Access summary
+    # -----------------------
+    @app.get("/api/dashboard/conditional-access")
+    def dashboard_ca():
+        return get_dashboard_ca_summary()
+
+    # -----------------------
+    # Discovery Runs
+    # -----------------------
+    @app.get("/api/runs")
+    def runs():
+        return get_discovery_runs()
+
+    @app.post("/api/runs/trigger")
+    def runs_trigger():
+        return trigger_discovery()
+
+    @app.get("/api/runs/<int:run_id>/drift")
+    def runs_drift(run_id):
+        return get_drift_report(run_id)
+
+    # -----------------------
+    # Scheduler status
+    # -----------------------
+    @app.get("/api/scheduler")
+    def scheduler_status():
+        return get_scheduler_status()
+
+    # -----------------------
+    # Start background scheduler (only in main process, not reloader)
+    # -----------------------
+    import os
+    if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        start_scheduler()
+        atexit.register(stop_scheduler)
 
     return app
 

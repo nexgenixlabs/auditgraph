@@ -47,6 +47,12 @@ interface StatsResponse {
   } | null;
 }
 
+interface MonitoredResources {
+  azure: { subscriptions: number; subscription_ids: string[] };
+  aws: { accounts: number; account_ids: string[] };
+  gcp: { projects: number; project_ids: string[] };
+}
+
 interface IdentitySummaryResponse {
   run_id: number;
   completed_at: string | null;
@@ -54,6 +60,7 @@ interface IdentitySummaryResponse {
     string,
     { total: number; critical: number; high: number; medium: number; low: number; info: number }
   >;
+  monitored_resources?: MonitoredResources;
 }
 
 const Overview: React.FC = () => {
@@ -199,7 +206,7 @@ const Overview: React.FC = () => {
       </div>
 
       {/* Section 2: Cloud Risk Comparison */}
-      <CloudComparison data={cloudData} onCloudClick={handleCloudClick} />
+      <CloudComparison data={cloudData} monitoredResources={summary?.monitored_resources} onCloudClick={handleCloudClick} />
 
       {/* Section 3: Privilege Tiers + Action Items + Dormant/Unowned */}
       <InsightsPanel data={insights} loading={loading} />

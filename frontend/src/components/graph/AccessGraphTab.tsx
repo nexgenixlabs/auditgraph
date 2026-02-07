@@ -338,7 +338,7 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
   const [data, setData] = useState<GraphDataResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [viewMode, setViewMode] = useState<ViewMode>('executive');
+  const [viewMode, setViewMode] = useState<ViewMode>('technical');
 
   useEffect(() => {
     let cancelled = false;
@@ -396,7 +396,7 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
               viewMode === 'executive' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
             }`}
           >
-            Executive Risk Story
+            Executive Summary
           </button>
           <button
             onClick={() => setViewMode('technical')}
@@ -404,16 +404,16 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
               viewMode === 'technical' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
             }`}
           >
-            Technical Trust Graph
+            Access Tree
           </button>
         </div>
         <span className="text-[10px] text-gray-500">
-          {viewMode === 'executive' ? 'Simplified view for risk communication' : 'Full relationship graph with all edges'}
+          {viewMode === 'executive' ? 'Simplified blast radius for risk communication' : 'Full hierarchy: Subscriptions, Resource Groups, Resources & Roles'}
         </span>
       </div>
 
       {/* Graph Canvas */}
-      <div className="border rounded-xl overflow-hidden bg-gray-50" style={{ height: 450 }}>
+      <div className="border rounded-xl overflow-hidden bg-gray-50" style={{ height: viewMode === 'technical' ? 600 : 450 }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}

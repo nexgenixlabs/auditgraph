@@ -21,7 +21,10 @@ const riskText: Record<string, string> = {
 export function IdentityNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-blue-500 bg-blue-50';
   return (
-    <div className={`px-5 py-3 rounded-xl border-2 shadow-lg ${colors} min-w-[180px] max-w-[240px]`}>
+    <div
+      title={`${data.label}\nRisk: ${(data.risk_level as string || 'unknown').toUpperCase()} (${data.risk_score} pts)${data.category ? `\nCategory: ${data.category}` : ''}`}
+      className={`px-5 py-3 rounded-xl border-2 shadow-lg ${colors} min-w-[180px] max-w-[240px]`}
+    >
       <Handle type="target" position={Position.Left} className="!bg-gray-400" />
       <div className="flex items-center gap-2 mb-1">
         <svg className="w-4 h-4 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -37,6 +40,7 @@ export function IdentityNode({ data }: NodeProps) {
         {!!data.category && <span className="text-gray-400 truncate">{data.category as string}</span>}
       </div>
       <Handle type="source" position={Position.Right} className="!bg-gray-400" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="!bg-gray-400" />
     </div>
   );
 }
@@ -45,7 +49,10 @@ export function IdentityNode({ data }: NodeProps) {
 export function RiskSummaryNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-red-500 bg-red-50';
   return (
-    <div className={`px-4 py-3 rounded-lg border-2 ${colors} max-w-[260px] shadow-md`}>
+    <div
+      title={`${data.label}${data.detail ? `\n${data.detail}` : ''}`}
+      className={`px-4 py-3 rounded-lg border-2 ${colors} max-w-[260px] shadow-md`}
+    >
       <Handle type="target" position={Position.Left} className="!bg-red-400" />
       <div className="flex items-center gap-1.5 mb-1">
         <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -61,7 +68,10 @@ export function RiskSummaryNode({ data }: NodeProps) {
 // Blast radius (executive mode)
 export function BlastRadiusNode({ data }: NodeProps) {
   return (
-    <div className="px-4 py-3 rounded-lg border-2 border-purple-400 bg-purple-50 max-w-[260px] shadow-md">
+    <div
+      title={`Blast Radius: ${data.label}`}
+      className="px-4 py-3 rounded-lg border-2 border-purple-400 bg-purple-50 max-w-[260px] shadow-md"
+    >
       <Handle type="target" position={Position.Left} className="!bg-purple-400" />
       <div className="flex items-center gap-1.5 mb-0.5">
         <svg className="w-4 h-4 text-purple-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -77,7 +87,10 @@ export function BlastRadiusNode({ data }: NodeProps) {
 // Owner node
 export function OwnerNode({ data }: NodeProps) {
   return (
-    <div className="px-4 py-2.5 rounded-full border-2 border-green-400 bg-green-50 shadow-sm max-w-[200px]">
+    <div
+      title={`Owner: ${data.label}${data.upn ? `\n${data.upn}` : ''}`}
+      className="px-4 py-2.5 rounded-full border-2 border-green-400 bg-green-50 shadow-sm max-w-[200px]"
+    >
       <Handle type="source" position={Position.Right} className="!bg-green-400" />
       <div className="flex items-center gap-1.5">
         <svg className="w-3.5 h-3.5 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -96,7 +109,10 @@ export function OwnerNode({ data }: NodeProps) {
 export function FederatedTrustNode({ data }: NodeProps) {
   const trustColor = (data.trust_risk as string) === 'high' ? 'border-amber-500 bg-amber-50' : 'border-amber-300 bg-amber-50';
   return (
-    <div className={`px-4 py-2.5 rounded-full border-2 border-dashed ${trustColor} shadow-sm max-w-[220px]`}>
+    <div
+      title={`Federated Trust: ${data.label}${data.subject ? `\nSubject: ${data.subject}` : ''}${data.trust_risk ? `\nRisk: ${(data.trust_risk as string).toUpperCase()}` : ''}`}
+      className={`px-4 py-2.5 rounded-full border-2 border-dashed ${trustColor} shadow-sm max-w-[220px]`}
+    >
       <Handle type="source" position={Position.Right} className="!bg-amber-400" />
       <div className="flex items-center gap-1.5">
         <svg className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -116,7 +132,10 @@ export function RoleNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-gray-300 bg-gray-50';
   const typeLabel = (data.role_type as string) === 'entra' ? 'Entra' : 'RBAC';
   return (
-    <div className={`px-3 py-2 rounded-lg border ${colors} shadow-sm max-w-[200px]`}>
+    <div
+      title={`${data.label}\nType: ${typeLabel}\nRisk: ${(data.risk_level as string || 'low').toUpperCase()}${data.scope ? `\nScope: ${data.scope}` : ''}`}
+      className={`px-3 py-2 rounded-lg border ${colors} shadow-sm max-w-[200px]`}
+    >
       <Handle type="target" position={Position.Left} className="!bg-gray-400" />
       <div className="flex items-center gap-1.5">
         <span className="text-xs font-semibold text-gray-900 truncate">{data.label as string}</span>
@@ -143,7 +162,10 @@ export function CredentialNode({ data }: NodeProps) {
   const colors = riskColor[data.exposure_risk as string] || 'border-gray-300 bg-gray-50';
   const typeIcons: Record<string, string> = { secret: 'Key', certificate: 'Cert', federated: 'Fed' };
   return (
-    <div className={`px-3 py-2 rounded-lg border ${colors} shadow-sm max-w-[150px]`}>
+    <div
+      title={`${data.label}\nType: ${(typeIcons[data.credential_type as string] || data.credential_type) as string}${data.status ? `\nStatus: ${data.status}` : ''}${data.exposure_risk ? `\nExposure: ${(data.exposure_risk as string).toUpperCase()}` : ''}`}
+      className={`px-3 py-2 rounded-lg border ${colors} shadow-sm max-w-[150px]`}
+    >
       <Handle type="target" position={Position.Top} className="!bg-gray-400" />
       <div className="flex items-center gap-1">
         <svg className="w-3 h-3 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -166,10 +188,37 @@ export function CredentialNode({ data }: NodeProps) {
   );
 }
 
+// Permission node (Graph API permissions + app role assignments)
+export function PermissionNode({ data }: NodeProps) {
+  const colors = riskBorder[data.risk_level as string] || 'border-gray-300 bg-gray-50';
+  const typeLabel = (data.permission_type as string) === 'app_role' ? 'App Role' : 'Graph API';
+  return (
+    <div
+      title={`${data.label}\nType: ${typeLabel}\nResource: ${data.resource || 'N/A'}\nRisk: ${(data.risk_level as string || 'info').toUpperCase()}`}
+      className={`px-3 py-2 rounded-lg border ${colors} shadow-sm max-w-[220px]`}
+    >
+      <Handle type="target" position={Position.Left} className="!bg-gray-400" />
+      <div className="flex items-center gap-1.5">
+        <svg className="w-3 h-3 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+        <span className="text-[10px] font-semibold text-gray-900 truncate">{data.label as string}</span>
+      </div>
+      <div className="flex items-center gap-1.5 mt-0.5">
+        <span className="text-[9px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-700 font-medium">{typeLabel}</span>
+        {!!data.resource && <span className="text-[9px] text-gray-500 truncate">{data.resource as string}</span>}
+      </div>
+    </div>
+  );
+}
+
 // Scope node (technical mode)
 export function ScopeNode({ data }: NodeProps) {
   return (
-    <div className="px-3 py-2 rounded border border-dashed border-gray-400 bg-gray-50 shadow-sm max-w-[180px]">
+    <div
+      title={`${data.full_scope || data.label}\nType: ${data.scope_type || 'scope'}`}
+      className="px-3 py-2 rounded border border-dashed border-gray-400 bg-gray-50 shadow-sm max-w-[260px]"
+    >
       <Handle type="target" position={Position.Left} className="!bg-gray-400" />
       <div className="flex items-center gap-1">
         <svg className="w-3 h-3 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -182,6 +231,97 @@ export function ScopeNode({ data }: NodeProps) {
   );
 }
 
+// Subscription node (ARM hierarchy)
+export function SubscriptionNode({ data }: NodeProps) {
+  return (
+    <div
+      title={`Subscription: ${data.full_id || data.label}`}
+      className="px-4 py-2.5 rounded-lg border-2 border-blue-400 bg-blue-50 shadow-sm max-w-[220px]"
+    >
+      <Handle type="target" position={Position.Left} className="!bg-blue-400" />
+      <div className="flex items-center gap-2">
+        <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
+        </svg>
+        <div className="min-w-0">
+          <div className="text-[9px] font-bold text-blue-600 uppercase">Subscription</div>
+          <div className="text-xs font-medium text-gray-900 truncate">{data.label as string}</div>
+        </div>
+      </div>
+      <Handle type="source" position={Position.Right} className="!bg-blue-400" />
+    </div>
+  );
+}
+
+// Resource group node (ARM hierarchy)
+export function ResourceGroupNode({ data }: NodeProps) {
+  return (
+    <div
+      title={`Resource Group: ${data.label}`}
+      className="px-3 py-2 rounded-lg border border-gray-300 bg-gray-50 shadow-sm max-w-[200px]"
+    >
+      <Handle type="target" position={Position.Left} className="!bg-gray-400" />
+      <div className="flex items-center gap-1.5">
+        <svg className="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+        </svg>
+        <div className="min-w-0">
+          <div className="text-[9px] font-bold text-gray-500 uppercase">Resource Group</div>
+          <div className="text-xs font-medium text-gray-900 truncate">{data.label as string}</div>
+        </div>
+      </div>
+      <Handle type="source" position={Position.Right} className="!bg-gray-400" />
+    </div>
+  );
+}
+
+// Resource node (ARM hierarchy)
+export function ResourceNode({ data }: NodeProps) {
+  return (
+    <div
+      title={`${data.full_type || data.resource_type}: ${data.label}`}
+      className="px-3 py-2 rounded border border-dashed border-purple-300 bg-purple-50 shadow-sm max-w-[220px]"
+    >
+      <Handle type="target" position={Position.Left} className="!bg-purple-300" />
+      <div className="flex items-center gap-1.5">
+        <svg className="w-3 h-3 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+        </svg>
+        <div className="min-w-0">
+          <div className="text-[9px] text-purple-600 font-medium">{data.resource_type as string}</div>
+          <div className="text-[10px] font-semibold text-gray-900 truncate">{data.label as string}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Entra directory container node (ARM hierarchy)
+export function EntraDirectoryNode({ data }: NodeProps) {
+  return (
+    <div
+      title={`Entra ID Directory: ${data.count || 0} role${(data.count as number) !== 1 ? 's' : ''}`}
+      className="px-4 py-2.5 rounded-lg border-2 border-indigo-400 bg-indigo-50 shadow-sm max-w-[200px]"
+    >
+      <Handle type="target" position={Position.Left} className="!bg-indigo-400" />
+      <div className="flex items-center gap-2">
+        <svg className="w-4 h-4 text-indigo-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+        <div>
+          <div className="text-xs font-bold text-indigo-700">Entra Directory</div>
+          {!!(data.count as number) && (
+            <div className="text-[9px] text-gray-500">
+              {data.count as number} role{(data.count as number) !== 1 ? 's' : ''}
+            </div>
+          )}
+        </div>
+      </div>
+      <Handle type="source" position={Position.Right} className="!bg-indigo-400" />
+    </div>
+  );
+}
+
 export const nodeTypes = {
   identity: IdentityNode,
   risk_summary: RiskSummaryNode,
@@ -189,6 +329,11 @@ export const nodeTypes = {
   owner: OwnerNode,
   federated_trust: FederatedTrustNode,
   role: RoleNode,
+  permission: PermissionNode,
   credential: CredentialNode,
   scope: ScopeNode,
+  subscription: SubscriptionNode,
+  resource_group: ResourceGroupNode,
+  resource: ResourceNode,
+  entra_directory: EntraDirectoryNode,
 };

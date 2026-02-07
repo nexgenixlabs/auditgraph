@@ -61,6 +61,20 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
   - Technical Trust Graph — full relationship graph with all role/scope/credential edges
   - Powered by @xyflow/react with pan/zoom/minimap
 
+- **PIM (Privileged Identity Management) Tracking**: JIT access governance monitoring
+  - Eligible role discovery via roleEligibilityScheduleInstances
+  - Active activation tracking with justification and ticket integration
+  - Overuse metrics: activation frequency, total active hours, always-active pattern detection
+  - PIM badge on Identities table, dedicated PIM tab on Identity Detail
+
+- **Conditional Access Monitoring**: Policy coverage and MFA enforcement analysis
+  - Automatic policy discovery via Graph API (Policy.Read.All)
+  - Per-identity coverage computation (covered / excluded / no coverage)
+  - MFA enforcement status per identity
+  - Weak policy detection: disabled policies, legacy auth, missing MFA
+  - Dashboard widget with coverage percentage and policy risk flags
+  - Shield icon on Identities table (green=MFA, yellow=no MFA, red=excluded)
+
 - **Scheduled Discovery & Change Alerts**: Automated monitoring with email notifications
   - Configurable discovery interval (6, 12, or 24 hours)
   - Email alerts when identities are added or removed
@@ -81,7 +95,7 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
 │  Port 5001                                                    │
 ├──────────────────────────────────────────────────────────────┤
 │                        Database                               │
-│  PostgreSQL — 14 tables                                       │
+│  PostgreSQL — 18 tables                                       │
 │  identities, role_assignments, entra_role_assignments,        │
 │  credentials, sp_ownership, graph_api_permissions,            │
 │  app_role_assignments, discovery_runs, risk_scores, ...       │
@@ -106,6 +120,7 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
 - Risk Heat Map — identity category vs risk level matrix
 - Risk Donut Chart — risk level distribution
 - GRC Compliance Scorecard — SOC 2, HIPAA, PCI-DSS, NIST 800-53 controls
+- Conditional Access Card — policy coverage %, MFA enforcement, weak policy flags
 
 ### Identities (`/identities`)
 
@@ -118,16 +133,17 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
 
 ### Identity Detail (`/identities/:id`)
 
-7-tab layout:
+8-tab layout:
 
 | Tab | Content |
 |-----|---------|
-| **Overview** | Quick stats, activity status, risk reasons |
+| **Overview** | Quick stats, activity status, risk reasons, CA coverage badges |
 | **Roles** | Azure RBAC + Entra roles with usage status, risk badges, compliance cross-links |
 | **Permissions** | Graph API permissions + app role assignments |
 | **Credentials** | Credential count, status, next expiration |
 | **Ownership** | Owner listing with primary owner badge |
-| **Access Graph** | Dual-mode interactive graph + trust/scope/exposure detail panels |
+| **Access Graph** | Dual-mode interactive graph + trust/scope/exposure detail panels (with hover tooltips) |
+| **PIM** | Eligible roles, activation history with justification/ticket, overuse metrics |
 | **Compliance** | GRC framework relevance, per-role attack patterns, HIPAA violation mappings |
 
 ## Identity Categories
@@ -152,6 +168,151 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
 | `recently_created` | Created <30 days ago, no sign-in yet | Blue — New |
 | `unknown` | No sign-in data available (requires Azure AD P1/P2) | Gray dash |
 
+## Onboarding a New Tenant / Subscription
+
+Follow these steps to onboard a new Azure tenant or add a subscription for identity discovery.
+
+### Step 1: Create an Azure Service Principal
+
+Register an app in Entra ID (Azure AD) for AuditGraph to read identity data.
+
+```bash
+# Create the service principal
+az ad sp create-for-rbac --name "AuditGraph-Reader" --role Reader \
+  --scopes /subscriptions/<SUBSCRIPTION_ID>
+```
+
+Save the output — you'll need `appId`, `password`, and `tenant`.
+
+### Step 2: Grant Microsoft Graph API Permissions
+
+The service principal needs read-only Graph API permissions. In the Azure Portal:
+
+1. Go to **Entra ID** > **App registrations** > **AuditGraph-Reader**
+2. Click **API permissions** > **Add a permission** > **Microsoft Graph** > **Application permissions**
+3. Add these permissions:
+
+| Permission | Purpose | Required |
+|-----------|---------|----------|
+| `Directory.Read.All` | Read all identities, roles, group memberships | Yes |
+| `Application.Read.All` | Read service principals, credentials, ownership | Yes |
+| `RoleManagement.Read.Directory` | Read Entra role assignments + PIM eligible roles | Yes |
+| `Policy.Read.All` | Read Conditional Access policies | Yes |
+| `AuditLog.Read.All` | Read sign-in activity (last sign-in timestamps) | Yes |
+| `Mail.Send` | Send email change notifications (optional) | No |
+
+4. Click **Grant admin consent** for the tenant
+
+### Step 3: Assign Azure RBAC Reader Role
+
+The service principal needs Reader access on each subscription you want to monitor:
+
+```bash
+# Grant Reader on a subscription
+az role assignment create \
+  --assignee <APP_ID> \
+  --role "Reader" \
+  --scope /subscriptions/<SUBSCRIPTION_ID>
+
+# For multiple subscriptions, repeat for each:
+az role assignment create \
+  --assignee <APP_ID> \
+  --role "Reader" \
+  --scope /subscriptions/<SECOND_SUBSCRIPTION_ID>
+```
+
+> **Note**: AuditGraph discovers RBAC role assignments using `az role assignment list --all`, which returns roles across **all subscriptions** the service principal has access to. To monitor additional subscriptions, just grant Reader on them — no code changes needed.
+
+### Step 4: Configure Environment
+
+Create `backend/.env.local`:
+
+```env
+# Azure Service Principal
+AZURE_TENANT_ID=your-tenant-id
+AZURE_CLIENT_ID=your-app-id
+AZURE_CLIENT_SECRET=your-client-secret
+AZURE_SUBSCRIPTION_ID=your-primary-subscription-id
+
+# PostgreSQL Database
+DB_HOST=your-db-host
+DB_PORT=5432
+DB_NAME=auditgraph
+DB_USER=your-db-user
+DB_PASSWORD=your-db-password
+DB_SSLMODE=require
+
+# Email Notifications (optional)
+EMAIL_FROM=sender@yourdomain.com
+EMAIL_TO=security-team@yourdomain.com
+
+# Scheduler Configuration
+DISCOVERY_INTERVAL_HOURS=12  # Options: 6, 12, or 24
+```
+
+### Step 5: Run Database Migrations
+
+```bash
+cd backend
+
+# Run all migrations in order
+for f in migrations/*.sql; do
+  echo "Running $f..."
+  PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
+    --set=sslmode=require -f "$f"
+done
+```
+
+### Step 6: Start AuditGraph
+
+```bash
+# Backend (starts scheduler automatically)
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python -m app.main
+# → API at http://localhost:5001
+# → Scheduler runs discovery every 12h (configurable)
+
+# Frontend
+cd frontend
+npm install
+npm start
+# → UI at http://localhost:3000
+```
+
+### Step 7: Trigger First Discovery
+
+Discovery runs automatically on schedule, but you can trigger it immediately:
+
+- **UI**: Click the **"Run Discovery"** button on the Dashboard page
+- **API**: `POST http://localhost:5001/api/runs/trigger`
+- **CLI**: `curl -X POST http://localhost:5001/api/runs/trigger`
+
+Monitor progress at `GET /api/runs`. After completion, refresh the Dashboard to see discovered identities.
+
+### Adding More Subscriptions
+
+To monitor additional subscriptions after initial setup:
+
+1. Grant the service principal **Reader** access on the new subscription (Step 3)
+2. Trigger a new discovery run (Step 7)
+3. New RBAC role assignments from the added subscription will appear automatically
+
+No environment variable changes or restarts needed — the discovery engine reads roles across all accessible subscriptions.
+
+### Optional: PIM + Conditional Access
+
+| Feature | License Required | Permission |
+|---------|-----------------|------------|
+| PIM (Privileged Identity Management) | Azure AD P2 | `RoleManagement.Read.Directory` |
+| Conditional Access policies | Azure AD P1+ | `Policy.Read.All` |
+| Sign-in activity (last sign-in) | Azure AD P1+ | `AuditLog.Read.All` |
+
+If your tenant doesn't have P2, PIM data will be empty (no errors). If CA policies aren't configured, the CA section will show 0 coverage.
+
+---
+
 ## Local Development
 
 ### Prerequisites
@@ -159,7 +320,7 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
 - Python 3.9+
 - Node.js 18+
 - PostgreSQL database (Azure Postgres Flexible Server or local)
-- Azure Service Principal with read permissions
+- Azure Service Principal with read permissions (see Onboarding above)
 
 ### Backend Setup
 
@@ -167,14 +328,8 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
 cd backend
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env.local
-# Edit .env.local with your Azure and database credentials
-
-# Run API server
 python -m app.main
-# → API at http://localhost:5001
+# → API at http://localhost:5001 (scheduler starts automatically)
 ```
 
 ### Frontend Setup
@@ -184,32 +339,6 @@ cd frontend
 npm install
 npm start
 # → UI at http://localhost:3000
-```
-
-### Environment Variables
-
-Create `backend/.env.local` with:
-
-```env
-# Azure Service Principal (read-only recommended)
-AZURE_TENANT_ID=your-tenant-id
-AZURE_CLIENT_ID=your-client-id
-AZURE_CLIENT_SECRET=your-client-secret
-AZURE_SUBSCRIPTION_ID=your-subscription-id
-
-# PostgreSQL Database
-DB_HOST=your-db-host
-DB_PORT=5432
-DB_NAME=auditgraph
-DB_USER=your-db-user
-DB_PASSWORD=your-db-password
-
-# Email Notifications (Microsoft Graph API)
-EMAIL_FROM=sender@yourdomain.com
-EMAIL_TO=security-team@yourdomain.com
-
-# Scheduler Configuration
-DISCOVERY_INTERVAL_HOURS=12  # Options: 6, 12, or 24
 ```
 
 ## API Endpoints
@@ -229,6 +358,7 @@ DISCOVERY_INTERVAL_HOURS=12  # Options: 6, 12, or 24
 |----------|-------------|
 | `GET /api/dashboard/posture` | Posture score, credential health, dormant counts, trend |
 | `GET /api/dashboard/compliance` | GRC compliance scorecard (SOC 2, HIPAA, PCI-DSS, NIST) |
+| `GET /api/dashboard/conditional-access` | CA policy coverage, MFA enforcement, weak policy flags |
 
 ### Overview
 
@@ -243,6 +373,16 @@ DISCOVERY_INTERVAL_HOURS=12  # Options: 6, 12, or 24
 | `GET /api/identities` | All identities (supports `limit`, `offset`, `cloud`, `risk_level`, `identity_category`, `search`) |
 | `GET /api/identities/:id` | Full detail: roles, permissions, app_roles, owners, role_intelligence |
 | `GET /api/identities/:id/graph-data` | Access graph: trust relationships, effective scope, secret exposure, pre-computed graph nodes/edges |
+| `GET /api/identities/:id/pim` | PIM eligible assignments, activation history, overuse metrics |
+
+### Discovery & Scheduler
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /api/runs` | GET | List discovery runs (last 50) |
+| `POST /api/runs/trigger` | POST | Trigger a manual discovery run (returns 202, runs in background) |
+| `GET /api/runs/:id/drift` | GET | Get drift report comparing a run to its predecessor |
+| `GET /api/scheduler` | GET | Scheduler status, next run time, interval configuration |
 
 ## Project Structure
 
@@ -271,9 +411,9 @@ auditgraph/
 │   └── src/
 │       ├── App.tsx                          # Router + Overview page (inline)
 │       ├── pages/
-│       │   ├── Dashboard.tsx                # Stats, posture, compliance scorecard
+│       │   ├── Dashboard.tsx                # Stats, posture, compliance, CA card
 │       │   ├── Identities.tsx               # 14-col sortable table + CSV/PDF export
-│       │   └── IdentityDetail.tsx           # 7-tab detail layout
+│       │   └── IdentityDetail.tsx           # 8-tab detail layout (with PIM tab)
 │       └── components/
 │           ├── dashboard/
 │           │   ├── PostureScore.tsx          # Posture gauge (0-100)
@@ -281,7 +421,8 @@ auditgraph/
 │           │   ├── QuickActions.tsx          # Action item counts
 │           │   ├── ComplianceScorecard.tsx   # GRC framework scores
 │           │   ├── RiskHeatMap.tsx           # Category x risk matrix
-│           │   └── RiskDonutChart.tsx        # Risk distribution chart
+│           │   ├── RiskDonutChart.tsx        # Risk distribution chart
+│           │   └── ConditionalAccessCard.tsx # CA coverage + weak policy flags
 │           ├── overview/
 │           │   ├── GlobalRiskCards.tsx       # Total/critical/high/medium counts
 │           │   ├── CloudComparison.tsx       # Per-cloud identity breakdown

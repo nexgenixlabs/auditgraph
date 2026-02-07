@@ -43,6 +43,10 @@ interface IdentityRow {
   risk_score?: number;
   activity_status?: string;
   privilege_tier?: number;
+  pim_eligible_count?: number;
+  has_permanent_assignment?: boolean;
+  ca_coverage_status?: string | null;
+  ca_mfa_enforced?: boolean;
 }
 
 type SortField =
@@ -320,6 +324,10 @@ export default function IdentitiesPage() {
           risk_score: raw.risk_score ?? 0,
           activity_status: raw.activity_status || 'unknown',
           privilege_tier: raw.privilege_tier ?? undefined,
+          pim_eligible_count: raw.pim_eligible_count ?? 0,
+          has_permanent_assignment: raw.has_permanent_assignment ?? false,
+          ca_coverage_status: raw.ca_coverage_status || null,
+          ca_mfa_enforced: raw.ca_mfa_enforced ?? false,
         }));
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
@@ -588,7 +596,22 @@ export default function IdentitiesPage() {
                     <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
 
                     {/* Risk */}
-                    <td className="px-2 py-2"><RiskBadge level={i.risk_level} score={i.risk_score} /></td>
+                    <td className="px-2 py-2">
+                      <div className="flex items-center gap-1">
+                        <RiskBadge level={i.risk_level} score={i.risk_score} />
+                        {i.ca_coverage_status && (
+                          <span title={`CA: ${i.ca_coverage_status}${i.ca_mfa_enforced ? ' + MFA' : ''}`}>
+                            <svg className={`w-3.5 h-3.5 ${
+                              i.ca_coverage_status === 'covered' && i.ca_mfa_enforced ? 'text-green-500' :
+                              i.ca_coverage_status === 'covered' ? 'text-yellow-500' :
+                              'text-red-400'
+                            }`} fill="currentColor" viewBox="0 0 24 24">
+                              <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" />
+                            </svg>
+                          </span>
+                        )}
+                      </div>
+                    </td>
 
                     {/* Entra Roles */}
                     <td className="px-2 py-2 text-center">
@@ -596,8 +619,18 @@ export default function IdentitiesPage() {
                         <div className="flex items-center justify-center gap-1">
                           <RiskDot level={i.entra_max_risk} />
                           <span className="font-semibold text-indigo-700">{i.entra_role_count}</span>
+                          {(i.pim_eligible_count ?? 0) > 0 && (
+                            <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700" title={`${i.pim_eligible_count} PIM eligible role(s)`}>PIM</span>
+                          )}
                         </div>
-                      ) : <span className="text-gray-300">0</span>}
+                      ) : (
+                        <div className="flex items-center justify-center gap-1">
+                          <span className="text-gray-300">0</span>
+                          {(i.pim_eligible_count ?? 0) > 0 && (
+                            <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700" title={`${i.pim_eligible_count} PIM eligible role(s)`}>PIM</span>
+                          )}
+                        </div>
+                      )}
                     </td>
 
                     {/* RBAC Roles */}

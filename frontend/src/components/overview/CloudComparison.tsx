@@ -9,8 +9,15 @@ interface CloudRiskData {
   low: number;
 }
 
+interface MonitoredResources {
+  azure: { subscriptions: number; subscription_ids: string[] };
+  aws: { accounts: number; account_ids: string[] };
+  gcp: { projects: number; project_ids: string[] };
+}
+
 interface CloudComparisonProps {
   data: CloudRiskData[];
+  monitoredResources?: MonitoredResources | null;
   onCloudClick?: (cloud: string) => void;
 }
 
@@ -67,7 +74,29 @@ function RiskBadge({ level, count }: { level: string; count: number }) {
   );
 }
 
-export default function CloudComparison({ data, onCloudClick }: CloudComparisonProps) {
+const resourceLabel: Record<string, string> = {
+  azure: 'Subscriptions',
+  aws: 'Accounts',
+  gcp: 'Projects',
+};
+
+function getResourceCount(cloud: string, res?: MonitoredResources | null): number {
+  if (!res) return 0;
+  if (cloud === 'azure') return res.azure?.subscriptions ?? 0;
+  if (cloud === 'aws') return res.aws?.accounts ?? 0;
+  if (cloud === 'gcp') return res.gcp?.projects ?? 0;
+  return 0;
+}
+
+function getResourceIds(cloud: string, res?: MonitoredResources | null): string[] {
+  if (!res) return [];
+  if (cloud === 'azure') return res.azure?.subscription_ids ?? [];
+  if (cloud === 'aws') return res.aws?.account_ids ?? [];
+  if (cloud === 'gcp') return res.gcp?.project_ids ?? [];
+  return [];
+}
+
+export default function CloudComparison({ data, monitoredResources, onCloudClick }: CloudComparisonProps) {
   // If no data, show placeholder for future clouds
   const displayData: CloudRiskData[] = data.length > 0 ? data : [
     { cloud: 'azure', total: 0, critical: 0, high: 0, medium: 0, low: 0 },
@@ -85,7 +114,8 @@ export default function CloudComparison({ data, onCloudClick }: CloudComparisonP
           <thead>
             <tr className="text-xs text-gray-500 uppercase">
               <th className="px-5 py-3 text-left font-medium">Cloud</th>
-              <th className="px-3 py-3 text-center font-medium">Total</th>
+              <th className="px-3 py-3 text-center font-medium">Monitored</th>
+              <th className="px-3 py-3 text-center font-medium">Identities</th>
               <th className="px-3 py-3 text-center font-medium">Critical</th>
               <th className="px-3 py-3 text-center font-medium">High</th>
               <th className="px-3 py-3 text-center font-medium">Medium</th>
@@ -95,6 +125,9 @@ export default function CloudComparison({ data, onCloudClick }: CloudComparisonP
           <tbody className="divide-y">
             {displayData.map((row) => {
               const config = cloudConfig[row.cloud];
+              const resCount = getResourceCount(row.cloud, monitoredResources);
+              const resIds = getResourceIds(row.cloud, monitoredResources);
+              const resType = resourceLabel[row.cloud] || 'Resources';
               return (
                 <tr
                   key={row.cloud}
@@ -108,6 +141,14 @@ export default function CloudComparison({ data, onCloudClick }: CloudComparisonP
                         <div className={`font-semibold ${config.textColor}`}>{config.label}</div>
                         <div className="text-xs text-gray-500">{row.total} identities</div>
                       </div>
+                    </div>
+                  </td>
+                  <td className="px-3 py-4 text-center">
+                    <div
+                      title={resIds.length > 0 ? resIds.map(id => id.substring(0, 8) + '...').join('\n') : `No ${resType.toLowerCase()} detected`}
+                    >
+                      <span className="text-lg font-bold text-gray-900">{resCount}</span>
+                      <div className="text-[10px] text-gray-400 leading-tight">{resType}</div>
                     </div>
                   </td>
                   <td className="px-3 py-4 text-center">
@@ -141,6 +182,7 @@ export default function CloudComparison({ data, onCloudClick }: CloudComparisonP
                     </div>
                   </div>
                 </td>
+                <td className="px-3 py-4 text-center text-gray-400 text-xs">0 Accounts</td>
                 <td colSpan={5} className="px-3 py-4 text-center text-gray-400 text-sm">
                   Connect AWS account to enable
                 </td>
@@ -157,6 +199,7 @@ export default function CloudComparison({ data, onCloudClick }: CloudComparisonP
                     </div>
                   </div>
                 </td>
+                <td className="px-3 py-4 text-center text-gray-400 text-xs">0 Projects</td>
                 <td colSpan={5} className="px-3 py-4 text-center text-gray-400 text-sm">
                   Connect GCP project to enable
                 </td>

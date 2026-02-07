@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
-import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard } from '../components/dashboard';
+import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner } from '../components/dashboard';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -18,6 +18,12 @@ interface StatsResponse {
   } | null;
 }
 
+interface MonitoredResources {
+  azure: { subscriptions: number; subscription_ids: string[] };
+  aws: { accounts: number; account_ids: string[] };
+  gcp: { projects: number; project_ids: string[] };
+}
+
 interface IdentitySummaryResponse {
   run_id: number;
   completed_at: string | null;
@@ -25,6 +31,7 @@ interface IdentitySummaryResponse {
     string,
     { total: number; critical: number; high: number; medium: number; low: number; info: number; unknown: number }
   >;
+  monitored_resources?: MonitoredResources;
 }
 
 interface PostureResponse {
@@ -64,7 +71,10 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
   const [posture, setPosture] = useState<PostureResponse | null>(null);
   const [compliance, setCompliance] = useState<any>(null);
+  const [caData, setCaData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  const [discoveryRunning, setDiscoveryRunning] = useState(false);
+  const [schedulerInfo, setSchedulerInfo] = useState<{ scheduler: string; next_run: string | null; interval_hours: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,11 +83,12 @@ export default function Dashboard() {
       setLoading(true);
       setError(null);
       try {
-        const [statsRes, summaryRes, postureRes, complianceRes] = await Promise.all([
+        const [statsRes, summaryRes, postureRes, complianceRes, caRes] = await Promise.all([
           fetch('/api/stats'),
           fetch('/api/identity-summary'),
           fetch('/api/dashboard/posture'),
           fetch('/api/dashboard/compliance'),
+          fetch('/api/dashboard/conditional-access'),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
@@ -95,12 +106,22 @@ export default function Dashboard() {
         }
 
         const complianceJson = complianceRes.ok ? await complianceRes.json() : null;
+        const caJson = caRes.ok ? await caRes.json() : null;
+
+        // Fetch scheduler status (non-blocking)
+        let schedJson = null;
+        try {
+          const schedRes = await fetch('/api/scheduler');
+          if (schedRes.ok) schedJson = await schedRes.json();
+        } catch { /* ignore */ }
 
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
           setPosture(postureJson);
           setCompliance(complianceJson);
+          setCaData(caJson);
+          setSchedulerInfo(schedJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -165,6 +186,55 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            disabled={discoveryRunning}
+            onClick={async () => {
+              setDiscoveryRunning(true);
+              try {
+                const res = await fetch('/api/runs/trigger', { method: 'POST' });
+                if (!res.ok) throw new Error('Trigger failed');
+                // Poll for completion
+                const poll = setInterval(async () => {
+                  const runsRes = await fetch('/api/runs');
+                  if (runsRes.ok) {
+                    const runsJson = await runsRes.json();
+                    const latest = runsJson?.runs?.[0];
+                    if (latest?.status === 'completed') {
+                      clearInterval(poll);
+                      setDiscoveryRunning(false);
+                      window.location.reload();
+                    }
+                  }
+                }, 5000);
+                // Safety timeout: stop polling after 10 minutes
+                setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); }, 600000);
+              } catch {
+                setDiscoveryRunning(false);
+              }
+            }}
+            className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border transition ${
+              discoveryRunning
+                ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200'
+                : 'bg-indigo-600 text-white hover:bg-indigo-700 border-indigo-600'
+            }`}
+          >
+            {discoveryRunning ? (
+              <>
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                Running...
+              </>
+            ) : (
+              <>
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                Run Discovery
+              </>
+            )}
+          </button>
+          {schedulerInfo && (
+            <span className="text-xs text-gray-400" title={`Interval: every ${schedulerInfo.interval_hours}h`}>
+              Next: {schedulerInfo.next_run ? new Date(schedulerInfo.next_run).toLocaleString() : 'N/A'}
+            </span>
+          )}
           <ViewAllButton />
         </div>
       </div>
@@ -213,6 +283,11 @@ export default function Dashboard() {
             />
           </div>
 
+          {/* Cloud Context Banner */}
+          {summary?.monitored_resources && (
+            <CloudContextBanner monitoredResources={summary.monitored_resources} />
+          )}
+
           {/* Posture Score + Credential Health + Quick Actions */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
             {posture ? (
@@ -253,8 +328,15 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Compliance Scorecard */}
-          <ComplianceScorecard data={compliance} loading={loading} />
+          {/* Compliance Scorecard + Conditional Access */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2">
+              <ComplianceScorecard data={compliance} loading={loading} />
+            </div>
+            <div>
+              <ConditionalAccessCard data={caData} loading={loading} />
+            </div>
+          </div>
         </>
       )}
     </div>

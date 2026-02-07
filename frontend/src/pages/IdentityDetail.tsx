@@ -80,6 +80,8 @@ interface IdentityDetailsResponse {
     api_permission_count?: number;
     app_role_count?: number;
     status?: string;
+    ca_coverage_status?: string | null;
+    ca_mfa_enforced?: boolean;
   };
   roles: any[];
   graph_permissions: any[];
@@ -88,7 +90,41 @@ interface IdentityDetailsResponse {
   role_intelligence: RoleIntelligence[];
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim';
+
+interface PimEligible {
+  role_name: string;
+  role_definition_id?: string;
+  directory_scope?: string;
+  assignment_type?: string;
+  start_datetime?: string | null;
+  end_datetime?: string | null;
+  member_type?: string;
+}
+
+interface PimActivation {
+  role_name: string;
+  role_definition_id?: string;
+  directory_scope?: string;
+  status?: string;
+  activation_start?: string | null;
+  activation_end?: string | null;
+  justification?: string | null;
+  ticket_number?: string | null;
+  ticket_system?: string | null;
+  is_approval_required?: boolean;
+  created_datetime?: string | null;
+}
+
+interface PimData {
+  eligible_assignments: PimEligible[];
+  activations: PimActivation[];
+  overuse_metrics: {
+    activation_frequency_30d: number;
+    always_active_pattern: boolean;
+    total_active_hours_30d: number;
+  };
+}
 
 function safeLower(v: any) {
   return String(v ?? '').toLowerCase();
@@ -197,6 +233,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'credentials', label: 'Credentials', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
     { id: 'ownership', label: 'Ownership', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
     { id: 'access_graph' as TabId, label: 'Access Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+    { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
@@ -244,6 +281,8 @@ export default function IdentityDetail() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<IdentityDetailsResponse | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [pimData, setPimData] = useState<PimData | null>(null);
+  const [pimLoading, setPimLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -266,6 +305,19 @@ export default function IdentityDetail() {
     if (id) load();
     return () => { cancelled = true; };
   }, [id]);
+
+  // Lazy-load PIM data when tab is selected
+  useEffect(() => {
+    if (activeTab !== 'pim' || pimData || pimLoading || !id) return;
+    let cancelled = false;
+    setPimLoading(true);
+    fetch(`/api/identities/${encodeURIComponent(id)}/pim`)
+      .then(res => res.ok ? res.json() : Promise.reject('PIM fetch failed'))
+      .then(json => { if (!cancelled) setPimData(json); })
+      .catch(() => { if (!cancelled) setPimData({ eligible_assignments: [], activations: [], overuse_metrics: { activation_frequency_30d: 0, always_active_pattern: false, total_active_hours_30d: 0 } }); })
+      .finally(() => { if (!cancelled) setPimLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, pimData, pimLoading]);
 
   const identity = data?.identity;
 
@@ -291,6 +343,7 @@ export default function IdentityDetail() {
     credentials: identity?.credential_count ?? 0,
     ownership: (data?.owners || []).length,
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
+    pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
   };
 
@@ -455,6 +508,33 @@ export default function IdentityDetail() {
                       <div className="text-sm text-gray-500">No risk reasons recorded.</div>
                     )}
                   </div>
+
+                  {/* Conditional Access Coverage */}
+                  {identity.ca_coverage_status && (
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 mb-2">Conditional Access</div>
+                      <div className="flex items-center gap-3">
+                        <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                          identity.ca_coverage_status === 'covered'
+                            ? 'bg-green-100 text-green-700'
+                            : identity.ca_coverage_status === 'partial'
+                            ? 'bg-yellow-100 text-yellow-700'
+                            : identity.ca_coverage_status === 'excluded'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          {identity.ca_coverage_status === 'covered' ? 'Covered' :
+                           identity.ca_coverage_status === 'partial' ? 'Partial' :
+                           identity.ca_coverage_status === 'excluded' ? 'Excluded' : 'No Coverage'}
+                        </span>
+                        {identity.ca_mfa_enforced ? (
+                          <span className="px-2 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">MFA Enforced</span>
+                        ) : (
+                          <span className="px-2 py-1 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">No MFA</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -723,6 +803,166 @@ export default function IdentityDetail() {
               {/* Access Graph Tab */}
               {activeTab === 'access_graph' && identity && (
                 <AccessGraphTab identityId={identity.identity_id} />
+              )}
+
+              {/* PIM Tab */}
+              {activeTab === 'pim' && (
+                <div className="space-y-6">
+                  {pimLoading ? (
+                    <div className="animate-pulse space-y-4">
+                      <div className="h-20 bg-gray-100 rounded-xl" />
+                      <div className="h-40 bg-gray-100 rounded-xl" />
+                    </div>
+                  ) : !pimData || (pimData.eligible_assignments.length === 0 && pimData.activations.length === 0) ? (
+                    <div className="text-center py-8">
+                      <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      </svg>
+                      <div className="text-sm text-gray-500">No PIM data available for this identity.</div>
+                      <div className="text-xs text-gray-400 mt-1">
+                        PIM requires Azure AD P2 license. Eligible roles and activations will appear here when available.
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Overuse Metrics */}
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900 mb-3">Overuse Metrics (Last 30 Days)</div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          <div className="bg-gray-50 rounded-xl p-4">
+                            <div className="text-xs text-gray-500 mb-1">Activations</div>
+                            <div className={`text-2xl font-bold ${pimData.overuse_metrics.activation_frequency_30d > 10 ? 'text-orange-600' : 'text-gray-900'}`}>
+                              {pimData.overuse_metrics.activation_frequency_30d}
+                            </div>
+                          </div>
+                          <div className="bg-gray-50 rounded-xl p-4">
+                            <div className="text-xs text-gray-500 mb-1">Total Active Hours</div>
+                            <div className="text-2xl font-bold text-gray-900">
+                              {pimData.overuse_metrics.total_active_hours_30d}h
+                            </div>
+                          </div>
+                          <div className="bg-gray-50 rounded-xl p-4">
+                            <div className="text-xs text-gray-500 mb-1">Always-Active Pattern</div>
+                            <div className="text-sm font-semibold mt-1">
+                              {pimData.overuse_metrics.always_active_pattern ? (
+                                <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-700">Detected</span>
+                              ) : (
+                                <span className="px-2 py-1 rounded-full text-xs bg-green-100 text-green-700">Not Detected</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        {pimData.overuse_metrics.always_active_pattern && (
+                          <div className="mt-3 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                            This identity is active &gt;80% of the time via PIM. Consider converting to a permanent (non-PIM) assignment or reviewing if JIT governance is being bypassed.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Eligible Roles */}
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                          Eligible Roles
+                          <span className="px-2 py-0.5 rounded-full text-xs bg-emerald-100 text-emerald-700">
+                            {pimData.eligible_assignments.length}
+                          </span>
+                        </div>
+                        {pimData.eligible_assignments.length === 0 ? (
+                          <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No PIM eligible roles.</div>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full text-sm">
+                              <thead>
+                                <tr className="border-b text-gray-500 text-xs">
+                                  <th className="text-left py-2 pr-4 font-medium">Role Name</th>
+                                  <th className="text-left py-2 pr-4 font-medium">Scope</th>
+                                  <th className="text-left py-2 pr-4 font-medium">Type</th>
+                                  <th className="text-left py-2 pr-4 font-medium">Member</th>
+                                  <th className="text-left py-2 font-medium">Expiration</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                {pimData.eligible_assignments.map((ea, idx) => (
+                                  <tr key={idx}>
+                                    <td className="py-2.5 pr-4 font-medium text-gray-900">{ea.role_name}</td>
+                                    <td className="py-2.5 pr-4 text-gray-600 text-xs font-mono">{ea.directory_scope || '/'}</td>
+                                    <td className="py-2.5 pr-4">
+                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                        ea.assignment_type === 'permanent_eligible'
+                                          ? 'bg-red-100 text-red-700'
+                                          : 'bg-blue-100 text-blue-700'
+                                      }`}>
+                                        {ea.assignment_type === 'permanent_eligible' ? 'Permanent' : 'Time-Bound'}
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 pr-4 text-gray-600 text-xs">{ea.member_type || '—'}</td>
+                                    <td className="py-2.5 text-gray-600 text-xs">
+                                      {ea.end_datetime ? formatDate(ea.end_datetime) : <span className="text-red-600 font-medium">No expiry</span>}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Activation History */}
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                          Activation History
+                          <span className="px-2 py-0.5 rounded-full text-xs bg-purple-100 text-purple-700">
+                            {pimData.activations.length}
+                          </span>
+                        </div>
+                        {pimData.activations.length === 0 ? (
+                          <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No PIM activation records.</div>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full text-sm">
+                              <thead>
+                                <tr className="border-b text-gray-500 text-xs">
+                                  <th className="text-left py-2 pr-4 font-medium">Role</th>
+                                  <th className="text-left py-2 pr-4 font-medium">Status</th>
+                                  <th className="text-left py-2 pr-4 font-medium">Start</th>
+                                  <th className="text-left py-2 pr-4 font-medium">End</th>
+                                  <th className="text-left py-2 pr-4 font-medium">Justification</th>
+                                  <th className="text-left py-2 font-medium">Ticket</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                {pimData.activations.map((act, idx) => (
+                                  <tr key={idx}>
+                                    <td className="py-2.5 pr-4 font-medium text-gray-900">{act.role_name}</td>
+                                    <td className="py-2.5 pr-4">
+                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                        act.status === 'Active' ? 'bg-green-100 text-green-700' :
+                                        act.status === 'Expired' ? 'bg-gray-100 text-gray-600' :
+                                        'bg-red-100 text-red-700'
+                                      }`}>{act.status || '—'}</span>
+                                    </td>
+                                    <td className="py-2.5 pr-4 text-gray-600 text-xs">{formatDate(act.activation_start)}</td>
+                                    <td className="py-2.5 pr-4 text-gray-600 text-xs">{formatDate(act.activation_end)}</td>
+                                    <td className="py-2.5 pr-4 text-gray-600 text-xs max-w-[200px] truncate" title={act.justification || ''}>
+                                      {act.justification || <span className="text-gray-300">—</span>}
+                                    </td>
+                                    <td className="py-2.5 text-gray-600 text-xs">
+                                      {act.ticket_number ? (
+                                        <span className="font-mono">{act.ticket_number}</span>
+                                      ) : (
+                                        <span className="text-gray-300">—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
 
               {/* Compliance & Intelligence Tab */}
