@@ -58,15 +58,15 @@ interface IdentitySummaryResponse {
 }
 
 interface RisksResponse {
-  run_id: number;
+  run_id?: number;
   count: number;
-  risks: Array<{
+  items: Array<{
     identity_id: string;
     display_name: string;
     identity_category?: string;
     risk_level: string;
     risk_score?: number;
-    risk_reason: string[] | string;
+    risk_reasons: string[] | string;
   }>;
 }
 
@@ -181,13 +181,13 @@ const Overview: React.FC = () => {
 
   // Critical identities list
   const criticalIdentities = useMemo(() => {
-    return (risks?.risks || []).map((r) => ({
+    return (risks?.items || []).map((r) => ({
       identity_id: r.identity_id,
       display_name: r.display_name,
       identity_category: r.identity_category,
       risk_level: r.risk_level,
       risk_score: r.risk_score,
-      risk_reason: r.risk_reason,
+      risk_reason: r.risk_reasons,
     }));
   }, [risks]);
 

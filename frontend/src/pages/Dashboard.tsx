@@ -30,15 +30,15 @@ interface StatsResponse {
 }
 
 interface RisksResponse {
-  run_id: number;
+  run_id?: number;
   count: number;
-  risks: Array<{
+  items: Array<{
     identity_id: string;
     display_name: string;
     identity_type?: string;
     identity_category?: IdentityCategory;
     risk_level: RiskLevel;
-    risk_reason: string[] | string;
+    risk_reasons: string[] | string;
   }>;
 }
 
@@ -320,11 +320,11 @@ export default function Dashboard() {
               </Link>
             </div>
 
-            {(risks?.risks || []).length === 0 ? (
+            {(risks?.items || []).length === 0 ? (
               <div className="text-sm text-gray-500">No critical/high risks found.</div>
             ) : (
               <div className="space-y-3">
-                {risks!.risks.slice(0, 8).map((r, idx) => (
+                {risks!.items.slice(0, 8).map((r: any, idx: number) => (
                   <Link
                     key={`${r.identity_id}-${idx}`}
                     to={`/identities/${encodeURIComponent(r.identity_id)}`}
@@ -342,7 +342,7 @@ export default function Dashboard() {
                     </div>
 
                     <div className="text-xs text-gray-700 mt-3">
-                      {Array.isArray(r.risk_reason) ? r.risk_reason.join(' • ') : String(r.risk_reason || '')}
+                      {Array.isArray(r.risk_reasons) ? r.risk_reasons.join(' • ') : String(r.risk_reasons || '')}
                     </div>
                   </Link>
                 ))}
