@@ -225,70 +225,135 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
         </div>
       </div>
 
-      {/* Row 2: Dormant Privileged + Unowned SPNs lists */}
-      {(dormant_privileged.length > 0 || unowned_spns.length > 0) && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Dormant Privileged */}
-          {dormant_privileged.length > 0 && (
-            <div className="bg-white border rounded-xl overflow-hidden">
-              <div className="px-5 py-3 border-b bg-red-50 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Dormant Privileged Identities</h3>
-                <span className="text-xs text-gray-500">{dormant_privileged.length} found</span>
-              </div>
-              <div className="divide-y">
-                {dormant_privileged.map((d, idx) => (
-                  <Link
-                    key={`${d.identity_id}-${idx}`}
-                    to={`/identities/${encodeURIComponent(d.identity_id)}`}
-                    className="flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                        d.tier === 0 ? 'bg-red-200 text-red-800' : 'bg-orange-200 text-orange-800'
-                      }`}>T{d.tier}</span>
-                      <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[d.cloud || 'azure'] || cloudColors.azure}`}>{d.cloud || 'azure'}</span>
-                      <span className="font-medium text-gray-900 text-sm truncate">{d.display_name}</span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      <span className="text-[10px] text-gray-400">{categoryLabels[d.category] || d.category}</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${riskColors[d.risk_level] || 'bg-gray-100 text-gray-600'}`}>
-                        {d.risk_level}
-                      </span>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            </div>
-          )}
+      {/* Row 2: Recommendations */}
+      {(() => {
+        const recs: { priority: string; title: string; description: string; count: number; link: string; color: string; icon: string }[] = [];
 
-          {/* Unowned SPNs */}
-          {unowned_spns.length > 0 && (
-            <div className="bg-white border rounded-xl overflow-hidden">
-              <div className="px-5 py-3 border-b bg-yellow-50 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Unowned Service Principals</h3>
-                <span className="text-xs text-gray-500">{unowned_spns.length} found</span>
-              </div>
-              <div className="divide-y">
-                {unowned_spns.map((s, idx) => (
-                  <Link
-                    key={`${s.identity_id}-${idx}`}
-                    to={`/identities/${encodeURIComponent(s.identity_id)}`}
-                    className="flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[s.cloud || 'azure'] || cloudColors.azure}`}>{s.cloud || 'azure'}</span>
-                      <span className="font-medium text-gray-900 text-sm truncate">{s.display_name}</span>
-                    </div>
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${riskColors[s.risk_level] || 'bg-gray-100 text-gray-600'}`}>
-                      {s.risk_level}
-                    </span>
-                  </Link>
-                ))}
-              </div>
+        // Dormant T0 accounts — most critical
+        const dormantT0 = dormant_privileged.filter(d => d.tier === 0);
+        if (dormantT0.length > 0) {
+          recs.push({
+            priority: 'Critical',
+            title: `Revoke ${dormantT0.length} unused Control Plane account${dormantT0.length > 1 ? 's' : ''}`,
+            description: `${dormantT0.map(d => d.display_name).join(', ')} — T0 identities with no sign-in activity. Global Admin accounts that are never used are prime targets for credential stuffing.`,
+            count: dormantT0.length,
+            link: '/identities?risk_level=critical',
+            color: 'border-red-300 bg-red-50',
+            icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z',
+          });
+        }
+
+        // Dormant T1 accounts
+        const dormantT1 = dormant_privileged.filter(d => d.tier === 1);
+        if (dormantT1.length > 0) {
+          recs.push({
+            priority: 'High',
+            title: `Review ${dormantT1.length} dormant Management Plane account${dormantT1.length > 1 ? 's' : ''}`,
+            description: `${dormantT1.map(d => d.display_name).join(', ')} — T1 identities (User Admin, Exchange Admin, sub Owner) with no recent activity. Consider downgrading or disabling.`,
+            count: dormantT1.length,
+            link: '/identities?risk_level=high',
+            color: 'border-orange-300 bg-orange-50',
+            icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
+          });
+        }
+
+        // Too many T0 accounts
+        if (td.t0.count > 2) {
+          recs.push({
+            priority: 'High',
+            title: `Reduce T0 footprint from ${td.t0.count} to 2 or fewer`,
+            description: 'Microsoft recommends no more than 2 Global Admin accounts. Each additional T0 identity increases your attack surface exponentially.',
+            count: td.t0.count,
+            link: '/identities',
+            color: 'border-orange-300 bg-orange-50',
+            icon: 'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6',
+          });
+        }
+
+        // Expiring credentials
+        if (ai.expiring_credentials > 0) {
+          recs.push({
+            priority: 'High',
+            title: `Rotate ${ai.expiring_credentials} expiring credential${ai.expiring_credentials > 1 ? 's' : ''}`,
+            description: 'Secrets or certificates expiring within 30 days. Expired credentials cause service outages. Rotate proactively to avoid downtime.',
+            count: ai.expiring_credentials,
+            link: '/identities',
+            color: 'border-orange-300 bg-orange-50',
+            icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z',
+          });
+        }
+
+        // Unowned SPNs
+        if (unowned_spns.length > 0) {
+          recs.push({
+            priority: 'Medium',
+            title: `Assign owners to ${unowned_spns.length} service principal${unowned_spns.length > 1 ? 's' : ''}`,
+            description: `${unowned_spns.slice(0, 3).map(s => s.display_name).join(', ')}${unowned_spns.length > 3 ? ` + ${unowned_spns.length - 3} more` : ''} — unowned SPNs with medium+ risk have no accountability. SOC 2 CC6.1 requires clear ownership.`,
+            count: unowned_spns.length,
+            link: '/identities?identity_category=service_principal',
+            color: 'border-yellow-300 bg-yellow-50',
+            icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
+          });
+        }
+
+        // All clear
+        if (recs.length === 0) {
+          recs.push({
+            priority: 'Info',
+            title: 'No immediate actions required',
+            description: 'Your identity posture looks healthy. Continue monitoring for changes.',
+            count: 0,
+            link: '/identities',
+            color: 'border-green-300 bg-green-50',
+            icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
+          });
+        }
+
+        const priorityColors: Record<string, string> = {
+          Critical: 'bg-red-100 text-red-800',
+          High: 'bg-orange-100 text-orange-800',
+          Medium: 'bg-yellow-100 text-yellow-800',
+          Info: 'bg-green-100 text-green-800',
+        };
+
+        return (
+          <div className="bg-white border rounded-xl overflow-hidden">
+            <div className="px-5 py-4 border-b bg-gray-50">
+              <h3 className="text-sm font-semibold text-gray-900">Recommendations</h3>
+              <p className="text-xs text-gray-500 mt-0.5">{recs.length} actionable item{recs.length !== 1 ? 's' : ''} based on current posture</p>
             </div>
-          )}
-        </div>
-      )}
+            <div className="divide-y">
+              {recs.map((rec, idx) => (
+                <Link
+                  key={idx}
+                  to={rec.link}
+                  className={`flex items-start gap-4 px-5 py-4 hover:bg-gray-50 transition group`}
+                >
+                  <div className={`flex-shrink-0 p-2 rounded-lg border ${rec.color}`}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={rec.icon} />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${priorityColors[rec.priority] || 'bg-gray-100 text-gray-600'}`}>
+                        {rec.priority}
+                      </span>
+                      <span className="font-semibold text-gray-900 text-sm group-hover:text-blue-600 transition">{rec.title}</span>
+                    </div>
+                    <p className="text-xs text-gray-600 leading-relaxed">{rec.description}</p>
+                  </div>
+                  <div className="flex-shrink-0 text-gray-400 group-hover:text-blue-600 transition mt-1">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
