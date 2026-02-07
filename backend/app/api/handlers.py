@@ -1390,3 +1390,415 @@ def get_identity_summary():
     finally:
         cursor.close()
         db.close()
+
+
+# =====================================================================
+# Access Graph: Trust, Scope, Secret Exposure, Graph Visualization
+# =====================================================================
+
+_ISSUER_LABELS = {
+    "token.actions.githubusercontent.com": "GitHub Actions",
+    "login.microsoftonline.com": "Azure AD",
+    "sts.windows.net": "Azure AD",
+    "accounts.google.com": "Google Cloud",
+    "oidc.eks.": "AWS EKS",
+    "vstoken.dev.azure.com": "Azure DevOps",
+}
+
+_RISK_ORDER_GRAPH = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "unknown": 0}
+
+
+def _issuer_label(issuer):
+    if not issuer:
+        return "Unknown"
+    for fragment, label in _ISSUER_LABELS.items():
+        if fragment in issuer:
+            return label
+    parts = issuer.replace("https://", "").replace("http://", "").split("/")
+    return parts[0] if parts else issuer
+
+
+def _max_risk(a, b):
+    return a if _RISK_ORDER_GRAPH.get(a, 0) >= _RISK_ORDER_GRAPH.get(b, 0) else b
+
+
+def _parse_arm_scope(scope):
+    parts = scope.strip("/").split("/") if scope else []
+    sub_id = rg_name = res_type = res_name = None
+    lower_parts = [p.lower() for p in parts]
+    if "subscriptions" in lower_parts:
+        idx = lower_parts.index("subscriptions")
+        if idx + 1 < len(parts):
+            sub_id = parts[idx + 1]
+    if "resourcegroups" in lower_parts:
+        idx = lower_parts.index("resourcegroups")
+        if idx + 1 < len(parts):
+            rg_name = parts[idx + 1]
+    if "providers" in lower_parts:
+        idx = lower_parts.index("providers")
+        if idx + 2 < len(parts):
+            res_type = f"{parts[idx+1]}/{parts[idx+2]}"
+            if idx + 3 < len(parts):
+                res_name = parts[-1]
+    return sub_id, rg_name, res_type, res_name
+
+
+def get_identity_graph_data(identity_id):
+    """
+    Return trust relationships, effective scope, secret exposure analysis,
+    and pre-computed graph nodes/edges for dual-mode visualization.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT id, identity_id, display_name, identity_category, risk_level,
+                   COALESCE(risk_score, 0), activity_status,
+                   COALESCE(cloud, 'azure'), COALESCE(owner_count, 0),
+                   COALESCE(credential_count, 0)
+            FROM identities
+            WHERE identity_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Identity not found"}), 404
+
+        db_id = row[0]
+        ident = {
+            "identity_id": row[1],
+            "display_name": row[2] or "",
+            "identity_category": _normalize_category_key(row[3] or ""),
+            "risk_level": row[4] or "info",
+            "risk_score": int(row[5]),
+            "activity_status": row[6] or "unknown",
+            "cloud": row[7],
+            "owner_count": int(row[8]),
+            "credential_count": int(row[9]),
+        }
+
+        roles = db.get_identity_roles_enriched(db_id)
+        credentials = db.get_identity_credentials(db_id)
+        owners = db.get_ownership(db_id)
+        graph_perms = db.get_graph_permissions(db_id)
+
+        is_dormant = ident["activity_status"] in ("stale", "never_used")
+        has_priv_roles = any(r.get("risk_level") in ("critical", "high") for r in roles)
+
+        # ── TRUST RELATIONSHIPS ──────────────────────────────────
+        federated_trusts = []
+        for c in credentials:
+            if c.get("credential_type") == "federated":
+                issuer = c.get("issuer") or ""
+                label = _issuer_label(issuer)
+                risk = "high" if has_priv_roles else "medium"
+                reason = f"External identity from {label} can authenticate as this identity"
+                if has_priv_roles:
+                    reason += " (privileged roles present)"
+                federated_trusts.append({
+                    "credential_id": c.get("id"),
+                    "issuer": issuer,
+                    "subject": c.get("subject") or "",
+                    "issuer_label": label,
+                    "trust_risk": risk,
+                    "trust_reason": reason,
+                })
+
+        ownership_edges = [{
+            "owner_object_id": o.get("owner_object_id"),
+            "owner_display_name": o.get("owner_display_name") or "Unknown",
+            "owner_upn": o.get("owner_upn"),
+            "owner_type": o.get("owner_type", "user"),
+            "is_primary_owner": o.get("is_primary_owner", False),
+        } for o in owners]
+
+        role_edges = [{
+            "role_name": r.get("role_name"),
+            "role_type": r.get("role_type", "azure"),
+            "scope": r.get("scope") or "",
+            "scope_type": r.get("scope_type") or "directory",
+            "risk_level": r.get("risk_level") or "low",
+            "usage_status": r.get("usage_status") or "unknown",
+        } for r in roles]
+
+        trust = {
+            "federated_trusts": federated_trusts,
+            "ownership_edges": ownership_edges,
+            "role_edges": role_edges,
+        }
+
+        # ── EFFECTIVE SCOPE ──────────────────────────────────────
+        subs = {}
+        for r in roles:
+            if r.get("role_type") != "azure":
+                continue
+            scope = r.get("scope") or ""
+            sub_id, rg_name, res_type, res_name = _parse_arm_scope(scope)
+            if not sub_id:
+                continue
+            if sub_id not in subs:
+                subs[sub_id] = {"subscription_id": sub_id, "resource_groups": {}, "subscription_level_roles": []}
+            s = subs[sub_id]
+            if rg_name:
+                if rg_name not in s["resource_groups"]:
+                    s["resource_groups"][rg_name] = {"name": rg_name, "roles": [], "resources": []}
+                rg = s["resource_groups"][rg_name]
+                if r["role_name"] not in rg["roles"]:
+                    rg["roles"].append(r["role_name"])
+                if res_type and res_name:
+                    entry = {"type": res_type, "name": res_name}
+                    if entry not in rg["resources"]:
+                        rg["resources"].append(entry)
+            else:
+                if r["role_name"] not in s["subscription_level_roles"]:
+                    s["subscription_level_roles"].append(r["role_name"])
+
+        scope_hierarchy = []
+        total_rgs = 0
+        total_resources = 0
+        for s in subs.values():
+            rgs_list = list(s["resource_groups"].values())
+            total_rgs += len(rgs_list)
+            for rg in rgs_list:
+                total_resources += len(rg["resources"])
+            scope_hierarchy.append({
+                "subscription_id": s["subscription_id"],
+                "resource_groups": rgs_list,
+                "subscription_level_roles": s["subscription_level_roles"],
+            })
+
+        entra_scopes = []
+        for r in roles:
+            if r.get("role_type") != "entra":
+                continue
+            ds = r.get("scope") or "/"
+            label = "Entire Directory" if ds == "/" else f"Scoped: {ds}"
+            entra_scopes.append({
+                "role_name": r.get("role_name"),
+                "directory_scope": ds,
+                "scope_label": label,
+                "risk_level": r.get("risk_level") or "low",
+            })
+
+        sub_count = len(subs)
+        blast_parts = []
+        if sub_count:
+            blast_parts.append(f"{sub_count} subscription{'s' if sub_count != 1 else ''}")
+        if total_rgs:
+            blast_parts.append(f"{total_rgs} resource group{'s' if total_rgs != 1 else ''}")
+        if total_resources:
+            blast_parts.append(f"{total_resources} resource{'s' if total_resources != 1 else ''}")
+        if entra_scopes:
+            blast_parts.append(f"{len(entra_scopes)} Entra role{'s' if len(entra_scopes) != 1 else ''}")
+        blast_label = ", ".join(blast_parts) if blast_parts else "No scoped access"
+
+        effective_scope = {
+            "subscription_count": sub_count,
+            "resource_group_count": total_rgs,
+            "resource_count": total_resources,
+            "scope_hierarchy": scope_hierarchy,
+            "entra_scopes": entra_scopes,
+            "blast_radius_label": blast_label,
+        }
+
+        # ── SECRET EXPOSURE ──────────────────────────────────────
+        now = datetime.utcnow()
+        secret_exposure = []
+        for c in credentials:
+            flags = []
+            risk = "low"
+            ctype = c.get("credential_type", "")
+            start = c.get("start_datetime")
+            end = c.get("end_datetime")
+            age_days = None
+            days_to_expiry = int(c["days_to_expiry"]) if c.get("days_to_expiry") is not None else None
+
+            if start:
+                try:
+                    age_days = (now - start).days
+                except Exception:
+                    pass
+
+            if age_days is not None and age_days > 365:
+                flags.append(f"Secret age {age_days} days - never rotated")
+                risk = _max_risk(risk, "high")
+            elif age_days is not None and age_days > 180:
+                flags.append(f"Secret age {age_days} days - rotation recommended")
+                risk = _max_risk(risk, "medium")
+
+            if days_to_expiry is not None and days_to_expiry < 0:
+                flags.append("Expired credential still present")
+                risk = _max_risk(risk, "high")
+            elif days_to_expiry is not None and days_to_expiry <= 30:
+                flags.append(f"Expires in {days_to_expiry} days")
+                risk = _max_risk(risk, "medium")
+
+            if is_dormant and ctype == "secret":
+                if not end or (end and end > now):
+                    flags.append("Active secret on dormant identity - takeover risk")
+                    risk = _max_risk(risk, "critical")
+
+            if has_priv_roles and ctype == "secret":
+                flags.append("Secret credential on privileged identity")
+                risk = _max_risk(risk, "high")
+
+            if ctype == "federated":
+                issuer = c.get("issuer") or ""
+                flags.append(f"Federated trust to {_issuer_label(issuer)}")
+                if has_priv_roles:
+                    flags.append("Identity has privileged roles - lateral movement risk")
+                    risk = _max_risk(risk, "high")
+
+            status = c.get("status") or "unknown"
+            if ctype == "federated":
+                status = "active"
+
+            secret_exposure.append({
+                "credential_id": c.get("id"),
+                "credential_type": ctype,
+                "display_name": c.get("display_name"),
+                "age_days": age_days,
+                "days_to_expiry": days_to_expiry,
+                "status": status,
+                "issuer": c.get("issuer"),
+                "subject": c.get("subject"),
+                "issuer_label": _issuer_label(c.get("issuer") or "") if ctype == "federated" else None,
+                "exposure_flags": flags,
+                "exposure_risk": risk,
+            })
+
+        secret_exposure.sort(key=lambda x: _RISK_ORDER_GRAPH.get(x["exposure_risk"], 0), reverse=True)
+
+        # ── GRAPH PRE-COMPUTATION ────────────────────────────────
+        cx, cy = 400, 250
+
+        # Executive mode (3-5 nodes)
+        exec_nodes = [{"id": "identity", "type": "identity", "position": {"x": cx, "y": cy},
+            "data": {"label": ident["display_name"], "risk_level": ident["risk_level"],
+                     "risk_score": ident["risk_score"], "category": ident["identity_category"]}}]
+        exec_edges = []
+
+        risk_lines = []
+        if has_priv_roles:
+            crit_roles = [r["role_name"] for r in roles if r.get("risk_level") == "critical"]
+            if crit_roles:
+                risk_lines.append(f"Critical roles: {', '.join(crit_roles[:3])}")
+        crit_secrets = [s for s in secret_exposure if s["exposure_risk"] in ("critical", "high")]
+        if crit_secrets:
+            risk_lines.append(f"{len(crit_secrets)} credential exposure{'s' if len(crit_secrets) != 1 else ''}")
+        if is_dormant and ident["credential_count"] > 0:
+            risk_lines.append("Dormant identity with active credentials")
+        high_perms = [p for p in graph_perms if p.get("risk_level") in ("critical", "high")]
+        if high_perms:
+            risk_lines.append(f"{len(high_perms)} high-risk API permission{'s' if len(high_perms) != 1 else ''}")
+
+        if risk_lines:
+            exec_nodes.append({"id": "risk", "type": "risk_summary",
+                "position": {"x": cx + 300, "y": cy - 100},
+                "data": {"label": risk_lines[0],
+                         "detail": "; ".join(risk_lines[1:]) if len(risk_lines) > 1 else "",
+                         "risk_level": ident["risk_level"]}})
+            exec_edges.append({"id": "e-id-risk", "source": "identity", "target": "risk",
+                "label": "top risk", "animated": True, "style": {"stroke": "#ef4444"}})
+
+        if blast_label != "No scoped access":
+            exec_nodes.append({"id": "blast", "type": "blast_radius",
+                "position": {"x": cx + 300, "y": cy + 100},
+                "data": {"label": blast_label}})
+            exec_edges.append({"id": "e-id-blast", "source": "identity", "target": "blast",
+                "label": "blast radius"})
+
+        if federated_trusts:
+            ft = federated_trusts[0]
+            fl = ft["issuer_label"]
+            if len(federated_trusts) > 1:
+                fl += f" (+{len(federated_trusts) - 1} more)"
+            exec_nodes.append({"id": "fed", "type": "federated_trust",
+                "position": {"x": cx - 300, "y": cy - 100},
+                "data": {"label": fl, "subject": ft["subject"], "trust_risk": ft["trust_risk"]}})
+            exec_edges.append({"id": "e-fed-id", "source": "fed", "target": "identity",
+                "label": "can act as", "animated": True, "style": {"stroke": "#f59e0b"}})
+
+        if ownership_edges:
+            primary = next((o for o in ownership_edges if o.get("is_primary_owner")), ownership_edges[0])
+            ol = primary["owner_display_name"]
+            if len(ownership_edges) > 1:
+                ol += f" (+{len(ownership_edges) - 1})"
+            exec_nodes.append({"id": "owner", "type": "owner",
+                "position": {"x": cx - 300, "y": cy + 100},
+                "data": {"label": ol, "owner_type": primary["owner_type"], "upn": primary.get("owner_upn")}})
+            exec_edges.append({"id": "e-owner-id", "source": "owner", "target": "identity", "label": "manages"})
+
+        # Technical mode (full graph)
+        tech_nodes = [{"id": "identity", "type": "identity", "position": {"x": cx, "y": cy},
+            "data": {"label": ident["display_name"], "risk_level": ident["risk_level"],
+                     "risk_score": ident["risk_score"], "category": ident["identity_category"]}}]
+        tech_edges = []
+
+        for i, o in enumerate(ownership_edges[:5]):
+            nid = f"owner-{i}"
+            tech_nodes.append({"id": nid, "type": "owner",
+                "position": {"x": cx - 350, "y": 80 + i * 80},
+                "data": {"label": o["owner_display_name"], "owner_type": o["owner_type"], "upn": o.get("owner_upn")}})
+            tech_edges.append({"id": f"e-{nid}-id", "source": nid, "target": "identity", "label": "manages"})
+
+        for i, ft in enumerate(federated_trusts[:5]):
+            nid = f"fed-{i}"
+            tech_nodes.append({"id": nid, "type": "federated_trust",
+                "position": {"x": cx - 350, "y": cy + 120 + i * 80},
+                "data": {"label": ft["issuer_label"], "subject": ft["subject"], "trust_risk": ft["trust_risk"]}})
+            tech_edges.append({"id": f"e-{nid}-id", "source": nid, "target": "identity",
+                "label": "can act as", "animated": True, "style": {"stroke": "#f59e0b"}})
+
+        seen_roles = {}
+        for r in role_edges:
+            rn = r["role_name"]
+            if rn not in seen_roles:
+                seen_roles[rn] = r
+        for i, (rn, r) in enumerate(list(seen_roles.items())[:10]):
+            nid = f"role-{i}"
+            tech_nodes.append({"id": nid, "type": "role",
+                "position": {"x": cx + 300, "y": 30 + i * 70},
+                "data": {"label": rn, "role_type": r["role_type"], "risk_level": r["risk_level"], "scope_type": r["scope_type"]}})
+            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid, "label": "has role"})
+
+            if r["scope"] and r["role_type"] == "azure":
+                scope_short = r["scope"].split("/")[-1] if "/" in r["scope"] else r["scope"]
+                if len(scope_short) > 20:
+                    scope_short = scope_short[:17] + "..."
+                sid = f"scope-{i}"
+                tech_nodes.append({"id": sid, "type": "scope",
+                    "position": {"x": cx + 620, "y": 30 + i * 70},
+                    "data": {"label": scope_short, "scope_type": r["scope_type"], "full_scope": r["scope"]}})
+                tech_edges.append({"id": f"e-{nid}-{sid}", "source": nid, "target": sid,
+                    "label": "scoped to", "style": {"strokeDasharray": "5,5"}})
+
+        for i, c in enumerate(secret_exposure[:8]):
+            nid = f"cred-{i}"
+            tech_nodes.append({"id": nid, "type": "credential",
+                "position": {"x": cx - 200 + i * 130, "y": cy + 200},
+                "data": {"label": c["display_name"] or c["credential_type"],
+                         "credential_type": c["credential_type"], "exposure_risk": c["exposure_risk"],
+                         "status": c["status"], "age_days": c.get("age_days"), "days_to_expiry": c.get("days_to_expiry")}})
+            tech_edges.append({"id": f"e-id-{nid}", "source": "identity", "target": nid, "label": "holds"})
+
+        graph = {
+            "executive_nodes": exec_nodes, "executive_edges": exec_edges,
+            "technical_nodes": tech_nodes, "technical_edges": tech_edges,
+        }
+
+        return jsonify({
+            "identity_id": ident["identity_id"],
+            "display_name": ident["display_name"],
+            "risk_level": ident["risk_level"],
+            "risk_score": ident["risk_score"],
+            "trust_relationships": trust,
+            "effective_scope": effective_scope,
+            "secret_exposure": secret_exposure,
+            "graph": graph,
+        })
+
+    finally:
+        cursor.close()
+        db.close()

@@ -11,6 +11,7 @@ from app.api.handlers import (
     get_dashboard_posture,
     get_dashboard_compliance,
     get_overview_insights,
+    get_identity_graph_data,
 )
 
 def create_app():
@@ -88,6 +89,13 @@ def create_app():
     @app.get("/api/identities/<identity_id>")
     def identity_details(identity_id):
         return get_identity_details(identity_id)
+
+    # -----------------------
+    # Identity Access Graph (trust, scope, exposure, visualization)
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/graph-data")
+    def identity_graph_data(identity_id):
+        return get_identity_graph_data(identity_id)
 
     return app
 
