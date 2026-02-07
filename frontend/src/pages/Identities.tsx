@@ -121,11 +121,13 @@ function getPrivilegeTier(row: IdentityRow): number {
   return 3;
 }
 
-function getDormantStatus(row: IdentityRow): 'yes' | 'idle' | 'no' | 'unknown' {
+function getDormantStatus(row: IdentityRow): 'yes' | 'idle' | 'never' | 'new' | 'no' | 'unknown' {
   const act = safeLower(row.activity_status);
-  if (act === 'stale' || act === 'never_used') return 'yes';
+  if (act === 'stale') return 'yes';
+  if (act === 'never_used') return 'never';
   if (act === 'inactive') return 'idle';
-  if (act === 'active' || act === 'recently_created') return 'no';
+  if (act === 'recently_created') return 'new';
+  if (act === 'active') return 'no';
   return 'unknown';
 }
 
@@ -214,9 +216,11 @@ function TierBadge({ tier }: { tier: number }) {
   );
 }
 
-function DormantBadge({ status }: { status: 'yes' | 'idle' | 'no' | 'unknown' }) {
-  if (status === 'yes') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">90d+</span>;
-  if (status === 'idle') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 text-yellow-700">30-90d</span>;
+function DormantBadge({ status }: { status: 'yes' | 'idle' | 'never' | 'new' | 'no' | 'unknown' }) {
+  if (status === 'yes') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">Stale 90d+</span>;
+  if (status === 'never') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-orange-100 text-orange-700">Never Used</span>;
+  if (status === 'idle') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 text-yellow-700">Idle 30-90d</span>;
+  if (status === 'new') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-700">New</span>;
   if (status === 'no') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">Active</span>;
   return <span className="text-[10px] text-gray-300">—</span>;
 }
@@ -336,7 +340,7 @@ export default function IdentitiesPage() {
     if (riskFilter !== 'all') result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
     if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
-    if (activityFilter === 'dormant') result = result.filter(i => getDormantStatus(i) === 'yes' || getDormantStatus(i) === 'idle');
+    if (activityFilter === 'dormant') result = result.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'idle' || d === 'never'; });
     if (tierFilter !== 'all') result = result.filter(i => getPrivilegeTier(i) === tierFilter);
 
     result.sort((a, b) => {
@@ -363,7 +367,7 @@ export default function IdentitiesPage() {
           bVal = b.last_seen_auth ? new Date(b.last_seen_auth).getTime() : 0;
           break;
         case 'dormant':
-          const dormOrder: Record<string, number> = { yes: 3, idle: 2, no: 1, unknown: 0 };
+          const dormOrder: Record<string, number> = { yes: 4, never: 3, idle: 2, no: 1, 'new': 1, unknown: 0 };
           aVal = dormOrder[getDormantStatus(a)] || 0;
           bVal = dormOrder[getDormantStatus(b)] || 0;
           break;
@@ -544,7 +548,7 @@ export default function IdentitiesPage() {
                 <SortHeader label="Secret/Expiry" field="credential_expiration" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Dormant" field="dormant" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Activity" field="dormant" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -660,7 +664,7 @@ export default function IdentitiesPage() {
         T1 = Management Plane (User/Exchange/Intune Admin, sub Owner/Contributor) |
         T2 = Data/App (scoped roles, risky perms) |
         T3 = Standard.
-        Dormant: 90d+ = stale, 30-90d = idle.
+        Activity: Stale 90d+ = no sign-in 90+ days | Never Used = created &gt;30d, no sign-in | Idle 30-90d | New = created &lt;30d.
       </div>
     </div>
   );

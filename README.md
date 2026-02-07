@@ -4,7 +4,7 @@
 
 ## Overview
 
-AuditGraph is an enterprise-grade security platform that provides comprehensive visibility into cloud identity posture. It discovers and analyzes identities across Azure/Entra ID, calculates risk levels, and provides actionable insights for security teams.
+AuditGraph is an enterprise-grade security platform that provides comprehensive visibility into cloud identity posture. It discovers and analyzes identities across Azure/Entra ID, calculates risk levels, maps trust relationships and blast radius, performs credential exposure analysis, and provides GRC compliance scoring with actionable insights for security teams.
 
 ### Key Features
 
@@ -15,74 +15,142 @@ AuditGraph is an enterprise-grade security platform that provides comprehensive 
   - Guest accounts
   - Microsoft Internal services (for visibility)
 
-- **Risk Assessment**: Multi-factor risk calculation based on:
+- **Risk Assessment**: Points-based risk scoring with multiple factors:
   - Azure RBAC role assignments (Owner, Contributor, User Access Administrator)
   - Entra ID directory roles (Global Administrator, Application Administrator)
-  - Credential status and expiration
-  - Orphaned/unused identities
+  - Microsoft Graph API permissions (Mail.ReadWrite, Directory.ReadWrite.All)
+  - Credential status, age, and expiration
+  - Activity status (dormant identity + active secret = critical)
+  - Ownership accountability
 
-- **Permission Analysis**: Deep inspection of identity permissions
-  - Microsoft Graph API permissions
-  - Custom application role assignments
-  - Azure RBAC scope analysis (subscription, resource group, resource)
+- **Privilege Tier Classification**: Identity tiering based on role criticality:
+  - **T0 Control Plane** — Global Admin, Privileged Role Admin, tenant-wide Owner
+  - **T1 Management Plane** — User Admin, Exchange Admin, subscription Owner/Contributor
+  - **T2 Data/App Plane** — Scoped RBAC roles, risky Graph API permissions
+  - **T3 Standard** — No privileged roles
 
-- **Credential Management**: Track and monitor identity credentials
-  - Secrets with expiration dates
-  - Certificates
-  - Federated identity credentials
+- **Trust Relationship Mapping**: Identify who can act as, manage, or escalate an identity:
+  - Federated credential trusts (GitHub Actions, Azure AD, Google Cloud, AWS EKS)
+  - Ownership edges (who manages this service principal)
+  - Role-based trust chains
 
-- **Dashboard & Reporting**: Clean, enterprise-ready UI
-  - Risk-based identity overview
-  - Category-based filtering
-  - Drill-down identity details
-  - Role intelligence with attack patterns
+- **Effective Scope & Blast Radius**: Visualize what an identity can impact:
+  - ARM scope hierarchy parsing (subscription > resource group > resource)
+  - Entra directory scope analysis
+  - Blast radius computation (subscription count, RG count, resource count)
+
+- **Secret Exposure Intelligence**: Credential hygiene beyond count/expiry:
+  - Age analysis (never rotated flags for secrets >365 days)
+  - Cross-referencing: dormant identity + active secret = critical exposure
+  - Privileged identity + long-lived secret = high exposure
+  - Federated trust to external CI/CD + privileged roles = high exposure
+
+- **GRC Compliance Scoring**: Framework-level compliance assessment:
+  - **SOC 2** — CC6.1 (Logical Access), CC6.3 (Role-Based Access)
+  - **HIPAA** — Section 164.312 (Access Controls), violation mappings per role
+  - **PCI-DSS** — Requirement 7/8 (Privileged Access Control)
+  - **NIST 800-53** — AC-6 (Least Privilege), IA-5 (Authenticator Management)
+
+- **Role Intelligence**: Per-role security context:
+  - Real-world attack pattern mappings (company, year, estimated cost)
+  - HIPAA violation mappings with penalty ranges
+  - Role usage status inference (active, likely unused, orphaned, over-privileged)
+
+- **Interactive Access Graph**: Dual-mode graph visualization per identity:
+  - Executive Risk Story — simplified 3-5 node view for stakeholder communication
+  - Technical Trust Graph — full relationship graph with all role/scope/credential edges
+  - Powered by @xyflow/react with pan/zoom/minimap
 
 - **Scheduled Discovery & Change Alerts**: Automated monitoring with email notifications
   - Configurable discovery interval (6, 12, or 24 hours)
   - Email alerts when identities are added or removed
   - Summary table showing category changes (Before | After | Change)
-  - Only sends notifications when actual changes occur (no spam)
 
 ## Architecture
 
 ```
-auditgraph/
-├── backend/                    # Python Flask REST API
-│   ├── app/
-│   │   ├── api/               # REST endpoints
-│   │   ├── engines/           # Discovery engine
-│   │   │   └── discovery/     # Azure/Entra discovery
-│   │   └── database.py        # PostgreSQL data layer
-│   └── migrations/            # Database schema
-├── frontend/                   # React TypeScript UI
-│   └── src/
-│       ├── pages/             # Dashboard, Identities, Details
-│       └── components/        # Reusable UI components
-└── docs/                       # Documentation
+┌──────────────────────────────────────────────────────────────┐
+│                        Frontend                               │
+│  React 19 + TypeScript + Tailwind CSS + React Router          │
+│  @xyflow/react (graph viz) + jsPDF (PDF export)              │
+│  Port 3000 → proxies /api to backend :5001                   │
+├──────────────────────────────────────────────────────────────┤
+│                        Backend                                │
+│  Python Flask + Flask-CORS                                    │
+│  Microsoft Graph SDK + Azure Identity SDK                     │
+│  Port 5001                                                    │
+├──────────────────────────────────────────────────────────────┤
+│                        Database                               │
+│  PostgreSQL — 14 tables                                       │
+│  identities, role_assignments, entra_role_assignments,        │
+│  credentials, sp_ownership, graph_api_permissions,            │
+│  app_role_assignments, discovery_runs, risk_scores, ...       │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+## UI Pages
+
+### Overview (`/`)
+
+- Global Risk Cards — total identities, critical/high/medium counts
+- Cloud Comparison — Azure identity breakdown (AWS/GCP ready)
+- Privilege Tier Distribution — T0-T3 bar chart with named T0/T1 identities
+- Action Items — dormant privileged count, expiring credentials, unowned SPNs
+- Recommendations — prioritized items with deep-links to filtered Identities page
+
+### Dashboard (`/dashboard`)
+
+- Posture Score — weighted security posture (0-100) with trend comparison
+- Credential Health — valid/expiring/expired donut chart
+- Quick Actions — real-time counts for dormant, expiring, unowned
+- Risk Heat Map — identity category vs risk level matrix
+- Risk Donut Chart — risk level distribution
+- GRC Compliance Scorecard — SOC 2, HIPAA, PCI-DSS, NIST 800-53 controls
+
+### Identities (`/identities`)
+
+- 14-column sortable table with checkbox selection
+- Columns: Name, Type, Category, Cloud, Risk, Entra Roles, RBAC Roles, Graph API, Tier, Secret/Expiry, Created, Last Used, Activity, Compliance
+- Filters: risk level, category, search text
+- URL-driven filters: `owner_status`, `activity_status`, `privilege_tier` (from recommendation deep-links)
+- Dismissible filter chips when URL-driven filters are active
+- CSV and PDF export
+
+### Identity Detail (`/identities/:id`)
+
+7-tab layout:
+
+| Tab | Content |
+|-----|---------|
+| **Overview** | Quick stats, activity status, risk reasons |
+| **Roles** | Azure RBAC + Entra roles with usage status, risk badges, compliance cross-links |
+| **Permissions** | Graph API permissions + app role assignments |
+| **Credentials** | Credential count, status, next expiration |
+| **Ownership** | Owner listing with primary owner badge |
+| **Access Graph** | Dual-mode interactive graph + trust/scope/exposure detail panels |
+| **Compliance** | GRC framework relevance, per-role attack patterns, HIPAA violation mappings |
 
 ## Identity Categories
 
-AuditGraph categorizes discovered identities into distinct groups:
+| Category | Key | Description |
+|----------|-----|-------------|
+| Service Principal | `service_principal` | Customer-owned Azure AD applications |
+| System Assigned MI | `managed_identity_system` | Managed identities bound to Azure resource lifecycle |
+| User Assigned MI | `managed_identity_user` | Standalone managed identities for flexible assignment |
+| Human User | `human_user` | Users with Azure RBAC or Entra directory roles |
+| Guest | `guest` | External/guest user accounts |
+| Microsoft Internal | `microsoft_internal` | Microsoft first-party services (informational) |
 
-| Category | Description |
-|----------|-------------|
-| **Service Principal** | Customer-owned Azure AD applications |
-| **System Assigned Identity** | Managed identities bound to Azure resource lifecycle |
-| **User Assigned Identity** | Standalone managed identities for flexible assignment |
-| **Human User** | Users with Azure RBAC or Entra directory roles |
-| **Guest** | External/guest user accounts |
-| **Microsoft Internal** | Microsoft first-party services (informational) |
+## Activity Status
 
-## Risk Levels
-
-| Level | Description | Examples |
-|-------|-------------|----------|
-| **Critical** | Highest privilege access | Subscription Owner/Contributor, Global Administrator |
-| **High** | Significant privilege elevation | Security Administrator, User Access Administrator |
-| **Medium** | Moderate risk | Reader roles, orphaned identities |
-| **Low** | Minimal risk | Properly scoped, limited access |
-| **Info** | No security concern | Microsoft internal services |
+| Status | Meaning | Badge Color |
+|--------|---------|-------------|
+| `active` | Sign-in within last 30 days | Green — Active |
+| `inactive` | Sign-in 30-90 days ago | Yellow — Idle 30-90d |
+| `stale` | No sign-in for 90+ days | Red — Stale 90d+ |
+| `never_used` | Created >30 days ago, never signed in | Orange — Never Used |
+| `recently_created` | Created <30 days ago, no sign-in yet | Blue — New |
+| `unknown` | No sign-in data available (requires Azure AD P1/P2) | Gray dash |
 
 ## Local Development
 
@@ -96,27 +164,26 @@ AuditGraph categorizes discovered identities into distinct groups:
 ### Backend Setup
 
 ```bash
-# Create virtual environment and install dependencies
-make backend
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
 # Configure environment
-cp backend/.env.example backend/.env.local
-# Edit backend/.env.local with your Azure and database credentials
+cp .env.example .env.local
+# Edit .env.local with your Azure and database credentials
 
 # Run API server
-make api
-# API runs on http://localhost:5001
+python -m app.main
+# → API at http://localhost:5001
 ```
 
 ### Frontend Setup
 
 ```bash
-# Install dependencies
-make frontend
-
-# Run development server
-make ui
-# UI runs on http://localhost:3000
+cd frontend
+npm install
+npm start
+# → UI at http://localhost:3000
 ```
 
 ### Environment Variables
@@ -145,40 +212,100 @@ EMAIL_TO=security-team@yourdomain.com
 DISCOVERY_INTERVAL_HOURS=12  # Options: 6, 12, or 24
 ```
 
-## Scheduled Discovery
+## API Endpoints
 
-AuditGraph runs automated discovery on a configurable schedule and sends email notifications when identity changes are detected.
+### Health & Summary
 
-### How It Works
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/health` | Health check |
+| `GET /api/stats` | Latest run summary statistics |
+| `GET /api/identity-summary` | Category-level risk breakdown |
+| `GET /api/risks` | Critical and high-risk identities |
 
-1. **Scheduled Runs**: Discovery runs automatically every 6, 12, or 24 hours (configurable)
-2. **Change Detection**: Compares current run with previous run to detect:
-   - New identities added to the environment
-   - Identities removed from the environment
-3. **Email Alerts**: Sends HTML email report only when changes occur
+### Dashboard
 
-### Email Report Format
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/dashboard/posture` | Posture score, credential health, dormant counts, trend |
+| `GET /api/dashboard/compliance` | GRC compliance scorecard (SOC 2, HIPAA, PCI-DSS, NIST) |
+
+### Overview
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/overview/insights` | Tier distribution, action items, dormant privileged, unowned SPNs |
+
+### Identities
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/identities` | All identities (supports `limit`, `offset`, `cloud`, `risk_level`, `identity_category`, `search`) |
+| `GET /api/identities/:id` | Full detail: roles, permissions, app_roles, owners, role_intelligence |
+| `GET /api/identities/:id/graph-data` | Access graph: trust relationships, effective scope, secret exposure, pre-computed graph nodes/edges |
+
+## Project Structure
 
 ```
-+------------------------------------------+
-|  AuditGraph Identity Change Report       |
-|  Run #15 vs Run #14                      |
-+------------------------------------------+
-
-Summary by Category
-| Category                  | Before | After | Change |
-|---------------------------|--------|-------|--------|
-| Service Principals        |   13   |  12   |   -1   |
-| Human Users               |    6   |   6   |    0   |
-| Guest Users               |    1   |   0   |   -1   |
-| Microsoft Internal        |  193   | 193   |    0   |
-
-Removed Identities (2)
-- spn-old-service (Service Principal) [MEDIUM]
-- guest-user@external.com (Guest) [LOW]
+auditgraph/
+├── backend/
+│   └── app/
+│       ├── main.py                          # Flask app factory + route registration
+│       ├── database.py                      # PostgreSQL connection pool
+│       ├── scheduler.py                     # Scheduled discovery + email alerts
+│       ├── api/
+│       │   └── handlers.py                  # All API endpoint handlers
+│       ├── engines/
+│       │   └── discovery/
+│       │       ├── base.py                  # BaseDiscoveryEngine interface
+│       │       ├── azure_discovery.py       # Azure/Entra ID discovery (production)
+│       │       ├── aws_discovery.py         # AWS IAM discovery (stub)
+│       │       ├── gcp_discovery.py         # GCP IAM discovery (stub)
+│       │       ├── activity_tracker.py      # Sign-in activity analysis
+│       │       ├── credential_checker.py    # Credential expiry/health checks
+│       │       └── models.py               # Identity data models
+│       ├── core/                            # Risk scoring engine, classification
+│       ├── db/                              # Database schema setup
+│       └── services/                        # Business logic services
+├── frontend/
+│   └── src/
+│       ├── App.tsx                          # Router + Overview page (inline)
+│       ├── pages/
+│       │   ├── Dashboard.tsx                # Stats, posture, compliance scorecard
+│       │   ├── Identities.tsx               # 14-col sortable table + CSV/PDF export
+│       │   └── IdentityDetail.tsx           # 7-tab detail layout
+│       └── components/
+│           ├── dashboard/
+│           │   ├── PostureScore.tsx          # Posture gauge (0-100)
+│           │   ├── CredentialHealth.tsx      # Credential donut chart
+│           │   ├── QuickActions.tsx          # Action item counts
+│           │   ├── ComplianceScorecard.tsx   # GRC framework scores
+│           │   ├── RiskHeatMap.tsx           # Category x risk matrix
+│           │   └── RiskDonutChart.tsx        # Risk distribution chart
+│           ├── overview/
+│           │   ├── GlobalRiskCards.tsx       # Total/critical/high/medium counts
+│           │   ├── CloudComparison.tsx       # Per-cloud identity breakdown
+│           │   ├── CategoryRiskGrid.tsx      # Category-level risk grid
+│           │   ├── CriticalIdentitiesList.tsx # Named critical identities
+│           │   └── InsightsPanel.tsx         # Tier distribution + recommendations
+│           └── graph/
+│               ├── AccessGraphTab.tsx        # Graph canvas + trust/scope/exposure panels
+│               └── nodes.tsx                 # 8 custom ReactFlow node types
+└── docs/
+    └── weekly/                              # Sprint documentation
 ```
 
-### Identity Discovery Rules
+## Multi-Cloud Support
+
+| Cloud | Status | Discovery Engine |
+|-------|--------|-----------------|
+| **Azure** | Production | Full Entra ID + RBAC + Graph API + credential + ownership discovery |
+| **AWS** | Stub | `aws_discovery.py` — IAM role/policy discovery placeholder |
+| **GCP** | Stub | `gcp_discovery.py` — IAM discovery placeholder |
+
+All engines extend `BaseDiscoveryEngine` with `discover()` and `test_connection()` methods.
+
+## Identity Discovery Rules
 
 | Identity Type | Discovery Rule |
 |---------------|----------------|
@@ -187,18 +314,7 @@ Removed Identities (2)
 | System Assigned Managed Identities | Only with RBAC roles assigned |
 | Human Users | Only with Azure RBAC or Entra ID roles |
 | Guest Users | Only with roles assigned |
-| Microsoft Internal | All discovered (informational only)
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/health` | Health check |
-| `GET /api/stats` | Dashboard summary statistics |
-| `GET /api/identity-summary` | Category breakdown with risk counts |
-| `GET /api/identities` | List all identities (supports filtering) |
-| `GET /api/identities/:id` | Identity details with roles and permissions |
-| `GET /api/risks` | Critical and high-risk identities |
+| Microsoft Internal | All discovered (informational only) |
 
 ## Security Considerations
 
@@ -209,18 +325,13 @@ Removed Identities (2)
 
 ## Technology Stack
 
-**Backend:**
-- Python 3.9+
-- Flask (REST API)
-- Microsoft Graph SDK
-- Azure Identity SDK
-- PostgreSQL
-
-**Frontend:**
-- React 18
-- TypeScript
-- Tailwind CSS
-- React Router
+| Layer | Technologies |
+|-------|-------------|
+| **Frontend** | React 19, TypeScript, Tailwind CSS, React Router, jsPDF, @xyflow/react |
+| **Backend** | Python 3.9+, Flask, Flask-CORS, psycopg2 |
+| **Database** | PostgreSQL |
+| **Cloud APIs** | Microsoft Graph API, Azure Resource Manager, Azure Identity SDK |
+| **Scheduler** | APScheduler (discovery + email alerts) |
 
 ## License
 

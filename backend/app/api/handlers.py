@@ -949,10 +949,9 @@ def get_overview_insights():
                 except Exception:
                     pass
 
-            # Unowned service principals
+            # Unowned service principals (all risk levels)
             if category == 'service_principal' and (owner_count or 0) == 0:
-                if risk_level in ('critical', 'high', 'medium'):
-                    unowned_spns.append(identity_stub)
+                unowned_spns.append(identity_stub)
 
         return jsonify({
             "tier_distribution": {

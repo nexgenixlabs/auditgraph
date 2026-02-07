@@ -123,7 +123,7 @@ class ActivityTracker:
             created_date: When the SPN was created
             
         Returns:
-            Status string (never_used, stale, active, unknown)
+            Status string (recently_created, never_used, stale, active, unknown)
         """
         if last_sign_in is None:
             # Check if it's truly never used or just no data
@@ -136,8 +136,9 @@ class ActivityTracker:
                 if created_date.tzinfo is not None:
                     created_date = created_date.replace(tzinfo=None)
                 days_since_creation = (datetime.utcnow() - created_date).days
-                if days_since_creation > 30:
-                    return "never_used"  # Created >30 days ago but never used
+                if days_since_creation <= 30:
+                    return "recently_created"  # New account, too early to judge
+                return "never_used"  # Created >30 days ago but never used
             return "unknown"  # No data available
         
         now = datetime.utcnow()
