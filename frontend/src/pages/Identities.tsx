@@ -123,9 +123,9 @@ function getPrivilegeTier(row: IdentityRow): number {
 
 function getDormantStatus(row: IdentityRow): 'yes' | 'idle' | 'no' | 'unknown' {
   const act = safeLower(row.activity_status);
-  if (act === 'stale') return 'yes';
+  if (act === 'stale' || act === 'never_used') return 'yes';
   if (act === 'inactive') return 'idle';
-  if (act === 'active') return 'no';
+  if (act === 'active' || act === 'recently_created') return 'no';
   return 'unknown';
 }
 
