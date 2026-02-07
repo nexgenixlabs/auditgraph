@@ -42,6 +42,7 @@ interface IdentityRow {
   risk_level?: RiskLevel;
   risk_score?: number;
   activity_status?: string;
+  privilege_tier?: number;
 }
 
 type SortField =
@@ -106,7 +107,10 @@ function formatDate(d?: string | null): string {
 
 const RISK_ORDER: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1, unknown: 0 };
 
-function computePrivilegeTier(row: IdentityRow): number {
+function getPrivilegeTier(row: IdentityRow): number {
+  // Use backend-computed tier (role-name-based) when available
+  if (row.privilege_tier != null) return row.privilege_tier;
+  // Fallback: derive from max risk level
   const rbac = RISK_ORDER[safeLower(row.rbac_max_risk)] || 0;
   const entra = RISK_ORDER[safeLower(row.entra_max_risk)] || 0;
   const graph = RISK_ORDER[safeLower(row.graph_max_risk)] || 0;
@@ -196,15 +200,15 @@ function RiskDot({ level }: { level?: string }) {
 }
 
 function TierBadge({ tier }: { tier: number }) {
-  const cfg: Record<number, { label: string; color: string }> = {
-    0: { label: 'T0', color: 'bg-red-100 text-red-800 border-red-300' },
-    1: { label: 'T1', color: 'bg-orange-100 text-orange-800 border-orange-300' },
-    2: { label: 'T2', color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
-    3: { label: 'T3', color: 'bg-gray-100 text-gray-600 border-gray-300' },
+  const cfg: Record<number, { label: string; color: string; title: string }> = {
+    0: { label: 'T0', color: 'bg-red-100 text-red-800 border-red-300', title: 'T0 Control Plane — Global Admin, Privileged Role Admin, tenant-wide Owner' },
+    1: { label: 'T1', color: 'bg-orange-100 text-orange-800 border-orange-300', title: 'T1 Management Plane — User Admin, Exchange Admin, subscription Owner/Contributor' },
+    2: { label: 'T2', color: 'bg-yellow-100 text-yellow-800 border-yellow-300', title: 'T2 Data/App Plane — scoped roles, risky Graph API permissions' },
+    3: { label: 'T3', color: 'bg-gray-100 text-gray-600 border-gray-300', title: 'T3 Standard — no privileged roles' },
   };
   const c = cfg[tier] || cfg[3];
   return (
-    <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${c.color}`} title={`Privilege Tier ${tier}`}>
+    <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${c.color}`} title={c.title}>
       {c.label}
     </span>
   );
@@ -302,6 +306,7 @@ export default function IdentitiesPage() {
           risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
           risk_score: raw.risk_score ?? 0,
           activity_status: raw.activity_status || 'unknown',
+          privilege_tier: raw.privilege_tier ?? undefined,
         }));
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
@@ -332,7 +337,7 @@ export default function IdentitiesPage() {
         case 'entra_role_count': aVal = a.entra_role_count ?? 0; bVal = b.entra_role_count ?? 0; break;
         case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
         case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
-        case 'privilege_tier': aVal = computePrivilegeTier(a); bVal = computePrivilegeTier(b); break;
+        case 'privilege_tier': aVal = getPrivilegeTier(a); bVal = getPrivilegeTier(b); break;
         case 'credential_expiration':
           aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
           bVal = b.credential_expiration ? new Date(b.credential_expiration).getTime() : Infinity;
@@ -385,7 +390,7 @@ export default function IdentitiesPage() {
     const rows = selectedIdentities.map(i => [
       i.display_name, i.identity_id, i.identity_type || '', getCategoryLabel(i.identity_category),
       i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), i.risk_score ?? 0,
-      `T${computePrivilegeTier(i)}`, i.entra_role_count ?? 0, i.rbac_role_count ?? 0,
+      `T${getPrivilegeTier(i)}`, i.entra_role_count ?? 0, i.rbac_role_count ?? 0,
       i.api_permission_count ?? 0, i.credential_expiration || '', i.created_datetime || '',
       i.last_seen_auth || 'N/A', getDormantStatus(i), getComplianceRelevance(i), i.owner_display_name || '',
     ]);
@@ -413,7 +418,7 @@ export default function IdentitiesPage() {
       body: selectedIdentities.map(i => [
         i.display_name.substring(0, 28) + (i.display_name.length > 28 ? '..' : ''),
         getCategoryLabel(i.identity_category), (i.risk_level || '?').toUpperCase(),
-        String(i.risk_score ?? 0), `T${computePrivilegeTier(i)}`,
+        String(i.risk_score ?? 0), `T${getPrivilegeTier(i)}`,
         String((i.entra_role_count ?? 0) + (i.rbac_role_count ?? 0)),
         String(i.api_permission_count ?? 0), getDormantStatus(i).toUpperCase(),
         getComplianceRelevance(i),
@@ -514,7 +519,7 @@ export default function IdentitiesPage() {
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-gray-500">No identities match filters.</td></tr>
               ) : filtered.map(i => {
-                const tier = computePrivilegeTier(i);
+                const tier = getPrivilegeTier(i);
                 const dormant = getDormantStatus(i);
                 return (
                   <tr key={i.identity_id}
@@ -615,7 +620,10 @@ export default function IdentitiesPage() {
       </div>
 
       <div className="mt-3 text-[11px] text-gray-400 text-center">
-        Tier: T0 = Global Admin / Critical | T1 = High privilege | T2 = Medium | T3 = Standard.
+        T0 = Control Plane (Global Admin, Priv Role Admin, tenant Owner) |
+        T1 = Management Plane (User/Exchange/Intune Admin, sub Owner/Contributor) |
+        T2 = Data/App (scoped roles, risky perms) |
+        T3 = Standard.
         Dormant: 90d+ = stale, 30-90d = idle.
       </div>
     </div>

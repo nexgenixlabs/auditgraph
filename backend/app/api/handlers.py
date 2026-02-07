@@ -185,7 +185,69 @@ def get_identities():
                     AND gp.risk_level IS NOT NULL
                 ) as graph_max_risk,
                 i.enabled,
-                i.last_sign_in
+                i.last_sign_in,
+                -- Privilege tier (T0-T3) based on actual role names
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era
+                        WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator', 'privileged role administrator',
+                            'privileged authentication administrator',
+                            'partner tier2 support', 'security operator',
+                            'application administrator', 'cloud application administrator',
+                            'hybrid identity administrator',
+                            'domain name administrator',
+                            'external identity provider administrator'
+                        )
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra
+                        WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN (
+                            'owner', 'user access administrator'
+                        )
+                        AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%'
+                             AND ra.scope NOT LIKE '/subscriptions/%/resourceGroups/%')
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era
+                        WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'user administrator', 'exchange administrator',
+                            'sharepoint administrator', 'teams administrator',
+                            'intune administrator', 'conditional access administrator',
+                            'authentication administrator',
+                            'groups administrator', 'license administrator',
+                            'password administrator', 'security administrator',
+                            'compliance administrator', 'billing administrator',
+                            'dynamics 365 administrator', 'power platform administrator',
+                            'azure devops administrator', 'azure information protection administrator',
+                            'helpdesk administrator'
+                        )
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra
+                        WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN (
+                            'owner', 'contributor', 'user access administrator'
+                        )
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era
+                        WHERE era.identity_db_id = i.id
+                    ) THEN 2
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra
+                        WHERE ra.identity_db_id = i.id
+                    ) THEN 2
+                    WHEN EXISTS (
+                        SELECT 1 FROM graph_api_permissions gp
+                        WHERE gp.identity_db_id = i.id
+                        AND gp.risk_level IN ('critical', 'high')
+                    ) THEN 2
+                    ELSE 3
+                END as privilege_tier
             FROM identities i
             WHERE i.discovery_run_id = %s
         """
@@ -290,6 +352,7 @@ def get_identities():
                     "graph_max_risk": row[31] or "info",
                     "enabled": row[32] if row[32] is not None else True,
                     "last_sign_in": row[33].isoformat() if row[33] else None,
+                    "privilege_tier": int(row[34]) if row[34] is not None else 3,
                 }
             )
 
