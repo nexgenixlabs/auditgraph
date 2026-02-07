@@ -207,8 +207,8 @@ def get_identities():
                         AND LOWER(ra.role_name) IN (
                             'owner', 'user access administrator'
                         )
-                        AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%'
-                             AND ra.scope NOT LIKE '/subscriptions/%/resourceGroups/%')
+                        AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
+                             AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')
                     ) THEN 0
                     WHEN EXISTS (
                         SELECT 1 FROM entra_role_assignments era
