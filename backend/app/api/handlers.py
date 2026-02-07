@@ -836,6 +836,7 @@ def get_overview_insights():
                 i.activity_status,
                 COALESCE(i.owner_count, 0) as owner_count,
                 i.credential_expiration,
+                COALESCE(i.cloud, 'azure') as cloud,
                 CASE
                     WHEN EXISTS (
                         SELECT 1 FROM entra_role_assignments era
@@ -912,7 +913,7 @@ def get_overview_insights():
         now = datetime.utcnow()
 
         for r in rows:
-            identity_id, display_name, category, risk_level, activity_status, owner_count, cred_exp, tier = r
+            identity_id, display_name, category, risk_level, activity_status, owner_count, cred_exp, cloud, tier = r
             display_name = display_name or ''
             category = _normalize_category_key(category or '')
             tier = int(tier) if tier is not None else 3
@@ -924,6 +925,7 @@ def get_overview_insights():
                 "display_name": display_name,
                 "risk_level": risk_level or "info",
                 "category": category,
+                "cloud": cloud or "azure",
             }
 
             # Collect T0/T1 names

@@ -6,6 +6,7 @@ interface TierIdentity {
   display_name: string;
   risk_level: string;
   category: string;
+  cloud?: string;
 }
 
 interface DormantIdentity extends TierIdentity {
@@ -41,6 +42,12 @@ const categoryLabels: Record<string, string> = {
   human_user: 'Human',
   guest: 'Guest',
   microsoft_internal: 'MSFT',
+};
+
+const cloudColors: Record<string, string> = {
+  azure: 'bg-blue-100 text-blue-700',
+  aws: 'bg-orange-100 text-orange-700',
+  gcp: 'bg-red-100 text-red-700',
 };
 
 const riskColors: Record<string, string> = {
@@ -122,12 +129,13 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                   to={`/identities/${encodeURIComponent(i.identity_id)}`}
                   className="flex items-center justify-between py-1.5 px-3 rounded-lg bg-red-50 hover:bg-red-100 transition text-sm"
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-200 text-red-800">T0</span>
+                    <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[i.cloud || 'azure'] || cloudColors.azure}`}>{i.cloud || 'azure'}</span>
                     <span className="font-medium text-gray-900 truncate">{i.display_name}</span>
                     <span className="text-[10px] text-gray-500">{categoryLabels[i.category] || i.category}</span>
                   </div>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${riskColors[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${riskColors[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
                     {i.risk_level}
                   </span>
                 </Link>
@@ -138,12 +146,13 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                   to={`/identities/${encodeURIComponent(i.identity_id)}`}
                   className="flex items-center justify-between py-1.5 px-3 rounded-lg bg-orange-50 hover:bg-orange-100 transition text-sm"
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-200 text-orange-800">T1</span>
+                    <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[i.cloud || 'azure'] || cloudColors.azure}`}>{i.cloud || 'azure'}</span>
                     <span className="font-medium text-gray-900 truncate">{i.display_name}</span>
                     <span className="text-[10px] text-gray-500">{categoryLabels[i.category] || i.category}</span>
                   </div>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${riskColors[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${riskColors[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
                     {i.risk_level}
                   </span>
                 </Link>
@@ -237,6 +246,7 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                         d.tier === 0 ? 'bg-red-200 text-red-800' : 'bg-orange-200 text-orange-800'
                       }`}>T{d.tier}</span>
+                      <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[d.cloud || 'azure'] || cloudColors.azure}`}>{d.cloud || 'azure'}</span>
                       <span className="font-medium text-gray-900 text-sm truncate">{d.display_name}</span>
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
@@ -265,8 +275,11 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                     to={`/identities/${encodeURIComponent(s.identity_id)}`}
                     className="flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition"
                   >
-                    <span className="font-medium text-gray-900 text-sm truncate">{s.display_name}</span>
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${riskColors[s.risk_level] || 'bg-gray-100 text-gray-600'}`}>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[s.cloud || 'azure'] || cloudColors.azure}`}>{s.cloud || 'azure'}</span>
+                      <span className="font-medium text-gray-900 text-sm truncate">{s.display_name}</span>
+                    </div>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${riskColors[s.risk_level] || 'bg-gray-100 text-gray-600'}`}>
                       {s.risk_level}
                     </span>
                   </Link>

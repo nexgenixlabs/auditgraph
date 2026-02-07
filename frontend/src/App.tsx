@@ -28,7 +28,6 @@ import IdentityDetail from './pages/IdentityDetail';
 import {
   GlobalRiskCards,
   CloudComparison,
-  CriticalIdentitiesList,
   InsightsPanel,
 } from './components/overview';
 
@@ -57,19 +56,6 @@ interface IdentitySummaryResponse {
   >;
 }
 
-interface RisksResponse {
-  run_id?: number;
-  count: number;
-  items: Array<{
-    identity_id: string;
-    display_name: string;
-    identity_category?: string;
-    risk_level: string;
-    risk_score?: number;
-    risk_reasons: string[] | string;
-  }>;
-}
-
 const Overview: React.FC = () => {
   const navigate = useNavigate();
 
@@ -77,7 +63,6 @@ const Overview: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
-  const [risks, setRisks] = useState<RisksResponse | null>(null);
   const [insights, setInsights] = useState<any>(null);
 
   useEffect(() => {
@@ -87,28 +72,24 @@ const Overview: React.FC = () => {
       setLoading(true);
       setError(null);
       try {
-        const [statsRes, summaryRes, risksRes, insightsRes] = await Promise.all([
+        const [statsRes, summaryRes, insightsRes] = await Promise.all([
           fetch('/api/stats'),
           fetch('/api/identity-summary'),
-          fetch('/api/risks'),
           fetch('/api/overview/insights'),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
         if (!summaryRes.ok) throw new Error(`Summary API error: ${summaryRes.status}`);
-        if (!risksRes.ok) throw new Error(`Risks API error: ${risksRes.status}`);
 
-        const [statsJson, summaryJson, risksJson] = await Promise.all([
+        const [statsJson, summaryJson] = await Promise.all([
           statsRes.json(),
           summaryRes.json(),
-          risksRes.json(),
         ]);
         const insightsJson = insightsRes.ok ? await insightsRes.json() : null;
 
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
-          setRisks(risksJson);
           setInsights(insightsJson);
         }
       } catch (e: any) {
@@ -156,18 +137,6 @@ const Overview: React.FC = () => {
       low,
     }];
   }, [summary]);
-
-  // Critical identities list
-  const criticalIdentities = useMemo(() => {
-    return (risks?.items || []).map((r) => ({
-      identity_id: r.identity_id,
-      display_name: r.display_name,
-      identity_category: r.identity_category,
-      risk_level: r.risk_level,
-      risk_score: r.risk_score,
-      risk_reason: r.risk_reasons,
-    }));
-  }, [risks]);
 
   // Navigation handlers
   const handleRiskCardClick = (level: string) => {
@@ -234,9 +203,6 @@ const Overview: React.FC = () => {
 
       {/* Section 3: Privilege Tiers + Action Items + Dormant/Unowned */}
       <InsightsPanel data={insights} loading={loading} />
-
-      {/* Section 4: Critical Identities */}
-      <CriticalIdentitiesList identities={criticalIdentities} loading={loading} />
     </div>
   );
 };
