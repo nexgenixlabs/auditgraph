@@ -234,10 +234,10 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
         if (dormantT0.length > 0) {
           recs.push({
             priority: 'Critical',
-            title: `Revoke ${dormantT0.length} unused Control Plane account${dormantT0.length > 1 ? 's' : ''}`,
+            title: `${dormantT0.length} Control Plane account${dormantT0.length > 1 ? 's' : ''} unused — revoke access`,
             description: `${dormantT0.map(d => d.display_name).join(', ')} — T0 identities with no sign-in activity. Global Admin accounts that are never used are prime targets for credential stuffing.`,
             count: dormantT0.length,
-            link: '/identities?risk_level=critical',
+            link: '/identities?activity_status=dormant&privilege_tier=0',
             color: 'border-red-300 bg-red-50',
             icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z',
           });
@@ -248,10 +248,10 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
         if (dormantT1.length > 0) {
           recs.push({
             priority: 'High',
-            title: `Review ${dormantT1.length} dormant Management Plane account${dormantT1.length > 1 ? 's' : ''}`,
+            title: `${dormantT1.length} Management Plane account${dormantT1.length > 1 ? 's' : ''} dormant — review access`,
             description: `${dormantT1.map(d => d.display_name).join(', ')} — T1 identities (User Admin, Exchange Admin, sub Owner) with no recent activity. Consider downgrading or disabling.`,
             count: dormantT1.length,
-            link: '/identities?risk_level=high',
+            link: '/identities?activity_status=dormant&privilege_tier=1',
             color: 'border-orange-300 bg-orange-50',
             icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
           });
@@ -264,7 +264,7 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
             title: `Reduce T0 footprint from ${td.t0.count} to 2 or fewer`,
             description: 'Microsoft recommends no more than 2 Global Admin accounts. Each additional T0 identity increases your attack surface exponentially.',
             count: td.t0.count,
-            link: '/identities',
+            link: '/identities?privilege_tier=0',
             color: 'border-orange-300 bg-orange-50',
             icon: 'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6',
           });
@@ -274,7 +274,7 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
         if (ai.expiring_credentials > 0) {
           recs.push({
             priority: 'High',
-            title: `Rotate ${ai.expiring_credentials} expiring credential${ai.expiring_credentials > 1 ? 's' : ''}`,
+            title: `${ai.expiring_credentials} credential${ai.expiring_credentials > 1 ? 's' : ''} expiring soon — rotate now`,
             description: 'Secrets or certificates expiring within 30 days. Expired credentials cause service outages. Rotate proactively to avoid downtime.',
             count: ai.expiring_credentials,
             link: '/identities',
@@ -287,10 +287,10 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
         if (unowned_spns.length > 0) {
           recs.push({
             priority: 'Medium',
-            title: `Assign owners to ${unowned_spns.length} service principal${unowned_spns.length > 1 ? 's' : ''}`,
+            title: `${unowned_spns.length} service principal${unowned_spns.length > 1 ? 's' : ''} ha${unowned_spns.length > 1 ? 've' : 's'} no owner — assign accountability`,
             description: `${unowned_spns.slice(0, 3).map(s => s.display_name).join(', ')}${unowned_spns.length > 3 ? ` + ${unowned_spns.length - 3} more` : ''} — unowned SPNs with medium+ risk have no accountability. SOC 2 CC6.1 requires clear ownership.`,
             count: unowned_spns.length,
-            link: '/identities?identity_category=service_principal',
+            link: '/identities?identity_category=service_principal&owner_status=unowned',
             color: 'border-yellow-300 bg-yellow-50',
             icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
           });

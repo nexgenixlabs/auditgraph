@@ -255,6 +255,9 @@ export default function IdentitiesPage() {
   const [search, setSearch] = useState('');
   const [riskFilter, setRiskFilter] = useState<RiskLevel | 'all'>('all');
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
+  const [ownerFilter, setOwnerFilter] = useState<'all' | 'unowned'>('all');
+  const [activityFilter, setActivityFilter] = useState<'all' | 'dormant'>('all');
+  const [tierFilter, setTierFilter] = useState<number | 'all'>('all');
   const [sortField, setSortField] = useState<SortField>('risk_level');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -267,8 +270,14 @@ export default function IdentitiesPage() {
     const params = new URLSearchParams(location.search);
     const catParam = params.get('identity_category') || params.get('category');
     const riskParam = params.get('risk_level');
+    const ownerParam = params.get('owner_status');
+    const activityParam = params.get('activity_status');
+    const tierParam = params.get('privilege_tier');
     setCategoryFilter(catParam && CATEGORY_OPTIONS.find(o => o.value === catParam) ? catParam as IdentityCategory : 'all');
     setRiskFilter(riskParam && RISK_OPTIONS.find(o => o.value === riskParam) ? riskParam as RiskLevel : 'all');
+    setOwnerFilter(ownerParam === 'unowned' ? 'unowned' : 'all');
+    setActivityFilter(activityParam === 'dormant' ? 'dormant' : 'all');
+    setTierFilter(tierParam != null && ['0', '1', '2', '3'].includes(tierParam) ? Number(tierParam) : 'all');
   }, [location.search]);
 
   // Fetch
@@ -326,6 +335,9 @@ export default function IdentitiesPage() {
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
     if (riskFilter !== 'all') result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
     if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
+    if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
+    if (activityFilter === 'dormant') result = result.filter(i => getDormantStatus(i) === 'yes' || getDormantStatus(i) === 'idle');
+    if (tierFilter !== 'all') result = result.filter(i => getPrivilegeTier(i) === tierFilter);
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -365,7 +377,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [identities, search, riskFilter, categoryFilter, sortField, sortDir]);
+  }, [identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -479,11 +491,35 @@ export default function IdentitiesPage() {
           <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
             {CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); }}
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); navigate('/identities', { replace: true }); }}
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>
         </div>
+        {/* Active filter chips from recommendations */}
+        {(ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all') && (
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <span className="text-[10px] text-gray-500 uppercase font-semibold">Active filters:</span>
+            {ownerFilter === 'unowned' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                No Owner
+                <button onClick={() => { setOwnerFilter('all'); }} className="hover:text-yellow-600">&times;</button>
+              </span>
+            )}
+            {activityFilter === 'dormant' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                Dormant
+                <button onClick={() => { setActivityFilter('all'); }} className="hover:text-red-600">&times;</button>
+              </span>
+            )}
+            {tierFilter !== 'all' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                Tier T{tierFilter}
+                <button onClick={() => { setTierFilter('all'); }} className="hover:text-purple-600">&times;</button>
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Table */}
