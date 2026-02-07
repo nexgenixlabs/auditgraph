@@ -28,8 +28,8 @@ import IdentityDetail from './pages/IdentityDetail';
 import {
   GlobalRiskCards,
   CloudComparison,
-  CategoryRiskGrid,
   CriticalIdentitiesList,
+  InsightsPanel,
 } from './components/overview';
 
 // ============================================================
@@ -78,6 +78,7 @@ const Overview: React.FC = () => {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
   const [risks, setRisks] = useState<RisksResponse | null>(null);
+  const [insights, setInsights] = useState<any>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,10 +87,11 @@ const Overview: React.FC = () => {
       setLoading(true);
       setError(null);
       try {
-        const [statsRes, summaryRes, risksRes] = await Promise.all([
+        const [statsRes, summaryRes, risksRes, insightsRes] = await Promise.all([
           fetch('/api/stats'),
           fetch('/api/identity-summary'),
           fetch('/api/risks'),
+          fetch('/api/overview/insights'),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
@@ -101,11 +103,13 @@ const Overview: React.FC = () => {
           summaryRes.json(),
           risksRes.json(),
         ]);
+        const insightsJson = insightsRes.ok ? await insightsRes.json() : null;
 
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
           setRisks(risksJson);
+          setInsights(insightsJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load overview data');
@@ -153,32 +157,6 @@ const Overview: React.FC = () => {
     }];
   }, [summary]);
 
-  // Compute category data
-  const categoryData = useMemo(() => {
-    const cats = summary?.categories || {};
-    const orderedKeys = [
-      'service_principal',
-      'managed_identity_system',
-      'managed_identity_user',
-      'human_user',
-      'guest',
-      'microsoft_internal',
-    ];
-
-    return orderedKeys.map((key) => {
-      const cat = cats[key] || { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-      return {
-        key,
-        total: cat.total,
-        critical: cat.critical,
-        high: cat.high,
-        medium: cat.medium,
-        low: cat.low,
-        info: cat.info,
-      };
-    });
-  }, [summary]);
-
   // Critical identities list
   const criticalIdentities = useMemo(() => {
     return (risks?.items || []).map((r) => ({
@@ -198,14 +176,6 @@ const Overview: React.FC = () => {
 
   const handleCloudClick = (cloud: string) => {
     navigate(`/identities?cloud=${cloud}`);
-  };
-
-  const handleCategoryClick = (category: string, riskLevel?: string) => {
-    let url = `/identities?identity_category=${encodeURIComponent(category)}`;
-    if (riskLevel) {
-      url += `&risk_level=${encodeURIComponent(riskLevel)}`;
-    }
-    navigate(url);
   };
 
   if (loading) {
@@ -262,11 +232,8 @@ const Overview: React.FC = () => {
       {/* Section 2: Cloud Risk Comparison */}
       <CloudComparison data={cloudData} onCloudClick={handleCloudClick} />
 
-      {/* Section 3: Category Risk Grid */}
-      <div>
-        <div className="text-sm font-semibold text-gray-700 mb-3">Risk by Identity Category</div>
-        <CategoryRiskGrid categories={categoryData} onCategoryClick={handleCategoryClick} />
-      </div>
+      {/* Section 3: Privilege Tiers + Action Items + Dormant/Unowned */}
+      <InsightsPanel data={insights} loading={loading} />
 
       {/* Section 4: Critical Identities */}
       <CriticalIdentitiesList identities={criticalIdentities} loading={loading} />

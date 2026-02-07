@@ -811,6 +811,167 @@ def _is_microsoft_internal_identity(display_name: str, identity_type: str) -> bo
     return False
 
 
+def get_overview_insights():
+    """
+    Aggregated insights for the Overview page:
+    - Privilege tier distribution (T0-T3) with T0/T1 identity names
+    - Action items: dormant privileged, expiring credentials, unowned SPNs
+    - Lists of dormant privileged identities and unowned SPNs
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        latest_run = cursor.fetchone()[0]
+        if not latest_run:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        # Privilege tier for each identity
+        cursor.execute("""
+            SELECT
+                i.identity_id,
+                i.display_name,
+                i.identity_category,
+                i.risk_level,
+                i.activity_status,
+                COALESCE(i.owner_count, 0) as owner_count,
+                i.credential_expiration,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era
+                        WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator', 'privileged role administrator',
+                            'privileged authentication administrator',
+                            'partner tier2 support', 'security operator',
+                            'application administrator', 'cloud application administrator',
+                            'hybrid identity administrator',
+                            'domain name administrator',
+                            'external identity provider administrator'
+                        )
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra
+                        WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN (
+                            'owner', 'user access administrator'
+                        )
+                        AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
+                             AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era
+                        WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'user administrator', 'exchange administrator',
+                            'sharepoint administrator', 'teams administrator',
+                            'intune administrator', 'conditional access administrator',
+                            'authentication administrator',
+                            'groups administrator', 'license administrator',
+                            'password administrator', 'security administrator',
+                            'compliance administrator', 'billing administrator',
+                            'dynamics 365 administrator', 'power platform administrator',
+                            'azure devops administrator', 'azure information protection administrator',
+                            'helpdesk administrator'
+                        )
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra
+                        WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN (
+                            'owner', 'contributor', 'user access administrator'
+                        )
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era
+                        WHERE era.identity_db_id = i.id
+                    ) THEN 2
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra
+                        WHERE ra.identity_db_id = i.id
+                    ) THEN 2
+                    WHEN EXISTS (
+                        SELECT 1 FROM graph_api_permissions gp
+                        WHERE gp.identity_db_id = i.id
+                        AND gp.risk_level IN ('critical', 'high')
+                    ) THEN 2
+                    ELSE 3
+                END as privilege_tier
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+        """, (latest_run,))
+
+        rows = cursor.fetchall()
+
+        tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        tier_identities = {0: [], 1: []}  # Only list T0/T1 names
+        dormant_privileged = []
+        unowned_spns = []
+        expiring_creds = 0
+
+        now = datetime.utcnow()
+
+        for r in rows:
+            identity_id, display_name, category, risk_level, activity_status, owner_count, cred_exp, tier = r
+            display_name = display_name or ''
+            category = _normalize_category_key(category or '')
+            tier = int(tier) if tier is not None else 3
+
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+
+            identity_stub = {
+                "identity_id": identity_id,
+                "display_name": display_name,
+                "risk_level": risk_level or "info",
+                "category": category,
+            }
+
+            # Collect T0/T1 names
+            if tier <= 1:
+                tier_identities[tier].append(identity_stub)
+
+            # Dormant privileged (T0/T1 + stale)
+            if tier <= 1 and activity_status in ('stale', 'never_used'):
+                dormant_privileged.append({
+                    **identity_stub,
+                    "tier": tier,
+                    "activity_status": activity_status,
+                })
+
+            # Expiring credentials (within 30 days)
+            if cred_exp:
+                try:
+                    days_left = (cred_exp - now).days
+                    if 0 <= days_left <= 30:
+                        expiring_creds += 1
+                except Exception:
+                    pass
+
+            # Unowned service principals
+            if category == 'service_principal' and (owner_count or 0) == 0:
+                if risk_level in ('critical', 'high', 'medium'):
+                    unowned_spns.append(identity_stub)
+
+        return jsonify({
+            "tier_distribution": {
+                "t0": {"count": tier_counts[0], "identities": tier_identities[0]},
+                "t1": {"count": tier_counts[1], "identities": tier_identities[1]},
+                "t2": {"count": tier_counts[2]},
+                "t3": {"count": tier_counts[3]},
+            },
+            "action_items": {
+                "dormant_privileged": len(dormant_privileged),
+                "expiring_credentials": expiring_creds,
+                "unowned_spns": len(unowned_spns),
+            },
+            "dormant_privileged": dormant_privileged[:10],
+            "unowned_spns": unowned_spns[:10],
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
 def get_dashboard_posture():
     """
     Dashboard posture data: credential health, dormant counts, posture score,
