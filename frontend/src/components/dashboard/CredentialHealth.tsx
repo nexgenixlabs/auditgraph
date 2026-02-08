@@ -44,8 +44,9 @@ export default function CredentialHealth({ expired, expiringSoon, healthy, noCre
             key={seg.key}
             onClick={() => {
               if (seg.key === 'expired') navigate('/identities?credential_status=expired');
-              else if (seg.key === 'expiring') navigate('/identities?credential_expiry=expiring_soon');
+              else if (seg.key === 'expiring') navigate('/identities?credential_status=expiring_soon');
               else if (seg.key === 'healthy') navigate('/identities?credential_status=valid');
+              else if (seg.key === 'none') navigate('/identities?credential_status=none');
             }}
             className={`${seg.bgColor} rounded-lg p-2 text-left hover:opacity-80 transition`}
           >

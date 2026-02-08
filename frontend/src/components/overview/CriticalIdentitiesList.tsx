@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { RISK_BADGE, getCategoryLabel } from '../../constants/metrics';
 
 interface CriticalIdentity {
   identity_id: string;
@@ -15,20 +16,11 @@ interface CriticalIdentitiesListProps {
   loading?: boolean;
 }
 
-const categoryLabels: Record<string, string> = {
-  service_principal: 'Service Principal',
-  managed_identity_system: 'System MI',
-  managed_identity_user: 'User MI',
-  human_user: 'Human User',
-  guest: 'Guest',
-  microsoft_internal: 'Microsoft',
-};
-
 function RiskBadge({ level, score }: { level: string; score?: number }) {
   const colors: Record<string, string> = {
-    critical: 'bg-red-100 text-red-700 border-red-200',
-    high: 'bg-orange-100 text-orange-700 border-orange-200',
-    medium: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+    critical: `${RISK_BADGE.critical} border-red-200`,
+    high: `${RISK_BADGE.high} border-orange-200`,
+    medium: `${RISK_BADGE.medium} border-yellow-200`,
   };
 
   return (
@@ -113,7 +105,7 @@ export default function CriticalIdentitiesList({ identities, loading }: Critical
                       {identity.display_name}
                     </span>
                     <span className="flex-shrink-0 px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600">
-                      {categoryLabels[identity.identity_category || ''] || 'Unknown'}
+                      {getCategoryLabel(identity.identity_category)}
                     </span>
                   </div>
 

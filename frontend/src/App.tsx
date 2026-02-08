@@ -110,17 +110,22 @@ const Overview: React.FC = () => {
     return () => { cancelled = true; };
   }, []);
 
-  // Compute global risk counts
+  // Compute global risk counts from summary categories (real low/info split)
   const riskCounts = useMemo(() => {
-    const latest = stats?.latest_run;
-    return {
-      critical: latest?.critical_count ?? 0,
-      high: latest?.high_count ?? 0,
-      medium: latest?.medium_count ?? 0,
-      low: (latest?.total_identities ?? 0) - (latest?.critical_count ?? 0) - (latest?.high_count ?? 0) - (latest?.medium_count ?? 0),
-      total: latest?.total_identities ?? 0,
-    };
-  }, [stats]);
+    const cats = summary?.categories || {};
+    let critical = 0, high = 0, medium = 0, low = 0, info = 0, total = 0;
+
+    Object.values(cats).forEach((cat) => {
+      critical += cat.critical;
+      high += cat.high;
+      medium += cat.medium;
+      low += cat.low;
+      info += cat.info;
+      total += cat.total;
+    });
+
+    return { critical, high, medium, low, info, total };
+  }, [summary]);
 
   // Compute cloud risk data (currently Azure only)
   const cloudData = useMemo(() => {
@@ -152,6 +157,10 @@ const Overview: React.FC = () => {
 
   const handleCloudClick = (cloud: string) => {
     navigate(`/identities?cloud=${cloud}`);
+  };
+
+  const handleRiskClick = (cloud: string, riskLevel: string) => {
+    navigate(`/identities?cloud=${cloud}&risk_level=${riskLevel}`);
   };
 
   if (loading) {
@@ -206,7 +215,7 @@ const Overview: React.FC = () => {
       </div>
 
       {/* Section 2: Cloud Risk Comparison */}
-      <CloudComparison data={cloudData} monitoredResources={summary?.monitored_resources} onCloudClick={handleCloudClick} />
+      <CloudComparison data={cloudData} monitoredResources={summary?.monitored_resources} onCloudClick={handleCloudClick} onRiskClick={handleRiskClick} />
 
       {/* Section 3: Privilege Tiers + Action Items + Dormant/Unowned */}
       <InsightsPanel data={insights} loading={loading} />

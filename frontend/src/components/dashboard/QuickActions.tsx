@@ -48,7 +48,7 @@ export default function QuickActions({ criticalCount, expiringCount = 0, dormant
         </svg>
       ),
       color: 'purple',
-      onClick: () => navigate('/identities?activity_status=stale'),
+      onClick: () => navigate('/identities?activity_status=dormant'),
     },
     {
       id: 'service_principals',
@@ -65,11 +65,11 @@ export default function QuickActions({ criticalCount, expiringCount = 0, dormant
     },
   ];
 
-  const colorClasses: Record<string, { bg: string; border: string; text: string; iconBg: string }> = {
-    red: { bg: 'bg-red-50', border: 'border-red-200', text: 'text-red-700', iconBg: 'bg-red-100' },
-    orange: { bg: 'bg-orange-50', border: 'border-orange-200', text: 'text-orange-700', iconBg: 'bg-orange-100' },
-    purple: { bg: 'bg-purple-50', border: 'border-purple-200', text: 'text-purple-700', iconBg: 'bg-purple-100' },
-    blue: { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-700', iconBg: 'bg-blue-100' },
+  const colorClasses: Record<string, { bg: string; hoverBg: string; border: string; text: string; iconBg: string }> = {
+    red: { bg: 'bg-red-50', hoverBg: 'hover:bg-red-50', border: 'border-red-200', text: 'text-red-700', iconBg: 'bg-red-100' },
+    orange: { bg: 'bg-orange-50', hoverBg: 'hover:bg-orange-50', border: 'border-orange-200', text: 'text-orange-700', iconBg: 'bg-orange-100' },
+    purple: { bg: 'bg-purple-50', hoverBg: 'hover:bg-purple-50', border: 'border-purple-200', text: 'text-purple-700', iconBg: 'bg-purple-100' },
+    blue: { bg: 'bg-blue-50', hoverBg: 'hover:bg-blue-50', border: 'border-blue-200', text: 'text-blue-700', iconBg: 'bg-blue-100' },
   };
 
   return (
@@ -86,11 +86,7 @@ export default function QuickActions({ criticalCount, expiringCount = 0, dormant
             <button
               key={action.id}
               onClick={action.onClick}
-              className={`
-                p-4 text-left transition
-                hover:${colors.bg}
-                group
-              `}
+              className={`p-4 text-left transition ${colors.hoverBg} group`}
             >
               <div className="flex items-start gap-3">
                 <div className={`p-2 rounded-lg ${colors.iconBg} ${colors.text} group-hover:scale-110 transition`}>

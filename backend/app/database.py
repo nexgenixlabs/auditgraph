@@ -497,7 +497,8 @@ class Database:
                 real_world_example,
                 company_affected,
                 breach_year,
-                estimated_cost_usd
+                estimated_cost_usd,
+                source
             FROM role_attack_patterns
             WHERE role_name = %s
             ORDER BY breach_year DESC

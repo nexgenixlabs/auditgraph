@@ -1,4 +1,5 @@
 import React from 'react';
+import { RISK_LEVELS, RISK_HEX } from '../../constants/metrics';
 
 interface RiskCounts {
   critical: number;
@@ -12,17 +13,17 @@ interface RiskCounts {
 interface RiskDonutChartProps {
   counts: RiskCounts;
   onSegmentClick?: (level: string) => void;
+  cloudSources?: string[];
 }
 
-const riskConfig = [
-  { key: 'critical', label: 'Critical', color: '#ef4444', hoverColor: '#dc2626' },
-  { key: 'high', label: 'High', color: '#f97316', hoverColor: '#ea580c' },
-  { key: 'medium', label: 'Medium', color: '#eab308', hoverColor: '#ca8a04' },
-  { key: 'low', label: 'Low', color: '#22c55e', hoverColor: '#16a34a' },
-  { key: 'info', label: 'Info', color: '#3b82f6', hoverColor: '#2563eb' },
-];
+const riskConfig = RISK_LEVELS.map(key => ({
+  key,
+  label: key.charAt(0).toUpperCase() + key.slice(1),
+  color: RISK_HEX[key].color,
+  hoverColor: RISK_HEX[key].hoverColor,
+}));
 
-export default function RiskDonutChart({ counts, onSegmentClick }: RiskDonutChartProps) {
+export default function RiskDonutChart({ counts, onSegmentClick, cloudSources }: RiskDonutChartProps) {
   const total = counts.total || 1;
   const size = 200;
   const strokeWidth = 35;
@@ -54,7 +55,18 @@ export default function RiskDonutChart({ counts, onSegmentClick }: RiskDonutChar
 
   return (
     <div className="bg-white border rounded-xl p-5">
-      <div className="text-sm font-semibold text-gray-900 mb-4">Risk Distribution</div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-sm font-semibold text-gray-900">Risk Distribution</div>
+        {cloudSources && cloudSources.length > 0 && (
+          <div className="flex items-center gap-1">
+            {cloudSources.map(c => (
+              <span key={c} className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-gray-100 text-gray-600">
+                {c}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="flex items-center justify-center gap-8">
         {/* SVG Donut */}

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface Control {
   id: string;
@@ -41,6 +42,29 @@ const statusConfig: Record<string, { label: string; color: string; bg: string; i
   },
 };
 
+// Control ID → drilldown URL mapping
+const controlDrillDown: Record<string, string> = {
+  // SOC 2
+  'CC6.1': '/identities?privilege_tier=0',
+  'CC6.2': '/identities?activity_status=dormant&privilege_tier=0,1',
+  'CC6.3': '/identities?owner_status=unowned&identity_category=service_principal',
+  'CC7.2': '/identities?credential_status=expired',
+  // HIPAA
+  '§164.312(a)': '/identities?privilege_tier=0',
+  '§164.312(d)': '/identities?credential_status=expired',
+  '§164.308(a)(3)': '/identities?activity_status=dormant&privilege_tier=0,1',
+  '§164.312(b)': '/identities?risk_level=high',
+  // PCI-DSS
+  'Req 7.1': '/identities?privilege_tier=0',
+  'Req 8.1': '/identities?credential_status=expired',
+  'Req 8.6': '/identities?owner_status=unowned&identity_category=service_principal',
+  // NIST 800-53
+  'AC-2': '/identities?activity_status=dormant&privilege_tier=0,1',
+  'AC-6': '/identities?privilege_tier=0',
+  'IA-5': '/identities?credential_status=expired',
+  'CM-8': '/identities?owner_status=unowned',
+};
+
 function ScoreRing({ score, size = 48 }: { score: number; size?: number }) {
   const r = (size - 6) / 2;
   const circ = 2 * Math.PI * r;
@@ -64,6 +88,8 @@ function ScoreRing({ score, size = 48 }: { score: number; size?: number }) {
 }
 
 export default function ComplianceScorecard({ data, loading }: ComplianceScorecardProps) {
+  const navigate = useNavigate();
+
   if (loading || !data) {
     return (
       <div className="bg-white border rounded-2xl p-6">
@@ -124,22 +150,27 @@ export default function ComplianceScorecard({ data, loading }: ComplianceScoreca
               <div className="space-y-2.5">
                 {fw.controls.map(ctrl => {
                   const cfg = statusConfig[ctrl.status];
+                  const drillUrl = controlDrillDown[ctrl.id];
                   return (
-                    <div key={ctrl.id} className="group">
+                    <button
+                      key={ctrl.id}
+                      className="group w-full text-left rounded-lg px-1.5 py-1 -mx-1.5 hover:bg-gray-50 transition"
+                      onClick={() => drillUrl && navigate(drillUrl)}
+                    >
                       <div className="flex items-center gap-2">
                         <svg className={`w-4 h-4 flex-shrink-0 ${cfg.color}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={cfg.icon} />
                         </svg>
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="text-[10px] font-mono text-gray-400">{ctrl.id}</span>
-                          <span className="text-xs font-medium text-gray-800 truncate">{ctrl.name}</span>
+                          <span className="text-xs font-medium text-gray-800 truncate group-hover:text-blue-600 transition">{ctrl.name}</span>
                         </div>
                         <span className={`ml-auto px-1.5 py-0.5 rounded text-[9px] font-bold uppercase flex-shrink-0 ${cfg.bg} ${cfg.color}`}>
                           {cfg.label}
                         </span>
                       </div>
                       <div className="text-[10px] text-gray-500 ml-6 mt-0.5">{ctrl.detail}</div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>

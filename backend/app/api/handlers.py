@@ -86,7 +86,34 @@ def get_stats():
             "high_count": row[4] or 0,
             "medium_count": row[5] or 0,
         }
-        return jsonify({"latest_run": latest, "total_discovery_runs": total_runs})
+
+        # Previous run for trend comparison (Pillar 6)
+        cursor.execute(
+            """
+            SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
+            FROM discovery_runs
+            WHERE status = 'completed'
+            ORDER BY id DESC
+            LIMIT 1 OFFSET 1
+            """
+        )
+        prev_row = cursor.fetchone()
+        previous_run = None
+        if prev_row:
+            previous_run = {
+                "id": prev_row[0],
+                "completed_at": prev_row[1].isoformat() if prev_row[1] else None,
+                "total_identities": prev_row[2] or 0,
+                "critical_count": prev_row[3] or 0,
+                "high_count": prev_row[4] or 0,
+                "medium_count": prev_row[5] or 0,
+            }
+
+        return jsonify({
+            "latest_run": latest,
+            "previous_run": previous_run,
+            "total_discovery_runs": total_runs,
+        })
 
     finally:
         cursor.close()
@@ -310,12 +337,6 @@ def get_identities():
             # First normalize the category key
             normalized_category = _normalize_category_key(raw_category)
 
-            # For service principals, check if it's actually Microsoft internal
-            # This handles legacy data that wasn't properly categorized
-            if normalized_category == 'service_principal':
-                if _is_microsoft_internal_identity(display_name, identity_type):
-                    normalized_category = 'microsoft_internal'
-
             identities.append(
                 {
                     "identity_id": row[0],
@@ -387,31 +408,35 @@ def get_identity_details(identity_id: str):
     try:
         cursor.execute(
             """
-            SELECT id, identity_id, display_name, identity_type, identity_category, risk_level,
-                   credential_count, credential_risk, credential_status, credential_expiration,
-                   created_datetime, activity_status, risk_reasons,
+            SELECT i.id, i.identity_id, i.display_name, i.identity_type, i.identity_category, i.risk_level,
+                   i.credential_count, i.credential_risk, i.credential_status, i.credential_expiration,
+                   i.created_datetime, i.activity_status, i.risk_reasons,
                    -- Multi-cloud normalized fields
-                   COALESCE(cloud, 'azure') as cloud,
-                   identity_type_normalized,
-                   canonical_name,
-                   principal_id,
-                   tenant_or_org_id,
-                   COALESCE(source_normalized, 'entra') as source,
-                   COALESCE(is_federated, false) as is_federated,
-                   COALESCE(status, 'active') as status,
-                   last_seen_auth,
+                   COALESCE(i.cloud, 'azure') as cloud,
+                   i.identity_type_normalized,
+                   i.canonical_name,
+                   i.principal_id,
+                   i.tenant_or_org_id,
+                   COALESCE(i.source_normalized, 'entra') as source,
+                   COALESCE(i.is_federated, false) as is_federated,
+                   COALESCE(i.status, 'active') as status,
+                   i.last_seen_auth,
                    -- Ownership fields
-                   owner_display_name,
-                   COALESCE(owner_count, 0) as owner_count,
+                   i.owner_display_name,
+                   COALESCE(i.owner_count, 0) as owner_count,
                    -- Risk scoring fields
-                   COALESCE(risk_score, 0) as risk_score,
-                   COALESCE(api_permission_count, 0) as api_permission_count,
-                   COALESCE(app_role_count, 0) as app_role_count,
-                   ca_coverage_status,
-                   COALESCE(ca_mfa_enforced, false) as ca_mfa_enforced
-            FROM identities
-            WHERE identity_id = %s
-            ORDER BY discovery_run_id DESC
+                   COALESCE(i.risk_score, 0) as risk_score,
+                   COALESCE(i.api_permission_count, 0) as api_permission_count,
+                   COALESCE(i.app_role_count, 0) as app_role_count,
+                   i.ca_coverage_status,
+                   COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
+                   -- Evidence fields (Pillar 5)
+                   i.discovery_run_id,
+                   dr.completed_at as run_completed_at
+            FROM identities i
+            LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            WHERE i.identity_id = %s
+            ORDER BY i.discovery_run_id DESC
             LIMIT 1
             """,
             (identity_id,),
@@ -424,11 +449,6 @@ def get_identity_details(identity_id: str):
         display_name = row[2] or ''
         identity_type = row[3] or ''
         normalized_category = _normalize_category_key(row[4] or '')
-
-        # For service principals, check if it's actually Microsoft internal
-        if normalized_category == 'service_principal':
-            if _is_microsoft_internal_identity(display_name, identity_type):
-                normalized_category = 'microsoft_internal'
 
         identity = {
             "db_id": identity_db_id,
@@ -463,7 +483,51 @@ def get_identity_details(identity_id: str):
             "app_role_count": int(row[26] or 0),
             "ca_coverage_status": row[27] or None,
             "ca_mfa_enforced": bool(row[28]) if row[28] is not None else False,
+            "discovery_run_id": row[29],
         }
+
+        run_completed_at = row[30].isoformat() if row[30] else None
+        current_run_id = row[29]
+
+        # Trend comparison: get this identity's state from the previous run (Pillar 6)
+        trend = None
+        if current_run_id:
+            try:
+                cursor.execute(
+                    """
+                    SELECT risk_level, risk_score, credential_count, credential_expiration
+                    FROM identities
+                    WHERE identity_id = %s
+                      AND discovery_run_id = (
+                          SELECT MAX(id) FROM discovery_runs
+                          WHERE status = 'completed' AND id < %s
+                      )
+                    LIMIT 1
+                    """,
+                    (identity_id, current_run_id),
+                )
+                prev = cursor.fetchone()
+                if prev:
+                    trend = {
+                        "previous_risk_level": prev[0],
+                        "previous_risk_score": int(prev[1] or 0),
+                        "risk_direction": (
+                            "worsened" if (identity["risk_score"] or 0) > (prev[1] or 0)
+                            else "improved" if (identity["risk_score"] or 0) < (prev[1] or 0)
+                            else "unchanged"
+                        ),
+                        "is_new": False,
+                    }
+                else:
+                    # Identity not found in previous run → it's new
+                    trend = {
+                        "previous_risk_level": None,
+                        "previous_risk_score": None,
+                        "risk_direction": "new",
+                        "is_new": True,
+                    }
+            except Exception:
+                pass
 
         # ✅ FIXED: clean try/except blocks
         try:
@@ -517,6 +581,21 @@ def get_identity_details(identity_id: str):
                 "app_roles": app_roles,
                 "owners": owners,
                 "role_intelligence": role_intelligence,
+                "trend": trend,
+                "evidence": {
+                    "run_id": identity.get("discovery_run_id"),
+                    "collected_at": run_completed_at,
+                    "sources": {
+                        "identity": "Microsoft Graph API /servicePrincipals or /users",
+                        "roles_azure": "Azure Resource Manager /roleAssignments",
+                        "roles_entra": "Microsoft Graph API /roleManagement/directory",
+                        "permissions": "Microsoft Graph API /servicePrincipals/{id}/appRoleAssignments",
+                        "credentials": "Microsoft Graph API /applications/{id}/passwordCredentials + keyCredentials",
+                        "owners": "Microsoft Graph API /servicePrincipals/{id}/owners",
+                        "pim": "Microsoft Graph API /roleManagement/directory/roleEligibilityScheduleInstances",
+                        "ca_policies": "Microsoft Graph API /identity/conditionalAccess/policies",
+                    },
+                },
             }
         )
 
@@ -554,11 +633,6 @@ def get_risks():
             display_name = r[1] or ''
             identity_type = r[2] or ''
             normalized_category = _normalize_category_key(r[3] or '')
-
-            # For service principals, check if it's actually Microsoft internal
-            if normalized_category == 'service_principal':
-                if _is_microsoft_internal_identity(display_name, identity_type):
-                    normalized_category = 'microsoft_internal'
 
             items.append(
                 {
@@ -811,7 +885,6 @@ def _is_microsoft_internal_identity(display_name: str, identity_type: str) -> bo
         'ppe-',
         'aci api',
         'aciapi',
-        'apple internet accounts',
         # Additional Microsoft services that don't follow common patterns
         'azuresupportcenter',
         'support center',
@@ -1334,10 +1407,18 @@ def get_dashboard_posture():
                      + current_run["medium_count"])
         posture_score = round(((total - high_risk) / total) * 100, 1)
 
+        previous_posture_score = None
+        if previous_run:
+            prev_total = previous_run["total_identities"] or 1
+            prev_high_risk = (previous_run["critical_count"] + previous_run["high_count"]
+                              + previous_run["medium_count"])
+            previous_posture_score = round(((prev_total - prev_high_risk) / prev_total) * 100, 1)
+
         return jsonify({
             "current_run": current_run,
             "previous_run": previous_run,
             "posture_score": posture_score,
+            "previous_posture_score": previous_posture_score,
             "credential_health": credential_health,
             "dormant_count": dormant_count,
             "no_owner_count": no_owner_count,
@@ -1394,11 +1475,6 @@ def get_identity_summary():
         for display_name, identity_type, raw_cat, risk in rows:
             # Normalize category key
             cat = _normalize_category_key(raw_cat)
-
-            # For service principals, check if it's actually Microsoft internal
-            if cat == 'service_principal':
-                if _is_microsoft_internal_identity(display_name, identity_type):
-                    cat = 'microsoft_internal'
 
             if cat not in categories:
                 categories[cat] = {
@@ -1634,14 +1710,19 @@ def get_identity_graph_data(identity_id):
             s = subs[sub_id]
             if rg_name:
                 if rg_name not in s["resource_groups"]:
-                    s["resource_groups"][rg_name] = {"name": rg_name, "roles": [], "resources": []}
+                    s["resource_groups"][rg_name] = {"name": rg_name, "rg_level_roles": [], "resources": {}}
                 rg = s["resource_groups"][rg_name]
-                if r["role_name"] not in rg["roles"]:
-                    rg["roles"].append(r["role_name"])
                 if res_type and res_name:
-                    entry = {"type": res_type, "name": res_name}
-                    if entry not in rg["resources"]:
-                        rg["resources"].append(entry)
+                    # Resource-level role
+                    res_key = f"{res_type}:{res_name}"
+                    if res_key not in rg["resources"]:
+                        rg["resources"][res_key] = {"type": res_type, "name": res_name, "roles": []}
+                    if r["role_name"] not in rg["resources"][res_key]["roles"]:
+                        rg["resources"][res_key]["roles"].append(r["role_name"])
+                else:
+                    # RG-level role (no specific resource)
+                    if r["role_name"] not in rg["rg_level_roles"]:
+                        rg["rg_level_roles"].append(r["role_name"])
             else:
                 if r["role_name"] not in s["subscription_level_roles"]:
                     s["subscription_level_roles"].append(r["role_name"])
@@ -1650,13 +1731,19 @@ def get_identity_graph_data(identity_id):
         total_rgs = 0
         total_resources = 0
         for s in subs.values():
-            rgs_list = list(s["resource_groups"].values())
-            total_rgs += len(rgs_list)
-            for rg in rgs_list:
-                total_resources += len(rg["resources"])
+            rgs_out = []
+            for rg in s["resource_groups"].values():
+                res_list = list(rg["resources"].values())
+                total_resources += len(res_list)
+                rgs_out.append({
+                    "name": rg["name"],
+                    "roles": rg["rg_level_roles"],
+                    "resources": res_list,
+                })
+            total_rgs += len(rgs_out)
             scope_hierarchy.append({
                 "subscription_id": s["subscription_id"],
-                "resource_groups": rgs_list,
+                "resource_groups": rgs_out,
                 "subscription_level_roles": s["subscription_level_roles"],
             })
 
@@ -1853,88 +1940,72 @@ def get_identity_graph_data(identity_id):
             left_y += 80
 
         # ── Entra Directory branch (upper-right) ──
+        # Roles embedded as data inside the entra_directory node
         right_y = 30
         if entra_scopes:
+            entra_roles_data = []
+            for es in entra_scopes:
+                entra_roles_data.append({
+                    "name": es["role_name"],
+                    "risk_level": es.get("risk_level", "low"),
+                })
             entra_nid = "entra-dir"
+            # Height scales with role count
+            entra_height = 55 + len(entra_scopes) * 28
             tech_nodes.append({"id": entra_nid, "type": "entra_directory",
                 "position": {"x": cx + 280, "y": right_y},
-                "data": {"label": "Entra Directory", "count": len(entra_scopes)}})
+                "data": {"label": "Entra Directory", "count": len(entra_scopes),
+                         "roles": entra_roles_data}})
             tech_edges.append({"id": "e-id-entra", "source": "identity", "target": entra_nid,
                 "label": "directory roles", "style": {"stroke": "#6366f1"}})
-            right_y += 55
+            right_y += entra_height + 20
 
-            for i, es in enumerate(entra_scopes):
-                es_nid = f"entra-role-{i}"
-                tech_nodes.append({"id": es_nid, "type": "role",
-                    "position": {"x": cx + 530, "y": right_y},
-                    "data": {"label": es["role_name"], "role_type": "entra",
-                             "risk_level": es.get("risk_level", "low"), "scope_type": "directory",
-                             "scope": es.get("directory_scope", "/")}})
-                tech_edges.append({"id": f"e-entra-{es_nid}", "source": entra_nid, "target": es_nid,
-                    "label": es["scope_label"]})
-                right_y += 50
-
-            right_y += 30  # gap before ARM tree
-
-        # ── ARM hierarchy tree (uses scope_hierarchy) ──
+        # ── ARM hierarchy tree (roles embedded inside each node) ──
         arm_y = max(right_y, 40)
 
         for si, sub_entry in enumerate(scope_hierarchy):
             sub_nid = f"sub-{si}"
             sub_label = sub_entry["subscription_id"][:12] + "..."
+            sub_roles = sub_entry.get("subscription_level_roles", [])
+            sub_roles_data = [{"name": rn, "risk_level": role_risk_map.get(rn, "low")} for rn in sub_roles]
+            sub_height = 55 + len(sub_roles) * 24
             tech_nodes.append({"id": sub_nid, "type": "subscription",
                 "position": {"x": cx + 280, "y": arm_y},
-                "data": {"label": sub_label, "full_id": sub_entry["subscription_id"]}})
+                "data": {"label": sub_label, "full_id": sub_entry["subscription_id"],
+                         "roles": sub_roles_data}})
             tech_edges.append({"id": f"e-id-{sub_nid}", "source": "identity", "target": sub_nid,
-                "label": "accesses", "style": {"stroke": "#3b82f6"}})
-            arm_y += 55
-
-            # Subscription-level role badges
-            for ri, role_name in enumerate(sub_entry.get("subscription_level_roles", [])):
-                role_nid = f"sub-{si}-role-{ri}"
-                tech_nodes.append({"id": role_nid, "type": "role",
-                    "position": {"x": cx + 400, "y": arm_y},
-                    "data": {"label": role_name, "role_type": "azure",
-                             "risk_level": role_risk_map.get(role_name, "low"),
-                             "scope_type": "subscription"}})
-                tech_edges.append({"id": f"e-{sub_nid}-{role_nid}", "source": sub_nid, "target": role_nid,
-                    "label": "grants"})
-                arm_y += 40
+                "label": "", "style": {"stroke": "#3b82f6"}})
+            arm_y += sub_height + 10
 
             # Resource groups under this subscription
             for rgi, rg in enumerate(sub_entry.get("resource_groups", [])):
                 rg_nid = f"sub-{si}-rg-{rgi}"
+                rg_roles = rg.get("roles", [])
+                rg_roles_data = [{"name": rn, "risk_level": role_risk_map.get(rn, "low")} for rn in rg_roles]
+                rg_height = 45 + len(rg_roles) * 24
                 tech_nodes.append({"id": rg_nid, "type": "resource_group",
                     "position": {"x": cx + 530, "y": arm_y},
-                    "data": {"label": rg["name"]}})
+                    "data": {"label": rg["name"], "roles": rg_roles_data}})
                 tech_edges.append({"id": f"e-{sub_nid}-{rg_nid}", "source": sub_nid, "target": rg_nid})
-                arm_y += 50
-
-                # RG-level role badges
-                for ri, role_name in enumerate(rg.get("roles", [])):
-                    role_nid = f"sub-{si}-rg-{rgi}-role-{ri}"
-                    tech_nodes.append({"id": role_nid, "type": "role",
-                        "position": {"x": cx + 620, "y": arm_y},
-                        "data": {"label": role_name, "role_type": "azure",
-                                 "risk_level": role_risk_map.get(role_name, "low"),
-                                 "scope_type": "resource_group"}})
-                    tech_edges.append({"id": f"e-{rg_nid}-{role_nid}", "source": rg_nid, "target": role_nid,
-                        "label": "grants"})
-                    arm_y += 35
+                arm_y += rg_height + 10
 
                 # Resources under this RG
                 for resi, res in enumerate(rg.get("resources", [])):
                     res_nid = f"sub-{si}-rg-{rgi}-res-{resi}"
                     short_type = res["type"].split("/")[-1] if "/" in res["type"] else res["type"]
+                    res_roles = res.get("roles", [])
+                    res_roles_data = [{"name": rn, "risk_level": role_risk_map.get(rn, "low")} for rn in res_roles]
+                    res_height = 40 + len(res_roles) * 24
                     tech_nodes.append({"id": res_nid, "type": "resource",
                         "position": {"x": cx + 780, "y": arm_y},
-                        "data": {"label": res["name"], "resource_type": short_type, "full_type": res["type"]}})
+                        "data": {"label": res["name"], "resource_type": short_type,
+                                 "full_type": res["type"], "roles": res_roles_data}})
                     tech_edges.append({"id": f"e-{rg_nid}-{res_nid}", "source": rg_nid, "target": res_nid})
-                    arm_y += 45
+                    arm_y += res_height + 10
 
-                arm_y += 15  # spacing between RGs
+                arm_y += 10  # spacing between RGs
 
-            arm_y += 25  # spacing between subscriptions
+            arm_y += 15  # spacing between subscriptions
 
         # ── Permissions (Graph API + App Roles) ──
         perm_y = arm_y + 20

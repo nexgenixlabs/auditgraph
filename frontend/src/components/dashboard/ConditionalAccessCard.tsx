@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface WeakPolicyFlag {
   flag: string;
@@ -40,6 +41,7 @@ const severityConfig: Record<string, { bg: string; text: string }> = {
 };
 
 export default function ConditionalAccessCard({ data, loading }: ConditionalAccessCardProps) {
+  const navigate = useNavigate();
   if (loading) {
     return (
       <div className="bg-white border rounded-2xl p-6 animate-pulse">
@@ -92,14 +94,20 @@ export default function ConditionalAccessCard({ data, loading }: ConditionalAcce
           <div className="text-xs text-gray-500">MFA Enforcing</div>
           <div className="text-lg font-bold text-blue-700">{data.mfa_policies ?? 0}</div>
         </div>
-        <div className="bg-gray-50 rounded-lg p-3">
+        <button
+          onClick={() => navigate('/identities?ca_coverage=covered')}
+          className="bg-gray-50 rounded-lg p-3 text-left hover:bg-green-50 transition"
+        >
           <div className="text-xs text-gray-500">Covered</div>
           <div className="text-lg font-bold text-green-700">{data.coverage.covered}</div>
-        </div>
-        <div className="bg-gray-50 rounded-lg p-3">
+        </button>
+        <button
+          onClick={() => navigate('/identities?ca_coverage=not_covered')}
+          className="bg-gray-50 rounded-lg p-3 text-left hover:bg-red-50 transition"
+        >
           <div className="text-xs text-gray-500">Not Covered</div>
           <div className="text-lg font-bold text-red-700">{data.coverage.no_coverage + data.coverage.excluded}</div>
-        </div>
+        </button>
       </div>
 
       {/* Weak policy flags */}

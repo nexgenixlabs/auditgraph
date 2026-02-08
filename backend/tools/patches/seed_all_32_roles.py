@@ -199,41 +199,11 @@ print(f"   ✓ Seeded {len(entra_roles)} Entra ID roles")
 # ============================================================================
 print("\n3. Seeding attack patterns...")
 
-attack_patterns = [
-    # EXISTING
-    ('Global Administrator', 'Credential Stuffing Attack',
-     'UnitedHealth/Change Healthcare breach - unused admin account compromised',
-     'UnitedHealth Group', 2024, 872000000),
-    
-    ('Owner', 'Ransomware Attack',
-     'Scripps Health - Owner access used to encrypt all databases and VMs',
-     'Scripps Health', 2021, 113000000),
-    
-    ('Exchange Administrator', 'Email Forwarding Exfiltration',
-     'SolarWinds - Exchange admin created hidden forwarding rules',
-     'Multiple Organizations', 2020, 100000000),
-    
-    # NEW
-    ('User Access Administrator', 'Privilege Escalation',
-     'Attacker granted self Owner role via User Access Administrator',
-     'NexGenHealthcare (Example)', 2023, 25000000),
-    
-    ('Privileged Role Administrator', 'Admin Account Creation',
-     'Attacker created backdoor Global Admin accounts',
-     'Healthcare Provider (Disclosed)', 2023, 45000000),
-    
-    ('Application Administrator', 'Service Principal Compromise',
-     'Malicious app registration with Mail.Read permissions',
-     'Technology Company', 2022, 18000000),
-]
-
-for role, scenario, example, company, year, cost in attack_patterns:
-    cursor.execute("""
-        INSERT INTO role_attack_patterns
-        (role_name, attack_scenario, real_world_example, company_affected, breach_year, estimated_cost_usd)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING
-    """, (role, scenario, example, company, year, cost))
+# NOTE: Attack patterns are now managed by seed_verified_attacks.py
+# which contains ONLY verified, publicly documented breaches with source citations.
+# Do NOT add fabricated examples here. Run seed_verified_attacks.py instead.
+attack_patterns = []
+print("   (Skipped — use seed_verified_attacks.py for verified breach data)")
 
 db.conn.commit()
 print(f"   ✓ Seeded {len(attack_patterns)} attack patterns")

@@ -256,9 +256,11 @@ class AzureDiscoveryEngine:
         return None  # result
     
     async def _discover_service_principals(self) -> List[Dict[str, Any]]:
-        """Discover all service principals with pagination"""
+        """Discover customer-owned service principals (excludes Microsoft system apps and system-assigned MIs)"""
         try:
             identities = []
+            skipped_microsoft_count = 0
+            skipped_sami_count = 0
             
             # Microsoft Graph returns max 100 by default, need pagination
             # Use $top=999 to get more per page
@@ -333,8 +335,9 @@ class AzureDiscoveryEngine:
                         'source': 'entra',
                     }
 
-                    # Classify identity into the correct category
-                    # Categories: service_principal, managed_identity_system, managed_identity_user, microsoft_internal
+                    # ──── STRICT DISCOVERY POLICY ────
+                    # EXCLUDE: Microsoft system apps + system-assigned managed identities
+                    # KEEP: Customer service principals, user-assigned MIs only
                     sp_type = None
                     if hasattr(sp, "service_principal_type"):
                         sp_type = sp.service_principal_type
@@ -342,8 +345,6 @@ class AzureDiscoveryEngine:
                         sp_type = getattr(sp, "servicePrincipalType")
                     sp_type_norm = str(sp_type or "").strip().lower()
 
-                    # Category 1 & 2: Managed Identities (SAMI / UAMI)
-                    # In Entra, managed identities are represented as service principals with servicePrincipalType=ManagedIdentity
                     if sp_type_norm == "managedidentity":
                         alt_names = []
                         if hasattr(sp, "alternative_names") and sp.alternative_names:
@@ -353,31 +354,36 @@ class AzureDiscoveryEngine:
 
                         alt_join = " ".join([str(a) for a in alt_names]).lower()
                         is_uami = "userassignedidentities" in alt_join
-                        identity_dict["identity_category"] = "managed_identity_user" if is_uami else "managed_identity_system"
-                        identity_dict["identity_type"] = identity_dict["identity_category"]
+
+                        if not is_uami:
+                            # SKIP: System-assigned managed identity (tied to Azure resource lifecycle)
+                            skipped_sami_count += 1
+                            continue
+
+                        # KEEP: User-assigned managed identity (customer-owned)
+                        identity_dict["identity_category"] = "managed_identity_user"
+                        identity_dict["identity_type"] = "managed_identity_user"
                         identity_dict["alternative_names"] = alt_names
-                        identity_dict["is_microsoft_system"] = False  # Managed identities are customer-owned
+                        identity_dict["is_microsoft_system"] = False
                         identities.append(identity_dict)
 
-                    # Category 3: Microsoft Internal (first-party Microsoft apps)
                     elif self._is_microsoft_system_app(identity_dict):
-                        identity_dict["identity_category"] = "microsoft_internal"
-                        identity_dict["identity_type"] = "service_principal"  # Keep legacy type for compatibility
-                        identity_dict["is_microsoft_system"] = True
-                        identities.append(identity_dict)
+                        # SKIP: Microsoft first-party app (Office 365, Azure Portal, Graph API, etc.)
+                        skipped_microsoft_count += 1
+                        continue
 
-                    # Category 4: Customer Service Principals (custom apps)
                     else:
+                        # KEEP: Customer service principal (app registration)
                         identity_dict["identity_category"] = "service_principal"
                         identity_dict["identity_type"] = "service_principal"
                         identity_dict["is_microsoft_system"] = False
                         identities.append(identity_dict)
             
-            return identities
-        except Exception as e:
-            print(f"  ❌ Error: {e}")
-            return []
+            if skipped_microsoft_count > 0 or skipped_sami_count > 0:
+                print(f"  🚫 Excluded: {skipped_microsoft_count} Microsoft system apps, {skipped_sami_count} system-assigned managed identities")
+                print(f"  ✅ Kept: {len(identities)} customer-owned identities")
 
+            return identities
         except Exception as e:
             print(f"  ❌ Error: {e}")
             return []
@@ -1689,21 +1695,6 @@ class AzureDiscoveryEngine:
             risk_score = 0
             risk_reasons = []
 
-            is_microsoft = identity.get('is_microsoft_system', False)
-            identity_category = identity.get('identity_category', '')
-
-            # Skip detailed scoring for Microsoft internal identities
-            if is_microsoft or identity_category == 'microsoft_internal':
-                identity['risk_level'] = 'info'
-                identity['risk_score'] = 0
-                identity['risk_reasons'] = ['Microsoft internal service (no customer action needed)']
-                identity['roles'] = identity_roles
-                identity['entra_roles'] = identity_entra_roles
-                identity['role_count'] = len(identity_roles)
-                identity['api_permission_count'] = len(identity_permissions)
-                identity['app_role_count'] = len(identity_app_roles)
-                continue
-
             # ============================================================
             # 1. Entra ID Directory Roles (highest privilege)
             # ============================================================
@@ -1884,13 +1875,11 @@ class AzureDiscoveryEngine:
                     print(f"       • {reason}")
 
         # Summary
-        customer_count = sum(1 for i in identities if not i.get('is_microsoft_system', False))
-        microsoft_count = sum(1 for i in identities if i.get('is_microsoft_system', False))
         critical_count = sum(1 for i in identities if i.get('risk_level') == 'critical')
         high_count = sum(1 for i in identities if i.get('risk_level') == 'high')
 
         print(f"\n  📊 Risk Summary:")
-        print(f"     Total: {len(identities)} ({customer_count} customer, {microsoft_count} Microsoft)")
+        print(f"     Total: {len(identities)} customer-owned identities")
         print(f"     🔴 Critical: {critical_count}  🟠 High: {high_count}")
 
         return identities
@@ -1987,16 +1976,10 @@ class AzureDiscoveryEngine:
         return identities
     
     def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None, pim_map: Dict[str, Dict] = None, ca_policies: List[Dict] = None) -> int:
-        """Save all identities to database with proper categorization"""
+        """Save all identities to database (customer-owned only, Microsoft system apps excluded at discovery)"""
         saved_count = 0
-        microsoft_count = 0
 
         for identity in identities:
-            # Track Microsoft internal identities (they are now saved with proper category)
-            if identity.get('is_microsoft_system'):
-                microsoft_count += 1
-
-            # Save ALL identities - Microsoft internal ones have identity_category='microsoft_internal'
             
             # Set source for multi-cloud
             identity['source'] = 'azure'
@@ -2075,9 +2058,6 @@ class AzureDiscoveryEngine:
                 self.db.update_identity_pim_summary(identity_db_id)
 
             saved_count += 1
-
-        if microsoft_count > 0:
-            print(f"  ℹ️  Included {microsoft_count} Microsoft internal identities (categorized separately)")
 
         # Save CA policies and compute coverage after all identities are saved
         if ca_policies:

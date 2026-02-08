@@ -5,6 +5,7 @@ interface RiskCounts {
   high: number;
   medium: number;
   low: number;
+  info: number;
   total: number;
 }
 
@@ -59,7 +60,7 @@ export default function GlobalRiskCards({ counts, onCardClick }: GlobalRiskCards
     },
     {
       level: 'low',
-      label: 'Low / Info',
+      label: 'Low',
       count: counts.low,
       bgColor: 'bg-green-50',
       borderColor: 'border-green-200',
@@ -71,10 +72,24 @@ export default function GlobalRiskCards({ counts, onCardClick }: GlobalRiskCards
         </svg>
       ),
     },
+    {
+      level: 'info',
+      label: 'Info',
+      count: counts.info,
+      bgColor: 'bg-blue-50',
+      borderColor: 'border-blue-200',
+      textColor: 'text-blue-700',
+      iconBg: 'bg-blue-100',
+      icon: (
+        <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      ),
+    },
   ];
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
       {cards.map((card) => (
         <button
           key={card.level}

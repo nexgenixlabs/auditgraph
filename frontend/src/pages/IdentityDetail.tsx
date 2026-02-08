@@ -1,17 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { AccessGraphTab } from '../components/graph';
-
-type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown';
-
-type IdentityCategory =
-  | 'service_principal'
-  | 'managed_identity_system'
-  | 'managed_identity_user'
-  | 'human_user'
-  | 'guest'
-  | 'microsoft_internal'
-  | 'unknown';
+import {
+  type IdentityCategory, type RiskLevel,
+  RISK_BADGE, RISK_ORDER, CLOUD_BADGE, DATA_EXPLANATIONS, DORMANT_LABELS,
+  safeLower, normalizeCategoryFromBackend, getCategoryLabel, getDormantStatus as getDormantStatusFromActivity,
+} from '../constants/metrics';
 
 interface Owner {
   owner_object_id: string;
@@ -27,6 +21,7 @@ interface AttackPattern {
   company_affected: string;
   breach_year: number;
   estimated_cost_usd: number;
+  source?: string;
 }
 
 interface HipaaViolation {
@@ -41,6 +36,19 @@ interface RoleIntelligence {
   role_name: string;
   attack_patterns: AttackPattern[];
   hipaa_violations: HipaaViolation[];
+}
+
+interface TrendData {
+  previous_risk_level?: string | null;
+  previous_risk_score?: number | null;
+  risk_direction?: 'worsened' | 'improved' | 'unchanged' | 'new';
+  is_new?: boolean;
+}
+
+interface EvidenceMetadata {
+  run_id?: number;
+  collected_at?: string | null;
+  sources?: Record<string, string>;
 }
 
 interface IdentityDetailsResponse {
@@ -88,6 +96,8 @@ interface IdentityDetailsResponse {
   app_roles: any[];
   owners: Owner[];
   role_intelligence: RoleIntelligence[];
+  trend?: TrendData | null;
+  evidence?: EvidenceMetadata;
 }
 
 type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim';
@@ -126,29 +136,7 @@ interface PimData {
   };
 }
 
-function safeLower(v: any) {
-  return String(v ?? '').toLowerCase();
-}
-
-function normalizeCategoryFromBackend(raw?: any): string | undefined {
-  const v = safeLower(raw).trim();
-  if (!v) return undefined;
-
-  const keys = [
-    'service_principal', 'managed_identity_system', 'managed_identity_user',
-    'human_user', 'guest', 'microsoft_internal', 'unknown',
-  ];
-  if (keys.includes(v)) return v;
-
-  if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
-  if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
-  if (v === 'microsoft internal' || v.includes('microsoft')) return 'microsoft_internal';
-  if (v === 'human user' || v === 'user') return 'human_user';
-  if (v === 'guest') return 'guest';
-  if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
-
-  return undefined;
-}
+// safeLower and normalizeCategoryFromBackend imported from constants/metrics
 
 function formatDate(iso?: string | null) {
   if (!iso) return '—';
@@ -157,6 +145,25 @@ function formatDate(iso?: string | null) {
   } catch {
     return iso;
   }
+}
+
+function daysUntil(iso?: string | null): number | null {
+  if (!iso) return null;
+  try {
+    const diff = new Date(iso).getTime() - Date.now();
+    return Math.ceil(diff / 86400000);
+  } catch { return null; }
+}
+
+function credentialCountdown(iso?: string | null): React.ReactNode {
+  const days = daysUntil(iso);
+  if (days == null) return null;
+  if (days < 0) return <span className="text-xs font-semibold text-red-600">Expired {Math.abs(days)}d ago</span>;
+  if (days === 0) return <span className="text-xs font-semibold text-red-600">Expires today</span>;
+  if (days <= 7) return <span className="text-xs font-semibold text-red-600">{days}d remaining</span>;
+  if (days <= 30) return <span className="text-xs font-semibold text-orange-600">{days}d remaining</span>;
+  if (days <= 90) return <span className="text-xs font-semibold text-yellow-600">{days}d remaining</span>;
+  return <span className="text-xs text-green-600">{days}d remaining</span>;
 }
 
 function formatUsd(n?: number): string {
@@ -168,22 +175,13 @@ function formatUsd(n?: number): string {
 }
 
 function violationRiskColor(risk?: string): string {
-  const r = (risk || '').toLowerCase();
-  if (r === 'critical') return 'bg-red-100 text-red-800';
-  if (r === 'high') return 'bg-orange-100 text-orange-800';
-  if (r === 'medium') return 'bg-yellow-100 text-yellow-800';
-  return 'bg-gray-100 text-gray-600';
+  return RISK_BADGE[safeLower(risk)] || 'bg-gray-100 text-gray-600';
 }
 
 function riskBadge(level?: string) {
   const v = safeLower(level);
   const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
-  if (v === 'critical') return <span className={`${base} bg-red-100 text-red-700`}>CRITICAL</span>;
-  if (v === 'high') return <span className={`${base} bg-orange-100 text-orange-700`}>HIGH</span>;
-  if (v === 'medium') return <span className={`${base} bg-yellow-100 text-yellow-700`}>MEDIUM</span>;
-  if (v === 'low') return <span className={`${base} bg-green-100 text-green-700`}>LOW</span>;
-  if (v === 'info') return <span className={`${base} bg-blue-100 text-blue-700`}>INFO</span>;
-  return <span className={`${base} bg-gray-100 text-gray-700`}>UNKNOWN</span>;
+  return <span className={`${base} ${RISK_BADGE[v] || 'bg-gray-100 text-gray-700'}`}>{(v || 'unknown').toUpperCase()}</span>;
 }
 
 function usageStatusBadge(status?: string, redundantWith?: string) {
@@ -205,19 +203,112 @@ function usageStatusBadge(status?: string, redundantWith?: string) {
 }
 
 function categoryLabel(catRaw?: any, typeRaw?: any) {
-  const cat = normalizeCategoryFromBackend(catRaw) || safeLower(catRaw);
-  const key = cat || safeLower(typeRaw);
+  const cat = normalizeCategoryFromBackend(catRaw);
+  if (cat !== 'unknown') return getCategoryLabel(cat);
+  // Fallback to type-based lookup
+  return getCategoryLabel(safeLower(typeRaw)) || 'Unknown';
+}
 
-  switch (key) {
-    case 'service_principal': return 'Service Principal';
-    case 'managed_identity_system': return 'System Assigned Identity';
-    case 'managed_identity_user': return 'User Assigned Identity';
-    case 'managed_identity': return 'User Assigned Identity';
-    case 'human_user': return 'Human User';
-    case 'guest': return 'Guest';
-    case 'microsoft_internal': return 'Microsoft Internal';
-    default: return 'Unknown';
+// ─── Evidence / Data Source component (Pillar 5) ──────────────────
+
+function DataSource({ label, apiSource, collectedAt }: { label: string; apiSource?: string; collectedAt?: string | null }) {
+  return (
+    <div className="flex items-center gap-2 text-[10px] text-gray-400 mt-1">
+      <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <span>
+        Source: <span className="text-gray-500 font-medium">{label}</span>
+        {apiSource && <span className="ml-1 font-mono">{apiSource}</span>}
+        {collectedAt && <span className="ml-1">· Collected {new Date(collectedAt).toLocaleDateString()}</span>}
+      </span>
+    </div>
+  );
+}
+
+// ─── Privilege tier / Effective access helpers ─────────────────────
+
+const TIER_CONFIG: Record<number, { label: string; name: string; color: string; borderColor: string; description: string }> = {
+  0: { label: 'T0', name: 'Control Plane', color: 'bg-red-100 text-red-800 border-red-300', borderColor: 'border-red-200', description: 'Full tenant control — Global Admin, Privileged Role Admin' },
+  1: { label: 'T1', name: 'Management Plane', color: 'bg-orange-100 text-orange-800 border-orange-300', borderColor: 'border-orange-200', description: 'Broad management access — User Admin, Exchange Admin, sub Owner' },
+  2: { label: 'T2', name: 'Data / App Plane', color: 'bg-yellow-100 text-yellow-800 border-yellow-300', borderColor: 'border-yellow-200', description: 'Scoped data/app access — Contributor, Key Vault, risky Graph API perms' },
+  3: { label: 'T3', name: 'Standard', color: 'bg-gray-100 text-gray-600 border-gray-300', borderColor: 'border-gray-200', description: 'No privileged roles — Reader, limited access' },
+};
+
+function computePrivilegeTier(roles: any[], graphPerms: any[]): { tier: number; reasons: string[] } {
+  const reasons: string[] = [];
+  let maxTier = 3;
+
+  const t0Roles = ['Global Administrator', 'Privileged Role Administrator', 'Partner Tier2 Support'];
+  const t1Roles = ['User Administrator', 'Exchange Administrator', 'Intune Administrator', 'Security Administrator', 'Compliance Administrator'];
+  const t0Scopes = ['Owner'];
+  const t1Scopes = ['Contributor'];
+
+  for (const r of roles) {
+    const name = r.role_name || '';
+    const type = safeLower(r.role_type);
+    const scope = r.scope || '';
+
+    if (type === 'entra') {
+      if (t0Roles.some(t => name.includes(t))) {
+        if (maxTier > 0) maxTier = 0;
+        reasons.push(`Entra: ${name}`);
+      } else if (t1Roles.some(t => name.includes(t))) {
+        if (maxTier > 1) maxTier = 1;
+        reasons.push(`Entra: ${name}`);
+      } else if (maxTier > 2) {
+        maxTier = 2;
+        reasons.push(`Entra: ${name}`);
+      }
+    } else {
+      // Azure RBAC
+      const isSubScope = scope.match(/^\/subscriptions\/[^/]+$/) || scope === '/';
+      if (t0Scopes.some(t => name.includes(t)) && isSubScope) {
+        if (maxTier > 0) maxTier = 0;
+        reasons.push(`RBAC: ${name} at ${scope.substring(0, 60)}`);
+      } else if (t1Scopes.some(t => name.includes(t)) && isSubScope) {
+        if (maxTier > 1) maxTier = 1;
+        reasons.push(`RBAC: ${name} at ${scope.substring(0, 60)}`);
+      } else if (safeLower(r.risk_level) === 'critical' || safeLower(r.risk_level) === 'high') {
+        if (maxTier > 2) maxTier = 2;
+        reasons.push(`RBAC: ${name}`);
+      }
+    }
   }
+
+  // Check Graph API permissions for T2 elevation
+  const riskyPerms = graphPerms.filter(p => safeLower(p.risk_level) === 'critical' || safeLower(p.risk_level) === 'high');
+  if (riskyPerms.length > 0 && maxTier > 2) {
+    maxTier = 2;
+    reasons.push(`${riskyPerms.length} high-risk Graph API permission${riskyPerms.length > 1 ? 's' : ''}`);
+  }
+
+  return { tier: maxTier, reasons: reasons.slice(0, 5) };
+}
+
+function parseEffectiveAccessScope(roles: any[]): { subscriptions: string[]; resourceGroups: string[]; tenantWide: boolean; entraScopes: string[] } {
+  const subs = new Set<string>();
+  const rgs = new Set<string>();
+  const entraScopes = new Set<string>();
+  let tenantWide = false;
+
+  for (const r of roles) {
+    const scope = r.scope || '';
+    const type = safeLower(r.role_type);
+
+    if (type === 'entra') {
+      entraScopes.add(scope === '/' ? 'Tenant-wide' : scope);
+      if (scope === '/') tenantWide = true;
+    } else {
+      const subMatch = scope.match(/\/subscriptions\/([^/]+)/);
+      if (subMatch) subs.add(subMatch[1]);
+      const rgMatch = scope.match(/\/resourceGroups\/([^/]+)/);
+      if (rgMatch) rgs.add(rgMatch[1]);
+      if (scope === '/') tenantWide = true;
+    }
+  }
+
+  return { subscriptions: Array.from(subs), resourceGroups: Array.from(rgs), tenantWide, entraScopes: Array.from(entraScopes) };
 }
 
 // Tab component
@@ -328,6 +419,10 @@ export default function IdentityDetail() {
     return { azure, entra };
   }, [data]);
 
+  // Pillar 4: Identity-centric computed values
+  const privilegeTier = useMemo(() => computePrivilegeTier(data?.roles || [], data?.graph_permissions || []), [data]);
+  const effectiveScope = useMemo(() => parseEffectiveAccessScope(data?.roles || []), [data]);
+
   const intelByRole = useMemo(() => {
     const map: Record<string, RoleIntelligence> = {};
     (data?.role_intelligence || []).forEach(ri => { map[ri.role_name] = ri; });
@@ -379,11 +474,43 @@ export default function IdentityDetail() {
 
                 <div className="flex flex-wrap items-center gap-2 mt-3">
                   {riskBadge(identity.risk_level)}
+                  {/* Trend badge (Pillar 6) */}
+                  {data?.trend?.risk_direction === 'new' && (
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-700 border border-indigo-200">
+                      NEW
+                    </span>
+                  )}
+                  {data?.trend?.risk_direction === 'worsened' && (
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200" title={`Was ${data.trend.previous_risk_level || 'lower'} in previous run`}>
+                      ↑ WORSENED
+                    </span>
+                  )}
+                  {data?.trend?.risk_direction === 'improved' && (
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200" title={`Was ${data.trend.previous_risk_level || 'higher'} in previous run`}>
+                      ↓ IMPROVED
+                    </span>
+                  )}
                   {identity.risk_score !== undefined && (
                     <span className="px-2 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">
                       {identity.risk_score} pts
+                      {data?.trend?.previous_risk_score != null && data.trend.risk_direction !== 'new' && (
+                        <span className="ml-1 opacity-70">
+                          (was {data.trend.previous_risk_score})
+                        </span>
+                      )}
                     </span>
                   )}
+                  {(() => {
+                    const tc = TIER_CONFIG[privilegeTier.tier];
+                    return (
+                      <span
+                        className={`px-2 py-1 rounded-full border text-xs font-bold ${tc.color}`}
+                        title={`${tc.name}: ${tc.description}`}
+                      >
+                        {tc.label}
+                      </span>
+                    );
+                  })()}
                   <span className="px-2 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700 uppercase">
                     {identity.cloud || 'azure'}
                   </span>
@@ -406,14 +533,19 @@ export default function IdentityDetail() {
               {/* Key metrics */}
               <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-sm">
                 <div className="text-gray-500">Created</div>
-                <div className="font-medium text-gray-900">{formatDate(identity.created_datetime)}</div>
+                <div className="font-medium text-gray-900">
+                  {identity.created_datetime
+                    ? formatDate(identity.created_datetime)
+                    : <span className="text-gray-400 italic" title="Creation date not available from Graph API for this identity type">Unknown</span>
+                  }
+                </div>
 
                 <div className="text-gray-500">Last Sign-in</div>
                 <div className="font-medium">
                   {identity.last_sign_in ? (
                     <span className="text-gray-900">{formatDate(identity.last_sign_in)}</span>
                   ) : (
-                    <span className="text-gray-400 italic">Premium P1/P2 required</span>
+                    <span className="text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>Unknown — P1/P2 required</span>
                   )}
                 </div>
 
@@ -429,11 +561,40 @@ export default function IdentityDetail() {
                 </div>
 
                 <div className="text-gray-500">Owner</div>
-                <div className="font-medium text-gray-900">
-                  {identity.owner_display_name || <span className="text-gray-400">No owner</span>}
+                <div className="font-medium">
+                  {identity.owner_display_name
+                    ? <span className="text-gray-900">{identity.owner_display_name}</span>
+                    : <span className="text-orange-600" title="No owner assigned — assign an owner for accountability and incident response">Unowned</span>
+                  }
                 </div>
               </div>
             </div>
+
+            {/* Evidence trail */}
+            {data?.evidence && (
+              <div className="mt-4 pt-3 border-t flex items-center gap-4 text-[10px] text-gray-400">
+                <div className="flex items-center gap-1.5">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Run #{data.evidence.run_id}
+                </div>
+                {data.evidence.collected_at && (
+                  <div className="flex items-center gap-1.5">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Collected {new Date(data.evidence.collected_at).toLocaleString()}
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                  </svg>
+                  Microsoft Graph API + Azure Resource Manager
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Tabs */}
@@ -444,48 +605,204 @@ export default function IdentityDetail() {
               {/* Overview Tab */}
               {activeTab === 'overview' && (
                 <div className="space-y-6">
-                  {/* Quick stats grid */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div className="bg-gray-50 rounded-xl p-4 text-center">
-                      <div className="text-2xl font-bold text-gray-900">{(data?.roles || []).length}</div>
-                      <div className="text-xs text-gray-500 mt-1">Total Roles</div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-4 text-center">
-                      <div className="text-2xl font-bold text-purple-700">{identity.api_permission_count ?? 0}</div>
-                      <div className="text-xs text-gray-500 mt-1">API Permissions</div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-4 text-center">
-                      <div className="text-2xl font-bold text-gray-900">{identity.credential_count ?? 0}</div>
-                      <div className="text-xs text-gray-500 mt-1">Credentials</div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-4 text-center">
-                      <div className="text-2xl font-bold text-gray-900">{(data?.owners || []).length}</div>
-                      <div className="text-xs text-gray-500 mt-1">Owners</div>
+                  {/* Identity Security Posture — 4-quadrant view */}
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {/* Activity */}
+                      {(() => {
+                        const dormant = getDormantStatusFromActivity(identity.activity_status || undefined);
+                        const dcfg = DORMANT_LABELS[dormant];
+                        return (
+                          <div className="border rounded-xl p-4" title={dcfg.tooltip}>
+                            <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
+                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${dcfg.color}`}>{dcfg.label}</span>
+                            <div className="text-[10px] text-gray-500 mt-2">
+                              {identity.last_sign_in
+                                ? `Last sign-in: ${formatDate(identity.last_sign_in)}`
+                                : DATA_EXPLANATIONS.SIGN_IN
+                              }
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Credentials */}
+                      <div className="border rounded-xl p-4">
+                        <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Credentials</div>
+                        {(identity.identity_category === 'human_user' || identity.identity_category === 'guest') ? (
+                          <span className="text-xs text-gray-400 italic">N/A (Entra ID auth)</span>
+                        ) : (
+                          <>
+                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                              safeLower(identity.credential_status) === 'expired' ? 'bg-red-100 text-red-700' :
+                              safeLower(identity.credential_status) === 'expiring_soon' ? 'bg-orange-100 text-orange-700' :
+                              safeLower(identity.credential_status) === 'valid' ? 'bg-green-100 text-green-700' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>
+                              {identity.credential_status || 'No credentials'}
+                            </span>
+                            <div className="text-[10px] text-gray-500 mt-2">
+                              {(identity.credential_count ?? 0)} secret{(identity.credential_count ?? 0) !== 1 ? 's' : ''}/cert{(identity.credential_count ?? 0) !== 1 ? 's' : ''}
+                              {identity.credential_expiration && (
+                                <span className="ml-1">· {credentialCountdown(identity.credential_expiration)}</span>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Conditional Access */}
+                      <div className="border rounded-xl p-4">
+                        <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">CA Coverage</div>
+                        {identity.ca_coverage_status ? (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                                identity.ca_coverage_status === 'covered' ? 'bg-green-100 text-green-700' :
+                                identity.ca_coverage_status === 'partial' ? 'bg-yellow-100 text-yellow-700' :
+                                'bg-red-100 text-red-700'
+                              }`}>
+                                {identity.ca_coverage_status === 'covered' ? 'Covered' :
+                                 identity.ca_coverage_status === 'partial' ? 'Partial' : 'Not Covered'}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-2">
+                              {identity.ca_mfa_enforced ? 'MFA enforced' : 'No MFA requirement'}
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-xs text-gray-400 italic" title={DATA_EXPLANATIONS.CA_POLICY}>Unknown</span>
+                        )}
+                      </div>
+
+                      {/* PIM */}
+                      <div className="border rounded-xl p-4">
+                        <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">PIM</div>
+                        {pimData ? (
+                          <>
+                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                              pimData.eligible_assignments.length > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                            }`}>
+                              {pimData.eligible_assignments.length > 0 ? `${pimData.eligible_assignments.length} eligible` : 'None'}
+                            </span>
+                            {pimData.overuse_metrics.always_active_pattern && (
+                              <div className="text-[10px] text-red-600 mt-2 font-medium">Always-active pattern detected</div>
+                            )}
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => setActiveTab('pim')}
+                            className="text-xs text-blue-600 hover:underline"
+                          >
+                            Load PIM data
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  {/* Activity */}
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 mb-2">Activity Status</div>
-                    <div className="text-sm">
-                      {identity.last_sign_in ? (
-                        <span className={
-                          identity.activity_status === 'active' ? 'text-green-600 font-medium' :
-                          identity.activity_status === 'inactive' ? 'text-yellow-600 font-medium' :
-                          identity.activity_status === 'stale' ? 'text-orange-600 font-medium' :
-                          'text-gray-600'
-                        }>
-                          {identity.activity_status === 'active' ? 'Active (signed in within 30 days)' :
-                           identity.activity_status === 'inactive' ? 'Inactive (30-90 days since last sign-in)' :
-                           identity.activity_status === 'stale' ? 'Stale (90+ days since last sign-in)' :
-                           identity.activity_status || 'Unknown'}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400 italic">
-                          Sign-in data unavailable — requires Azure AD Premium P1/P2
-                        </span>
+                  {/* Privilege Tier Explanation */}
+                  {(() => {
+                    const tc = TIER_CONFIG[privilegeTier.tier];
+                    return (
+                      <div className={`border rounded-xl p-4 ${tc.borderColor}`}>
+                        <div className="flex items-center gap-3 mb-2">
+                          <span className={`px-2.5 py-1 rounded-full border text-sm font-bold ${tc.color}`}>{tc.label}</span>
+                          <div>
+                            <div className="text-sm font-semibold text-gray-900">{tc.name}</div>
+                            <div className="text-xs text-gray-500">{tc.description}</div>
+                          </div>
+                        </div>
+                        {privilegeTier.reasons.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider">Classification reasons</div>
+                            {privilegeTier.reasons.map((r, i) => (
+                              <div key={i} className="text-xs text-gray-600 flex items-center gap-1.5">
+                                <span className="w-1 h-1 rounded-full bg-gray-400 flex-shrink-0" />
+                                {r}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Effective Access Scope */}
+                  {(effectiveScope.subscriptions.length > 0 || effectiveScope.entraScopes.length > 0 || (data?.roles || []).length > 0) && (
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 mb-3">Effective Access Scope</div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {/* Entra Directory */}
+                        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                          <div className="text-[10px] uppercase font-semibold text-indigo-400 tracking-wider mb-2">Entra Directory</div>
+                          <div className="text-lg font-bold text-indigo-700">{groupedRoles.entra.length} role{groupedRoles.entra.length !== 1 ? 's' : ''}</div>
+                          <div className="text-[10px] text-gray-500 mt-1">
+                            {effectiveScope.tenantWide
+                              ? <span className="text-red-600 font-medium">Tenant-wide scope</span>
+                              : effectiveScope.entraScopes.length > 0
+                                ? `${effectiveScope.entraScopes.length} scoped`
+                                : 'No Entra roles'
+                            }
+                          </div>
+                        </div>
+
+                        {/* Azure RBAC */}
+                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                          <div className="text-[10px] uppercase font-semibold text-blue-400 tracking-wider mb-2">Azure RBAC</div>
+                          <div className="text-lg font-bold text-blue-700">{groupedRoles.azure.length} role{groupedRoles.azure.length !== 1 ? 's' : ''}</div>
+                          <div className="text-[10px] text-gray-500 mt-1">
+                            {effectiveScope.subscriptions.length > 0
+                              ? `${effectiveScope.subscriptions.length} sub${effectiveScope.subscriptions.length !== 1 ? 's' : ''}, ${effectiveScope.resourceGroups.length} RG${effectiveScope.resourceGroups.length !== 1 ? 's' : ''}`
+                              : 'No RBAC roles'
+                            }
+                          </div>
+                        </div>
+
+                        {/* Graph API */}
+                        <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
+                          <div className="text-[10px] uppercase font-semibold text-purple-400 tracking-wider mb-2">Graph API</div>
+                          <div className="text-lg font-bold text-purple-700">{identity.api_permission_count ?? 0} perm{(identity.api_permission_count ?? 0) !== 1 ? 's' : ''}</div>
+                          <div className="text-[10px] text-gray-500 mt-1">
+                            {(identity.app_role_count ?? 0) > 0 ? `+ ${identity.app_role_count} app role${(identity.app_role_count ?? 0) !== 1 ? 's' : ''}` : 'Application-level access'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Scope details */}
+                      {effectiveScope.subscriptions.length > 0 && (
+                        <div className="mt-3 text-xs text-gray-500">
+                          <span className="font-medium text-gray-700">Subscriptions:</span>{' '}
+                          {effectiveScope.subscriptions.map((s, i) => (
+                            <span key={s}>
+                              <span className="font-mono text-gray-600">{s.substring(0, 8)}...</span>
+                              {i < effectiveScope.subscriptions.length - 1 && ', '}
+                            </span>
+                          ))}
+                        </div>
                       )}
                     </div>
+                  )}
+
+                  {/* Quick stats grid */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <button onClick={() => setActiveTab('roles')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+                      <div className="text-2xl font-bold text-gray-900">{(data?.roles || []).length}</div>
+                      <div className="text-xs text-gray-500 mt-1">Total Roles</div>
+                    </button>
+                    <button onClick={() => setActiveTab('permissions')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+                      <div className="text-2xl font-bold text-purple-700">{identity.api_permission_count ?? 0}</div>
+                      <div className="text-xs text-gray-500 mt-1">API Permissions</div>
+                    </button>
+                    <button onClick={() => setActiveTab('credentials')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+                      <div className="text-2xl font-bold text-gray-900">{identity.credential_count ?? 0}</div>
+                      <div className="text-xs text-gray-500 mt-1">Credentials</div>
+                    </button>
+                    <button onClick={() => setActiveTab('ownership')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+                      <div className="text-2xl font-bold text-gray-900">{(data?.owners || []).length}</div>
+                      <div className="text-xs text-gray-500 mt-1">Owners</div>
+                    </button>
                   </div>
 
                   {/* Risk reasons */}
@@ -508,39 +825,14 @@ export default function IdentityDetail() {
                       <div className="text-sm text-gray-500">No risk reasons recorded.</div>
                     )}
                   </div>
-
-                  {/* Conditional Access Coverage */}
-                  {identity.ca_coverage_status && (
-                    <div>
-                      <div className="text-sm font-semibold text-gray-900 mb-2">Conditional Access</div>
-                      <div className="flex items-center gap-3">
-                        <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                          identity.ca_coverage_status === 'covered'
-                            ? 'bg-green-100 text-green-700'
-                            : identity.ca_coverage_status === 'partial'
-                            ? 'bg-yellow-100 text-yellow-700'
-                            : identity.ca_coverage_status === 'excluded'
-                            ? 'bg-red-100 text-red-700'
-                            : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          {identity.ca_coverage_status === 'covered' ? 'Covered' :
-                           identity.ca_coverage_status === 'partial' ? 'Partial' :
-                           identity.ca_coverage_status === 'excluded' ? 'Excluded' : 'No Coverage'}
-                        </span>
-                        {identity.ca_mfa_enforced ? (
-                          <span className="px-2 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">MFA Enforced</span>
-                        ) : (
-                          <span className="px-2 py-1 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">No MFA</span>
-                        )}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
 
               {/* Roles Tab */}
               {activeTab === 'roles' && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div>
+                  <DataSource label="Azure Resource Manager + Microsoft Graph API" apiSource="/roleAssignments, /roleManagement/directory" collectedAt={data?.evidence?.collected_at} />
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-3">
                   {/* Azure RBAC */}
                   <div>
                     <div className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -651,11 +943,13 @@ export default function IdentityDetail() {
                     )}
                   </div>
                 </div>
+                </div>
               )}
 
               {/* Permissions Tab */}
               {activeTab === 'permissions' && (
                 <div className="space-y-6">
+                  <DataSource label="Microsoft Graph API" apiSource="/servicePrincipals/{id}/appRoleAssignments" collectedAt={data?.evidence?.collected_at} />
                   {/* Graph API Permissions */}
                   <div>
                     <div className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -713,10 +1007,20 @@ export default function IdentityDetail() {
               {/* Credentials Tab */}
               {activeTab === 'credentials' && (
                 <div className="space-y-4">
+                  <DataSource label="Microsoft Graph API" apiSource="/applications/{id}/passwordCredentials + keyCredentials" collectedAt={data?.evidence?.collected_at} />
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="bg-gray-50 rounded-xl p-4">
                       <div className="text-xs text-gray-500 mb-1">Credential Count</div>
-                      <div className="text-2xl font-bold text-gray-900">{identity.credential_count ?? 0}</div>
+                      {(identity.identity_category === 'human_user' || identity.identity_category === 'guest') ? (
+                        <div className="text-sm text-gray-400 italic mt-1" title={DATA_EXPLANATIONS.CREDENTIAL_NA}>N/A — Entra ID auth</div>
+                      ) : (identity.credential_count ?? 0) > 0 ? (
+                        <div className="text-2xl font-bold text-gray-900">{identity.credential_count}</div>
+                      ) : (
+                        <div>
+                          <div className="text-2xl font-bold text-gray-900">0</div>
+                          <div className="text-[10px] text-gray-400">No secrets or certificates registered</div>
+                        </div>
+                      )}
                     </div>
                     <div className="bg-gray-50 rounded-xl p-4">
                       <div className="text-xs text-gray-500 mb-1">Status</div>
@@ -730,8 +1034,10 @@ export default function IdentityDetail() {
                           }>
                             {identity.credential_status}
                           </span>
+                        ) : (identity.identity_category === 'human_user' || identity.identity_category === 'guest') ? (
+                          <span className="text-gray-400 italic">N/A</span>
                         ) : (
-                          <span className="text-gray-400">Unknown</span>
+                          <span className="text-gray-400 italic" title="No credentials registered for this identity">No credentials</span>
                         )}
                       </div>
                     </div>
@@ -739,15 +1045,20 @@ export default function IdentityDetail() {
                       <div className="text-xs text-gray-500 mb-1">Next Expiration</div>
                       <div className="text-sm font-semibold text-gray-900">
                         {identity.credential_expiration ? (
-                          <span className={
-                            new Date(identity.credential_expiration) < new Date() ? 'text-red-700' :
-                            new Date(identity.credential_expiration) < new Date(Date.now() + 30 * 86400000) ? 'text-orange-700' :
-                            'text-green-700'
-                          }>
-                            {formatDate(identity.credential_expiration)}
-                          </span>
+                          <div>
+                            <span className={
+                              new Date(identity.credential_expiration) < new Date() ? 'text-red-700' :
+                              new Date(identity.credential_expiration) < new Date(Date.now() + 30 * 86400000) ? 'text-orange-700' :
+                              'text-green-700'
+                            }>
+                              {formatDate(identity.credential_expiration)}
+                            </span>
+                            <div className="mt-1">{credentialCountdown(identity.credential_expiration)}</div>
+                          </div>
+                        ) : (identity.credential_count ?? 0) > 0 ? (
+                          <span className="text-yellow-600" title="Credentials exist but have no expiration set">No expiration set</span>
                         ) : (
-                          <span className="text-gray-400">No expiration</span>
+                          <span className="text-gray-400 italic">N/A</span>
                         )}
                       </div>
                     </div>
@@ -755,7 +1066,7 @@ export default function IdentityDetail() {
 
                   {(identity.identity_category === 'human_user' || identity.identity_category === 'guest') && (
                     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-700">
-                      Human users and guests authenticate via Entra ID credentials (passwords, MFA).
+                      {DATA_EXPLANATIONS.CREDENTIAL_NA}.
                       Secret/certificate tracking applies to service principals and managed identities.
                     </div>
                   )}
@@ -797,6 +1108,7 @@ export default function IdentityDetail() {
                       ))}
                     </div>
                   )}
+                  <DataSource label="Microsoft Graph API" apiSource="/servicePrincipals/{id}/owners" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
 
@@ -820,7 +1132,7 @@ export default function IdentityDetail() {
                       </svg>
                       <div className="text-sm text-gray-500">No PIM data available for this identity.</div>
                       <div className="text-xs text-gray-400 mt-1">
-                        PIM requires Azure AD P2 license. Eligible roles and activations will appear here when available.
+                        {DATA_EXPLANATIONS.PIM}. Eligible roles and activations will appear here when available.
                       </div>
                     </div>
                   ) : (
@@ -962,6 +1274,7 @@ export default function IdentityDetail() {
                       </div>
                     </>
                   )}
+                  <DataSource label="Microsoft Graph API" apiSource="/roleManagement/directory/roleEligibilityScheduleInstances" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
 
@@ -1076,6 +1389,11 @@ export default function IdentityDetail() {
                                         {ap.company_affected && <span className="font-medium">{ap.company_affected}</span>}
                                         {ap.breach_year > 0 && <span>{ap.breach_year}</span>}
                                       </div>
+                                      {ap.source && (
+                                        <div className="mt-1.5 text-[10px] text-gray-400 italic">
+                                          Source: {ap.source}
+                                        </div>
+                                      )}
                                     </div>
                                   ))}
                                 </div>
@@ -1126,6 +1444,7 @@ export default function IdentityDetail() {
                       ))}
                     </div>
                   )}
+                  <DataSource label="AuditGraph Intelligence Engine" apiSource="Role-based GRC mapping" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
             </div>

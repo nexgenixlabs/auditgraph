@@ -1,5 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { RISK_LEVELS, RISK_SOLID, getCategoryLabel } from '../../constants/metrics';
 
 interface CategoryRiskData {
   key: string;
@@ -14,25 +15,6 @@ interface CategoryRiskData {
 interface RiskHeatMapProps {
   categories: CategoryRiskData[];
 }
-
-const categoryLabels: Record<string, string> = {
-  service_principal: 'Service Principal',
-  managed_identity_system: 'System MI',
-  managed_identity_user: 'User MI',
-  human_user: 'Human User',
-  guest: 'Guest',
-  microsoft_internal: 'Microsoft',
-};
-
-const riskLevels = ['critical', 'high', 'medium', 'low', 'info'] as const;
-
-const riskColors: Record<string, { bg: string; hover: string; text: string }> = {
-  critical: { bg: 'bg-red-500', hover: 'hover:bg-red-600', text: 'text-white' },
-  high: { bg: 'bg-orange-500', hover: 'hover:bg-orange-600', text: 'text-white' },
-  medium: { bg: 'bg-yellow-400', hover: 'hover:bg-yellow-500', text: 'text-gray-900' },
-  low: { bg: 'bg-green-400', hover: 'hover:bg-green-500', text: 'text-white' },
-  info: { bg: 'bg-blue-400', hover: 'hover:bg-blue-500', text: 'text-white' },
-};
 
 function getCellIntensity(count: number, maxCount: number): number {
   if (count === 0) return 0;
@@ -65,7 +47,7 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
           <thead>
             <tr className="border-b">
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-              {riskLevels.map(level => (
+              {RISK_LEVELS.map(level => (
                 <th key={level} className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase">
                   {level}
                 </th>
@@ -77,12 +59,12 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
             {categories.map(cat => (
               <tr key={cat.key} className="hover:bg-gray-50">
                 <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                  {categoryLabels[cat.key] || cat.key}
+                  {getCategoryLabel(cat.key)}
                 </td>
-                {riskLevels.map(level => {
+                {RISK_LEVELS.map(level => {
                   const count = cat[level as keyof CategoryRiskData] as number;
                   const intensity = getCellIntensity(count, maxCount);
-                  const colors = riskColors[level];
+                  const colors = RISK_SOLID[level];
 
                   return (
                     <td key={level} className="px-3 py-3 text-center">
@@ -93,7 +75,7 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
                             inline-flex items-center justify-center
                             min-w-[40px] px-2 py-1 rounded-lg
                             text-sm font-semibold
-                            ${colors.bg} ${colors.hover} ${colors.text}
+                            ${colors.bg} ${colors.hoverBg} ${colors.text}
                             transition cursor-pointer
                           `}
                           style={{ opacity: 0.4 + intensity * 0.6 }}
@@ -115,9 +97,9 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
           <tfoot className="border-t bg-gray-50">
             <tr>
               <td className="px-4 py-3 text-sm font-semibold text-gray-900">Total</td>
-              {riskLevels.map(level => {
+              {RISK_LEVELS.map(level => {
                 const total = categories.reduce((sum, c) => sum + (c[level as keyof CategoryRiskData] as number), 0);
-                const colors = riskColors[level];
+                const colors = RISK_SOLID[level];
                 return (
                   <td key={level} className="px-3 py-3 text-center">
                     <span className={`inline-flex items-center justify-center min-w-[40px] px-2 py-1 rounded-lg text-sm font-bold ${colors.bg} ${colors.text}`}>

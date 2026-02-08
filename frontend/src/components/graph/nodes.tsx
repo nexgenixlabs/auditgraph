@@ -17,6 +17,37 @@ const riskText: Record<string, string> = {
   info: 'text-blue-600',
 };
 
+const roleBadgeColors: Record<string, string> = {
+  critical: 'bg-red-100 text-red-700 border-red-200',
+  high: 'bg-orange-100 text-orange-700 border-orange-200',
+  medium: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+  low: 'bg-green-100 text-green-700 border-green-200',
+  info: 'bg-blue-100 text-blue-600 border-blue-200',
+};
+
+interface RoleData {
+  name: string;
+  risk_level: string;
+}
+
+function InlineRoleBadges({ roles }: { roles: RoleData[] }) {
+  if (!roles || roles.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1 mt-1.5">
+      {roles.map((r, i) => (
+        <span
+          key={i}
+          className={`text-[9px] px-1.5 py-0.5 rounded border font-semibold ${
+            roleBadgeColors[r.risk_level] || 'bg-gray-100 text-gray-600 border-gray-200'
+          }`}
+        >
+          {r.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // Central identity node
 export function IdentityNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-blue-500 bg-blue-50';
@@ -231,12 +262,13 @@ export function ScopeNode({ data }: NodeProps) {
   );
 }
 
-// Subscription node (ARM hierarchy)
+// Subscription node (ARM hierarchy) — roles rendered inline
 export function SubscriptionNode({ data }: NodeProps) {
+  const roles = (data.roles as RoleData[]) || [];
   return (
     <div
-      title={`Subscription: ${data.full_id || data.label}`}
-      className="px-4 py-2.5 rounded-lg border-2 border-blue-400 bg-blue-50 shadow-sm max-w-[220px]"
+      title={`Subscription: ${data.full_id || data.label}${roles.length ? '\nRoles: ' + roles.map(r => r.name).join(', ') : ''}`}
+      className="px-4 py-2.5 rounded-lg border-2 border-blue-400 bg-blue-50 shadow-sm max-w-[260px]"
     >
       <Handle type="target" position={Position.Left} className="!bg-blue-400" />
       <div className="flex items-center gap-2">
@@ -248,17 +280,19 @@ export function SubscriptionNode({ data }: NodeProps) {
           <div className="text-xs font-medium text-gray-900 truncate">{data.label as string}</div>
         </div>
       </div>
+      <InlineRoleBadges roles={roles} />
       <Handle type="source" position={Position.Right} className="!bg-blue-400" />
     </div>
   );
 }
 
-// Resource group node (ARM hierarchy)
+// Resource group node (ARM hierarchy) — roles rendered inline
 export function ResourceGroupNode({ data }: NodeProps) {
+  const roles = (data.roles as RoleData[]) || [];
   return (
     <div
-      title={`Resource Group: ${data.label}`}
-      className="px-3 py-2 rounded-lg border border-gray-300 bg-gray-50 shadow-sm max-w-[200px]"
+      title={`Resource Group: ${data.label}${roles.length ? '\nRoles: ' + roles.map(r => r.name).join(', ') : ''}`}
+      className="px-3 py-2 rounded-lg border border-gray-300 bg-gray-50 shadow-sm max-w-[240px]"
     >
       <Handle type="target" position={Position.Left} className="!bg-gray-400" />
       <div className="flex items-center gap-1.5">
@@ -270,17 +304,19 @@ export function ResourceGroupNode({ data }: NodeProps) {
           <div className="text-xs font-medium text-gray-900 truncate">{data.label as string}</div>
         </div>
       </div>
+      <InlineRoleBadges roles={roles} />
       <Handle type="source" position={Position.Right} className="!bg-gray-400" />
     </div>
   );
 }
 
-// Resource node (ARM hierarchy)
+// Resource node (ARM hierarchy) — roles rendered inline
 export function ResourceNode({ data }: NodeProps) {
+  const roles = (data.roles as RoleData[]) || [];
   return (
     <div
-      title={`${data.full_type || data.resource_type}: ${data.label}`}
-      className="px-3 py-2 rounded border border-dashed border-purple-300 bg-purple-50 shadow-sm max-w-[220px]"
+      title={`${data.full_type || data.resource_type}: ${data.label}${roles.length ? '\nRoles: ' + roles.map(r => r.name).join(', ') : ''}`}
+      className="px-3 py-2 rounded border border-dashed border-purple-300 bg-purple-50 shadow-sm max-w-[240px]"
     >
       <Handle type="target" position={Position.Left} className="!bg-purple-300" />
       <div className="flex items-center gap-1.5">
@@ -292,16 +328,18 @@ export function ResourceNode({ data }: NodeProps) {
           <div className="text-[10px] font-semibold text-gray-900 truncate">{data.label as string}</div>
         </div>
       </div>
+      <InlineRoleBadges roles={roles} />
     </div>
   );
 }
 
-// Entra directory container node (ARM hierarchy)
+// Entra directory node — roles rendered inline
 export function EntraDirectoryNode({ data }: NodeProps) {
+  const roles = (data.roles as RoleData[]) || [];
   return (
     <div
-      title={`Entra ID Directory: ${data.count || 0} role${(data.count as number) !== 1 ? 's' : ''}`}
-      className="px-4 py-2.5 rounded-lg border-2 border-indigo-400 bg-indigo-50 shadow-sm max-w-[200px]"
+      title={`Entra ID Directory\nRoles: ${roles.map(r => r.name).join(', ') || 'None'}`}
+      className="px-4 py-2.5 rounded-lg border-2 border-indigo-400 bg-indigo-50 shadow-sm max-w-[260px]"
     >
       <Handle type="target" position={Position.Left} className="!bg-indigo-400" />
       <div className="flex items-center gap-2">
@@ -310,14 +348,9 @@ export function EntraDirectoryNode({ data }: NodeProps) {
         </svg>
         <div>
           <div className="text-xs font-bold text-indigo-700">Entra Directory</div>
-          {!!(data.count as number) && (
-            <div className="text-[9px] text-gray-500">
-              {data.count as number} role{(data.count as number) !== 1 ? 's' : ''}
-            </div>
-          )}
         </div>
       </div>
-      <Handle type="source" position={Position.Right} className="!bg-indigo-400" />
+      <InlineRoleBadges roles={roles} />
     </div>
   );
 }

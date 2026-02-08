@@ -1,19 +1,9 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface PostureScoreProps {
   score: number;
-  previousRun?: {
-    total_identities: number;
-    critical_count: number;
-    high_count: number;
-    medium_count: number;
-  } | null;
-  currentRun?: {
-    total_identities: number;
-    critical_count: number;
-    high_count: number;
-    medium_count: number;
-  } | null;
+  previousScore?: number | null;
 }
 
 function getGrade(score: number): { label: string; color: string } {
@@ -32,29 +22,8 @@ function getArcColor(score: number): string {
   return '#ef4444';
 }
 
-function TrendArrow({ current, previous, label, inverse = false }: {
-  current: number;
-  previous: number;
-  label: string;
-  inverse?: boolean;
-}) {
-  const diff = current - previous;
-  if (diff === 0) return null;
-
-  const isGood = inverse ? diff < 0 : diff > 0;
-  const arrow = diff > 0 ? '+' : '';
-
-  return (
-    <div className="flex items-center gap-1 text-xs">
-      <span className="text-gray-500">{label}:</span>
-      <span className={isGood ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
-        {arrow}{diff}
-      </span>
-    </div>
-  );
-}
-
-export default function PostureScore({ score, previousRun, currentRun }: PostureScoreProps) {
+export default function PostureScore({ score, previousScore }: PostureScoreProps) {
+  const navigate = useNavigate();
   const grade = getGrade(score);
   const arcColor = getArcColor(score);
 
@@ -64,13 +33,22 @@ export default function PostureScore({ score, previousRun, currentRun }: Posture
   const circumference = Math.PI * radius; // Half circle
   const dashLength = (score / 100) * circumference;
 
-  const hasTrend = previousRun && currentRun;
+  const scoreDelta = previousScore != null ? Math.round((score - previousScore) * 10) / 10 : null;
+  const isImproved = scoreDelta !== null && scoreDelta > 0;
+  const isDeclined = scoreDelta !== null && scoreDelta < 0;
 
   return (
-    <div className="bg-white border rounded-xl p-5">
-      <div className="text-sm font-semibold text-gray-900 mb-3">Security Posture</div>
+    <div
+      className="bg-white border rounded-xl p-5 cursor-pointer hover:shadow-md transition"
+      onClick={() => navigate('/identities?risk_level=critical')}
+      title="View critical risk identities"
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-gray-900">Security Posture</div>
+        <span className="text-[10px] text-gray-400">Click to drill down</span>
+      </div>
 
-      <div className="flex items-center gap-6">
+      <div className="flex flex-col items-center">
         {/* Arc gauge */}
         <div className="relative flex-shrink-0" style={{ width: size, height: size / 2 + 20 }}>
           <svg width={size} height={size / 2 + 10} viewBox={`0 0 ${size} ${size / 2 + 10}`}>
@@ -99,41 +77,26 @@ export default function PostureScore({ score, previousRun, currentRun }: Posture
           </div>
         </div>
 
-        {/* Trend comparison */}
-        <div className="flex-1 min-w-0">
-          {hasTrend ? (
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium text-gray-700 mb-2">vs Previous Run</div>
-              <TrendArrow
-                current={currentRun!.critical_count}
-                previous={previousRun!.critical_count}
-                label="Critical"
-                inverse
-              />
-              <TrendArrow
-                current={currentRun!.high_count}
-                previous={previousRun!.high_count}
-                label="High"
-                inverse
-              />
-              <TrendArrow
-                current={currentRun!.medium_count}
-                previous={previousRun!.medium_count}
-                label="Medium"
-                inverse
-              />
-              <TrendArrow
-                current={currentRun!.total_identities}
-                previous={previousRun!.total_identities}
-                label="Total"
-              />
-            </div>
-          ) : (
-            <div className="text-xs text-gray-400 italic">
-              Trend data available after 2+ runs
-            </div>
-          )}
-        </div>
+        {/* Delta vs previous run */}
+        {scoreDelta !== null && scoreDelta !== 0 ? (
+          <div className={`mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg ${isImproved ? 'bg-green-50' : 'bg-red-50'}`}>
+            <svg className={`w-4 h-4 ${isImproved ? 'text-green-600' : 'text-red-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isImproved ? 'M5 10l7-7m0 0l7 7m-7-7v18' : 'M19 14l-7 7m0 0l-7-7m7 7V3'} />
+            </svg>
+            <span className={`text-sm font-semibold ${isImproved ? 'text-green-700' : 'text-red-700'}`}>
+              {Math.abs(scoreDelta)}%
+            </span>
+            <span className="text-xs text-gray-500">vs previous run</span>
+          </div>
+        ) : scoreDelta === 0 ? (
+          <div className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50">
+            <span className="text-xs text-gray-500">No change vs previous run</span>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-gray-400 italic">
+            Trend data available after 2+ runs
+          </div>
+        )}
       </div>
     </div>
   );

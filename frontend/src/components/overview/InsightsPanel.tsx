@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { RISK_BADGE, CLOUD_BADGE, THRESHOLDS, getCategoryShortLabel } from '../../constants/metrics';
 
 interface TierIdentity {
   identity_id: string;
@@ -35,27 +36,7 @@ interface InsightsPanelProps {
   loading?: boolean;
 }
 
-const categoryLabels: Record<string, string> = {
-  service_principal: 'SPN',
-  managed_identity_system: 'Sys MI',
-  managed_identity_user: 'Usr MI',
-  human_user: 'Human',
-  guest: 'Guest',
-  microsoft_internal: 'MSFT',
-};
-
-const cloudColors: Record<string, string> = {
-  azure: 'bg-blue-100 text-blue-700',
-  aws: 'bg-orange-100 text-orange-700',
-  gcp: 'bg-red-100 text-red-700',
-};
-
-const riskColors: Record<string, string> = {
-  critical: 'bg-red-100 text-red-700',
-  high: 'bg-orange-100 text-orange-700',
-  medium: 'bg-yellow-100 text-yellow-700',
-  low: 'bg-green-100 text-green-700',
-};
+// categoryLabels, cloudColors, riskColors imported from constants/metrics
 
 function TierBar({ t0, t1, t2, t3 }: { t0: number; t1: number; t2: number; t3: number }) {
   const total = t0 + t1 + t2 + t3 || 1;
@@ -104,19 +85,24 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
           {/* Tier cards */}
           <div className="grid grid-cols-4 gap-3 mt-4">
             {[
-              { label: 'T0', sub: 'Control Plane', count: td.t0.count, color: 'border-red-300 bg-red-50', text: 'text-red-800', dot: 'bg-red-500' },
-              { label: 'T1', sub: 'Management', count: td.t1.count, color: 'border-orange-300 bg-orange-50', text: 'text-orange-800', dot: 'bg-orange-400' },
-              { label: 'T2', sub: 'Data / App', count: td.t2.count, color: 'border-yellow-300 bg-yellow-50', text: 'text-yellow-800', dot: 'bg-yellow-400' },
-              { label: 'T3', sub: 'Standard', count: td.t3.count, color: 'border-gray-200 bg-gray-50', text: 'text-gray-600', dot: 'bg-gray-400' },
+              { label: 'T0', tier: 0, sub: 'Control Plane', count: td.t0.count, color: 'border-red-300 bg-red-50', text: 'text-red-800', dot: 'bg-red-500', tooltip: 'Global Admin, Privileged Role Admin, Partner Tier2 — full tenant control' },
+              { label: 'T1', tier: 1, sub: 'Management', count: td.t1.count, color: 'border-orange-300 bg-orange-50', text: 'text-orange-800', dot: 'bg-orange-400', tooltip: 'User Admin, Exchange Admin, Subscription Owner — broad management access' },
+              { label: 'T2', tier: 2, sub: 'Data / App', count: td.t2.count, color: 'border-yellow-300 bg-yellow-50', text: 'text-yellow-800', dot: 'bg-yellow-400', tooltip: 'App Admin, Contributor, Key Vault roles — data and application access' },
+              { label: 'T3', tier: 3, sub: 'Standard', count: td.t3.count, color: 'border-gray-200 bg-gray-50', text: 'text-gray-600', dot: 'bg-gray-400', tooltip: 'Reader, limited roles, no privileged access' },
             ].map(t => (
-              <div key={t.label} className={`rounded-lg border p-3 ${t.color}`}>
+              <Link
+                key={t.label}
+                to={`/identities?privilege_tier=${t.tier}`}
+                title={t.tooltip}
+                className={`rounded-lg border p-3 ${t.color} hover:shadow-md transition group`}
+              >
                 <div className="flex items-center gap-1.5 mb-1">
                   <span className={`w-2 h-2 rounded-full ${t.dot}`} />
                   <span className={`text-xs font-bold ${t.text}`}>{t.label}</span>
                 </div>
-                <div className={`text-2xl font-bold ${t.text}`}>{t.count}</div>
+                <div className={`text-2xl font-bold ${t.text} group-hover:underline`}>{t.count}</div>
                 <div className="text-[10px] text-gray-500">{t.sub}</div>
-              </div>
+              </Link>
             ))}
           </div>
 
@@ -131,11 +117,11 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-200 text-red-800">T0</span>
-                    <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[i.cloud || 'azure'] || cloudColors.azure}`}>{i.cloud || 'azure'}</span>
+                    <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${CLOUD_BADGE[i.cloud || 'azure'] || CLOUD_BADGE.azure}`}>{i.cloud || 'azure'}</span>
                     <span className="font-medium text-gray-900 truncate">{i.display_name}</span>
-                    <span className="text-[10px] text-gray-500">{categoryLabels[i.category] || i.category}</span>
+                    <span className="text-[10px] text-gray-500">{getCategoryShortLabel(i.category) || i.category}</span>
                   </div>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${riskColors[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${RISK_BADGE[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
                     {i.risk_level}
                   </span>
                 </Link>
@@ -148,11 +134,11 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-200 text-orange-800">T1</span>
-                    <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${cloudColors[i.cloud || 'azure'] || cloudColors.azure}`}>{i.cloud || 'azure'}</span>
+                    <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${CLOUD_BADGE[i.cloud || 'azure'] || CLOUD_BADGE.azure}`}>{i.cloud || 'azure'}</span>
                     <span className="font-medium text-gray-900 truncate">{i.display_name}</span>
-                    <span className="text-[10px] text-gray-500">{categoryLabels[i.category] || i.category}</span>
+                    <span className="text-[10px] text-gray-500">{getCategoryShortLabel(i.category) || i.category}</span>
                   </div>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${riskColors[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase flex-shrink-0 ${RISK_BADGE[i.risk_level] || 'bg-gray-100 text-gray-600'}`}>
                     {i.risk_level}
                   </span>
                 </Link>
@@ -173,7 +159,10 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
           </div>
 
           <div className="space-y-3">
-            <div className={`rounded-lg p-4 ${ai.dormant_privileged > 0 ? 'bg-red-50 border border-red-100' : 'bg-gray-50'}`}>
+            <Link
+              to="/identities?activity_status=dormant&privilege_tier=0,1"
+              className={`block rounded-lg p-4 hover:shadow-md transition ${ai.dormant_privileged > 0 ? 'bg-red-50 border border-red-100' : 'bg-gray-50'}`}
+            >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <svg className={`w-5 h-5 ${ai.dormant_privileged > 0 ? 'text-red-500' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -186,9 +175,12 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                 </span>
               </div>
               <div className="text-[10px] text-gray-500 mt-1 ml-7">T0/T1 identities with no recent activity</div>
-            </div>
+            </Link>
 
-            <div className={`rounded-lg p-4 ${ai.expiring_credentials > 0 ? 'bg-orange-50 border border-orange-100' : 'bg-gray-50'}`}>
+            <Link
+              to="/identities?credential_status=expiring_soon"
+              className={`block rounded-lg p-4 hover:shadow-md transition ${ai.expiring_credentials > 0 ? 'bg-orange-50 border border-orange-100' : 'bg-gray-50'}`}
+            >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <svg className={`w-5 h-5 ${ai.expiring_credentials > 0 ? 'text-orange-500' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -201,9 +193,12 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                 </span>
               </div>
               <div className="text-[10px] text-gray-500 mt-1 ml-7">Secrets/certs expiring within 30 days</div>
-            </div>
+            </Link>
 
-            <div className={`rounded-lg p-4 ${ai.unowned_spns > 0 ? 'bg-yellow-50 border border-yellow-100' : 'bg-gray-50'}`}>
+            <Link
+              to="/identities?identity_category=service_principal&owner_status=unowned"
+              className={`block rounded-lg p-4 hover:shadow-md transition ${ai.unowned_spns > 0 ? 'bg-yellow-50 border border-yellow-100' : 'bg-gray-50'}`}
+            >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <svg className={`w-5 h-5 ${ai.unowned_spns > 0 ? 'text-yellow-600' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -216,7 +211,7 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
                 </span>
               </div>
               <div className="text-[10px] text-gray-500 mt-1 ml-7">Risky service principals with no owner</div>
-            </div>
+            </Link>
           </div>
 
           {totalActions === 0 && (
@@ -258,10 +253,10 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
         }
 
         // Too many T0 accounts
-        if (td.t0.count > 2) {
+        if (td.t0.count > THRESHOLDS.MAX_T0_ACCOUNTS) {
           recs.push({
             priority: 'High',
-            title: `Reduce T0 footprint from ${td.t0.count} to 2 or fewer`,
+            title: `Reduce T0 footprint from ${td.t0.count} to ${THRESHOLDS.MAX_T0_ACCOUNTS} or fewer`,
             description: 'Microsoft recommends no more than 2 Global Admin accounts. Each additional T0 identity increases your attack surface exponentially.',
             count: td.t0.count,
             link: '/identities?privilege_tier=0',
@@ -277,7 +272,7 @@ export default function InsightsPanel({ data, loading }: InsightsPanelProps) {
             title: `${ai.expiring_credentials} credential${ai.expiring_credentials > 1 ? 's' : ''} expiring soon — rotate now`,
             description: 'Secrets or certificates expiring within 30 days. Expired credentials cause service outages. Rotate proactively to avoid downtime.',
             count: ai.expiring_credentials,
-            link: '/identities',
+            link: '/identities?credential_status=expiring_soon',
             color: 'border-orange-300 bg-orange-50',
             icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z',
           });

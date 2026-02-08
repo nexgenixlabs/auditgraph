@@ -2,18 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import {
+  type IdentityCategory, type RiskLevel, type DormantStatus,
+  CATEGORY_FILTER_OPTIONS, RISK_FILTER_OPTIONS, RISK_ORDER, RISK_BADGE, RISK_SOLID, CLOUD_BADGE,
+  THRESHOLDS, DORMANT_LABELS, DATA_EXPLANATIONS,
+  safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
+} from '../constants/metrics';
 
-type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown';
 type IdentityStatus = 'active' | 'disabled' | 'deleted';
-
-type IdentityCategory =
-  | 'service_principal'
-  | 'managed_identity_system'
-  | 'managed_identity_user'
-  | 'human_user'
-  | 'guest'
-  | 'microsoft_internal'
-  | 'unknown';
 
 interface IdentityRow {
   identity_id: string;
@@ -64,44 +60,7 @@ type SortField =
   | 'last_seen_auth'
   | 'dormant';
 
-const CATEGORY_OPTIONS: { value: IdentityCategory | 'all'; label: string }[] = [
-  { value: 'all', label: 'All Categories' },
-  { value: 'service_principal', label: 'Service Principal' },
-  { value: 'managed_identity_system', label: 'System Assigned MI' },
-  { value: 'managed_identity_user', label: 'User Assigned MI' },
-  { value: 'human_user', label: 'Human User' },
-  { value: 'guest', label: 'Guest' },
-  { value: 'microsoft_internal', label: 'Microsoft Internal' },
-];
-
-const RISK_OPTIONS: { value: RiskLevel | 'all'; label: string }[] = [
-  { value: 'all', label: 'All Levels' },
-  { value: 'critical', label: 'Critical' },
-  { value: 'high', label: 'High' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'low', label: 'Low' },
-  { value: 'info', label: 'Info' },
-];
-
 // ─── Helpers ───────────────────────────────────────────────────────
-
-function safeLower(v: any): string {
-  return String(v ?? '').toLowerCase();
-}
-
-function normalizeCategoryFromBackend(raw?: any): IdentityCategory {
-  const v = safeLower(raw).trim();
-  if (!v) return 'unknown';
-  if (['service_principal', 'managed_identity_system', 'managed_identity_user',
-       'human_user', 'guest', 'microsoft_internal'].includes(v))
-    return v as IdentityCategory;
-  if (v === 'user' || v === 'human user') return 'human_user';
-  if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
-  if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
-  if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
-  if (v.includes('microsoft')) return 'microsoft_internal';
-  return 'unknown';
-}
 
 function formatDate(d?: string | null): string {
   if (!d) return '—';
@@ -109,7 +68,16 @@ function formatDate(d?: string | null): string {
   catch { return d; }
 }
 
-const RISK_ORDER: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1, unknown: 0 };
+function credentialCountdownText(iso?: string | null): { text: string; color: string } | null {
+  if (!iso) return null;
+  try {
+    const days = Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+    if (days < 0) return { text: `Expired ${Math.abs(days)}d ago`, color: 'text-red-600' };
+    if (days === 0) return { text: 'Expires today', color: 'text-red-600' };
+    if (days <= 30) return { text: `${days}d left`, color: days <= 7 ? 'text-red-600' : 'text-orange-600' };
+    return { text: `${days}d left`, color: 'text-green-600' };
+  } catch { return null; }
+}
 
 function getPrivilegeTier(row: IdentityRow): number {
   // Use backend-computed tier (role-name-based) when available
@@ -125,26 +93,8 @@ function getPrivilegeTier(row: IdentityRow): number {
   return 3;
 }
 
-function getDormantStatus(row: IdentityRow): 'yes' | 'idle' | 'never' | 'new' | 'no' | 'unknown' {
-  const act = safeLower(row.activity_status);
-  if (act === 'stale') return 'yes';
-  if (act === 'never_used') return 'never';
-  if (act === 'inactive') return 'idle';
-  if (act === 'recently_created') return 'new';
-  if (act === 'active') return 'no';
-  return 'unknown';
-}
-
-function getCategoryLabel(cat?: IdentityCategory): string {
-  const labels: Record<string, string> = {
-    service_principal: 'Service Principal',
-    managed_identity_system: 'System MI',
-    managed_identity_user: 'User MI',
-    human_user: 'Human User',
-    guest: 'Guest',
-    microsoft_internal: 'Microsoft Internal',
-  };
-  return labels[cat || ''] || 'Unknown';
+function getDormantStatus(row: IdentityRow): DormantStatus {
+  return getDormantStatusFromActivity(row.activity_status);
 }
 
 function getComplianceRelevance(i: IdentityRow): string {
@@ -178,19 +128,14 @@ function SortHeader({ label, field, currentField, currentDir, onSort }: {
 
 function CloudBadge({ cloud }: { cloud?: string }) {
   const c = safeLower(cloud) || 'azure';
-  const colors: Record<string, string> = { azure: 'bg-blue-100 text-blue-700', aws: 'bg-orange-100 text-orange-700', gcp: 'bg-red-100 text-red-700' };
-  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${colors[c] || colors.azure}`}>{c}</span>;
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${CLOUD_BADGE[c] || CLOUD_BADGE.azure}`}>{c}</span>;
 }
 
 function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
   const risk = safeLower(level);
-  const styles: Record<string, string> = {
-    critical: 'bg-red-100 text-red-800', high: 'bg-orange-100 text-orange-800',
-    medium: 'bg-yellow-100 text-yellow-800', low: 'bg-green-100 text-green-800', info: 'bg-blue-100 text-blue-800',
-  };
   return (
     <div className="flex items-center gap-1">
-      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${styles[risk] || 'bg-gray-100 text-gray-600'}`}>
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
         {risk || '?'}
       </span>
       {score !== undefined && score > 0 && <span className="text-[10px] text-gray-400 font-mono">{score}</span>}
@@ -199,10 +144,8 @@ function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
 }
 
 function RiskDot({ level }: { level?: string }) {
-  const colors: Record<string, string> = {
-    critical: 'bg-red-500', high: 'bg-orange-500', medium: 'bg-yellow-400', low: 'bg-green-400', info: 'bg-blue-400',
-  };
-  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${colors[safeLower(level)] || 'bg-gray-300'}`} />;
+  const s = RISK_SOLID[safeLower(level)];
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${s?.bg || 'bg-gray-300'}`} />;
 }
 
 function TierBadge({ tier }: { tier: number }) {
@@ -220,26 +163,29 @@ function TierBadge({ tier }: { tier: number }) {
   );
 }
 
-function DormantBadge({ status }: { status: 'yes' | 'idle' | 'never' | 'new' | 'no' | 'unknown' }) {
-  if (status === 'yes') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">Stale 90d+</span>;
-  if (status === 'never') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-orange-100 text-orange-700">Never Used</span>;
-  if (status === 'idle') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 text-yellow-700">Idle 30-90d</span>;
-  if (status === 'new') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-700">New</span>;
-  if (status === 'no') return <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">Active</span>;
-  return <span className="text-[10px] text-gray-300">—</span>;
+function DormantBadge({ status }: { status: DormantStatus }) {
+  const cfg = DORMANT_LABELS[status];
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.color}`}
+      title={cfg.tooltip}
+    >
+      {cfg.label}
+    </span>
+  );
 }
 
+const CATEGORY_BADGE_COLORS: Record<string, string> = {
+  service_principal: 'bg-purple-50 text-purple-700',
+  managed_identity_system: 'bg-cyan-50 text-cyan-700',
+  managed_identity_user: 'bg-teal-50 text-teal-700',
+  human_user: 'bg-indigo-50 text-indigo-700',
+  guest: 'bg-pink-50 text-pink-700',
+};
+
 function CategoryBadge({ category }: { category?: IdentityCategory }) {
-  const map: Record<string, { label: string; color: string }> = {
-    service_principal: { label: 'SPN', color: 'bg-purple-50 text-purple-700' },
-    managed_identity_system: { label: 'Sys MI', color: 'bg-cyan-50 text-cyan-700' },
-    managed_identity_user: { label: 'Usr MI', color: 'bg-teal-50 text-teal-700' },
-    human_user: { label: 'Human', color: 'bg-indigo-50 text-indigo-700' },
-    guest: { label: 'Guest', color: 'bg-pink-50 text-pink-700' },
-    microsoft_internal: { label: 'MSFT', color: 'bg-sky-50 text-sky-700' },
-  };
-  const info = map[category || ''] || { label: '?', color: 'bg-gray-50 text-gray-600' };
-  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${info.color}`}>{info.label}</span>;
+  const color = CATEGORY_BADGE_COLORS[category || ''] || 'bg-gray-50 text-gray-600';
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${color}`}>{getCategoryShortLabel(category)}</span>;
 }
 
 function TypeLabel({ type }: { type?: string }) {
@@ -265,7 +211,9 @@ export default function IdentitiesPage() {
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
   const [ownerFilter, setOwnerFilter] = useState<'all' | 'unowned'>('all');
   const [activityFilter, setActivityFilter] = useState<'all' | 'dormant'>('all');
-  const [tierFilter, setTierFilter] = useState<number | 'all'>('all');
+  const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
+  const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
+  const [caFilter, setCaFilter] = useState<'all' | 'covered' | 'not_covered'>('all');
   const [sortField, setSortField] = useState<SortField>('risk_level');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -281,11 +229,20 @@ export default function IdentitiesPage() {
     const ownerParam = params.get('owner_status');
     const activityParam = params.get('activity_status');
     const tierParam = params.get('privilege_tier');
-    setCategoryFilter(catParam && CATEGORY_OPTIONS.find(o => o.value === catParam) ? catParam as IdentityCategory : 'all');
-    setRiskFilter(riskParam && RISK_OPTIONS.find(o => o.value === riskParam) ? riskParam as RiskLevel : 'all');
+    const credParam = params.get('credential_status') || params.get('credential_expiry');
+    const caParam = params.get('ca_coverage');
+    setCategoryFilter(catParam && CATEGORY_FILTER_OPTIONS.find(o => o.value === catParam) ? catParam as IdentityCategory : 'all');
+    setRiskFilter(riskParam && RISK_FILTER_OPTIONS.find(o => o.value === riskParam) ? riskParam as RiskLevel : 'all');
     setOwnerFilter(ownerParam === 'unowned' ? 'unowned' : 'all');
     setActivityFilter(activityParam === 'dormant' ? 'dormant' : 'all');
-    setTierFilter(tierParam != null && ['0', '1', '2', '3'].includes(tierParam) ? Number(tierParam) : 'all');
+    if (tierParam != null) {
+      const tiers = tierParam.split(',').map(Number).filter(t => [0, 1, 2, 3].includes(t));
+      setTierFilter(tiers.length > 0 ? tiers : 'all');
+    } else {
+      setTierFilter('all');
+    }
+    setCredentialFilter(credParam && ['expired', 'expiring_soon', 'valid', 'none'].includes(credParam) ? credParam as any : 'all');
+    setCaFilter(caParam === 'covered' ? 'covered' : caParam === 'not_covered' ? 'not_covered' : 'all');
   }, [location.search]);
 
   // Fetch
@@ -349,7 +306,25 @@ export default function IdentitiesPage() {
     if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (activityFilter === 'dormant') result = result.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'idle' || d === 'never'; });
-    if (tierFilter !== 'all') result = result.filter(i => getPrivilegeTier(i) === tierFilter);
+    if (tierFilter !== 'all') result = result.filter(i => tierFilter.includes(getPrivilegeTier(i)));
+    if (credentialFilter !== 'all') {
+      const now = Date.now();
+      const thirtyDays = THRESHOLDS.CREDENTIAL_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+      result = result.filter(i => {
+        if (credentialFilter === 'none') return (i.credential_count ?? 0) === 0;
+        if (credentialFilter === 'expired') return i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < now);
+        if (credentialFilter === 'expiring_soon') return i.credential_expiration && new Date(i.credential_expiration).getTime() > now && new Date(i.credential_expiration).getTime() < now + thirtyDays;
+        if (credentialFilter === 'valid') return i.credential_expiration && new Date(i.credential_expiration).getTime() > now + thirtyDays;
+        return true;
+      });
+    }
+    if (caFilter !== 'all') {
+      result = result.filter(i => {
+        if (caFilter === 'covered') return i.ca_coverage_status === 'covered';
+        if (caFilter === 'not_covered') return !i.ca_coverage_status || i.ca_coverage_status === 'no_coverage' || i.ca_coverage_status === 'excluded';
+        return true;
+      });
+    }
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -389,7 +364,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, sortField, sortDir]);
+  }, [identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -498,18 +473,18 @@ export default function IdentitiesPage() {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, ID, owner…"
             className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
           <select value={riskFilter} onChange={e => setRiskFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
-            {RISK_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {RISK_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
-            {CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {CATEGORY_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); navigate('/identities', { replace: true }); }}
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); navigate('/identities', { replace: true }); }}
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>
         </div>
         {/* Active filter chips from recommendations */}
-        {(ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all') && (
+        {(ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all') && (
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <span className="text-[10px] text-gray-500 uppercase font-semibold">Active filters:</span>
             {ownerFilter === 'unowned' && (
@@ -526,8 +501,20 @@ export default function IdentitiesPage() {
             )}
             {tierFilter !== 'all' && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                Tier T{tierFilter}
+                Tier {tierFilter.map(t => `T${t}`).join('/')}
                 <button onClick={() => { setTierFilter('all'); }} className="hover:text-purple-600">&times;</button>
+              </span>
+            )}
+            {credentialFilter !== 'all' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                Cred: {credentialFilter === 'expired' ? 'Expired' : credentialFilter === 'expiring_soon' ? 'Expiring Soon' : credentialFilter === 'none' ? 'No Credentials' : 'Valid'}
+                <button onClick={() => { setCredentialFilter('all'); }} className="hover:text-orange-600">&times;</button>
+              </span>
+            )}
+            {caFilter !== 'all' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                CA: {caFilter === 'covered' ? 'Covered' : 'Not Covered'}
+                <button onClick={() => { setCaFilter('all'); }} className="hover:text-blue-600">&times;</button>
               </span>
             )}
           </div>
@@ -599,17 +586,20 @@ export default function IdentitiesPage() {
                     <td className="px-2 py-2">
                       <div className="flex items-center gap-1">
                         <RiskBadge level={i.risk_level} score={i.risk_score} />
-                        {i.ca_coverage_status && (
-                          <span title={`CA: ${i.ca_coverage_status}${i.ca_mfa_enforced ? ' + MFA' : ''}`}>
-                            <svg className={`w-3.5 h-3.5 ${
-                              i.ca_coverage_status === 'covered' && i.ca_mfa_enforced ? 'text-green-500' :
-                              i.ca_coverage_status === 'covered' ? 'text-yellow-500' :
-                              'text-red-400'
-                            }`} fill="currentColor" viewBox="0 0 24 24">
-                              <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" />
-                            </svg>
-                          </span>
-                        )}
+                        <span title={
+                          i.ca_coverage_status
+                            ? `CA: ${i.ca_coverage_status}${i.ca_mfa_enforced ? ' + MFA' : ''}`
+                            : DATA_EXPLANATIONS.CA_POLICY
+                        }>
+                          <svg className={`w-3.5 h-3.5 ${
+                            !i.ca_coverage_status ? 'text-gray-300' :
+                            i.ca_coverage_status === 'covered' && i.ca_mfa_enforced ? 'text-green-500' :
+                            i.ca_coverage_status === 'covered' ? 'text-yellow-500' :
+                            'text-red-400'
+                          }`} fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" />
+                          </svg>
+                        </span>
                       </div>
                     </td>
 
@@ -659,14 +649,17 @@ export default function IdentitiesPage() {
                     {/* Secret/Expiry */}
                     <td className="px-2 py-2">
                       {i.identity_category === 'human_user' || i.identity_category === 'guest' ? (
-                        <span className="text-gray-300">N/A</span>
-                      ) : (
+                        <span className="text-[10px] text-gray-300" title={DATA_EXPLANATIONS.CREDENTIAL_NA}>N/A</span>
+                      ) : (i.credential_count ?? 0) > 0 ? (
                         <div>
-                          <span className="text-gray-600">{i.credential_count ?? 0}</span>
-                          {i.credential_expiration && (
-                            <div className="text-[10px] text-orange-600">{formatDate(i.credential_expiration)}</div>
-                          )}
+                          <span className="text-gray-600">{i.credential_count}</span>
+                          {(() => {
+                            const cd = credentialCountdownText(i.credential_expiration);
+                            return cd ? <div className={`text-[10px] font-medium ${cd.color}`}>{cd.text}</div> : null;
+                          })()}
                         </div>
+                      ) : (
+                        <span className="text-[10px] text-gray-400" title="No secrets or certificates registered">0</span>
                       )}
                     </td>
 
@@ -678,7 +671,9 @@ export default function IdentitiesPage() {
                       {i.last_seen_auth ? (
                         <span className="text-gray-600">{formatDate(i.last_seen_auth)}</span>
                       ) : (
-                        <span className="text-gray-300 italic" title="Requires Azure AD Premium P1/P2">P1/P2</span>
+                        <span className="text-[10px] text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>
+                          Unknown<span className="text-gray-300 ml-0.5">(P1/P2)</span>
+                        </span>
                       )}
                     </td>
 
