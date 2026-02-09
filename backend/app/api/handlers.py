@@ -3340,6 +3340,41 @@ def auth_me():
         db.close()
 
 
+def change_password():
+    """PUT /api/auth/password — change own password."""
+    user = g.current_user
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('current_password', ''))
+    new_password = str(data.get('new_password', ''))
+
+    if not current_password or not new_password:
+        return jsonify({'error': 'Current password and new password are required'}), 400
+    if len(new_password) < 8:
+        return jsonify({'error': 'New password must be at least 8 characters'}), 400
+
+    db = _db()
+    try:
+        full_user = db.get_user_by_username(user['username'])
+        if not full_user:
+            return jsonify({'error': 'User not found'}), 404
+
+        if not bcrypt.checkpw(current_password.encode('utf-8'), full_user['password_hash'].encode('utf-8')):
+            return jsonify({'error': 'Current password is incorrect'}), 401
+
+        new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        db.update_user(user['id'], password_hash=new_hash)
+
+        try:
+            db.log_activity('password_changed', f'User "{user["username"]}" changed their password',
+                            {'user_id': user['id']})
+        except Exception:
+            pass
+
+        return jsonify({'message': 'Password changed successfully'})
+    finally:
+        db.close()
+
+
 def get_users_list():
     """GET /api/users — list all users (admin only)."""
     db = _db()
@@ -4470,5 +4505,144 @@ def bulk_review_decisions(campaign_id):
                          'count': count, 'reviewer': user['username']})
 
         return jsonify({'updated_count': count})
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------
+# Identity Groups (Phase 38)
+# ---------------------------------------------------------------
+
+def get_groups_list():
+    db = _db()
+    try:
+        groups = db.get_groups()
+        return jsonify({'groups': groups})
+    finally:
+        db.close()
+
+
+def create_group_handler():
+    db = _db()
+    try:
+        body = request.get_json(force=True)
+        name = (body.get('name') or '').strip()
+        if not name or len(name) > 255:
+            return jsonify({'error': 'name is required (max 255 chars)'}), 400
+
+        user = getattr(g, 'current_user', None) or {}
+        data = {
+            'name': name,
+            'description': body.get('description'),
+            'color': body.get('color', '#3B82F6'),
+            'group_type': body.get('group_type', 'custom'),
+            'auto_criteria': body.get('auto_criteria'),
+            'created_by': user.get('id'),
+        }
+        group = db.create_group(data)
+        db.log_activity('group_created', f'Created group "{name}"',
+                        {'group_id': group['id'], 'user': user.get('username')})
+        return jsonify(group), 201
+    finally:
+        db.close()
+
+
+def get_group_detail(group_id):
+    db = _db()
+    try:
+        group = db.get_group(group_id)
+        if not group:
+            return jsonify({'error': 'Group not found'}), 404
+        return jsonify(group)
+    finally:
+        db.close()
+
+
+def update_group_handler(group_id):
+    db = _db()
+    try:
+        body = request.get_json(force=True)
+        result = db.update_group(group_id, body)
+        if not result:
+            return jsonify({'error': 'Group not found'}), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def delete_group_handler(group_id):
+    db = _db()
+    try:
+        deleted = db.delete_group(group_id)
+        if not deleted:
+            return jsonify({'error': 'Group not found or is an auto group'}), 400
+        db.log_activity('group_deleted', f'Deleted group #{group_id}', {'group_id': group_id})
+        return jsonify({'deleted': True})
+    finally:
+        db.close()
+
+
+def add_group_members_handler(group_id):
+    db = _db()
+    try:
+        body = request.get_json(force=True)
+        identity_ids = body.get('identity_ids', [])
+        if not identity_ids or not isinstance(identity_ids, list):
+            return jsonify({'error': 'identity_ids must be a non-empty list'}), 400
+
+        # Check group exists and is custom
+        group = db.get_group(group_id)
+        if not group:
+            return jsonify({'error': 'Group not found'}), 404
+        if group.get('group_type') == 'auto':
+            return jsonify({'error': 'Cannot manually add members to auto groups'}), 400
+
+        added = db.add_group_members(group_id, identity_ids)
+        return jsonify({'added': added})
+    finally:
+        db.close()
+
+
+def remove_group_members_handler(group_id):
+    db = _db()
+    try:
+        body = request.get_json(force=True)
+        identity_ids = body.get('identity_ids', [])
+        if not identity_ids or not isinstance(identity_ids, list):
+            return jsonify({'error': 'identity_ids must be a non-empty list'}), 400
+
+        group = db.get_group(group_id)
+        if not group:
+            return jsonify({'error': 'Group not found'}), 404
+        if group.get('group_type') == 'auto':
+            return jsonify({'error': 'Cannot manually remove members from auto groups'}), 400
+
+        removed = db.remove_group_members(group_id, identity_ids)
+        return jsonify({'removed': removed})
+    finally:
+        db.close()
+
+
+def get_group_comparison_handler():
+    db = _db()
+    try:
+        ids_param = request.args.get('ids', '')
+        try:
+            group_ids = [int(x.strip()) for x in ids_param.split(',') if x.strip()]
+        except ValueError:
+            return jsonify({'error': 'ids must be comma-separated integers'}), 400
+        if len(group_ids) < 2 or len(group_ids) > 3:
+            return jsonify({'error': 'Provide 2-3 group ids'}), 400
+        results = db.get_group_comparison(group_ids)
+        return jsonify({'groups': results})
+    finally:
+        db.close()
+
+
+def get_identity_groups_handler(identity_id):
+    db = _db()
+    try:
+        groups = db.get_identity_groups(identity_id)
+        return jsonify({'groups': groups})
     finally:
         db.close()

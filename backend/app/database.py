@@ -3657,3 +3657,413 @@ class Database:
         self.conn.commit()
         cursor.close()
         return count
+
+    # ---------------------------------------------------------------
+    # Identity Groups (Phase 38)
+    # ---------------------------------------------------------------
+    def _ensure_identity_group_tables(self):
+        """Create identity_groups and identity_group_members tables if they don't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_groups (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                color VARCHAR(20) DEFAULT '#3B82F6',
+                group_type VARCHAR(10) NOT NULL DEFAULT 'custom',
+                auto_criteria JSONB,
+                created_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_groups_type ON identity_groups(group_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_groups_name ON identity_groups(name)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_group_members (
+                id SERIAL PRIMARY KEY,
+                group_id INTEGER NOT NULL REFERENCES identity_groups(id) ON DELETE CASCADE,
+                identity_id TEXT NOT NULL,
+                added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON identity_group_members(group_id, identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_members_identity ON identity_group_members(identity_id)")
+        self.conn.commit()
+        cursor.close()
+
+    def _build_auto_criteria_where(self, criteria: dict) -> tuple:
+        """Build WHERE clause fragments from auto_criteria JSON. Returns (clause_parts, params)."""
+        parts = []
+        params = []
+        allowed = {'identity_category', 'cloud', 'status', 'risk_level', 'activity_status'}
+        for key, val in criteria.items():
+            if key not in allowed:
+                continue
+            if isinstance(val, list):
+                parts.append(f"COALESCE(i.{key}, '') = ANY(%s)")
+                params.append(val)
+            else:
+                parts.append(f"COALESCE(i.{key}, '') = %s")
+                params.append(val)
+        return parts, params
+
+    def _get_group_risk_stats(self, cursor, group_id: int = None, auto_criteria: dict = None, latest_run: int = None) -> dict:
+        """Compute risk breakdown for a group's members."""
+        if latest_run is None:
+            cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+            row = cursor.fetchone()
+            latest_run = row[0] if row else None
+        if not latest_run:
+            return {'member_count': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0, 'avg_risk_score': 0}
+
+        if auto_criteria:
+            where_parts, where_params = self._build_auto_criteria_where(auto_criteria)
+            where_clause = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+            cursor.execute(f"""
+                SELECT COUNT(*) as cnt,
+                    COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
+                    COUNT(*) FILTER (WHERE risk_level = 'high') as high,
+                    COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
+                    COUNT(*) FILTER (WHERE risk_level = 'low') as low,
+                    COUNT(*) FILTER (WHERE risk_level = 'info') as info,
+                    COALESCE(AVG(COALESCE(risk_score, 0)), 0) as avg_score
+                FROM identities i
+                WHERE i.discovery_run_id = %s{where_clause}
+            """, [latest_run] + where_params)
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) as cnt,
+                    COUNT(*) FILTER (WHERE i.risk_level = 'critical') as critical,
+                    COUNT(*) FILTER (WHERE i.risk_level = 'high') as high,
+                    COUNT(*) FILTER (WHERE i.risk_level = 'medium') as medium,
+                    COUNT(*) FILTER (WHERE i.risk_level = 'low') as low,
+                    COUNT(*) FILTER (WHERE i.risk_level = 'info') as info,
+                    COALESCE(AVG(COALESCE(i.risk_score, 0)), 0) as avg_score
+                FROM identities i
+                JOIN identity_group_members m ON m.identity_id = i.identity_id
+                WHERE i.discovery_run_id = %s AND m.group_id = %s
+            """, (latest_run, group_id))
+        row = cursor.fetchone()
+        return {
+            'member_count': row[0],
+            'critical': row[1], 'high': row[2], 'medium': row[3], 'low': row[4], 'info': row[5],
+            'avg_risk_score': round(float(row[6]), 1)
+        }
+
+    def get_groups(self) -> list:
+        """Get all identity groups with summary stats."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        row = cursor.fetchone()
+        latest_run = row['max'] if row else None
+
+        cursor.execute("""
+            SELECT g.*, u.username as creator_name
+            FROM identity_groups g
+            LEFT JOIN users u ON u.id = g.created_by
+            ORDER BY g.group_type ASC, g.name ASC
+        """)
+        groups = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        # Switch to regular cursor for risk stats
+        cursor2 = self.conn.cursor()
+        for g in groups:
+            if g['group_type'] == 'auto' and g.get('auto_criteria'):
+                stats = self._get_group_risk_stats(cursor2, auto_criteria=g['auto_criteria'], latest_run=latest_run)
+            else:
+                stats = self._get_group_risk_stats(cursor2, group_id=g['id'], latest_run=latest_run)
+            g.update(stats)
+            for ts in ('created_at', 'updated_at'):
+                if g.get(ts) and hasattr(g[ts], 'isoformat'):
+                    g[ts] = g[ts].isoformat()
+            if g.get('auto_criteria') and not isinstance(g['auto_criteria'], dict):
+                import json as _json
+                g['auto_criteria'] = _json.loads(g['auto_criteria']) if isinstance(g['auto_criteria'], str) else g['auto_criteria']
+        cursor2.close()
+        return groups
+
+    def get_group(self, group_id: int) -> Optional[dict]:
+        """Get a single group with its member identities."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute("""
+            SELECT g.*, u.username as creator_name
+            FROM identity_groups g
+            LEFT JOIN users u ON u.id = g.created_by
+            WHERE g.id = %s
+        """, (group_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return None
+        group = dict(row)
+        for ts in ('created_at', 'updated_at'):
+            if group.get(ts) and hasattr(group[ts], 'isoformat'):
+                group[ts] = group[ts].isoformat()
+
+        # Get latest run
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        lr = cursor.fetchone()
+        latest_run = lr['max'] if lr else None
+
+        # Get members
+        members = []
+        if latest_run:
+            if group['group_type'] == 'auto' and group.get('auto_criteria'):
+                where_parts, where_params = self._build_auto_criteria_where(group['auto_criteria'])
+                where_clause = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+                cursor.execute(f"""
+                    SELECT i.identity_id, i.display_name, COALESCE(i.identity_category, '') as identity_category,
+                        COALESCE(i.cloud, 'azure') as cloud, i.risk_level,
+                        COALESCE(i.risk_score, 0) as risk_score, i.activity_status, i.last_seen_auth
+                    FROM identities i
+                    WHERE i.discovery_run_id = %s{where_clause}
+                    ORDER BY i.risk_level DESC NULLS LAST, i.display_name ASC
+                """, [latest_run] + where_params)
+            else:
+                cursor.execute("""
+                    SELECT i.identity_id, i.display_name, COALESCE(i.identity_category, '') as identity_category,
+                        COALESCE(i.cloud, 'azure') as cloud, i.risk_level,
+                        COALESCE(i.risk_score, 0) as risk_score, i.activity_status, i.last_seen_auth
+                    FROM identities i
+                    JOIN identity_group_members m ON m.identity_id = i.identity_id
+                    WHERE i.discovery_run_id = %s AND m.group_id = %s
+                    ORDER BY i.risk_level DESC NULLS LAST, i.display_name ASC
+                """, (latest_run, group_id))
+            members = [dict(r) for r in cursor.fetchall()]
+            for m in members:
+                if m.get('last_seen_auth') and hasattr(m['last_seen_auth'], 'isoformat'):
+                    m['last_seen_auth'] = m['last_seen_auth'].isoformat()
+
+        # Risk stats
+        cursor2 = self.conn.cursor()
+        if group['group_type'] == 'auto' and group.get('auto_criteria'):
+            stats = self._get_group_risk_stats(cursor2, auto_criteria=group['auto_criteria'], latest_run=latest_run)
+        else:
+            stats = self._get_group_risk_stats(cursor2, group_id=group_id, latest_run=latest_run)
+        cursor2.close()
+
+        group.update(stats)
+        group['members'] = members
+        cursor.close()
+        return group
+
+    def create_group(self, data: dict) -> dict:
+        """Create a new identity group."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO identity_groups (name, description, color, group_type, auto_criteria, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            data['name'], data.get('description'), data.get('color', '#3B82F6'),
+            data.get('group_type', 'custom'),
+            json.dumps(data['auto_criteria']) if data.get('auto_criteria') else None,
+            data.get('created_by')
+        ))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        for ts in ('created_at', 'updated_at'):
+            if row.get(ts) and hasattr(row[ts], 'isoformat'):
+                row[ts] = row[ts].isoformat()
+        return row
+
+    def update_group(self, group_id: int, data: dict) -> Optional[dict]:
+        """Update a group's name, description, or color."""
+        self._ensure_identity_group_tables()
+        allowed = {'name', 'description', 'color'}
+        sets = []
+        params = []
+        for k in allowed:
+            if k in data:
+                sets.append(f"{k} = %s")
+                params.append(data[k])
+        if not sets:
+            return self.get_group(group_id)
+        sets.append("updated_at = NOW()")
+        params.append(group_id)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE identity_groups SET {', '.join(sets)} WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at'):
+            if result.get(ts) and hasattr(result[ts], 'isoformat'):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def delete_group(self, group_id: int) -> bool:
+        """Delete a custom group. Returns False if not found or is auto group."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT group_type FROM identity_groups WHERE id = %s", (group_id,))
+        row = cursor.fetchone()
+        if not row or row[0] == 'auto':
+            cursor.close()
+            return False
+        cursor.execute("DELETE FROM identity_groups WHERE id = %s", (group_id,))
+        self.conn.commit()
+        cursor.close()
+        return True
+
+    def add_group_members(self, group_id: int, identity_ids: list) -> int:
+        """Add identities to a custom group. Returns count of new members added."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor()
+        added = 0
+        for iid in identity_ids:
+            cursor.execute("""
+                INSERT INTO identity_group_members (group_id, identity_id)
+                VALUES (%s, %s)
+                ON CONFLICT (group_id, identity_id) DO NOTHING
+            """, (group_id, iid))
+            added += cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return added
+
+    def remove_group_members(self, group_id: int, identity_ids: list) -> int:
+        """Remove identities from a custom group."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            DELETE FROM identity_group_members
+            WHERE group_id = %s AND identity_id = ANY(%s)
+        """, (group_id, identity_ids))
+        count = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return count
+
+    def get_group_comparison(self, group_ids: list) -> list:
+        """Get comparison data for 2-3 groups."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        lr = cursor.fetchone()
+        latest_run = lr['max'] if lr else None
+
+        results = []
+        for gid in group_ids:
+            cursor.execute("SELECT * FROM identity_groups WHERE id = %s", (gid,))
+            row = cursor.fetchone()
+            if not row:
+                continue
+            group = dict(row)
+            for ts in ('created_at', 'updated_at'):
+                if group.get(ts) and hasattr(group[ts], 'isoformat'):
+                    group[ts] = group[ts].isoformat()
+
+            cursor2 = self.conn.cursor()
+            if group['group_type'] == 'auto' and group.get('auto_criteria'):
+                stats = self._get_group_risk_stats(cursor2, auto_criteria=group['auto_criteria'], latest_run=latest_run)
+                # Category breakdown for auto groups
+                where_parts, where_params = self._build_auto_criteria_where(group['auto_criteria'])
+                where_clause = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+                if latest_run:
+                    cursor2.execute(f"""
+                        SELECT COALESCE(i.identity_category, 'unknown') as cat, COUNT(*) as cnt
+                        FROM identities i WHERE i.discovery_run_id = %s{where_clause}
+                        GROUP BY 1
+                    """, [latest_run] + where_params)
+                    cat_rows = cursor2.fetchall()
+                else:
+                    cat_rows = []
+            else:
+                stats = self._get_group_risk_stats(cursor2, group_id=gid, latest_run=latest_run)
+                if latest_run:
+                    cursor2.execute("""
+                        SELECT COALESCE(i.identity_category, 'unknown') as cat, COUNT(*) as cnt
+                        FROM identities i
+                        JOIN identity_group_members m ON m.identity_id = i.identity_id
+                        WHERE i.discovery_run_id = %s AND m.group_id = %s
+                        GROUP BY 1
+                    """, (latest_run, gid))
+                    cat_rows = cursor2.fetchall()
+                else:
+                    cat_rows = []
+            cursor2.close()
+
+            categories = {r[0]: r[1] for r in cat_rows}
+            group.update(stats)
+            group['category_breakdown'] = categories
+            results.append(group)
+
+        cursor.close()
+        return results
+
+    def get_identity_groups(self, identity_id: str) -> list:
+        """Get all groups an identity belongs to (custom memberships + matching auto groups)."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Custom groups via membership
+        cursor.execute("""
+            SELECT g.id, g.name, g.color, g.group_type
+            FROM identity_groups g
+            JOIN identity_group_members m ON m.group_id = g.id
+            WHERE m.identity_id = %s
+            ORDER BY g.name
+        """, (identity_id,))
+        custom = [dict(r) for r in cursor.fetchall()]
+
+        # Auto groups: check if identity matches criteria
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        lr = cursor.fetchone()
+        latest_run = lr['max'] if lr else None
+
+        auto = []
+        if latest_run:
+            cursor.execute("SELECT * FROM identity_groups WHERE group_type = 'auto'")
+            auto_groups = [dict(r) for r in cursor.fetchall()]
+            for ag in auto_groups:
+                if not ag.get('auto_criteria'):
+                    continue
+                criteria = ag['auto_criteria'] if isinstance(ag['auto_criteria'], dict) else json.loads(ag['auto_criteria'])
+                where_parts, where_params = self._build_auto_criteria_where(criteria)
+                where_clause = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+                cursor.execute(f"""
+                    SELECT 1 FROM identities i
+                    WHERE i.discovery_run_id = %s AND i.identity_id = %s{where_clause}
+                    LIMIT 1
+                """, [latest_run, identity_id] + where_params)
+                if cursor.fetchone():
+                    auto.append({'id': ag['id'], 'name': ag['name'], 'color': ag['color'], 'group_type': 'auto'})
+
+        cursor.close()
+        return auto + custom
+
+    def seed_auto_groups(self):
+        """Create default auto groups on startup if they don't exist."""
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM identity_groups WHERE group_type = 'auto'")
+        count = cursor.fetchone()[0]
+        if count > 0:
+            cursor.close()
+            return
+
+        auto_groups = [
+            ('All Service Principals', '#6366F1', {'identity_category': 'service_principal'}),
+            ('All Human Users', '#3B82F6', {'identity_category': 'human_user'}),
+            ('All Managed Identities', '#8B5CF6', {'identity_category': ['managed_identity_system', 'managed_identity_user']}),
+            ('All Guest Users', '#F59E0B', {'identity_category': 'guest'}),
+        ]
+        for name, color, criteria in auto_groups:
+            cursor.execute("""
+                INSERT INTO identity_groups (name, color, group_type, auto_criteria)
+                VALUES (%s, %s, 'auto', %s)
+            """, (name, color, json.dumps(criteria)))
+        self.conn.commit()
+        cursor.close()

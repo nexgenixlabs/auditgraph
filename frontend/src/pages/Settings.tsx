@@ -442,6 +442,39 @@ export default function Settings() {
     }));
   }
 
+  // Change password state
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [pwChanging, setPwChanging] = useState(false);
+  const [pwMessage, setPwMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const handleChangePassword = async () => {
+    setPwMessage(null);
+    if (!currentPassword) { setPwMessage({ type: 'error', text: 'Enter your current password' }); return; }
+    if (newPassword.length < 8) { setPwMessage({ type: 'error', text: 'New password must be at least 8 characters' }); return; }
+    if (newPassword !== confirmPassword) { setPwMessage({ type: 'error', text: 'New passwords do not match' }); return; }
+
+    setPwChanging(true);
+    try {
+      const res = await fetch('/api/auth/password', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to change password');
+      setPwMessage({ type: 'success', text: 'Password changed successfully' });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (e: unknown) {
+      setPwMessage({ type: 'error', text: e instanceof Error ? e.message : 'Failed to change password' });
+    } finally {
+      setPwChanging(false);
+    }
+  };
+
   // User management state
   interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; }
   interface UserFormData { username: string; display_name: string; password: string; role: string; }
@@ -1152,6 +1185,58 @@ export default function Settings() {
             <p className="text-xs text-gray-400">
               Maximum 50 rules. Rules run after default scoring on every discovery run, ordered by priority (lower runs first).
             </p>
+          </div>
+
+          {/* Change Password */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div>
+              <div className="text-lg font-semibold text-gray-900">Change Password</div>
+              <p className="text-sm text-gray-500 mt-0.5">Update your account password</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={e => { setCurrentPassword(e.target.value); setPwMessage(null); }}
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Enter current password"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={e => { setNewPassword(e.target.value); setPwMessage(null); }}
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Min. 8 characters"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={e => { setConfirmPassword(e.target.value); setPwMessage(null); }}
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Repeat new password"
+                />
+              </div>
+            </div>
+            {pwMessage && (
+              <div className={`text-sm px-3 py-2 rounded-lg ${pwMessage.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {pwMessage.text}
+              </div>
+            )}
+            <button
+              onClick={handleChangePassword}
+              disabled={pwChanging || !currentPassword || !newPassword || !confirmPassword}
+              className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              {pwChanging ? 'Changing...' : 'Change Password'}
+            </button>
           </div>
 
           {/* Section 7: User Management */}

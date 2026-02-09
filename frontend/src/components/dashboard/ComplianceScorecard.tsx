@@ -80,7 +80,7 @@ function ScoreRing({ score, size = 48 }: { score: number; size?: number }) {
         strokeLinecap="round" transform={`rotate(-90 ${size / 2} ${size / 2})`}
       />
       <text x={size / 2} y={size / 2} textAnchor="middle" dominantBaseline="central"
-        className="text-xs font-bold" fill={color}>
+        fontSize={11} fontWeight={700} fill={color}>
         {score}%
       </text>
     </svg>
@@ -95,7 +95,7 @@ export default function ComplianceScorecard({ data, loading }: ComplianceScoreca
       <div className="bg-white border rounded-2xl p-6">
         <div className="animate-pulse space-y-4">
           <div className="h-5 bg-gray-200 rounded w-48" />
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {[1, 2, 3, 4].map(i => <div key={i} className="h-48 bg-gray-100 rounded-xl" />)}
           </div>
         </div>
@@ -128,13 +128,10 @@ export default function ComplianceScorecard({ data, loading }: ComplianceScoreca
       </div>
 
       {/* Framework cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 divide-y md:divide-y-0 md:divide-x">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-gray-200">
         {frameworks.map(fw => {
-          const fails = fw.controls.filter(c => c.status === 'fail').length;
-          const warns = fw.controls.filter(c => c.status === 'warn').length;
-
           return (
-            <div key={fw.name} className="p-5">
+            <div key={fw.name} className="p-5 bg-white">
               {/* Framework header */}
               <div className="flex items-center justify-between mb-4">
                 <div>
@@ -169,7 +166,7 @@ export default function ComplianceScorecard({ data, loading }: ComplianceScoreca
                           {cfg.label}
                         </span>
                       </div>
-                      <div className="text-[10px] text-gray-500 ml-6 mt-0.5">{ctrl.detail}</div>
+                      <div className="text-[10px] text-gray-500 ml-6 mt-0.5 truncate">{ctrl.detail}</div>
                     </button>
                   );
                 })}

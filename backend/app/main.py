@@ -55,6 +55,7 @@ from app.api.handlers import (
     auth_refresh,
     auth_logout,
     auth_me,
+    change_password,
     get_users_list,
     create_user_handler,
     update_user_handler,
@@ -75,6 +76,15 @@ from app.api.handlers import (
     delete_access_review,
     update_review_decision,
     bulk_review_decisions,
+    get_groups_list,
+    create_group_handler,
+    get_group_detail,
+    update_group_handler,
+    delete_group_handler,
+    add_group_members_handler,
+    remove_group_members_handler,
+    get_group_comparison_handler,
+    get_identity_groups_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -115,6 +125,10 @@ def create_app():
     @app.get("/api/auth/me")
     def me():
         return auth_me()
+
+    @app.put("/api/auth/password")
+    def password_change():
+        return change_password()
 
     # -----------------------
     # User Management (Phase 31 - Admin only)
@@ -474,6 +488,50 @@ def create_app():
         return bulk_review_decisions(campaign_id)
 
     # -----------------------
+    # Identity Groups (Phase 38)
+    # -----------------------
+    @app.get("/api/groups")
+    def groups_list():
+        return get_groups_list()
+
+    @app.post("/api/groups")
+    @require_role('auditor', 'admin')
+    def groups_create():
+        return create_group_handler()
+
+    @app.get("/api/groups/compare")
+    def groups_compare():
+        return get_group_comparison_handler()
+
+    @app.get("/api/groups/<int:group_id>")
+    def groups_detail(group_id):
+        return get_group_detail(group_id)
+
+    @app.put("/api/groups/<int:group_id>")
+    @require_role('auditor', 'admin')
+    def groups_update(group_id):
+        return update_group_handler(group_id)
+
+    @app.delete("/api/groups/<int:group_id>")
+    @require_role('admin')
+    def groups_delete(group_id):
+        return delete_group_handler(group_id)
+
+    @app.post("/api/groups/<int:group_id>/members")
+    @require_role('auditor', 'admin')
+    def groups_add_members(group_id):
+        return add_group_members_handler(group_id)
+
+    @app.delete("/api/groups/<int:group_id>/members")
+    @require_role('auditor', 'admin')
+    def groups_remove_members(group_id):
+        return remove_group_members_handler(group_id)
+
+    @app.get("/api/identities/<identity_id>/groups")
+    def identity_groups(identity_id):
+        return get_identity_groups_handler(identity_id)
+
+    # -----------------------
     # Activity Log (Phase 17)
     # -----------------------
     @app.get("/api/activity")
@@ -517,6 +575,7 @@ def create_app():
     try:
         db.ensure_default_admin()
         db.seed_compliance_frameworks()
+        db.seed_auto_groups()
     finally:
         db.close()
 

@@ -36,6 +36,7 @@ import Compliance from './pages/Compliance';
 import Exports from './pages/Exports';
 import AccessReviews from './pages/AccessReviews';
 import RoleMining from './pages/RoleMining';
+import IdentityGroups from './pages/IdentityGroups';
 import Login from './pages/Login';
 import {
   GlobalRiskCards,
@@ -362,6 +363,7 @@ function AppContent() {
                 <Route path="/exports" element={<ErrorBoundary><Exports /></ErrorBoundary>} />
                 <Route path="/access-reviews" element={<ErrorBoundary><AccessReviews /></ErrorBoundary>} />
                 <Route path="/role-mining" element={<ErrorBoundary><RoleMining /></ErrorBoundary>} />
+                <Route path="/groups" element={<ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
                 <Route path="/settings" element={
                   <ProtectedRoute requiredRole="admin">
                     <ErrorBoundary><Settings /></ErrorBoundary>
@@ -456,6 +458,17 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         }`}
       >
         Identities
+      </Link>
+
+      <Link
+        to="/groups"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/groups')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Groups
       </Link>
 
       <Link

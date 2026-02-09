@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import jsPDF from 'jspdf';
@@ -230,12 +230,16 @@ export default function IdentitiesPage() {
   const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
   const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
   const [caFilter, setCaFilter] = useState<'all' | 'covered' | 'not_covered'>('all');
+  const [groupFilter, setGroupFilter] = useState<number | 'all'>('all');
+  const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
+  const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('risk_level');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const [bulkLoading, setBulkLoading] = useState(false);
   const [bulkConfirm, setBulkConfirm] = useState<{ status: string; label: string } | null>(null);
+  const [addToGroupOpen, setAddToGroupOpen] = useState(false);
   const bulkMenuRef = useRef<HTMLDivElement>(null);
 
   // Saved Views state (Phase 34)
@@ -340,6 +344,26 @@ export default function IdentitiesPage() {
   }, []);
 
   useEffect(() => { loadViews(); }, [loadViews]);
+
+  // Load groups for filter
+  useEffect(() => {
+    fetch('/api/groups')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setAllGroups(d.groups || []))
+      .catch(() => {});
+  }, []);
+
+  // When group filter changes, fetch members
+  useEffect(() => {
+    if (groupFilter === 'all') { setGroupMemberIds(null); return; }
+    fetch(`/api/groups/${groupFilter}`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {
+        const ids = new Set<string>((d.members || []).map((m: any) => m.identity_id));
+        setGroupMemberIds(ids);
+      })
+      .catch(() => setGroupMemberIds(new Set()));
+  }, [groupFilter]);
 
   // Auto-apply default view on mount (only if no URL params)
   useEffect(() => {
@@ -484,6 +508,9 @@ export default function IdentitiesPage() {
         return true;
       });
     }
+    if (groupFilter !== 'all' && groupMemberIds) {
+      result = result.filter(i => groupMemberIds.has(i.identity_id));
+    }
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -523,7 +550,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, sortField, sortDir]);
+  }, [identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -711,6 +738,13 @@ export default function IdentitiesPage() {
                       >
                         Skip All Remediations
                       </button>
+                      <div className="border-t my-1" />
+                      <button
+                        onClick={() => { setBulkMenuOpen(false); setAddToGroupOpen(true); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50 hover:text-indigo-700 transition"
+                      >
+                        Add to Group...
+                      </button>
                     </div>
                   )}
                 </div>
@@ -894,7 +928,7 @@ export default function IdentitiesPage() {
 
       {/* Filters */}
       <div className="bg-white border rounded-xl p-3 mb-3 shadow-sm">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
           <input value={search} onChange={e => { setSearch(e.target.value); clearActiveView(); }} placeholder="Search name, ID, owner…"
             className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
           <select value={riskFilter} onChange={e => { setRiskFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
@@ -903,7 +937,11 @@ export default function IdentitiesPage() {
           <select value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
             {CATEGORY_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setActiveViewId(null); navigate('/identities', { replace: true }); }}
+          <select value={groupFilter === 'all' ? 'all' : String(groupFilter)} onChange={e => setGroupFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} className="border rounded-lg px-3 py-1.5 text-sm">
+            <option value="all">All Groups</option>
+            {allGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.member_count})</option>)}
+          </select>
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setGroupFilter('all'); setActiveViewId(null); navigate('/identities', { replace: true }); }}
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>
@@ -1155,6 +1193,48 @@ export default function IdentitiesPage() {
                 {bulkLoading ? 'Applying…' : `${bulkConfirm.label} All`}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add to Group Modal */}
+      {addToGroupOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setAddToGroupOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Add {selectedIds.size} identities to group</h3>
+            {allGroups.filter(g => g.group_type === 'custom').length === 0 ? (
+              <div className="text-xs text-gray-400 py-4 text-center">No custom groups. <Link to="/groups" className="text-blue-600 hover:underline">Create one</Link></div>
+            ) : (
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {allGroups.filter(g => g.group_type === 'custom').map(g => (
+                  <button
+                    key={g.id}
+                    onClick={async () => {
+                      try {
+                        const res = await fetch(`/api/groups/${g.id}/members`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ identity_ids: Array.from(selectedIds) }),
+                        });
+                        if (!res.ok) throw new Error('Failed');
+                        const data = await res.json();
+                        setAddToGroupOpen(false);
+                        setSelectedIds(new Set());
+                        alert(`Added ${data.added} identities to "${g.name}"`);
+                      } catch {
+                        alert('Failed to add to group');
+                      }
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-50 transition flex items-center gap-2 border"
+                  >
+                    <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: g.color || '#3B82F6' }} />
+                    <span className="text-sm font-medium text-gray-900">{g.name}</span>
+                    <span className="text-xs text-gray-400 ml-auto">{g.member_count} members</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setAddToGroupOpen(false)} className="mt-4 w-full py-2 text-sm text-gray-500 hover:text-gray-700 transition">Cancel</button>
           </div>
         </div>
       )}
