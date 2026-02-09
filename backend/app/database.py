@@ -1469,6 +1469,102 @@ class Database:
             },
         }
 
+    # ========================================================================
+    # Phase 14: Drift Detection & Change Tracking
+    # ========================================================================
+
+    def save_drift_report(self, current_run_id: int, previous_run_id: int, changes: Dict) -> int:
+        """Persist a drift comparison result. Returns drift_report ID."""
+        cursor = self.conn.cursor()
+
+        new_count = len(changes.get('new_identities', []))
+        removed_count = len(changes.get('removed_identities', []))
+        perm_count = len(changes.get('permission_changes', []))
+        risk_count = len(changes.get('risk_changes', []))
+        cred_count = len(changes.get('credential_changes', []))
+        total = new_count + removed_count + perm_count + risk_count + cred_count
+
+        cursor.execute("""
+            INSERT INTO drift_reports (
+                current_run_id, previous_run_id,
+                new_identities_count, removed_identities_count,
+                permission_changes_count, risk_changes_count,
+                credential_changes_count, total_changes,
+                changes
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (current_run_id, previous_run_id) DO UPDATE SET
+                new_identities_count = EXCLUDED.new_identities_count,
+                removed_identities_count = EXCLUDED.removed_identities_count,
+                permission_changes_count = EXCLUDED.permission_changes_count,
+                risk_changes_count = EXCLUDED.risk_changes_count,
+                credential_changes_count = EXCLUDED.credential_changes_count,
+                total_changes = EXCLUDED.total_changes,
+                changes = EXCLUDED.changes,
+                created_at = NOW()
+            RETURNING id
+        """, (
+            current_run_id, previous_run_id,
+            new_count, removed_count, perm_count, risk_count, cred_count, total,
+            json.dumps(changes, default=str)
+        ))
+
+        report_id = cursor.fetchone()[0]
+        self.conn.commit()
+        cursor.close()
+        return report_id
+
+    def get_drift_report(self, run_id: int) -> Optional[Dict]:
+        """Get the drift report where current_run_id = run_id. Returns None if not found."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, current_run_id, previous_run_id,
+                   new_identities_count, removed_identities_count,
+                   permission_changes_count, risk_changes_count,
+                   credential_changes_count, total_changes,
+                   changes, created_at
+            FROM drift_reports
+            WHERE current_run_id = %s
+        """, (run_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_latest_drift_report(self) -> Optional[Dict]:
+        """Get the most recent drift report summary (no full changes JSONB)."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, current_run_id, previous_run_id,
+                   new_identities_count, removed_identities_count,
+                   permission_changes_count, risk_changes_count,
+                   credential_changes_count, total_changes,
+                   created_at
+            FROM drift_reports
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_drift_history(self, limit: int = 20) -> List[Dict]:
+        """Get drift report summaries ordered by most recent."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT dr.id, dr.current_run_id, dr.previous_run_id,
+                   dr.new_identities_count, dr.removed_identities_count,
+                   dr.permission_changes_count, dr.risk_changes_count,
+                   dr.credential_changes_count, dr.total_changes,
+                   dr.created_at,
+                   r.completed_at as run_completed_at
+            FROM drift_reports dr
+            JOIN discovery_runs r ON r.id = dr.current_run_id
+            ORDER BY dr.created_at DESC
+            LIMIT %s
+        """, (limit,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
     def close(self):
         """Close database connection"""
         if self.conn:

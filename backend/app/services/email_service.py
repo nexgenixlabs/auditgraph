@@ -98,13 +98,17 @@ class EmailService:
         """
         new_count = len(changes.get('new_identities', []))
         removed_count = len(changes.get('removed_identities', []))
+        perm_count = len(changes.get('permission_changes', []))
+        risk_count = len(changes.get('risk_changes', []))
+        cred_count = len(changes.get('credential_changes', []))
+        total_changes = new_count + removed_count + perm_count + risk_count + cred_count
 
         # Don't send if no changes
-        if new_count == 0 and removed_count == 0:
-            logger.info("No identity changes - skipping email")
+        if total_changes == 0:
+            logger.info("No changes - skipping email")
             return True
 
-        subject = f"AuditGraph Alert: {new_count} Added, {removed_count} Removed Identities"
+        subject = f"AuditGraph Alert: {total_changes} Changes Detected (Run #{current_run_id})"
 
         html_body = self._generate_html_report(
             changes=changes,
@@ -174,7 +178,7 @@ class EmailService:
 
         summary_table = self._build_summary_table(category_counts)
 
-        # Only include sections for identities that actually changed
+        # Only include sections for change types that have data
         new_identities = changes.get('new_identities', [])
         removed_identities = changes.get('removed_identities', [])
 
@@ -188,6 +192,16 @@ class EmailService:
             removed_identities
         ) if removed_identities else ''
 
+        permission_section = self._build_permission_changes_section(
+            changes.get('permission_changes', [])
+        )
+        risk_section = self._build_risk_changes_section(
+            changes.get('risk_changes', [])
+        )
+        credential_section = self._build_credential_changes_section(
+            changes.get('credential_changes', [])
+        )
+
         html = f"""
 <!DOCTYPE html>
 <html>
@@ -198,7 +212,7 @@ class EmailService:
 </head>
 <body>
     <div class="header">
-        <h1>AuditGraph Identity Change Report</h1>
+        <h1>AuditGraph Change Report</h1>
         <p>Discovery Run #{current_run_id} vs #{previous_run_id}</p>
         <p>Generated: {timestamp}</p>
     </div>
@@ -206,6 +220,9 @@ class EmailService:
     {summary_table}
     {new_section}
     {removed_section}
+    {permission_section}
+    {risk_section}
+    {credential_section}
 
     <div class="footer">
         <p>This is an automated report from AuditGraph Identity Discovery System.</p>
@@ -344,6 +361,80 @@ class EmailService:
         <div class="identity-list">
             {''.join(items)}
         </div>
+    </div>
+"""
+
+    def _build_permission_changes_section(self, changes: List[Dict]) -> str:
+        """Build HTML section for permission/role changes."""
+        if not changes:
+            return ''
+        items = []
+        for change in changes:
+            identity = change.get('identity', {})
+            name = identity.get('display_name', 'Unknown')
+            added = change.get('added_roles', [])
+            removed = change.get('removed_roles', [])
+            added_html = ''.join(f'<div class="change-positive">+ {role}</div>' for role in added)
+            removed_html = ''.join(f'<div class="change-negative">- {role}</div>' for role in removed)
+            items.append(f"""
+                <div class="identity-item">
+                    <strong>{name}</strong><br>
+                    {added_html}{removed_html}
+                </div>
+            """)
+        return f"""
+    <div class="section">
+        <h2 class="section-title">Permission Changes ({len(changes)})</h2>
+        <div class="identity-list">{''.join(items)}</div>
+    </div>
+"""
+
+    def _build_risk_changes_section(self, changes: List[Dict]) -> str:
+        """Build HTML section for risk level changes."""
+        if not changes:
+            return ''
+        items = []
+        for change in changes:
+            identity = change.get('identity', {})
+            name = identity.get('display_name', 'Unknown')
+            prev_risk = change.get('previous_risk', '?')
+            curr_risk = change.get('current_risk', '?')
+            severity = change.get('severity', 'unchanged')
+            css_class = 'change-negative' if severity == 'escalation' else 'change-positive'
+            arrow = '&uarr;' if severity == 'escalation' else '&darr;'
+            items.append(f"""
+                <div class="identity-item">
+                    <strong>{name}</strong>
+                    <span class="{css_class}">{arrow} {prev_risk} &rarr; {curr_risk}</span>
+                </div>
+            """)
+        return f"""
+    <div class="section">
+        <h2 class="section-title">Risk Level Changes ({len(changes)})</h2>
+        <div class="identity-list">{''.join(items)}</div>
+    </div>
+"""
+
+    def _build_credential_changes_section(self, changes: List[Dict]) -> str:
+        """Build HTML section for credential status deterioration."""
+        if not changes:
+            return ''
+        items = []
+        for change in changes:
+            identity = change.get('identity', {})
+            name = identity.get('display_name', 'Unknown')
+            prev_status = change.get('previous_status', '?')
+            curr_status = change.get('current_status', '?')
+            items.append(f"""
+                <div class="identity-item">
+                    <strong>{name}</strong>
+                    <span class="change-negative">{prev_status} &rarr; {curr_status}</span>
+                </div>
+            """)
+        return f"""
+    <div class="section">
+        <h2 class="section-title">Credential Status Changes ({len(changes)})</h2>
+        <div class="identity-list">{''.join(items)}</div>
     </div>
 """
 

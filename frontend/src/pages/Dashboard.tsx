@@ -5,7 +5,7 @@ import { CATEGORY_DISPLAY_ORDER } from '../constants/metrics';
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
-import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner } from '../components/dashboard';
+import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges } from '../components/dashboard';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -86,6 +86,7 @@ export default function Dashboard() {
   const [schedulerInfo, setSchedulerInfo] = useState<{ scheduler: string; next_run: string | null; interval_hours: number } | null>(null);
   const [showRuns, setShowRuns] = useState(false);
   const [runs, setRuns] = useState<any[]>([]);
+  const [driftData, setDriftData] = useState<any>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,6 +127,13 @@ export default function Dashboard() {
           if (schedRes.ok) schedJson = await schedRes.json();
         } catch { /* ignore */ }
 
+        // Fetch drift data (non-blocking)
+        let driftJson = null;
+        try {
+          const driftRes = await fetch('/api/drift/latest');
+          if (driftRes.ok) driftJson = await driftRes.json();
+        } catch { /* ignore */ }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
@@ -133,6 +141,7 @@ export default function Dashboard() {
           setCompliance(complianceJson);
           setCaData(caJson);
           setSchedulerInfo(schedJson);
+          setDriftData(driftJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -365,8 +374,8 @@ export default function Dashboard() {
             <CloudContextBanner monitoredResources={summary.monitored_resources} />
           )}
 
-          {/* Posture Score + Credential Health + Quick Actions */}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+          {/* Posture Score + Credential Health + Quick Actions + Recent Changes */}
+          <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 mb-6">
             {posture ? (
               <>
                 <PostureScore
@@ -391,6 +400,18 @@ export default function Dashboard() {
               criticalCount={latest?.critical_count ?? 0}
               expiringCount={posture?.expiring_credentials_count ?? 0}
               dormantCount={posture?.dormant_count ?? 0}
+            />
+            <RecentChanges
+              hasData={driftData?.has_drift_data ?? false}
+              currentRunId={driftData?.current_run_id}
+              previousRunId={driftData?.previous_run_id}
+              newIdentities={driftData?.new_identities_count ?? 0}
+              removedIdentities={driftData?.removed_identities_count ?? 0}
+              permissionChanges={driftData?.permission_changes_count ?? 0}
+              riskChanges={driftData?.risk_changes_count ?? 0}
+              credentialChanges={driftData?.credential_changes_count ?? 0}
+              totalChanges={driftData?.total_changes ?? 0}
+              createdAt={driftData?.created_at}
             />
           </div>
 

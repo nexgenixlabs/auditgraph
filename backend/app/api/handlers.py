@@ -686,9 +686,80 @@ def get_discovery_runs():
 
 
 def get_drift_report(run_id: int):
-    detector = DriftDetector()
-    report = detector.get_drift_report(run_id)
-    return jsonify(report)
+    """Get drift report for a specific discovery run."""
+    db = _db()
+    try:
+        # Try persisted report first
+        report = db.get_drift_report(run_id)
+        if report:
+            report['created_at'] = report['created_at'].isoformat() if report.get('created_at') else None
+            return jsonify(report)
+
+        # Fall back to live computation: find the previous run
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE status = 'completed' AND id < %s
+            ORDER BY id DESC
+            LIMIT 1
+        """, (run_id,))
+        prev_row = cursor.fetchone()
+        cursor.close()
+
+        if not prev_row:
+            return jsonify({"error": "No previous run to compare against"}), 404
+
+        previous_run_id = prev_row[0]
+        detector = DriftDetector(db)
+        changes = detector.compare_runs(run_id, previous_run_id)
+
+        # Persist for future use
+        db.save_drift_report(run_id, previous_run_id, changes)
+
+        return jsonify({
+            "current_run_id": run_id,
+            "previous_run_id": previous_run_id,
+            "new_identities_count": len(changes.get('new_identities', [])),
+            "removed_identities_count": len(changes.get('removed_identities', [])),
+            "permission_changes_count": len(changes.get('permission_changes', [])),
+            "risk_changes_count": len(changes.get('risk_changes', [])),
+            "credential_changes_count": len(changes.get('credential_changes', [])),
+            "total_changes": sum(len(v) for v in changes.values()),
+            "changes": changes,
+        })
+    finally:
+        db.close()
+
+
+def get_latest_drift():
+    """Get the most recent drift report summary for the dashboard widget."""
+    db = _db()
+    try:
+        report = db.get_latest_drift_report()
+        if not report:
+            return jsonify({"has_drift_data": False})
+
+        report['created_at'] = report['created_at'].isoformat() if report.get('created_at') else None
+        report['has_drift_data'] = True
+        return jsonify(report)
+    finally:
+        db.close()
+
+
+def get_drift_history():
+    """Get drift report history for change timeline."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 20, type=int)
+        reports = db.get_drift_history(limit=limit)
+
+        for r in reports:
+            r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
+            r['run_completed_at'] = r['run_completed_at'].isoformat() if r.get('run_completed_at') else None
+
+        return jsonify({"count": len(reports), "reports": reports})
+    finally:
+        db.close()
 
 
 def trigger_discovery():

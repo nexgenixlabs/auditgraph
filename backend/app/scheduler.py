@@ -133,17 +133,27 @@ def _send_change_notification_if_needed():
 
         logger.info(f"Comparing runs: #{current_run_id} vs #{previous_run_id}")
 
-        # Compare runs for identity changes
+        # Compare runs for changes
         detector = DriftDetector(db)
         changes = detector.compare_runs(current_run_id, previous_run_id)
 
-        # Check if there are identity changes (new or removed)
+        # Phase 14: Persist drift report
+        report_id = db.save_drift_report(current_run_id, previous_run_id, changes)
+        logger.info(f"Drift report #{report_id} saved for runs #{current_run_id} vs #{previous_run_id}")
+
+        # Check if there are ANY significant changes (all 5 types)
         new_count = len(changes.get('new_identities', []))
         removed_count = len(changes.get('removed_identities', []))
-        has_identity_changes = new_count > 0 or removed_count > 0
+        perm_count = len(changes.get('permission_changes', []))
+        risk_count = len(changes.get('risk_changes', []))
+        cred_count = len(changes.get('credential_changes', []))
+        total_changes = new_count + removed_count + perm_count + risk_count + cred_count
 
-        if has_identity_changes:
-            logger.info(f"Identity changes detected: {new_count} added, {removed_count} removed")
+        if total_changes > 0:
+            logger.info(
+                f"Changes detected: {new_count} new, {removed_count} removed, "
+                f"{perm_count} permission, {risk_count} risk, {cred_count} credential"
+            )
 
             # Get category counts for both runs
             category_counts = _get_category_counts(db, current_run_id, previous_run_id)
@@ -158,11 +168,11 @@ def _send_change_notification_if_needed():
             )
 
             if success:
-                logger.info("Identity change report email sent successfully")
+                logger.info("Change report email sent successfully")
             else:
-                logger.warning("Failed to send identity change report email")
+                logger.warning("Failed to send change report email")
         else:
-            logger.info("No identity changes detected - no email notification needed")
+            logger.info("No changes detected - no email notification needed")
 
         db.close()
 

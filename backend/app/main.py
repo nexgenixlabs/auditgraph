@@ -21,6 +21,8 @@ from app.api.handlers import (
     get_scheduler_status,
     get_identity_remediations,
     get_report_data,
+    get_latest_drift,
+    get_drift_history,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -156,6 +158,17 @@ def create_app():
     @app.get("/api/reports/data")
     def report_data():
         return get_report_data()
+
+    # -----------------------
+    # Drift Detection (Phase 14)
+    # -----------------------
+    @app.get("/api/drift/latest")
+    def drift_latest():
+        return get_latest_drift()
+
+    @app.get("/api/drift/history")
+    def drift_history():
+        return get_drift_history()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)
