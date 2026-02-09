@@ -281,7 +281,7 @@ export default function IdentitiesPage() {
     let cancelled = false;
     async function load() {
       try {
-        const resp = await fetch('http://localhost:5001/api/identities');
+        const resp = await fetch('/api/identities');
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
         const rows: IdentityRow[] = (data.identities || []).map((raw: any) => ({

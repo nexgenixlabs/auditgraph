@@ -34,6 +34,7 @@ import IdentityComparison from './pages/IdentityComparison';
 import NotificationCenter from './pages/NotificationCenter';
 import Compliance from './pages/Compliance';
 import Exports from './pages/Exports';
+import AccessReviews from './pages/AccessReviews';
 import Login from './pages/Login';
 import {
   GlobalRiskCards,
@@ -358,6 +359,7 @@ function AppContent() {
                 <Route path="/compliance" element={<ErrorBoundary><Compliance /></ErrorBoundary>} />
                 <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
                 <Route path="/exports" element={<ErrorBoundary><Exports /></ErrorBoundary>} />
+                <Route path="/access-reviews" element={<ErrorBoundary><AccessReviews /></ErrorBoundary>} />
                 <Route path="/settings" element={
                   <ProtectedRoute requiredRole="admin">
                     <ErrorBoundary><Settings /></ErrorBoundary>
@@ -496,6 +498,17 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         }`}
       >
         Exports
+      </Link>
+
+      <Link
+        to="/access-reviews"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/access-reviews')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Reviews
       </Link>
 
       {isAdmin && (

@@ -344,7 +344,7 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
     let cancelled = false;
     setLoading(true);
     setError('');
-    fetch(`http://localhost:5001/api/identities/${encodeURIComponent(identityId)}/graph-data`)
+    fetch(`/api/identities/${encodeURIComponent(identityId)}/graph-data`)
       .then(res => {
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         return res.json();

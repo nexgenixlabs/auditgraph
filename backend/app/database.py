@@ -3209,3 +3209,278 @@ class Database:
         result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
         result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
         return result
+
+    # ===================================================================
+    # Access Review Campaigns (Phase 36)
+    # ===================================================================
+
+    def _ensure_access_review_tables(self):
+        """Create access_review_campaigns and campaign_reviews tables."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS access_review_campaigns (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'active',
+                scope_filters JSONB NOT NULL DEFAULT '{}',
+                deadline TIMESTAMPTZ,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                completed_at TIMESTAMPTZ
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_status ON access_review_campaigns(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_created_by ON access_review_campaigns(created_by)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS campaign_reviews (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES access_review_campaigns(id) ON DELETE CASCADE,
+                identity_id TEXT NOT NULL,
+                identity_display_name TEXT,
+                identity_risk_level VARCHAR(20),
+                identity_category VARCHAR(100),
+                reviewer_id INTEGER REFERENCES users(id),
+                decision VARCHAR(20),
+                notes TEXT,
+                decided_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_campaign ON campaign_reviews(campaign_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_identity ON campaign_reviews(identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_decision ON campaign_reviews(decision)")
+        self.conn.commit()
+        cursor.close()
+
+    def get_campaigns(self, status: str = None) -> list:
+        """Get all campaigns with review progress stats."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        query = """
+            SELECT c.*,
+                   u.display_name as creator_name,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id) as total_reviews,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision IS NOT NULL) as completed_reviews,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision = 'approve') as approved_count,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision = 'revoke') as revoked_count,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision = 'flag') as flagged_count
+            FROM access_review_campaigns c
+            JOIN users u ON u.id = c.created_by
+        """
+        params = []
+        if status:
+            query += " WHERE c.status = %s"
+            params.append(status)
+        query += " ORDER BY c.created_at DESC"
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts in ('created_at', 'updated_at', 'completed_at', 'deadline'):
+                if r.get(ts) and hasattr(r[ts], 'isoformat'):
+                    r[ts] = r[ts].isoformat()
+        return rows
+
+    def get_campaign(self, campaign_id: int) -> dict:
+        """Get a single campaign by ID with stats."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT c.*,
+                   u.display_name as creator_name,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id) as total_reviews,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision IS NOT NULL) as completed_reviews,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision = 'approve') as approved_count,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision = 'revoke') as revoked_count,
+                   (SELECT COUNT(*) FROM campaign_reviews cr WHERE cr.campaign_id = c.id AND cr.decision = 'flag') as flagged_count
+            FROM access_review_campaigns c
+            JOIN users u ON u.id = c.created_by
+            WHERE c.id = %s
+        """, (campaign_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'completed_at', 'deadline'):
+            if result.get(ts) and hasattr(result[ts], 'isoformat'):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def create_campaign(self, name: str, description: str, scope_filters: dict, deadline: str, created_by: int) -> dict:
+        """Create a new access review campaign."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO access_review_campaigns (name, description, scope_filters, deadline, created_by)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+        """, (name, description, json.dumps(scope_filters) if scope_filters else '{}', deadline, created_by))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        for ts in ('created_at', 'updated_at', 'completed_at', 'deadline'):
+            if row.get(ts) and hasattr(row[ts], 'isoformat'):
+                row[ts] = row[ts].isoformat()
+        return row
+
+    def update_campaign(self, campaign_id: int, **fields) -> dict:
+        """Update campaign fields."""
+        self._ensure_access_review_tables()
+        allowed = {'name', 'description', 'status', 'deadline'}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return self.get_campaign(campaign_id)
+
+        set_parts = []
+        params = []
+        for key, val in updates.items():
+            set_parts.append(f"{key} = %s")
+            params.append(val)
+        set_parts.append("updated_at = NOW()")
+        if updates.get('status') == 'completed':
+            set_parts.append("completed_at = NOW()")
+        params.append(campaign_id)
+
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE access_review_campaigns SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'completed_at', 'deadline'):
+            if result.get(ts) and hasattr(result[ts], 'isoformat'):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def delete_campaign(self, campaign_id: int) -> bool:
+        """Delete a campaign (CASCADE deletes reviews)."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM access_review_campaigns WHERE id = %s", (campaign_id,))
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return deleted
+
+    def populate_campaign_reviews(self, campaign_id: int, scope_filters: dict, reviewer_id: int) -> int:
+        """Populate campaign_reviews from identities matching scope_filters."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Find latest completed discovery run
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        row = cursor.fetchone()
+        latest_run = row['max'] if row else None
+        if not latest_run:
+            cursor.close()
+            return 0
+
+        # Build identity query with scope filters
+        where_parts = ["i.discovery_run_id = %s"]
+        params = [latest_run]
+
+        risk_levels = scope_filters.get('risk_levels', [])
+        if risk_levels:
+            placeholders = ','.join(['%s'] * len(risk_levels))
+            where_parts.append(f"i.risk_level IN ({placeholders})")
+            params.extend(risk_levels)
+
+        categories = scope_filters.get('identity_categories', [])
+        if categories:
+            placeholders = ','.join(['%s'] * len(categories))
+            where_parts.append(f"COALESCE(i.identity_category, '') IN ({placeholders})")
+            params.extend(categories)
+
+        identity_ids = scope_filters.get('identity_ids', [])
+        if identity_ids:
+            placeholders = ','.join(['%s'] * len(identity_ids))
+            where_parts.append(f"i.identity_id IN ({placeholders})")
+            params.extend(identity_ids)
+
+        where_clause = " AND ".join(where_parts)
+        cursor.execute(f"""
+            SELECT i.identity_id, i.display_name, i.risk_level,
+                   COALESCE(i.identity_category, '') as identity_category
+            FROM identities i
+            WHERE {where_clause}
+            ORDER BY i.display_name
+        """, params)
+        identities = cursor.fetchall()
+
+        count = 0
+        for ident in identities:
+            cursor.execute("""
+                INSERT INTO campaign_reviews (campaign_id, identity_id, identity_display_name,
+                    identity_risk_level, identity_category, reviewer_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (campaign_id, ident['identity_id'], ident['display_name'],
+                  ident['risk_level'], ident['identity_category'], reviewer_id))
+            count += 1
+
+        self.conn.commit()
+        cursor.close()
+        return count
+
+    def get_campaign_reviews(self, campaign_id: int) -> list:
+        """Get all reviews for a campaign, pending first."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT cr.*, u.display_name as reviewer_name
+            FROM campaign_reviews cr
+            LEFT JOIN users u ON u.id = cr.reviewer_id
+            WHERE cr.campaign_id = %s
+            ORDER BY
+                CASE WHEN cr.decision IS NULL THEN 0 ELSE 1 END,
+                cr.identity_display_name ASC
+        """, (campaign_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts in ('decided_at', 'created_at'):
+                if r.get(ts) and hasattr(r[ts], 'isoformat'):
+                    r[ts] = r[ts].isoformat()
+        return rows
+
+    def update_campaign_review(self, review_id: int, decision: str, notes: str = None, reviewer_id: int = None) -> dict:
+        """Set decision on a single review."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE campaign_reviews
+            SET decision = %s, notes = %s, reviewer_id = COALESCE(%s, reviewer_id), decided_at = NOW()
+            WHERE id = %s
+            RETURNING *
+        """, (decision, notes, reviewer_id, review_id))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('decided_at', 'created_at'):
+            if result.get(ts) and hasattr(result[ts], 'isoformat'):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def bulk_update_campaign_reviews(self, review_ids: list, decision: str, notes: str = None, reviewer_id: int = None) -> int:
+        """Bulk set decision on multiple reviews."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE campaign_reviews
+            SET decision = %s, notes = %s, reviewer_id = COALESCE(%s, reviewer_id), decided_at = NOW()
+            WHERE id = ANY(%s)
+        """, (decision, notes, reviewer_id, review_ids))
+        count = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return count

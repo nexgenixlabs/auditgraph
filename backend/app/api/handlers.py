@@ -4244,3 +4244,222 @@ def get_identity_lifecycle(identity_id):
         })
     finally:
         db.close()
+
+
+# ===================================================================
+# Access Review Campaigns (Phase 36)
+# ===================================================================
+
+def get_access_reviews_list():
+    """List all access review campaigns with progress stats."""
+    db = _db()
+    try:
+        status = request.args.get('status')
+        campaigns = db.get_campaigns(status=status)
+        return jsonify({'campaigns': campaigns})
+    finally:
+        db.close()
+
+
+def create_access_review():
+    """Create a new access review campaign and populate review items."""
+    db = _db()
+    try:
+        user = g.current_user
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        name = (body.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'name is required'}), 400
+        if len(name) > 255:
+            return jsonify({'error': 'name must be 255 characters or less'}), 400
+
+        description = body.get('description', '')
+        deadline = body.get('deadline')
+        scope = body.get('scope', {})
+        if not isinstance(scope, dict):
+            return jsonify({'error': 'scope must be an object'}), 400
+
+        has_criteria = (scope.get('risk_levels') or scope.get('identity_categories')
+                        or scope.get('identity_ids'))
+        if not has_criteria:
+            return jsonify({'error': 'At least one scope criteria is required (risk_levels, identity_categories, or identity_ids)'}), 400
+
+        campaign = db.create_campaign(name, description, scope, deadline, user['id'])
+        review_count = db.populate_campaign_reviews(campaign['id'], scope, user['id'])
+
+        db.log_activity('campaign_created',
+                        f'Access review campaign "{name}" created with {review_count} identities',
+                        {'campaign_id': campaign['id'], 'review_count': review_count})
+
+        try:
+            db.create_notification('access_review', 'access_review', 'info',
+                                   f'Campaign "{name}" started',
+                                   f'{review_count} identities included for review',
+                                   {'campaign_id': campaign['id']}, None, None, None)
+        except Exception:
+            pass
+
+        campaign = db.get_campaign(campaign['id'])
+        return jsonify({'campaign': campaign, 'review_count': review_count}), 201
+    finally:
+        db.close()
+
+
+def get_access_review_detail(campaign_id):
+    """Get a single campaign with all its review items."""
+    db = _db()
+    try:
+        campaign = db.get_campaign(campaign_id)
+        if not campaign:
+            return jsonify({'error': 'Campaign not found'}), 404
+        reviews = db.get_campaign_reviews(campaign_id)
+        return jsonify({'campaign': campaign, 'reviews': reviews})
+    finally:
+        db.close()
+
+
+def update_access_review(campaign_id):
+    """Update campaign fields or transition status."""
+    db = _db()
+    try:
+        existing = db.get_campaign(campaign_id)
+        if not existing:
+            return jsonify({'error': 'Campaign not found'}), 404
+
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        updates = {}
+        if 'name' in body:
+            updates['name'] = body['name']
+        if 'description' in body:
+            updates['description'] = body['description']
+        if 'deadline' in body:
+            updates['deadline'] = body['deadline']
+
+        if 'status' in body:
+            new_status = body['status']
+            current = existing['status']
+            valid_transitions = {
+                'active': ['completed'],
+                'completed': ['archived'],
+            }
+            allowed = valid_transitions.get(current, [])
+            if new_status not in allowed:
+                return jsonify({'error': f'Cannot transition from {current} to {new_status}'}), 400
+            updates['status'] = new_status
+
+        db.update_campaign(campaign_id, **updates)
+        updated = db.get_campaign(campaign_id)
+
+        if updates.get('status'):
+            db.log_activity('campaign_status_changed',
+                            f'Campaign "{existing["name"]}" status: {existing["status"]} → {updates["status"]}',
+                            {'campaign_id': campaign_id, 'old_status': existing['status'],
+                             'new_status': updates['status']})
+            if updates['status'] == 'completed':
+                try:
+                    db.create_notification('access_review', 'access_review', 'info',
+                                           f'Campaign "{existing["name"]}" completed',
+                                           f'{updated.get("completed_reviews", 0)} of {updated.get("total_reviews", 0)} identities reviewed',
+                                           {'campaign_id': campaign_id}, None, None, None)
+                except Exception:
+                    pass
+
+        return jsonify(updated)
+    finally:
+        db.close()
+
+
+def delete_access_review(campaign_id):
+    """Delete a campaign (only if archived)."""
+    db = _db()
+    try:
+        existing = db.get_campaign(campaign_id)
+        if not existing:
+            return jsonify({'error': 'Campaign not found'}), 404
+        if existing['status'] not in ('archived',):
+            return jsonify({'error': 'Only archived campaigns can be deleted'}), 400
+
+        db.delete_campaign(campaign_id)
+        db.log_activity('campaign_deleted', f'Campaign "{existing["name"]}" deleted',
+                        {'campaign_id': campaign_id})
+        return jsonify({'status': 'deleted', 'id': campaign_id})
+    finally:
+        db.close()
+
+
+def update_review_decision(campaign_id, review_id):
+    """Set a decision on a single review item."""
+    db = _db()
+    try:
+        user = g.current_user
+        campaign = db.get_campaign(campaign_id)
+        if not campaign:
+            return jsonify({'error': 'Campaign not found'}), 404
+        if campaign['status'] != 'active':
+            return jsonify({'error': 'Campaign is not active'}), 400
+
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        decision = body.get('decision')
+        if decision not in ('approve', 'revoke', 'flag'):
+            return jsonify({'error': 'decision must be one of: approve, revoke, flag'}), 400
+
+        notes = body.get('notes')
+        result = db.update_campaign_review(review_id, decision, notes, user['id'])
+        if not result:
+            return jsonify({'error': 'Review not found'}), 404
+
+        db.log_activity('review_decided',
+                        f'Review decision: {decision} for {result.get("identity_display_name", "")}',
+                        {'campaign_id': campaign_id, 'review_id': review_id,
+                         'decision': decision, 'reviewer': user['username']})
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def bulk_review_decisions(campaign_id):
+    """Bulk set decision on multiple review items."""
+    db = _db()
+    try:
+        user = g.current_user
+        campaign = db.get_campaign(campaign_id)
+        if not campaign:
+            return jsonify({'error': 'Campaign not found'}), 404
+        if campaign['status'] != 'active':
+            return jsonify({'error': 'Campaign is not active'}), 400
+
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        review_ids = body.get('review_ids', [])
+        if not review_ids or not isinstance(review_ids, list):
+            return jsonify({'error': 'review_ids must be a non-empty list'}), 400
+        if len(review_ids) > 100:
+            return jsonify({'error': 'Maximum 100 reviews per bulk action'}), 400
+
+        decision = body.get('decision')
+        if decision not in ('approve', 'revoke', 'flag'):
+            return jsonify({'error': 'decision must be one of: approve, revoke, flag'}), 400
+
+        notes = body.get('notes')
+        count = db.bulk_update_campaign_reviews(review_ids, decision, notes, user['id'])
+
+        db.log_activity('review_bulk_decided',
+                        f'Bulk {decision}: {count} reviews in campaign "{campaign["name"]}"',
+                        {'campaign_id': campaign_id, 'decision': decision,
+                         'count': count, 'reviewer': user['username']})
+
+        return jsonify({'updated_count': count})
+    finally:
+        db.close()

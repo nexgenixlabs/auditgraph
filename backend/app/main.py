@@ -67,6 +67,13 @@ from app.api.handlers import (
     delete_saved_view_handler,
     set_default_view_handler,
     get_identity_lifecycle,
+    get_access_reviews_list,
+    create_access_review,
+    get_access_review_detail,
+    update_access_review,
+    delete_access_review,
+    update_review_decision,
+    bulk_review_decisions,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -421,6 +428,42 @@ def create_app():
     @app.post("/api/saved-views/<int:view_id>/default")
     def saved_views_set_default(view_id):
         return set_default_view_handler(view_id)
+
+    # -----------------------
+    # Access Review Campaigns (Phase 36)
+    # -----------------------
+    @app.get("/api/access-reviews")
+    def access_reviews_list():
+        return get_access_reviews_list()
+
+    @app.post("/api/access-reviews")
+    @require_role('admin')
+    def access_reviews_create():
+        return create_access_review()
+
+    @app.get("/api/access-reviews/<int:campaign_id>")
+    def access_reviews_detail(campaign_id):
+        return get_access_review_detail(campaign_id)
+
+    @app.put("/api/access-reviews/<int:campaign_id>")
+    @require_role('admin')
+    def access_reviews_update(campaign_id):
+        return update_access_review(campaign_id)
+
+    @app.delete("/api/access-reviews/<int:campaign_id>")
+    @require_role('admin')
+    def access_reviews_delete(campaign_id):
+        return delete_access_review(campaign_id)
+
+    @app.patch("/api/access-reviews/<int:campaign_id>/reviews/<int:review_id>")
+    @require_role('auditor', 'admin')
+    def review_decision(campaign_id, review_id):
+        return update_review_decision(campaign_id, review_id)
+
+    @app.post("/api/access-reviews/<int:campaign_id>/reviews/bulk")
+    @require_role('auditor', 'admin')
+    def review_bulk_decision(campaign_id):
+        return bulk_review_decisions(campaign_id)
 
     # -----------------------
     # Activity Log (Phase 17)
