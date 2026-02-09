@@ -25,6 +25,7 @@ from app.api.handlers import (
     get_drift_history,
     get_app_settings,
     save_app_settings,
+    test_email,
     get_activity,
 )
 from app.scheduler import start_scheduler, stop_scheduler
@@ -183,6 +184,10 @@ def create_app():
     @app.post("/api/settings")
     def app_settings_save():
         return save_app_settings()
+
+    @app.post("/api/settings/test-email")
+    def settings_test_email():
+        return test_email()
 
     # -----------------------
     # Activity Log (Phase 17)

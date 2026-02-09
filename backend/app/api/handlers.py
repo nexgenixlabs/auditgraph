@@ -780,8 +780,9 @@ def get_app_settings():
         ])
 
         # Check scheduler state
-        from app.scheduler import get_next_run_time, scheduler as _sched
+        from app.scheduler import get_next_run_time, get_next_report_time, scheduler as _sched
         next_run = get_next_run_time()
+        next_report = get_next_report_time()
 
         return jsonify({
             "settings": settings,
@@ -790,6 +791,7 @@ def get_app_settings():
                 "email_configured": azure_configured,
                 "scheduler_running": _sched is not None,
                 "next_run": next_run.isoformat() if next_run else None,
+                "next_report": next_report.isoformat() if next_report else None,
             }
         })
     finally:
@@ -806,10 +808,12 @@ def save_app_settings():
         'org_name', 'discovery_interval_hours', 'email_enabled', 'email_to',
         'notify_new_identities', 'notify_removed_identities',
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
+        'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
+        'report_schedule_enabled',
     }
 
     # Filter to valid keys only
@@ -833,9 +837,14 @@ def save_app_settings():
                 continue
             value = value.lower()
 
-        if key == 'email_to' and value:
+        if key == 'report_schedule_frequency':
+            if value not in ('weekly', 'monthly'):
+                errors.append("report_schedule_frequency must be weekly or monthly")
+                continue
+
+        if key in ('email_to', 'report_email_to') and value:
             if '@' not in value:
-                errors.append("email_to must be a valid email address")
+                errors.append(f"{key} must be a valid email address")
                 continue
 
         updates[key] = value
@@ -852,6 +861,31 @@ def save_app_settings():
             'values': updates,
         })
         return jsonify({"settings": settings, "updated": list(updates.keys())})
+    finally:
+        db.close()
+
+
+def test_email():
+    """Send a test email to verify email configuration."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+        to_email = data.get('email_to', '').strip() or None
+
+        from app.services.email_service import EmailService
+        email_service = EmailService()
+
+        if not email_service.credentials_configured:
+            return jsonify({"error": "Azure credentials not configured. Email service requires AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET."}), 400
+
+        success = email_service.send_test_email(to_email_override=to_email)
+
+        if success:
+            db.log_activity('test_email_sent', f'Test email sent to {to_email or "default recipient"}')
+            return jsonify({"status": "sent", "message": "Test email sent successfully"})
+        else:
+            db.log_activity('test_email_failed', 'Test email failed to send')
+            return jsonify({"error": "Failed to send test email. Check server logs for details."}), 500
     finally:
         db.close()
 

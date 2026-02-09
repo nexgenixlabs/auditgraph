@@ -10,6 +10,9 @@ interface SettingsData {
   notify_permission_changes: string;
   notify_risk_changes: string;
   notify_credential_changes: string;
+  report_schedule_enabled: string;
+  report_schedule_frequency: string;
+  report_email_to: string;
 }
 
 interface StatusData {
@@ -17,6 +20,7 @@ interface StatusData {
   email_configured: boolean;
   scheduler_running: boolean;
   next_run: string | null;
+  next_report: string | null;
 }
 
 export default function Settings() {
@@ -76,6 +80,31 @@ export default function Settings() {
   function toggleBool(key: keyof SettingsData) {
     if (!settings) return;
     setSettings({ ...settings, [key]: settings[key] === 'true' ? 'false' : 'true' });
+  }
+
+  // Test email state
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  async function handleTestEmail() {
+    if (!settings) return;
+    setTestingEmail(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/settings/test-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email_to: settings.email_to }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Send failed');
+      setTestResult({ type: 'success', message: data.message || 'Test email sent successfully' });
+      setTimeout(() => setTestResult(null), 6000);
+    } catch (e: any) {
+      setTestResult({ type: 'error', message: e?.message || 'Failed to send test email' });
+    } finally {
+      setTestingEmail(false);
+    }
   }
 
   if (loading) {
@@ -231,6 +260,34 @@ export default function Settings() {
                   </p>
                 </div>
 
+                {/* Test email button */}
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleTestEmail}
+                    disabled={testingEmail || !status?.email_configured}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                      testingEmail || !status?.email_configured
+                        ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    {testingEmail ? (
+                      <span className="flex items-center gap-2">
+                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Sending...
+                      </span>
+                    ) : 'Send Test Email'}
+                  </button>
+                  {testResult && (
+                    <span className={`text-sm ${testResult.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                      {testResult.message}
+                    </span>
+                  )}
+                </div>
+
                 {/* Change type toggles */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -256,6 +313,88 @@ export default function Settings() {
                     ))}
                   </div>
                 </div>
+              </>
+            )}
+          </div>
+
+          {/* Section 4: Scheduled Reports */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="text-lg font-semibold text-gray-900">Scheduled Reports</div>
+              <button
+                onClick={() => toggleBool('report_schedule_enabled')}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  settings.report_schedule_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    settings.report_schedule_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <p className="text-sm text-gray-500">
+              Automatically send an executive summary report on a recurring schedule.
+            </p>
+
+            {settings.report_schedule_enabled === 'true' && (
+              <>
+                {/* Frequency selector */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Delivery Frequency
+                  </label>
+                  <div className="flex gap-3">
+                    {([
+                      { value: 'weekly', label: 'Weekly (Mon 8:00 UTC)' },
+                      { value: 'monthly', label: 'Monthly (1st 8:00 UTC)' },
+                    ] as const).map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => update('report_schedule_frequency', opt.value)}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                          settings.report_schedule_frequency === opt.value
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2">
+                    Schedule changes take effect on next scheduler restart.
+                  </p>
+                </div>
+
+                {/* Report recipient */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Report Recipient
+                  </label>
+                  <input
+                    type="email"
+                    value={settings.report_email_to}
+                    onChange={e => update('report_email_to', e.target.value)}
+                    placeholder={settings.email_to || 'Uses notification recipient'}
+                    className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    Leave empty to use the notification recipient above.
+                  </p>
+                </div>
+
+                {/* Next delivery time */}
+                {status?.next_report && (
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    <span className="text-gray-600">
+                      Next delivery: {new Date(status.next_report).toLocaleString()}
+                    </span>
+                  </div>
+                )}
               </>
             )}
           </div>

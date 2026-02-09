@@ -249,6 +249,46 @@ def _get_category_counts(db: Database, current_run_id: int, previous_run_id: int
     return counts
 
 
+def run_scheduled_report():
+    """
+    Send the scheduled executive summary report email.
+    Called by the scheduler on the configured cadence.
+    """
+    logger.info("=" * 70)
+    logger.info("SCHEDULED REPORT EMAIL STARTED")
+    logger.info(f"Time: {datetime.utcnow().isoformat()}")
+    logger.info("=" * 70)
+
+    try:
+        db = Database()
+        enabled = db.get_setting('report_schedule_enabled', 'false')
+        db.close()
+
+        if enabled != 'true':
+            logger.info("Scheduled reports disabled in settings - skipping")
+            return
+
+        email_service = EmailService()
+        if not email_service.credentials_configured:
+            logger.warning("Azure credentials not configured - skipping scheduled report")
+            return
+
+        success = email_service.send_scheduled_report()
+
+        act_db = Database()
+        if success:
+            act_db.log_activity('report_emailed', 'Scheduled executive summary report sent')
+            logger.info("✅ Scheduled report email sent successfully")
+        else:
+            act_db.log_activity('report_email_failed', 'Scheduled report email failed to send')
+            logger.warning("Failed to send scheduled report email")
+        act_db.close()
+
+    except Exception as e:
+        logger.error(f"Scheduled report failed: {e}")
+        logger.exception(e)
+
+
 # Global scheduler instance
 scheduler = None
 
@@ -290,18 +330,48 @@ def start_scheduler():
         coalesce=True
     )
     
+    # Phase 18: Add scheduled report job
+    try:
+        report_db = Database()
+        report_freq = report_db.get_setting('report_schedule_frequency', 'weekly')
+        report_enabled = report_db.get_setting('report_schedule_enabled', 'false') == 'true'
+        report_db.close()
+    except Exception:
+        report_freq = 'weekly'
+        report_enabled = False
+
+    if report_freq == 'monthly':
+        report_trigger = CronTrigger(day=1, hour=8, minute=0, timezone="UTC")
+        report_name = 'Executive Report (Monthly, 1st @ 08:00 UTC)'
+    else:
+        report_trigger = CronTrigger(day_of_week='mon', hour=8, minute=0, timezone="UTC")
+        report_name = 'Executive Report (Weekly, Mon @ 08:00 UTC)'
+
+    scheduler.add_job(
+        func=run_scheduled_report,
+        trigger=report_trigger,
+        id='scheduled_report',
+        name=report_name,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
-    
-    logger.info("✅ Scheduler started")
-    logger.info(f"📅 Schedule: Every {interval_hours} hours")
 
-    # Get next run time
+    logger.info("✅ Scheduler started")
+    logger.info(f"📅 Discovery: Every {interval_hours} hours")
+    logger.info(f"📊 Report: {report_name} (enabled={report_enabled})")
+
+    # Get next run times
     job = scheduler.get_job('scheduled_discovery')
     if job:
-        next_run = job.next_run_time
-        logger.info(f"🕐 Next scheduled run: {next_run}")
-    
+        logger.info(f"🕐 Next discovery: {job.next_run_time}")
+    report_job = scheduler.get_job('scheduled_report')
+    if report_job:
+        logger.info(f"📧 Next report: {report_job.next_run_time}")
+
     logger.info("=" * 70)
 
 
@@ -330,6 +400,23 @@ def get_next_run_time():
         return None
     
     job = scheduler.get_job('scheduled_discovery')
+    if job:
+        return job.next_run_time
+
+    return None
+
+
+def get_next_report_time():
+    """
+    Get the next scheduled report delivery time.
+    Returns datetime or None.
+    """
+    global scheduler
+
+    if scheduler is None:
+        return None
+
+    job = scheduler.get_job('scheduled_report')
     if job:
         return job.next_run_time
 

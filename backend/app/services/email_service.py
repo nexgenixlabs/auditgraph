@@ -450,6 +450,204 @@ class EmailService:
     </div>
 """
 
+    # ====================================================================
+    # Phase 18: Test Email & Scheduled Report
+    # ====================================================================
+
+    def send_test_email(self, to_email_override: str = None) -> bool:
+        """Send a lightweight test email to verify configuration."""
+        to_email = to_email_override or self.to_email
+        if not to_email_override:
+            try:
+                from app.database import Database
+                db = Database()
+                db_email = db.get_setting('email_to')
+                if db_email and '@' in db_email:
+                    to_email = db_email
+                db.close()
+            except Exception:
+                pass
+
+        subject = "AuditGraph - Email Configuration Test"
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head><style>{self._get_css_styles()}</style></head>
+<body>
+    <div class="header">
+        <h1>AuditGraph Email Test</h1>
+        <p>Configuration Verification</p>
+        <p>{timestamp}</p>
+    </div>
+    <div class="section">
+        <h2 class="section-title">Test Successful</h2>
+        <p>This confirms that your AuditGraph email notification configuration is working correctly.</p>
+        <p>You will receive change reports at this address when identity changes are detected during scheduled discovery runs.</p>
+    </div>
+    <div class="footer">
+        <p>This is a test email from AuditGraph Identity Discovery System.</p>
+        <p>NexGenix Labs - Azure Identity Security</p>
+    </div>
+</body>
+</html>
+"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        finally:
+            loop.close()
+
+    def send_scheduled_report(self) -> bool:
+        """Generate and send a scheduled executive summary report email."""
+        from app.database import Database
+        db = Database()
+        try:
+            report_data = db.get_report_data()
+            if report_data is None:
+                logger.info("No completed discovery runs - skipping scheduled report")
+                return False
+
+            to_email = db.get_setting('report_email_to') or db.get_setting('email_to') or self.to_email
+            if not to_email or '@' not in to_email:
+                logger.warning("No valid report recipient configured")
+                return False
+
+            org_name = db.get_setting('org_name', 'Your Organization')
+            freq = db.get_setting('report_schedule_frequency', 'weekly')
+        finally:
+            db.close()
+
+        stats = report_data.get('stats', {})
+        cred = report_data.get('credential_health', {})
+        ca = report_data.get('conditional_access', {})
+        remediation = report_data.get('remediation_summary', {})
+        prev = report_data.get('previous_run')
+        collected_at = report_data.get('collected_at', 'N/A')
+
+        subject = f"AuditGraph {freq.capitalize()} Report - {org_name}"
+        html_body = self._generate_executive_summary_html(
+            stats, cred, ca, remediation, prev, org_name, collected_at
+        )
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        finally:
+            loop.close()
+
+    def _generate_executive_summary_html(
+        self, stats: Dict, credential_health: Dict, conditional_access: Dict,
+        remediation_summary: Dict, previous_run, org_name: str, collected_at: str
+    ) -> str:
+        """Generate HTML for the executive summary report email."""
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+
+        total = stats.get('total_identities', 0)
+        critical = stats.get('critical', 0)
+        high = stats.get('high', 0)
+        medium = stats.get('medium', 0)
+        low = stats.get('low', 0)
+
+        def _trend(current, prev_val):
+            if prev_val is None:
+                return ''
+            diff = current - prev_val
+            if diff > 0:
+                return f'<span class="change-negative">(+{diff})</span>'
+            elif diff < 0:
+                return f'<span class="change-positive">({diff})</span>'
+            return '<span class="change-neutral">(no change)</span>'
+
+        prev_total = previous_run.get('total_identities') if previous_run else None
+        prev_critical = previous_run.get('critical') if previous_run else None
+        prev_high = previous_run.get('high') if previous_run else None
+
+        expired = credential_health.get('expired', 0)
+        expiring = credential_health.get('expiring_soon', 0)
+        ca_covered = conditional_access.get('covered', 0) if conditional_access else 0
+        ca_total = conditional_access.get('total', 0) if conditional_access else 0
+        ca_pct = round(ca_covered / ca_total * 100) if ca_total > 0 else 0
+        total_remediations = remediation_summary.get('total_actions', 0) if remediation_summary else 0
+
+        return f"""
+<!DOCTYPE html>
+<html>
+<head><style>{self._get_css_styles()}</style></head>
+<body>
+    <div class="header">
+        <h1>AuditGraph Executive Summary</h1>
+        <p>{org_name}</p>
+        <p>Data collected: {collected_at} | Report generated: {timestamp}</p>
+    </div>
+
+    <div class="section">
+        <h2 class="section-title">Identity Risk Overview</h2>
+        <table class="summary-table">
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th style="text-align:center;">Count</th>
+                    <th style="text-align:center;">Trend</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Total Identities</td>
+                    <td style="text-align:center;">{total}</td>
+                    <td style="text-align:center;">{_trend(total, prev_total)}</td>
+                </tr>
+                <tr>
+                    <td><span class="risk-badge risk-critical">CRITICAL</span> Critical Risk</td>
+                    <td style="text-align:center;">{critical}</td>
+                    <td style="text-align:center;">{_trend(critical, prev_critical)}</td>
+                </tr>
+                <tr>
+                    <td><span class="risk-badge risk-high">HIGH</span> High Risk</td>
+                    <td style="text-align:center;">{high}</td>
+                    <td style="text-align:center;">{_trend(high, prev_high)}</td>
+                </tr>
+                <tr>
+                    <td>Medium Risk</td>
+                    <td style="text-align:center;">{medium}</td>
+                    <td style="text-align:center;"></td>
+                </tr>
+                <tr>
+                    <td>Low / Info Risk</td>
+                    <td style="text-align:center;">{low}</td>
+                    <td style="text-align:center;"></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2 class="section-title">Credential Health</h2>
+        <p>Expired credentials: <strong class="change-negative">{expired}</strong> |
+           Expiring soon: <strong style="color:#e67e22;">{expiring}</strong></p>
+    </div>
+
+    <div class="section">
+        <h2 class="section-title">Conditional Access Coverage</h2>
+        <p>{ca_covered} of {ca_total} identities covered ({ca_pct}%)</p>
+    </div>
+
+    <div class="section">
+        <h2 class="section-title">Remediation Actions</h2>
+        <p>{total_remediations} recommended actions across all high/critical identities.</p>
+    </div>
+
+    <div class="footer">
+        <p>This is an automated scheduled report from AuditGraph.</p>
+        <p>NexGenix Labs - Azure Identity Security</p>
+    </div>
+</body>
+</html>
+"""
+
     def _get_css_styles(self) -> str:
         """Return CSS styles for the email"""
         return """
