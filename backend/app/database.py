@@ -2463,3 +2463,188 @@ class Database:
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
+
+    # ================================================================
+    # Phase 30: Notifications
+    # ================================================================
+
+    def _ensure_notifications_table(self):
+        """Create notifications table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id SERIAL PRIMARY KEY,
+                event_type VARCHAR(50) NOT NULL,
+                category VARCHAR(30) NOT NULL,
+                severity VARCHAR(20) NOT NULL DEFAULT 'info',
+                title VARCHAR(255) NOT NULL,
+                description TEXT NOT NULL,
+                payload JSONB,
+                related_identity_id TEXT,
+                related_identity_name VARCHAR(255),
+                related_run_id INTEGER,
+                read BOOLEAN DEFAULT false,
+                read_at TIMESTAMPTZ,
+                actioned BOOLEAN DEFAULT false,
+                action_type VARCHAR(50),
+                action_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_read_created ON notifications(read, created_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_severity ON notifications(severity)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_category ON notifications(category)")
+        self.conn.commit()
+        cursor.close()
+
+    def get_notifications(self, limit=50, offset=0, read=None, severity=None, category=None) -> list:
+        """Get notifications with optional filters."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if read is not None:
+            conditions.append("read = %s")
+            params.append(read)
+        if severity:
+            conditions.append("severity = %s")
+            params.append(severity)
+        if category:
+            conditions.append("category = %s")
+            params.append(category)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT * FROM notifications {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts_field in ('created_at', 'read_at', 'action_at'):
+                if r.get(ts_field):
+                    r[ts_field] = r[ts_field].isoformat()
+        return rows
+
+    def get_notification(self, notification_id: int) -> dict:
+        """Get a single notification by ID."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM notifications WHERE id = %s", (notification_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts_field in ('created_at', 'read_at', 'action_at'):
+            if result.get(ts_field):
+                result[ts_field] = result[ts_field].isoformat()
+        return result
+
+    def get_notification_stats(self) -> dict:
+        """Get notification statistics (unread count, by severity, by category)."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT COUNT(*) as total FROM notifications")
+        total = cursor.fetchone()['total']
+        cursor.execute("SELECT COUNT(*) as unread FROM notifications WHERE read = false")
+        unread = cursor.fetchone()['unread']
+        cursor.execute("SELECT severity, COUNT(*) as cnt FROM notifications WHERE read = false GROUP BY severity")
+        by_severity = {r['severity']: r['cnt'] for r in cursor.fetchall()}
+        cursor.execute("SELECT category, COUNT(*) as cnt FROM notifications WHERE read = false GROUP BY category")
+        by_category = {r['category']: r['cnt'] for r in cursor.fetchall()}
+        cursor.close()
+        return {'total': total, 'unread': unread, 'by_severity': by_severity, 'by_category': by_category}
+
+    def create_notification(self, event_type, category, severity, title, description,
+                            payload=None, related_identity_id=None, related_identity_name=None,
+                            related_run_id=None) -> dict:
+        """Create a new notification."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO notifications
+                (event_type, category, severity, title, description, payload,
+                 related_identity_id, related_identity_name, related_run_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (event_type, category, severity, title, description,
+              json.dumps(payload) if payload else None,
+              related_identity_id, related_identity_name, related_run_id))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        for ts_field in ('created_at', 'read_at', 'action_at'):
+            if row.get(ts_field):
+                row[ts_field] = row[ts_field].isoformat()
+        return row
+
+    def mark_notification_read(self, notification_id: int) -> dict:
+        """Mark a notification as read."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE notifications SET read = true, read_at = NOW()
+            WHERE id = %s RETURNING *
+        """, (notification_id,))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts_field in ('created_at', 'read_at', 'action_at'):
+            if result.get(ts_field):
+                result[ts_field] = result[ts_field].isoformat()
+        return result
+
+    def mark_all_notifications_read(self) -> int:
+        """Mark all unread notifications as read. Returns count updated."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false")
+        count = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return count
+
+    def action_notification(self, notification_id: int, action_type: str) -> dict:
+        """Mark a notification as actioned (acknowledged/dismissed)."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE notifications SET actioned = true, action_type = %s, action_at = NOW(),
+                   read = true, read_at = COALESCE(read_at, NOW())
+            WHERE id = %s RETURNING *
+        """, (action_type, notification_id))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts_field in ('created_at', 'read_at', 'action_at'):
+            if result.get(ts_field):
+                result[ts_field] = result[ts_field].isoformat()
+        return result
+
+    def delete_notification(self, notification_id: int) -> bool:
+        """Delete a single notification."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM notifications WHERE id = %s", (notification_id,))
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return deleted
+
+    def cleanup_old_notifications(self, days=90) -> int:
+        """Delete notifications older than N days."""
+        self._ensure_notifications_table()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM notifications WHERE created_at < NOW() - INTERVAL '%s days'", (days,))
+        count = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return count

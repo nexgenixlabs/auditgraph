@@ -1548,6 +1548,96 @@ def preview_risk_rule():
         db.close()
 
 
+# ============================================================
+# Phase 30: Notification Center
+# ============================================================
+
+
+def get_notifications_list():
+    """GET /api/notifications — list notifications with optional filters."""
+    db = _db()
+    try:
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        severity = request.args.get('severity')
+        category = request.args.get('category')
+        read_param = request.args.get('read')
+        read = None
+        if read_param == 'true':
+            read = True
+        elif read_param == 'false':
+            read = False
+
+        notifications = db.get_notifications(
+            limit=limit, offset=offset, read=read,
+            severity=severity, category=category
+        )
+        return jsonify({
+            "notifications": notifications,
+            "count": len(notifications),
+            "limit": limit,
+            "offset": offset,
+        })
+    finally:
+        db.close()
+
+
+def get_notification_stats_handler():
+    """GET /api/notifications/stats — unread count and breakdowns."""
+    db = _db()
+    try:
+        stats = db.get_notification_stats()
+        return jsonify(stats)
+    finally:
+        db.close()
+
+
+def mark_notification_handler(notification_id):
+    """PATCH /api/notifications/<id> — mark read or actioned."""
+    db = _db()
+    try:
+        existing = db.get_notification(notification_id)
+        if not existing:
+            return jsonify({"error": "Notification not found"}), 404
+
+        data = request.get_json(silent=True) or {}
+
+        if data.get('action_type'):
+            result = db.action_notification(notification_id, data['action_type'])
+        elif data.get('read') is True:
+            result = db.mark_notification_read(notification_id)
+        else:
+            return jsonify({"error": "Provide 'read': true or 'action_type'"}), 400
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def mark_all_notifications_read_handler():
+    """POST /api/notifications/mark-all-read — bulk mark all as read."""
+    db = _db()
+    try:
+        count = db.mark_all_notifications_read()
+        return jsonify({"status": "ok", "marked_read": count})
+    finally:
+        db.close()
+
+
+def delete_notification_handler(notification_id):
+    """DELETE /api/notifications/<id> — delete a notification."""
+    db = _db()
+    try:
+        existing = db.get_notification(notification_id)
+        if not existing:
+            return jsonify({"error": "Notification not found"}), 404
+
+        db.delete_notification(notification_id)
+        return jsonify({"status": "deleted", "id": notification_id})
+    finally:
+        db.close()
+
+
 def _normalize_category_key(raw_category: str) -> str:
     """
     Normalize category value to canonical snake_case key.

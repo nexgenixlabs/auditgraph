@@ -30,6 +30,7 @@ import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
 import IdentityComparison from './pages/IdentityComparison';
+import NotificationCenter from './pages/NotificationCenter';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -315,6 +316,7 @@ function App() {
           <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
           <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
+          <Route path="/notifications" element={<ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
         </Routes>
       </div>
       </ToastProvider>
@@ -324,6 +326,24 @@ function App() {
 
 function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => void; dark: boolean; onToggleTheme: () => void }) {
   const location = useLocation();
+  const navigate = useNavigate();
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    async function fetchStats() {
+      try {
+        const res = await fetch('/api/notifications/stats');
+        if (res.ok && mounted) {
+          const data = await res.json();
+          setUnreadCount(data.unread || 0);
+        }
+      } catch { /* ignore */ }
+    }
+    fetchStats();
+    const interval = setInterval(fetchStats, 60000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, []);
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';
@@ -419,6 +439,24 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
         </svg>
         <span className="hidden sm:inline text-xs text-gray-400">{isMac ? '\u2318' : 'Ctrl+'}K</span>
+      </button>
+
+      {/* Notification bell */}
+      <button
+        onClick={() => navigate('/notifications')}
+        className={`ml-1 p-2 rounded-lg transition relative ${
+          isActive('/notifications') ? 'bg-blue-100 text-blue-600' : 'text-gray-500 hover:bg-gray-100'
+        }`}
+        title="Notifications"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+        </svg>
+        {unreadCount > 0 && (
+          <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
       </button>
 
       {/* Dark mode toggle */}

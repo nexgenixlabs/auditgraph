@@ -44,6 +44,11 @@ from app.api.handlers import (
     update_risk_rule,
     delete_risk_rule,
     preview_risk_rule,
+    get_notifications_list,
+    get_notification_stats_handler,
+    mark_notification_handler,
+    mark_all_notifications_read_handler,
+    delete_notification_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -298,6 +303,29 @@ def create_app():
     @app.get("/api/activity")
     def activity_log():
         return get_activity()
+
+    # -----------------------
+    # Notifications (Phase 30)
+    # -----------------------
+    @app.get("/api/notifications")
+    def notifications_list():
+        return get_notifications_list()
+
+    @app.get("/api/notifications/stats")
+    def notifications_stats():
+        return get_notification_stats_handler()
+
+    @app.patch("/api/notifications/<int:notification_id>")
+    def notifications_mark(notification_id):
+        return mark_notification_handler(notification_id)
+
+    @app.post("/api/notifications/mark-all-read")
+    def notifications_mark_all():
+        return mark_all_notifications_read_handler()
+
+    @app.delete("/api/notifications/<int:notification_id>")
+    def notifications_delete(notification_id):
+        return delete_notification_handler(notification_id)
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

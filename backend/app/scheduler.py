@@ -208,6 +208,9 @@ def _send_change_notification_if_needed():
         # Phase 28: Fire webhook events
         _fire_webhook_events(current_run_id, changes, db)
 
+        # Phase 30: Generate in-app notifications
+        _generate_notifications(current_run_id, changes, db)
+
         db.close()
 
     except Exception as e:
@@ -309,6 +312,65 @@ def _fire_webhook_events(current_run_id: int, changes: dict, db: Database):
 
     except Exception as e:
         logger.error(f"Error firing webhook events: {e}")
+
+
+def _generate_notifications(current_run_id: int, changes: dict, db: Database):
+    """Generate in-app notifications from discovery changes."""
+    try:
+        from app.services.notification_service import NotificationService
+        notifier = NotificationService()
+
+        # Get run summary
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT total_identities, critical_count, high_count, medium_count, low_count
+            FROM discovery_runs WHERE id = %s
+        """, (current_run_id,))
+        run_row = cursor.fetchone()
+        cursor.close()
+
+        summary = {}
+        if run_row:
+            summary = {
+                'total_identities': run_row[0] or 0,
+                'critical': run_row[1] or 0,
+                'high': run_row[2] or 0,
+                'medium': run_row[3] or 0,
+                'low': run_row[4] or 0,
+            }
+
+        notifier.notify_discovery_completed(current_run_id, summary)
+
+        new_ids = changes.get('new_identities', [])
+        if new_ids:
+            notifier.notify_new_identities(current_run_id, new_ids)
+
+        removed_ids = changes.get('removed_identities', [])
+        if removed_ids:
+            notifier.notify_removed_identities(current_run_id, removed_ids)
+
+        risk_changes = changes.get('risk_changes', [])
+        escalations = [c for c in risk_changes if c.get('direction') == 'increased' or c.get('new_risk') in ('critical', 'high')]
+        if escalations:
+            notifier.notify_risk_escalations(current_run_id, escalations)
+
+        perm_changes = changes.get('permission_changes', [])
+        if perm_changes:
+            notifier.notify_permission_changes(current_run_id, perm_changes)
+
+        cred_changes = changes.get('credential_changes', [])
+        if cred_changes:
+            notifier.notify_credential_changes(current_run_id, cred_changes)
+
+        # Cleanup old notifications
+        cleaned = db.cleanup_old_notifications(days=90)
+        if cleaned > 0:
+            logger.info(f"Cleaned up {cleaned} old notifications")
+
+        logger.info(f"In-app notifications generated for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Error generating notifications: {e}")
 
 
 def _get_category_counts(db: Database, current_run_id: int, previous_run_id: int) -> Dict:
