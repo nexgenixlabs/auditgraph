@@ -1089,6 +1089,8 @@ def get_activity():
             "offset": offset,
             "entries": entries,
         })
+    except Exception as e:
+        return jsonify({"error": str(e), "entries": []}), 500
     finally:
         db.close()
 

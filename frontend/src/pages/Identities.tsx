@@ -459,6 +459,17 @@ export default function IdentitiesPage() {
               {selectedIds.size > 0 && (
                 <button onClick={() => setSelectedIds(new Set())} className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100">Clear</button>
               )}
+              {selectedIds.size === 2 && (
+                <button
+                  onClick={() => {
+                    const ids = Array.from(selectedIds);
+                    navigate(`/identities/compare?ids=${encodeURIComponent(ids[0])},${encodeURIComponent(ids[1])}`);
+                  }}
+                  className="px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100"
+                >
+                  Compare
+                </button>
+              )}
               <span className="w-px h-5 bg-gray-300" />
               <button onClick={exportToCSV} className="px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">CSV</button>
               <button onClick={exportToPDF} className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">PDF</button>

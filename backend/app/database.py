@@ -1157,6 +1157,123 @@ class Database:
     # Remediation Engine Methods
     # ========================================================================
 
+    def _ensure_remediation_playbooks(self):
+        """Create remediation_playbooks table and seed default playbooks if empty."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS remediation_playbooks (
+                id SERIAL PRIMARY KEY,
+                risk_pattern VARCHAR(255) NOT NULL,
+                pattern_type VARCHAR(20) DEFAULT 'contains',
+                title VARCHAR(255) NOT NULL,
+                description TEXT,
+                steps JSONB NOT NULL,
+                impact VARCHAR(10) DEFAULT 'high',
+                effort VARCHAR(10) DEFAULT 'medium',
+                priority_score INTEGER DEFAULT 50,
+                compliance_refs JSONB,
+                category VARCHAR(50),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        self.conn.commit()
+
+        # Check if empty — seed if so
+        cursor.execute("SELECT COUNT(*) FROM remediation_playbooks")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            playbooks = [
+                ("Global Administrator", "contains", "Remove or scope Global Administrator assignments",
+                 "Global Administrator grants unrestricted access to the entire Microsoft 365 tenant. This role should only be assigned to break-glass accounts with PIM just-in-time activation.",
+                 json.dumps(["Identify all identities with Global Administrator role","Determine if the identity genuinely requires tenant-wide control","Replace with scoped admin roles where possible","Enable PIM eligible assignment with 1-hour max activation","Configure approval workflow requiring a second administrator","Ensure 2-4 break-glass accounts retain emergency access","Document business justification for each remaining assignment"]),
+                 "critical","medium",98,json.dumps(["SOC2 CC6.1","HIPAA 164.308(a)(3)","PCI-DSS 7.1","NIST AC-6"]),"access_control"),
+                ("Owner", "contains", "Replace Azure Owner role with scoped RBAC roles",
+                 "The Owner role grants full control over Azure resources including the ability to assign access to others.",
+                 json.dumps(["List all Owner role assignments","Identify actual permissions used","Replace with resource-group-scoped Contributor","Use User Access Administrator for access management","Remove Owner assignment after confirming replacement","Monitor for access denied errors over 7 days"]),
+                 "critical","medium",95,json.dumps(["SOC2 CC6.1","HIPAA 164.308(a)(4)","NIST AC-6"]),"access_control"),
+                ("Privileged Role Administrator", "contains", "Restrict Privileged Role Administrator to break-glass only",
+                 "Privileged Role Administrator can assign any Entra ID directory role including Global Administrator.",
+                 json.dumps(["Identify all PRA assignments","Remove all permanent assignments except break-glass","Enable PIM with 30-minute max activation and approval","Configure alerts for role activation","Review activation logs monthly"]),
+                 "critical","medium",96,json.dumps(["SOC2 CC6.1","HIPAA 164.308(a)(3)","NIST AC-6"]),"access_control"),
+                ("User Access Administrator", "contains", "Restrict User Access Administrator to JIT/PIM only",
+                 "User Access Administrator can grant any Azure RBAC role including Owner, creating a privilege escalation path.",
+                 json.dumps(["List all assignments at subscription level","Replace permanent with PIM eligible","Scope to specific resource groups","Configure approval workflow","Set max activation to 2 hours"]),
+                 "critical","medium",94,json.dumps(["SOC2 CC6.1","HIPAA 164.308(a)(4)","NIST AC-2"]),"access_control"),
+                ("no_mfa", "contains", "Enable MFA via Conditional Access policy",
+                 "Identities without MFA enforcement are vulnerable to credential theft attacks.",
+                 json.dumps(["Navigate to Entra ID > Protection > Conditional Access","Create policy targeting All Users","Set conditions: All cloud apps","Under Grant: Require MFA","Set sign-in frequency to 1 hour for privileged roles","Test in Report-only mode for 7 days","Switch to Enabled after confirming no disruption"]),
+                 "critical","medium",93,json.dumps(["SOC2 CC6.1","HIPAA 164.312(d)","PCI-DSS 8.3","NIST IA-2"]),"access_control"),
+                ("Exchange Administrator", "contains", "Audit mailbox access and scope Exchange Admin permissions",
+                 "Exchange Administrators can access all mailboxes including those containing sensitive data.",
+                 json.dumps(["Review all Exchange Administrator assignments","Determine if scoped role suffices","Enable mailbox audit logging","Configure alerts for admin mailbox access","Move to PIM eligible with justification"]),
+                 "high","medium",82,json.dumps(["HIPAA 164.312(a)(1)","SOC2 CC6.3"]),"access_control"),
+                ("Application Administrator", "contains", "Review and restrict Application Administrator permissions",
+                 "Application Administrators can create service principals with high privileges and access application secrets.",
+                 json.dumps(["Audit all assignments","Replace with Cloud Application Administrator where possible","Restrict app registration creation","Enable consent workflow","Monitor for new app registrations"]),
+                 "high","medium",80,json.dumps(["SOC2 CC6.1","NIST AC-6"]),"access_control"),
+                ("Security Administrator", "contains", "Limit Security Administrator to read-only where possible",
+                 "Security Administrator can modify security settings and disable protections.",
+                 json.dumps(["Identify all role holders","Determine if Security Reader suffices","Downgrade where write access not required","Enable PIM with approval for remaining","Configure alerts for security policy changes"]),
+                 "high","medium",78,json.dumps(["SOC2 CC6.1","HIPAA 164.308(a)(1)","NIST AC-6"]),"access_control"),
+                ("Conditional Access Administrator", "contains", "Require approval workflow for CA policy changes",
+                 "Conditional Access Administrators can disable MFA policies, creating catastrophic security gaps.",
+                 json.dumps(["Move all permanent assignments to PIM eligible","Configure approval workflow requiring Security team sign-off","Set max activation to 4 hours","Enable change tracking alerts","Implement CA policy backup/restore process"]),
+                 "high","medium",85,json.dumps(["SOC2 CC6.1","NIST AC-6"]),"access_control"),
+                ("Mail.ReadWrite", "contains", "Remove Mail.ReadWrite unless business-justified",
+                 "Mail.ReadWrite Graph API permission allows reading and writing to any mailbox in the organization.",
+                 json.dumps(["Identify all SPNs with Mail.ReadWrite","Verify documented business need","Replace with Mail.Read where possible","Scope to specific mailboxes","Revoke unnecessary permissions"]),
+                 "high","medium",76,json.dumps(["HIPAA 164.312(a)(1)","SOC2 CC6.3"]),"access_control"),
+                ("Files.ReadWrite.All", "contains", "Scope file access to specific SharePoint sites",
+                 "Files.ReadWrite.All grants access to all files in SharePoint and OneDrive.",
+                 json.dumps(["Identify all SPNs with Files.ReadWrite.All","Determine specific SharePoint sites needed","Replace with Sites.Selected permission","Grant site-specific access","Validate application still functions"]),
+                 "high","medium",74,json.dumps(["HIPAA 164.312(a)(1)","SOC2 CC6.3"]),"access_control"),
+                ("excessive_permissions", "contains", "Apply least-privilege: remove unused API permissions",
+                 "Service principals with excessive permissions increase blast radius.",
+                 json.dumps(["Review each permission in App registrations","Cross-reference with usage logs","Identify unused permissions","Remove one at a time, testing after each","Document minimum required permissions"]),
+                 "high","high",70,json.dumps(["SOC2 CC6.1","NIST AC-6","PCI-DSS 7.1"]),"access_control"),
+                ("no_conditional_access", "contains", "Create CA policies covering all identity types",
+                 "Identities without Conditional Access coverage bypass MFA, device compliance, and location restrictions.",
+                 json.dumps(["Review current CA policy scope","Identify gaps for service principals and workload identities","Create baseline MFA policy for all users","Create separate policy for workload identities","Test in Report-only mode for 7 days"]),
+                 "high","medium",72,json.dumps(["SOC2 CC6.1","NIST AC-2","HIPAA 164.312(d)"]),"access_control"),
+                ("expired", "contains", "Rotate or remove expired credentials",
+                 "Expired credentials indicate poor lifecycle management and may signal abandoned service principals.",
+                 json.dumps(["List all SPNs with expired secrets/certificates","Check sign-in logs for activity","Disable unused SPNs, schedule deletion after 30 days","Generate new secret with max 12-month expiry for active SPNs","Store in Azure Key Vault","Update application configuration","Remove expired credential"]),
+                 "high","low",88,json.dumps(["SOC2 CC7.2","HIPAA 164.312(d)","PCI-DSS 8.1","NIST IA-5"]),"credential_hygiene"),
+                ("expiring_soon", "contains", "Schedule credential rotation before expiry",
+                 "Credentials expiring within 30 days need proactive rotation to prevent application outages.",
+                 json.dumps(["Generate new secret or certificate","Add alongside existing credential","Update application to use new credential","Validate for 48 hours","Remove old credential","Set calendar reminder for next rotation"]),
+                 "medium","low",75,json.dumps(["SOC2 CC7.2","NIST IA-5"]),"credential_hygiene"),
+                ("stale_credential", "contains", "Rotate credentials inactive for 90+ days",
+                 "Stale credentials may have been compromised without detection.",
+                 json.dumps(["Identify credentials not used in 90+ days","Determine if application still needed","Remove credential and disable SPN if unneeded","Rotate credential immediately if needed","Enable credential monitoring"]),
+                 "high","low",73,json.dumps(["NIST IA-5","SOC2 CC7.2"]),"credential_hygiene"),
+                ("dormant", "contains", "Disable or remove dormant identities",
+                 "Identities with no sign-in activity for 90+ days are attack surface with no business value.",
+                 json.dumps(["Confirm no sign-in activity in last 90 days","Check for automated process usage","Contact application owner","Disable the identity","Wait 30 days to confirm no impact","Delete if no impact"]),
+                 "high","low",83,json.dumps(["SOC2 CC6.2","HIPAA 164.308(a)(3)","NIST AC-2","PCI-DSS 8.1"]),"governance"),
+                ("never_used", "contains", "Review and remove never-used identities",
+                 "Identities created 30+ days ago with no recorded sign-in are likely orphaned.",
+                 json.dumps(["Verify created 30+ days ago with zero sign-ins","Check if recently provisioned","Contact creator to determine if still needed","Disable if unneeded, schedule deletion in 30 days","Set 30-day deadline for activation if needed"]),
+                 "high","low",79,json.dumps(["SOC2 CC6.2","NIST AC-2"]),"governance"),
+                ("no_owner", "contains", "Assign ownership to unowned service principals",
+                 "Service principals without designated owners cannot be maintained, rotated, or decommissioned properly.",
+                 json.dumps(["List all SPNs without owners","Identify managing team or individual","Assign at least one owner","Assign secondary owner for redundancy","Configure alerts for SPNs created without owners"]),
+                 "high","medium",77,json.dumps(["SOC2 CC6.3","NIST CM-8","PCI-DSS 8.6"]),"governance"),
+                ("multiple_high_privilege", "contains", "Separate duties across multiple identities",
+                 "A single identity holding multiple high-privilege roles violates separation of duties.",
+                 json.dumps(["Identify full role set across Azure RBAC and Entra ID","Determine which roles can be separated","Create purpose-specific service principals","Migrate role assignments","Remove excess roles from original identity","Document role separation"]),
+                 "critical","high",86,json.dumps(["SOC2 CC6.1","HIPAA 164.308(a)(3)","NIST AC-5"]),"governance"),
+            ]
+            for pb in playbooks:
+                cursor.execute("""
+                    INSERT INTO remediation_playbooks
+                    (risk_pattern, pattern_type, title, description, steps, impact, effort, priority_score, compliance_refs, category)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, pb)
+            self.conn.commit()
+            print(f"Seeded {len(playbooks)} remediation playbooks")
+        cursor.close()
+
     def get_identity_remediations(self, identity_db_id: int, identity_data: Dict) -> Dict:
         """
         Match an identity's risk factors against remediation playbooks.
@@ -1168,6 +1285,7 @@ class Database:
         Returns:
             Dict with remediations list and summary
         """
+        self._ensure_remediation_playbooks()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
         # Get all playbooks
@@ -1603,9 +1721,27 @@ class Database:
     # Phase 17: Activity Log & Audit Trail
     # ========================================================================
 
+    def _ensure_activity_log_table(self):
+        """Create activity_log table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id SERIAL PRIMARY KEY,
+                action_type VARCHAR(50) NOT NULL,
+                description TEXT NOT NULL,
+                metadata JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_created_at ON activity_log(created_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_action_type ON activity_log(action_type)")
+        self.conn.commit()
+        cursor.close()
+
     def log_activity(self, action_type: str, description: str, metadata: dict = None):
         """Append an entry to the activity log. Never raises — errors are logged only."""
         try:
+            self._ensure_activity_log_table()
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT INTO activity_log (action_type, description, metadata, created_at)
@@ -1626,6 +1762,7 @@ class Database:
 
     def get_activity_log(self, limit: int = 50, offset: int = 0, action_type: str = None) -> list:
         """Get activity log entries, most recent first."""
+        self._ensure_activity_log_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
         query = "SELECT id, action_type, description, metadata, created_at FROM activity_log"

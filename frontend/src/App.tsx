@@ -29,6 +29,7 @@ import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
+import IdentityComparison from './pages/IdentityComparison';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -306,6 +307,7 @@ function App() {
           <Route path="/" element={<ErrorBoundary><Overview /></ErrorBoundary>} />
           <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
           <Route path="/identities" element={<ErrorBoundary><Identities /></ErrorBoundary>} />
+          <Route path="/identities/compare" element={<ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
           <Route path="/identities/:id" element={<ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
           <Route path="/reports" element={<ErrorBoundary><Reports /></ErrorBoundary>} />
           <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />

@@ -13,21 +13,21 @@ interface ActivityEntry {
 
 // ── Action type display config ─────────────────────────────────
 
-const ACTION_CONFIG: Record<string, { label: string; color: string; bg: string; icon: string }> = {
-  discovery_triggered: { label: 'Discovery Triggered', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
-  discovery_completed: { label: 'Discovery Completed', color: 'text-green-700', bg: 'bg-green-50', icon: 'V' },
-  settings_updated: { label: 'Settings Updated', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
-  report_generated: { label: 'Report Generated', color: 'text-orange-700', bg: 'bg-orange-50', icon: 'D' },
-  drift_reviewed: { label: 'Drift Reviewed', color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '~' },
-  test_email_sent: { label: 'Test Email Sent', color: 'text-teal-700', bg: 'bg-teal-50', icon: '@' },
-  test_email_failed: { label: 'Test Email Failed', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
-  report_emailed: { label: 'Report Emailed', color: 'text-green-700', bg: 'bg-green-50', icon: '@' },
-  report_email_failed: { label: 'Report Email Failed', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
-  remediation_updated: { label: 'Remediation Updated', color: 'text-indigo-700', bg: 'bg-indigo-50', icon: 'R' },
+const ACTION_CONFIG: Record<string, { label: string; shortLabel: string; color: string; bg: string; icon: string }> = {
+  discovery_triggered: { label: 'Discovery Triggered', shortLabel: 'Triggered', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
+  discovery_completed: { label: 'Discovery Completed', shortLabel: 'Completed', color: 'text-green-700', bg: 'bg-green-50', icon: 'V' },
+  settings_updated: { label: 'Settings Updated', shortLabel: 'Settings', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
+  report_generated: { label: 'Report Generated', shortLabel: 'Report', color: 'text-orange-700', bg: 'bg-orange-50', icon: 'D' },
+  drift_reviewed: { label: 'Drift Reviewed', shortLabel: 'Drift', color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '~' },
+  test_email_sent: { label: 'Test Email Sent', shortLabel: 'Email OK', color: 'text-teal-700', bg: 'bg-teal-50', icon: '@' },
+  test_email_failed: { label: 'Test Email Failed', shortLabel: 'Email Fail', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
+  report_emailed: { label: 'Report Emailed', shortLabel: 'Emailed', color: 'text-green-700', bg: 'bg-green-50', icon: '@' },
+  report_email_failed: { label: 'Report Email Failed', shortLabel: 'Email Err', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
+  remediation_updated: { label: 'Remediation Updated', shortLabel: 'Remediation', color: 'text-indigo-700', bg: 'bg-indigo-50', icon: 'R' },
 };
 
 function getActionConfig(type: string) {
-  return ACTION_CONFIG[type] || { label: type, color: 'text-gray-700', bg: 'bg-gray-50', icon: '?' };
+  return ACTION_CONFIG[type] || { label: type, shortLabel: type, color: 'text-gray-700', bg: 'bg-gray-50', icon: '?' };
 }
 
 function timeAgo(dateStr: string): string {
@@ -164,7 +164,7 @@ export default function ActivityLog() {
                   filter === type ? 'bg-blue-600 text-white' : `${cfg.bg} ${cfg.color} hover:opacity-80`
                 }`}
               >
-                {cfg.label.split(' ')[0]}
+                {cfg.shortLabel}
               </button>
             );
           })}
