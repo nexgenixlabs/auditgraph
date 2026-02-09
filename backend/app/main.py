@@ -28,6 +28,9 @@ from app.api.handlers import (
     save_app_settings,
     test_email,
     get_activity,
+    get_remediation_status,
+    post_remediation_action,
+    get_remediation_dashboard_summary,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -174,6 +177,21 @@ def create_app():
     @app.get("/api/drift/history")
     def drift_history():
         return get_drift_history()
+
+    # -----------------------
+    # Remediation Action Tracking (Phase 21)
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/remediation-status")
+    def identity_remediation_status(identity_id):
+        return get_remediation_status(identity_id)
+
+    @app.post("/api/identities/<identity_id>/remediation-action")
+    def identity_remediation_action(identity_id):
+        return post_remediation_action(identity_id)
+
+    @app.get("/api/remediation-summary")
+    def remediation_summary():
+        return get_remediation_dashboard_summary()
 
     # -----------------------
     # Historical Trends (Phase 20)

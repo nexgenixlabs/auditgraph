@@ -1769,3 +1769,94 @@ class Database:
         cursor.close()
 
         return credentials
+
+    # ========================================================================
+    # Phase 21: Remediation Action Tracking
+    # ========================================================================
+
+    def _ensure_remediation_actions_table(self):
+        """Create remediation_actions table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS remediation_actions (
+                id SERIAL PRIMARY KEY,
+                identity_id TEXT NOT NULL,
+                playbook_id INTEGER NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'open',
+                notes TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(identity_id, playbook_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_remediation_actions_identity ON remediation_actions(identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_remediation_actions_status ON remediation_actions(status)")
+        self.conn.commit()
+        cursor.close()
+
+    def upsert_remediation_action(self, identity_id: str, playbook_id: int, status: str, notes: str = None):
+        """Create or update a remediation action for an identity/playbook pair."""
+        self._ensure_remediation_actions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO remediation_actions (identity_id, playbook_id, status, notes, updated_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (identity_id, playbook_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                notes = EXCLUDED.notes,
+                updated_at = NOW()
+            RETURNING id, identity_id, playbook_id, status, notes, created_at, updated_at
+        """, (identity_id, playbook_id, status, notes))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        return row
+
+    def get_remediation_actions(self, identity_id: str):
+        """Get all remediation action statuses for an identity."""
+        self._ensure_remediation_actions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT playbook_id, status, notes, updated_at
+            FROM remediation_actions
+            WHERE identity_id = %s
+        """, (identity_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        result = {}
+        for row in rows:
+            result[row['playbook_id']] = {
+                'status': row['status'],
+                'notes': row['notes'],
+                'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None,
+            }
+        return result
+
+    def get_remediation_summary(self):
+        """Get aggregated remediation action status counts across all identities."""
+        self._ensure_remediation_actions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'open') as open,
+                COUNT(*) FILTER (WHERE status = 'acknowledged') as acknowledged,
+                COUNT(*) FILTER (WHERE status = 'completed') as completed,
+                COUNT(*) FILTER (WHERE status = 'skipped') as skipped,
+                COUNT(*) as total
+            FROM remediation_actions
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+
+        total = int(row['total']) if row else 0
+        completed = int(row['completed']) if row else 0
+        completion_pct = round((completed / total) * 100, 1) if total > 0 else 0
+
+        return {
+            'open': int(row['open']) if row else 0,
+            'acknowledged': int(row['acknowledged']) if row else 0,
+            'completed': completed,
+            'skipped': int(row['skipped']) if row else 0,
+            'total': total,
+            'completion_pct': completion_pct,
+        }

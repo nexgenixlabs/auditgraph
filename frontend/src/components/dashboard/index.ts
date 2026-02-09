@@ -7,3 +7,4 @@ export { default as ComplianceScorecard } from './ComplianceScorecard';
 export { default as ConditionalAccessCard } from './ConditionalAccessCard';
 export { default as CloudContextBanner } from './CloudContextBanner';
 export { default as RecentChanges } from './RecentChanges';
+export { default as RemediationProgress } from './RemediationProgress';

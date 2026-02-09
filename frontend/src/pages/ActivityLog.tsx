@@ -22,6 +22,7 @@ const ACTION_CONFIG: Record<string, { label: string; color: string; bg: string; 
   test_email_failed: { label: 'Test Email Failed', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
   report_emailed: { label: 'Report Emailed', color: 'text-green-700', bg: 'bg-green-50', icon: '@' },
   report_email_failed: { label: 'Report Email Failed', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
+  remediation_updated: { label: 'Remediation Updated', color: 'text-indigo-700', bg: 'bg-indigo-50', icon: 'R' },
 };
 
 function getActionConfig(type: string) {

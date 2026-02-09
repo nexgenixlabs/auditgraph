@@ -2505,3 +2505,72 @@ def get_dashboard_ca_summary():
     finally:
         cursor.close()
         db.close()
+
+
+# ==========================================================================
+# Phase 21: Remediation Action Tracking
+# ==========================================================================
+
+def get_remediation_status(identity_id: str):
+    """Get remediation action statuses for all playbooks for a specific identity."""
+    db = _db()
+    try:
+        actions = db.get_remediation_actions(identity_id)
+        return jsonify({
+            'identity_id': identity_id,
+            'actions': actions,
+        })
+    finally:
+        db.close()
+
+
+def post_remediation_action(identity_id: str):
+    """Create or update a remediation action for an identity."""
+    db = _db()
+    try:
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        playbook_id = body.get('playbook_id')
+        status = body.get('status')
+        notes = body.get('notes')
+
+        if not playbook_id or not status:
+            return jsonify({'error': 'playbook_id and status are required'}), 400
+
+        valid_statuses = ('open', 'acknowledged', 'completed', 'skipped')
+        if status not in valid_statuses:
+            return jsonify({'error': f'status must be one of: {", ".join(valid_statuses)}'}), 400
+
+        result = db.upsert_remediation_action(
+            identity_id=identity_id,
+            playbook_id=int(playbook_id),
+            status=status,
+            notes=notes,
+        )
+
+        # Serialize timestamps
+        for key in ('created_at', 'updated_at'):
+            if result.get(key) and hasattr(result[key], 'isoformat'):
+                result[key] = result[key].isoformat()
+
+        db.log_activity('remediation_updated', f'Remediation status changed to {status}', {
+            'identity_id': identity_id,
+            'playbook_id': playbook_id,
+            'status': status,
+        })
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_remediation_dashboard_summary():
+    """Get aggregated remediation progress for the dashboard widget."""
+    db = _db()
+    try:
+        summary = db.get_remediation_summary()
+        return jsonify(summary)
+    finally:
+        db.close()

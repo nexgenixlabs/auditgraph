@@ -127,6 +127,16 @@ interface RemediationData {
   };
 }
 
+type RemediationStatus = 'open' | 'acknowledged' | 'completed' | 'skipped';
+
+interface RemediationAction {
+  status: RemediationStatus;
+  notes: string | null;
+  updated_at: string | null;
+}
+
+type RemediationActionsMap = Record<number, RemediationAction>;
+
 interface PimEligible {
   role_name: string;
   role_definition_id?: string;
@@ -402,6 +412,8 @@ export default function IdentityDetail() {
   const [pimLoading, setPimLoading] = useState(false);
   const [remediationData, setRemediationData] = useState<RemediationData | null>(null);
   const [remediationLoading, setRemediationLoading] = useState(false);
+  const [remediationActions, setRemediationActions] = useState<RemediationActionsMap>({});
+  const [actionLoading, setActionLoading] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -438,18 +450,56 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [activeTab, id, pimData, pimLoading]);
 
-  // Lazy-load Remediation data when tab is selected
+  // Lazy-load Remediation data + action statuses when tab is selected
   useEffect(() => {
     if (activeTab !== 'remediation' || remediationData || remediationLoading || !id) return;
     let cancelled = false;
     setRemediationLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(id)}/remediations`)
-      .then(res => res.ok ? res.json() : Promise.reject('Remediation fetch failed'))
-      .then(json => { if (!cancelled) setRemediationData(json); })
-      .catch(() => { if (!cancelled) setRemediationData({ identity_id: id, display_name: '', risk_level: '', remediations: [], summary: { total: 0, critical_actions: 0, quick_wins: 0 } }); })
+
+    Promise.all([
+      fetch(`/api/identities/${encodeURIComponent(id)}/remediations`).then(r => r.ok ? r.json() : null),
+      fetch(`/api/identities/${encodeURIComponent(id)}/remediation-status`).then(r => r.ok ? r.json() : null),
+    ])
+      .then(([playbookJson, statusJson]) => {
+        if (cancelled) return;
+        setRemediationData(playbookJson || { identity_id: id, display_name: '', risk_level: '', remediations: [], summary: { total: 0, critical_actions: 0, quick_wins: 0 } });
+        setRemediationActions(statusJson?.actions || {});
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRemediationData({ identity_id: id, display_name: '', risk_level: '', remediations: [], summary: { total: 0, critical_actions: 0, quick_wins: 0 } });
+        }
+      })
       .finally(() => { if (!cancelled) setRemediationLoading(false); });
+
     return () => { cancelled = true; };
   }, [activeTab, id, remediationData, remediationLoading]);
+
+  const handleRemediationAction = async (playbookId: number, status: RemediationStatus, notes?: string) => {
+    if (!id) return;
+    setActionLoading(playbookId);
+    try {
+      const res = await fetch(`/api/identities/${encodeURIComponent(id)}/remediation-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playbook_id: playbookId, status, notes }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        setRemediationActions(prev => ({
+          ...prev,
+          [playbookId]: {
+            status: result.status,
+            notes: result.notes,
+            updated_at: result.updated_at,
+          },
+        }));
+      }
+    } catch { /* silently fail */ }
+    finally {
+      setActionLoading(null);
+    }
+  };
 
   const identity = data?.identity;
 
@@ -1508,25 +1558,44 @@ export default function IdentityDetail() {
                   ) : (
                     <>
                       {/* Summary bar */}
-                      <div className="grid grid-cols-3 gap-4">
+                      <div className="grid grid-cols-5 gap-4">
                         <div className="bg-gray-50 rounded-xl p-4 text-center">
                           <div className="text-2xl font-bold text-gray-900">{remediationData.summary.total}</div>
                           <div className="text-xs text-gray-500 mt-1">Total Actions</div>
                         </div>
                         <div className="bg-red-50 rounded-xl p-4 text-center">
                           <div className="text-2xl font-bold text-red-700">{remediationData.summary.critical_actions}</div>
-                          <div className="text-xs text-red-600 mt-1">Critical Actions</div>
+                          <div className="text-xs text-red-600 mt-1">Critical</div>
                         </div>
                         <div className="bg-green-50 rounded-xl p-4 text-center">
                           <div className="text-2xl font-bold text-green-700">{remediationData.summary.quick_wins}</div>
-                          <div className="text-xs text-green-600 mt-1">Quick Wins (Low Effort)</div>
+                          <div className="text-xs text-green-600 mt-1">Quick Wins</div>
+                        </div>
+                        <div className="bg-green-50 rounded-xl p-4 text-center">
+                          <div className="text-2xl font-bold text-green-700">
+                            {Object.values(remediationActions).filter(a => a.status === 'completed').length}
+                          </div>
+                          <div className="text-xs text-green-600 mt-1">Completed</div>
+                        </div>
+                        <div className="bg-blue-50 rounded-xl p-4 text-center">
+                          <div className="text-2xl font-bold text-blue-700">
+                            {Object.values(remediationActions).filter(a => a.status === 'acknowledged').length}
+                          </div>
+                          <div className="text-xs text-blue-600 mt-1">Acknowledged</div>
                         </div>
                       </div>
 
                       {/* Remediation cards */}
                       <div className="space-y-4">
                         {remediationData.remediations.map((rem, idx) => (
-                          <RemediationCard key={rem.id} remediation={rem} index={idx} />
+                          <RemediationCard
+                            key={rem.id}
+                            remediation={rem}
+                            index={idx}
+                            action={remediationActions[rem.id]}
+                            onAction={(status, notes) => handleRemediationAction(rem.id, status, notes)}
+                            loading={actionLoading === rem.id}
+                          />
                         ))}
                       </div>
                     </>
@@ -1543,8 +1612,37 @@ export default function IdentityDetail() {
 }
 
 /* ═══ Remediation Card Component ═══ */
-function RemediationCard({ remediation, index }: { remediation: RemediationItem; index: number }) {
+
+const STATUS_COLORS: Record<RemediationStatus, string> = {
+  open: 'bg-gray-100 text-gray-600',
+  acknowledged: 'bg-blue-100 text-blue-700',
+  completed: 'bg-green-100 text-green-700',
+  skipped: 'bg-yellow-100 text-yellow-700',
+};
+
+const STATUS_LABELS: Record<RemediationStatus, string> = {
+  open: 'Open',
+  acknowledged: 'Acknowledged',
+  completed: 'Completed',
+  skipped: 'Skipped',
+};
+
+function RemediationCard({
+  remediation,
+  index,
+  action,
+  onAction,
+  loading,
+}: {
+  remediation: RemediationItem;
+  index: number;
+  action?: RemediationAction;
+  onAction: (status: RemediationStatus, notes?: string) => void;
+  loading: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+
+  const currentStatus: RemediationStatus = action?.status || 'open';
 
   const impactColors: Record<string, string> = {
     critical: 'bg-red-100 text-red-700',
@@ -1566,8 +1664,32 @@ function RemediationCard({ remediation, index }: { remediation: RemediationItem;
     monitoring: 'Monitoring',
   };
 
+  // Contextual action buttons based on current status
+  const availableActions: { status: RemediationStatus; label: string; color: string }[] = [];
+  if (currentStatus === 'open') {
+    availableActions.push(
+      { status: 'acknowledged', label: 'Acknowledge', color: 'bg-blue-600 hover:bg-blue-700 text-white' },
+      { status: 'completed', label: 'Mark Complete', color: 'bg-green-600 hover:bg-green-700 text-white' },
+      { status: 'skipped', label: 'Skip', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
+    );
+  } else if (currentStatus === 'acknowledged') {
+    availableActions.push(
+      { status: 'completed', label: 'Mark Complete', color: 'bg-green-600 hover:bg-green-700 text-white' },
+      { status: 'skipped', label: 'Skip', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
+      { status: 'open', label: 'Reopen', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
+    );
+  } else if (currentStatus === 'completed') {
+    availableActions.push(
+      { status: 'open', label: 'Reopen', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
+    );
+  } else if (currentStatus === 'skipped') {
+    availableActions.push(
+      { status: 'open', label: 'Reopen', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
+    );
+  }
+
   return (
-    <div className="border rounded-xl overflow-hidden hover:shadow-md transition">
+    <div className={`border rounded-xl overflow-hidden hover:shadow-md transition ${currentStatus === 'completed' ? 'opacity-60' : ''}`}>
       {/* Header — always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -1584,6 +1706,9 @@ function RemediationCard({ remediation, index }: { remediation: RemediationItem;
             </span>
             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700">
               {categoryLabels[remediation.category] || remediation.category}
+            </span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_COLORS[currentStatus]}`}>
+              {STATUS_LABELS[currentStatus]}
             </span>
           </div>
           <div className="font-semibold text-sm text-gray-900">{remediation.title}</div>
@@ -1627,6 +1752,32 @@ function RemediationCard({ remediation, index }: { remediation: RemediationItem;
               </div>
             </div>
           )}
+
+          {/* Action buttons */}
+          <div className="border-t pt-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              {availableActions.map(btn => (
+                <button
+                  key={btn.status}
+                  onClick={(e) => { e.stopPropagation(); onAction(btn.status); }}
+                  disabled={loading}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${btn.color} disabled:opacity-50`}
+                >
+                  {loading ? 'Updating...' : btn.label}
+                </button>
+              ))}
+              {action?.updated_at && (
+                <span className="text-[10px] text-gray-400 ml-auto">
+                  Updated {new Date(action.updated_at).toLocaleString()}
+                </span>
+              )}
+            </div>
+            {action?.notes && (
+              <div className="mt-2 text-[10px] text-gray-500 bg-white rounded p-2 border">
+                {action.notes}
+              </div>
+            )}
+          </div>
 
           {/* Matched reason */}
           <div className="text-[10px] text-gray-400 italic">
