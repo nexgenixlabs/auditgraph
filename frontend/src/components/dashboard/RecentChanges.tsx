@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 
 interface RecentChangesProps {
   hasData: boolean;
@@ -90,6 +91,19 @@ export default function RecentChanges({
           </div>
         </>
       )}
+
+      {/* View History link */}
+      <div className="mt-3 pt-3 border-t">
+        <Link
+          to="/drift"
+          className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-medium flex items-center gap-1"
+        >
+          View History
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+      </div>
     </div>
   );
 }

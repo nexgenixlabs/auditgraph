@@ -27,6 +27,7 @@ import Identities from './pages/Identities';
 import IdentityDetail from './pages/IdentityDetail';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
+import DriftHistory from './pages/DriftHistory';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -266,6 +267,7 @@ function App() {
           <Route path="/identities" element={<Identities />} />
           <Route path="/identities/:id" element={<IdentityDetail />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/drift" element={<DriftHistory />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </div>
