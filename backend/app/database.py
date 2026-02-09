@@ -1599,6 +1599,50 @@ class Database:
         self.conn.commit()
         cursor.close()
 
+    # ========================================================================
+    # Phase 17: Activity Log & Audit Trail
+    # ========================================================================
+
+    def log_activity(self, action_type: str, description: str, metadata: dict = None):
+        """Append an entry to the activity log. Never raises — errors are logged only."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO activity_log (action_type, description, metadata, created_at)
+                VALUES (%s, %s, %s, NOW())
+            """, (
+                action_type,
+                description,
+                json.dumps(metadata) if metadata else None,
+            ))
+            self.conn.commit()
+            cursor.close()
+        except Exception as e:
+            print(f"Warning: Failed to log activity: {e}")
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+
+    def get_activity_log(self, limit: int = 50, offset: int = 0, action_type: str = None) -> list:
+        """Get activity log entries, most recent first."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        query = "SELECT id, action_type, description, metadata, created_at FROM activity_log"
+        params: list = []
+
+        if action_type:
+            query += " WHERE action_type = %s"
+            params.append(action_type)
+
+        query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
     def close(self):
         """Close database connection"""
         if self.conn:

@@ -96,6 +96,14 @@ def run_scheduled_discovery():
         logger.info("✅ SCHEDULED DISCOVERY COMPLETED SUCCESSFULLY")
         logger.info("=" * 70)
 
+        # Log activity
+        try:
+            act_db = Database()
+            act_db.log_activity('discovery_completed', 'Scheduled discovery run completed')
+            act_db.close()
+        except Exception:
+            pass
+
         # Check for identity changes and send email notification
         _send_change_notification_if_needed()
 

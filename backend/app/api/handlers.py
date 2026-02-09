@@ -693,6 +693,10 @@ def get_drift_report(run_id: int):
         report = db.get_drift_report(run_id)
         if report:
             report['created_at'] = report['created_at'].isoformat() if report.get('created_at') else None
+            db.log_activity('drift_reviewed', f'Drift report reviewed for run #{run_id}', {
+                'run_id': run_id,
+                'total_changes': report.get('total_changes', 0),
+            })
             return jsonify(report)
 
         # Fall back to live computation: find the previous run
@@ -843,6 +847,10 @@ def save_app_settings():
     try:
         db.save_settings(updates)
         settings = db.get_settings()
+        db.log_activity('settings_updated', f'Settings updated: {", ".join(updates.keys())}', {
+            'updated_keys': list(updates.keys()),
+            'values': updates,
+        })
         return jsonify({"settings": settings, "updated": list(updates.keys())})
     finally:
         db.close()
@@ -861,6 +869,13 @@ def trigger_discovery():
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
+
+    db = _db()
+    try:
+        db.log_activity('discovery_triggered', 'Manual discovery run triggered')
+    finally:
+        db.close()
+
     return jsonify({"status": "started", "message": "Discovery run triggered. Check /api/runs for progress."}), 202
 
 
@@ -946,7 +961,36 @@ def get_report_data():
         data = db.get_report_data()
         if data is None:
             return jsonify({"error": "No completed discovery runs found"}), 404
+        db.log_activity('report_generated', 'Security report data generated', {
+            'run_id': data.get('run_id'),
+            'total_identities': data.get('stats', {}).get('total_identities', 0),
+        })
         return jsonify(data)
+    finally:
+        db.close()
+
+
+def get_activity():
+    """Get activity log entries with optional filtering."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        action_type = request.args.get('type')
+
+        limit = min(limit, 200)
+
+        entries = db.get_activity_log(limit=limit, offset=offset, action_type=action_type)
+
+        for entry in entries:
+            entry['created_at'] = entry['created_at'].isoformat() if entry.get('created_at') else None
+
+        return jsonify({
+            "count": len(entries),
+            "limit": limit,
+            "offset": offset,
+            "entries": entries,
+        })
     finally:
         db.close()
 

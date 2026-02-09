@@ -28,6 +28,7 @@ import IdentityDetail from './pages/IdentityDetail';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
+import ActivityLog from './pages/ActivityLog';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -269,6 +270,7 @@ function App() {
           <Route path="/reports" element={<Reports />} />
           <Route path="/drift" element={<DriftHistory />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/activity" element={<ActivityLog />} />
         </Routes>
       </div>
     </Router>
@@ -338,6 +340,17 @@ function NavLinks() {
         }`}
       >
         Settings
+      </Link>
+
+      <Link
+        to="/activity"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/activity')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Activity
       </Link>
     </div>
   );
