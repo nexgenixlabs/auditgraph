@@ -2144,3 +2144,196 @@ class Database:
 
         cursor.close()
         return {'statuses': merged, 'by_risk': risk_merged, 'total': total}
+
+    # ========================================================================
+    # Phase 28: Webhook & Alert Integration
+    # ========================================================================
+
+    def _ensure_webhook_tables(self):
+        """Create webhooks and webhook_deliveries tables if they don't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS webhooks (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                url TEXT NOT NULL,
+                secret VARCHAR(255),
+                event_types TEXT[] NOT NULL DEFAULT '{}',
+                headers JSONB,
+                enabled BOOLEAN DEFAULT true,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id SERIAL PRIMARY KEY,
+                webhook_id INTEGER REFERENCES webhooks(id) ON DELETE CASCADE,
+                event_type VARCHAR(50) NOT NULL,
+                payload JSONB NOT NULL,
+                status VARCHAR(20) DEFAULT 'pending',
+                http_status INTEGER,
+                response_body TEXT,
+                attempts INTEGER DEFAULT 0,
+                next_retry_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                delivered_at TIMESTAMPTZ
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id)")
+        self.conn.commit()
+        cursor.close()
+
+    def get_webhooks(self) -> list:
+        """Get all webhooks with recent delivery stats."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT w.*,
+                   (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.webhook_id = w.id) as total_deliveries,
+                   (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.webhook_id = w.id AND d.status = 'delivered') as successful_deliveries,
+                   (SELECT MAX(d.delivered_at) FROM webhook_deliveries d WHERE d.webhook_id = w.id AND d.status = 'delivered') as last_delivered_at
+            FROM webhooks w
+            ORDER BY w.created_at DESC
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
+            r['updated_at'] = r['updated_at'].isoformat() if r.get('updated_at') else None
+            r['last_delivered_at'] = r['last_delivered_at'].isoformat() if r.get('last_delivered_at') else None
+        return rows
+
+    def get_webhook(self, webhook_id: int) -> dict:
+        """Get a single webhook by ID."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM webhooks WHERE id = %s", (webhook_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result
+
+    def create_webhook(self, name: str, url: str, secret: str, event_types: list, headers: dict = None) -> dict:
+        """Create a new webhook configuration."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO webhooks (name, url, secret, event_types, headers, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            RETURNING *
+        """, (name, url, secret or None, event_types, json.dumps(headers) if headers else None))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        row['created_at'] = row['created_at'].isoformat() if row.get('created_at') else None
+        row['updated_at'] = row['updated_at'].isoformat() if row.get('updated_at') else None
+        return row
+
+    def update_webhook(self, webhook_id: int, **fields) -> dict:
+        """Update specific fields on a webhook."""
+        self._ensure_webhook_tables()
+        allowed = {'name', 'url', 'secret', 'event_types', 'headers', 'enabled'}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return self.get_webhook(webhook_id)
+
+        set_parts = []
+        params = []
+        for key, val in updates.items():
+            if key == 'headers':
+                set_parts.append(f"{key} = %s")
+                params.append(json.dumps(val) if val else None)
+            else:
+                set_parts.append(f"{key} = %s")
+                params.append(val)
+        set_parts.append("updated_at = NOW()")
+        params.append(webhook_id)
+
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE webhooks SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result
+
+    def delete_webhook(self, webhook_id: int) -> bool:
+        """Delete a webhook and its delivery history (CASCADE)."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM webhooks WHERE id = %s", (webhook_id,))
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return deleted
+
+    def get_webhooks_for_event(self, event_type: str) -> list:
+        """Get all enabled webhooks that subscribe to a specific event type."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM webhooks
+            WHERE enabled = true AND %s = ANY(event_types)
+        """, (event_type,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def create_webhook_delivery(self, webhook_id: int, event_type: str, payload: dict) -> int:
+        """Create a webhook delivery record."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status, created_at)
+            VALUES (%s, %s, %s, 'pending', NOW())
+            RETURNING id
+        """, (webhook_id, event_type, json.dumps(payload)))
+        delivery_id = cursor.fetchone()[0]
+        self.conn.commit()
+        cursor.close()
+        return delivery_id
+
+    def update_webhook_delivery(self, delivery_id: int, status: str, http_status: int = None, response_body: str = None):
+        """Update delivery status after attempt."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE webhook_deliveries
+            SET status = %s, http_status = %s, response_body = %s,
+                attempts = attempts + 1,
+                delivered_at = CASE WHEN %s = 'delivered' THEN NOW() ELSE delivered_at END
+            WHERE id = %s
+        """, (status, http_status, response_body, status, delivery_id))
+        self.conn.commit()
+        cursor.close()
+
+    def get_webhook_deliveries(self, webhook_id: int, limit: int = 20) -> list:
+        """Get recent deliveries for a webhook."""
+        self._ensure_webhook_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, event_type, status, http_status, attempts, created_at, delivered_at
+            FROM webhook_deliveries
+            WHERE webhook_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (webhook_id, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
+            r['delivered_at'] = r['delivered_at'].isoformat() if r.get('delivered_at') else None
+        return rows

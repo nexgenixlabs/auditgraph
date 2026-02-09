@@ -205,11 +205,110 @@ def _send_change_notification_if_needed():
         else:
             logger.info("No changes detected - no email notification needed")
 
+        # Phase 28: Fire webhook events
+        _fire_webhook_events(current_run_id, changes, db)
+
         db.close()
 
     except Exception as e:
         logger.error(f"Error during change detection/notification: {e}")
         logger.exception(e)
+
+
+def _fire_webhook_events(current_run_id: int, changes: dict, db: Database):
+    """Fire webhook events for discovery completion and detected changes."""
+    try:
+        from app.services.webhook_service import WebhookService
+        wh_service = WebhookService()
+
+        # Get run summary for the payload
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT total_identities, critical_count, high_count, medium_count, low_count
+            FROM discovery_runs WHERE id = %s
+        """, (current_run_id,))
+        run_row = cursor.fetchone()
+        cursor.close()
+
+        run_summary = {}
+        if run_row:
+            run_summary = {
+                'total_identities': run_row[0] or 0,
+                'critical': run_row[1] or 0,
+                'high': run_row[2] or 0,
+                'medium': run_row[3] or 0,
+                'low': run_row[4] or 0,
+            }
+
+        # Always fire discovery_completed
+        wh_service.trigger_event('discovery_completed', {
+            'run_id': current_run_id,
+            'summary': run_summary,
+        })
+
+        # Fire per-change-type events
+        new_ids = changes.get('new_identities', [])
+        if new_ids:
+            wh_service.trigger_event('new_identities', {
+                'run_id': current_run_id,
+                'count': len(new_ids),
+                'identities': [{'display_name': i.get('display_name'), 'risk_level': i.get('risk_level')} for i in new_ids[:20]],
+            })
+
+        removed_ids = changes.get('removed_identities', [])
+        if removed_ids:
+            wh_service.trigger_event('removed_identities', {
+                'run_id': current_run_id,
+                'count': len(removed_ids),
+                'identities': [{'display_name': i.get('display_name')} for i in removed_ids[:20]],
+            })
+
+        perm_changes = changes.get('permission_changes', [])
+        if perm_changes:
+            wh_service.trigger_event('permission_changes', {
+                'run_id': current_run_id,
+                'count': len(perm_changes),
+                'changes': [{'display_name': c.get('display_name'), 'summary': c.get('summary', '')} for c in perm_changes[:20]],
+            })
+
+        risk_changes = changes.get('risk_changes', [])
+        if risk_changes:
+            # Check for escalations (risk increased)
+            escalations = [c for c in risk_changes if c.get('direction') == 'increased' or c.get('new_risk') in ('critical', 'high')]
+            if escalations:
+                wh_service.trigger_event('risk_escalation', {
+                    'run_id': current_run_id,
+                    'count': len(escalations),
+                    'escalations': [{'display_name': c.get('display_name'), 'old_risk': c.get('old_risk'), 'new_risk': c.get('new_risk')} for c in escalations[:20]],
+                })
+
+        cred_changes = changes.get('credential_changes', [])
+        if cred_changes:
+            wh_service.trigger_event('credential_changes', {
+                'run_id': current_run_id,
+                'count': len(cred_changes),
+                'changes': [{'display_name': c.get('display_name'), 'summary': c.get('summary', '')} for c in cred_changes[:20]],
+            })
+
+        # Fire drift_detected if any changes at all
+        total_changes = len(new_ids) + len(removed_ids) + len(perm_changes) + len(risk_changes) + len(cred_changes)
+        if total_changes > 0:
+            wh_service.trigger_event('drift_detected', {
+                'run_id': current_run_id,
+                'total_changes': total_changes,
+                'breakdown': {
+                    'new_identities': len(new_ids),
+                    'removed_identities': len(removed_ids),
+                    'permission_changes': len(perm_changes),
+                    'risk_changes': len(risk_changes),
+                    'credential_changes': len(cred_changes),
+                },
+            })
+
+        logger.info(f"Webhook events fired for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Error firing webhook events: {e}")
 
 
 def _get_category_counts(db: Database, current_run_id: int, previous_run_id: int) -> Dict:

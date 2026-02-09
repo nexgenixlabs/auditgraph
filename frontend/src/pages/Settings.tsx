@@ -1,4 +1,48 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
+
+interface WebhookData {
+  id: number;
+  name: string;
+  url: string;
+  secret: string | null;
+  event_types: string[];
+  headers: Record<string, string> | null;
+  enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  total_deliveries: number;
+  successful_deliveries: number;
+  last_delivered_at: string | null;
+}
+
+interface WebhookDelivery {
+  id: number;
+  event_type: string;
+  status: string;
+  http_status: number | null;
+  attempts: number;
+  created_at: string | null;
+  delivered_at: string | null;
+}
+
+interface WebhookFormData {
+  name: string;
+  url: string;
+  secret: string;
+  event_types: string[];
+}
+
+const WEBHOOK_EVENT_LABELS: Record<string, string> = {
+  discovery_completed: 'Discovery Completed',
+  risk_escalation: 'Risk Escalation',
+  new_identities: 'New Identities',
+  removed_identities: 'Removed Identities',
+  permission_changes: 'Permission Changes',
+  credential_changes: 'Credential Changes',
+  drift_detected: 'Drift Detected',
+};
+
+const ALL_WEBHOOK_EVENTS = Object.keys(WEBHOOK_EVENT_LABELS);
 
 interface SettingsData {
   org_name: string;
@@ -80,6 +124,122 @@ export default function Settings() {
   function toggleBool(key: keyof SettingsData) {
     if (!settings) return;
     setSettings({ ...settings, [key]: settings[key] === 'true' ? 'false' : 'true' });
+  }
+
+  // Webhook state
+  const [webhooks, setWebhooks] = useState<WebhookData[]>([]);
+  const [webhookModal, setWebhookModal] = useState(false);
+  const [editingWebhook, setEditingWebhook] = useState<WebhookData | null>(null);
+  const [webhookForm, setWebhookForm] = useState<WebhookFormData>({ name: '', url: 'https://', secret: '', event_types: [] });
+  const [webhookSaving, setWebhookSaving] = useState(false);
+  const [webhookError, setWebhookError] = useState<string | null>(null);
+  const [testingWebhookId, setTestingWebhookId] = useState<number | null>(null);
+  const [expandedDeliveries, setExpandedDeliveries] = useState<number | null>(null);
+  const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+  const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
+
+  const loadWebhooks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/webhooks');
+      if (res.ok) {
+        const data = await res.json();
+        setWebhooks(data.webhooks || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadWebhooks(); }, [loadWebhooks]);
+
+  async function handleWebhookSave() {
+    setWebhookSaving(true);
+    setWebhookError(null);
+    try {
+      const method = editingWebhook ? 'PUT' : 'POST';
+      const url = editingWebhook ? `/api/webhooks/${editingWebhook.id}` : '/api/webhooks';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(webhookForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      setWebhookModal(false);
+      setEditingWebhook(null);
+      loadWebhooks();
+    } catch (e: any) {
+      setWebhookError(e?.message || 'Failed to save webhook');
+    } finally {
+      setWebhookSaving(false);
+    }
+  }
+
+  async function handleWebhookDelete(id: number) {
+    try {
+      await fetch(`/api/webhooks/${id}`, { method: 'DELETE' });
+      setDeleteConfirm(null);
+      loadWebhooks();
+    } catch { /* ignore */ }
+  }
+
+  async function handleWebhookTest(id: number) {
+    setTestingWebhookId(id);
+    try {
+      await fetch(`/api/webhooks/${id}/test`, { method: 'POST' });
+      loadWebhooks();
+    } catch { /* ignore */ }
+    finally { setTestingWebhookId(null); }
+  }
+
+  async function handleToggleWebhook(wh: WebhookData) {
+    try {
+      await fetch(`/api/webhooks/${wh.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !wh.enabled }),
+      });
+      loadWebhooks();
+    } catch { /* ignore */ }
+  }
+
+  async function loadDeliveries(webhookId: number) {
+    if (expandedDeliveries === webhookId) {
+      setExpandedDeliveries(null);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/webhooks/${webhookId}/deliveries?limit=10`);
+      if (res.ok) {
+        const data = await res.json();
+        setDeliveries(data.deliveries || []);
+        setExpandedDeliveries(webhookId);
+      }
+    } catch { /* ignore */ }
+  }
+
+  function openWebhookModal(wh?: WebhookData) {
+    if (wh) {
+      setEditingWebhook(wh);
+      setWebhookForm({
+        name: wh.name,
+        url: wh.url,
+        secret: wh.secret || '',
+        event_types: wh.event_types || [],
+      });
+    } else {
+      setEditingWebhook(null);
+      setWebhookForm({ name: '', url: 'https://', secret: '', event_types: [] });
+    }
+    setWebhookError(null);
+    setWebhookModal(true);
+  }
+
+  function toggleWebhookEvent(event: string) {
+    setWebhookForm(prev => ({
+      ...prev,
+      event_types: prev.event_types.includes(event)
+        ? prev.event_types.filter(e => e !== event)
+        : [...prev.event_types, event],
+    }));
   }
 
   // Test email state
@@ -399,6 +559,154 @@ export default function Settings() {
             )}
           </div>
 
+          {/* Section 5: Webhooks */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">Webhooks</div>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Send real-time alerts to Slack, Teams, Splunk, or any HTTP endpoint
+                </p>
+              </div>
+              <button
+                onClick={() => openWebhookModal()}
+                disabled={webhooks.length >= 10}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  webhooks.length >= 10
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                + Add Webhook
+              </button>
+            </div>
+
+            {webhooks.length === 0 ? (
+              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
+                No webhooks configured. Add one to receive real-time alerts.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {webhooks.map(wh => (
+                  <div key={wh.id} className="border rounded-lg">
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        {/* Enabled toggle */}
+                        <button
+                          onClick={() => handleToggleWebhook(wh)}
+                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
+                            wh.enabled ? 'bg-green-500' : 'bg-gray-300'
+                          }`}
+                        >
+                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                            wh.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                          }`} />
+                        </button>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-gray-900 truncate">{wh.name}</div>
+                          <div className="text-xs text-gray-400 font-mono truncate">{wh.url}</div>
+                        </div>
+                      </div>
+
+                      {/* Event type badges */}
+                      <div className="hidden sm:flex items-center gap-1 mx-3 flex-shrink-0">
+                        {(wh.event_types || []).slice(0, 3).map(et => (
+                          <span key={et} className="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-medium rounded">
+                            {WEBHOOK_EVENT_LABELS[et]?.split(' ')[0] || et}
+                          </span>
+                        ))}
+                        {(wh.event_types || []).length > 3 && (
+                          <span className="text-[10px] text-gray-400">+{wh.event_types.length - 3}</span>
+                        )}
+                      </div>
+
+                      {/* Stats + actions */}
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-xs text-gray-400">
+                          {wh.successful_deliveries}/{wh.total_deliveries} delivered
+                        </span>
+                        <button
+                          onClick={() => handleWebhookTest(wh.id)}
+                          disabled={testingWebhookId === wh.id}
+                          className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
+                        >
+                          {testingWebhookId === wh.id ? 'Testing...' : 'Test'}
+                        </button>
+                        <button
+                          onClick={() => loadDeliveries(wh.id)}
+                          className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
+                        >
+                          {expandedDeliveries === wh.id ? 'Hide' : 'Log'}
+                        </button>
+                        <button
+                          onClick={() => openWebhookModal(wh)}
+                          className="px-2 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition"
+                        >
+                          Edit
+                        </button>
+                        {deleteConfirm === wh.id ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleWebhookDelete(wh.id)}
+                              className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setDeleteConfirm(null)}
+                              className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setDeleteConfirm(wh.id)}
+                            className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Delivery log (expandable) */}
+                    {expandedDeliveries === wh.id && (
+                      <div className="border-t px-4 py-3 bg-gray-50">
+                        <div className="text-xs font-semibold text-gray-600 mb-2">Recent Deliveries</div>
+                        {deliveries.length === 0 ? (
+                          <div className="text-xs text-gray-400">No deliveries yet</div>
+                        ) : (
+                          <div className="space-y-1">
+                            {deliveries.map(d => (
+                              <div key={d.id} className="flex items-center justify-between text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span className={`w-1.5 h-1.5 rounded-full ${
+                                    d.status === 'delivered' ? 'bg-green-500' : d.status === 'pending' ? 'bg-yellow-500' : 'bg-red-500'
+                                  }`} />
+                                  <span className="font-medium text-gray-700">{WEBHOOK_EVENT_LABELS[d.event_type] || d.event_type}</span>
+                                </div>
+                                <div className="flex items-center gap-3 text-gray-400">
+                                  {d.http_status && <span>HTTP {d.http_status}</span>}
+                                  <span>{d.created_at ? new Date(d.created_at).toLocaleString() : '-'}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-400">
+              Maximum 10 webhooks. Payloads are signed with HMAC-SHA256 if a secret is configured.
+            </p>
+          </div>
+
           {/* Save button */}
           <div className="flex items-center gap-4">
             <button
@@ -424,6 +732,101 @@ export default function Settings() {
             </button>
           </div>
         </>
+      )}
+
+      {/* Webhook Add/Edit Modal */}
+      {webhookModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setWebhookModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="text-lg font-semibold text-gray-900">
+              {editingWebhook ? 'Edit Webhook' : 'Add Webhook'}
+            </div>
+
+            {webhookError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                {webhookError}
+              </div>
+            )}
+
+            {/* Name */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input
+                type="text"
+                value={webhookForm.name}
+                onChange={e => setWebhookForm(prev => ({ ...prev, name: e.target.value }))}
+                placeholder="e.g., Slack SOC Alerts"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            {/* URL */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">URL (HTTPS only)</label>
+              <input
+                type="url"
+                value={webhookForm.url}
+                onChange={e => setWebhookForm(prev => ({ ...prev, url: e.target.value }))}
+                placeholder="https://hooks.slack.com/services/..."
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            {/* Secret */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Secret Key <span className="text-gray-400 font-normal">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={webhookForm.secret}
+                onChange={e => setWebhookForm(prev => ({ ...prev, secret: e.target.value }))}
+                placeholder="Used for HMAC-SHA256 signature verification"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            {/* Event types */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Event Types</label>
+              <div className="grid grid-cols-2 gap-2">
+                {ALL_WEBHOOK_EVENTS.map(event => (
+                  <label key={event} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={webhookForm.event_types.includes(event)}
+                      onChange={() => toggleWebhookEvent(event)}
+                      className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-gray-700">{WEBHOOK_EVENT_LABELS[event]}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setWebhookModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleWebhookSave}
+                disabled={webhookSaving || !webhookForm.name || !webhookForm.url.startsWith('https://') || webhookForm.event_types.length === 0}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
+                  webhookSaving || !webhookForm.name || !webhookForm.url.startsWith('https://') || webhookForm.event_types.length === 0
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {webhookSaving ? 'Saving...' : editingWebhook ? 'Update' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

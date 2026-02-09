@@ -33,6 +33,12 @@ from app.api.handlers import (
     get_remediation_dashboard_summary,
     post_bulk_remediation,
     get_role_usage_stats,
+    get_webhooks_list,
+    create_webhook,
+    update_webhook,
+    delete_webhook,
+    test_webhook_endpoint,
+    get_webhook_deliveries,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -230,6 +236,33 @@ def create_app():
     @app.post("/api/settings/test-email")
     def settings_test_email():
         return test_email()
+
+    # -----------------------
+    # Webhooks (Phase 28)
+    # -----------------------
+    @app.get("/api/webhooks")
+    def webhooks_list():
+        return get_webhooks_list()
+
+    @app.post("/api/webhooks")
+    def webhooks_create():
+        return create_webhook()
+
+    @app.put("/api/webhooks/<int:webhook_id>")
+    def webhooks_update(webhook_id):
+        return update_webhook(webhook_id)
+
+    @app.delete("/api/webhooks/<int:webhook_id>")
+    def webhooks_delete(webhook_id):
+        return delete_webhook(webhook_id)
+
+    @app.post("/api/webhooks/<int:webhook_id>/test")
+    def webhooks_test(webhook_id):
+        return test_webhook_endpoint(webhook_id)
+
+    @app.get("/api/webhooks/<int:webhook_id>/deliveries")
+    def webhooks_deliveries(webhook_id):
+        return get_webhook_deliveries(webhook_id)
 
     # -----------------------
     # Activity Log (Phase 17)

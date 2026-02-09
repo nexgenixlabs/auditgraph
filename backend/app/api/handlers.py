@@ -1095,6 +1095,189 @@ def get_activity():
         db.close()
 
 
+# ============================================================
+# Phase 28: Webhook & Alert Integration
+# ============================================================
+
+VALID_WEBHOOK_EVENTS = [
+    'discovery_completed', 'risk_escalation', 'new_identities',
+    'removed_identities', 'permission_changes', 'credential_changes',
+    'drift_detected',
+]
+
+
+def get_webhooks_list():
+    """GET /api/webhooks — list all webhooks with delivery stats."""
+    db = _db()
+    try:
+        webhooks = db.get_webhooks()
+        return jsonify({"webhooks": webhooks, "count": len(webhooks)})
+    finally:
+        db.close()
+
+
+def create_webhook():
+    """POST /api/webhooks — create a new webhook."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+
+        name = str(data.get('name', '')).strip()
+        url = str(data.get('url', '')).strip()
+        secret = str(data.get('secret', '')).strip() if data.get('secret') else None
+        event_types = data.get('event_types', [])
+        headers = data.get('headers')
+
+        # Validation
+        errors = []
+        if not name:
+            errors.append("name is required")
+        if len(name) > 255:
+            errors.append("name must be 255 characters or less")
+        if not url:
+            errors.append("url is required")
+        elif not url.startswith('https://'):
+            errors.append("url must start with https://")
+        if not event_types or not isinstance(event_types, list):
+            errors.append("event_types must be a non-empty list")
+        else:
+            invalid = [e for e in event_types if e not in VALID_WEBHOOK_EVENTS]
+            if invalid:
+                errors.append(f"Invalid event types: {', '.join(invalid)}")
+        if headers and not isinstance(headers, dict):
+            errors.append("headers must be an object")
+
+        # Max 10 webhooks
+        existing = db.get_webhooks()
+        if len(existing) >= 10:
+            errors.append("Maximum of 10 webhooks allowed")
+
+        if errors:
+            return jsonify({"error": "; ".join(errors)}), 400
+
+        webhook = db.create_webhook(name, url, secret, event_types, headers)
+        db.log_activity('webhook_created',
+            f'Webhook "{name}" created for events: {", ".join(event_types)}',
+            {'webhook_id': webhook['id'], 'url': url, 'event_types': event_types})
+
+        return jsonify(webhook), 201
+    finally:
+        db.close()
+
+
+def update_webhook(webhook_id):
+    """PUT /api/webhooks/<id> — update a webhook."""
+    db = _db()
+    try:
+        existing = db.get_webhook(webhook_id)
+        if not existing:
+            return jsonify({"error": "Webhook not found"}), 404
+
+        data = request.get_json(silent=True) or {}
+        updates = {}
+
+        if 'name' in data:
+            name = str(data['name']).strip()
+            if not name:
+                return jsonify({"error": "name cannot be empty"}), 400
+            updates['name'] = name
+
+        if 'url' in data:
+            url = str(data['url']).strip()
+            if not url.startswith('https://'):
+                return jsonify({"error": "url must start with https://"}), 400
+            updates['url'] = url
+
+        if 'secret' in data:
+            updates['secret'] = str(data['secret']).strip() if data['secret'] else None
+
+        if 'event_types' in data:
+            event_types = data['event_types']
+            if not event_types or not isinstance(event_types, list):
+                return jsonify({"error": "event_types must be a non-empty list"}), 400
+            invalid = [e for e in event_types if e not in VALID_WEBHOOK_EVENTS]
+            if invalid:
+                return jsonify({"error": f"Invalid event types: {', '.join(invalid)}"}), 400
+            updates['event_types'] = event_types
+
+        if 'headers' in data:
+            updates['headers'] = data['headers']
+
+        if 'enabled' in data:
+            updates['enabled'] = bool(data['enabled'])
+
+        if not updates:
+            return jsonify(existing)
+
+        webhook = db.update_webhook(webhook_id, **updates)
+        db.log_activity('webhook_updated',
+            f'Webhook "{webhook["name"]}" updated: {", ".join(updates.keys())}',
+            {'webhook_id': webhook_id, 'updated_fields': list(updates.keys())})
+
+        return jsonify(webhook)
+    finally:
+        db.close()
+
+
+def delete_webhook(webhook_id):
+    """DELETE /api/webhooks/<id> — delete a webhook."""
+    db = _db()
+    try:
+        existing = db.get_webhook(webhook_id)
+        if not existing:
+            return jsonify({"error": "Webhook not found"}), 404
+
+        db.delete_webhook(webhook_id)
+        db.log_activity('webhook_deleted',
+            f'Webhook "{existing["name"]}" deleted',
+            {'webhook_id': webhook_id, 'url': existing['url']})
+
+        return jsonify({"status": "deleted", "id": webhook_id})
+    finally:
+        db.close()
+
+
+def test_webhook_endpoint(webhook_id):
+    """POST /api/webhooks/<id>/test — send test payload."""
+    db = _db()
+    try:
+        existing = db.get_webhook(webhook_id)
+        if not existing:
+            return jsonify({"error": "Webhook not found"}), 404
+
+        from app.services.webhook_service import WebhookService
+        service = WebhookService()
+        result = service.test_webhook(webhook_id)
+
+        db.log_activity('webhook_tested',
+            f'Test delivery to webhook "{existing["name"]}": {"success" if result["success"] else "failed"}',
+            {'webhook_id': webhook_id, 'success': result['success']})
+
+        if result['success']:
+            return jsonify({"status": "delivered", "http_status": result.get('http_status')})
+        else:
+            return jsonify({"status": "failed", "error": result.get('error'), "http_status": result.get('http_status')}), 502
+    finally:
+        db.close()
+
+
+def get_webhook_deliveries(webhook_id):
+    """GET /api/webhooks/<id>/deliveries — delivery history."""
+    db = _db()
+    try:
+        existing = db.get_webhook(webhook_id)
+        if not existing:
+            return jsonify({"error": "Webhook not found"}), 404
+
+        limit = request.args.get('limit', 20, type=int)
+        limit = min(limit, 100)
+        deliveries = db.get_webhook_deliveries(webhook_id, limit=limit)
+
+        return jsonify({"deliveries": deliveries, "count": len(deliveries)})
+    finally:
+        db.close()
+
+
 def _normalize_category_key(raw_category: str) -> str:
     """
     Normalize category value to canonical snake_case key.
