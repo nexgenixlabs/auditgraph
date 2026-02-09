@@ -32,6 +32,7 @@ import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
 import IdentityComparison from './pages/IdentityComparison';
 import NotificationCenter from './pages/NotificationCenter';
+import Compliance from './pages/Compliance';
 import Login from './pages/Login';
 import {
   GlobalRiskCards,
@@ -353,6 +354,7 @@ function AppContent() {
                 <Route path="/identities/compare" element={<ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                 <Route path="/identities/:id" element={<ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
                 <Route path="/reports" element={<ErrorBoundary><Reports /></ErrorBoundary>} />
+                <Route path="/compliance" element={<ErrorBoundary><Compliance /></ErrorBoundary>} />
                 <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
                 <Route path="/settings" element={
                   <ProtectedRoute requiredRole="admin">
@@ -459,6 +461,17 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         }`}
       >
         Reports
+      </Link>
+
+      <Link
+        to="/compliance"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/compliance')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Compliance
       </Link>
 
       <Link

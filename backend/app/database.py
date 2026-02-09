@@ -2863,3 +2863,210 @@ class Database:
                 self.log_activity('auth', f'Default admin user "{username}" created on first startup', {'username': username})
             except Exception:
                 pass
+
+    # ── Phase 32: Compliance Frameworks ──────────────────────────────
+
+    def _ensure_compliance_tables(self):
+        """Create compliance_frameworks and compliance_controls tables if they don't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS compliance_frameworks (
+                id SERIAL PRIMARY KEY,
+                key VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                description TEXT,
+                version VARCHAR(50),
+                enabled BOOLEAN DEFAULT true,
+                display_order INT DEFAULT 100,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS compliance_controls (
+                id SERIAL PRIMARY KEY,
+                framework_id INTEGER NOT NULL REFERENCES compliance_frameworks(id) ON DELETE CASCADE,
+                control_id VARCHAR(50) NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                metric VARCHAR(50) NOT NULL,
+                pass_operator VARCHAR(10) NOT NULL,
+                pass_value NUMERIC NOT NULL,
+                warn_operator VARCHAR(10),
+                warn_value NUMERIC,
+                drilldown_url VARCHAR(255),
+                display_order INT DEFAULT 100,
+                UNIQUE(framework_id, control_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_controls_framework ON compliance_controls(framework_id)")
+        self.conn.commit()
+        cursor.close()
+
+    def get_compliance_frameworks(self, enabled_only=False):
+        """Return all frameworks with their controls."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        query = "SELECT * FROM compliance_frameworks"
+        if enabled_only:
+            query += " WHERE enabled = true"
+        query += " ORDER BY display_order, id"
+        cursor.execute(query)
+        frameworks = [dict(r) for r in cursor.fetchall()]
+
+        for fw in frameworks:
+            cursor.execute(
+                "SELECT * FROM compliance_controls WHERE framework_id = %s ORDER BY display_order, id",
+                (fw['id'],)
+            )
+            fw['controls'] = [dict(r) for r in cursor.fetchall()]
+            if fw.get('created_at'):
+                fw['created_at'] = fw['created_at'].isoformat()
+            # Convert Decimal to float for JSON serialization
+            for ctrl in fw['controls']:
+                for k in ('pass_value', 'warn_value'):
+                    if ctrl.get(k) is not None:
+                        ctrl[k] = float(ctrl[k])
+
+        cursor.close()
+        return frameworks
+
+    def get_compliance_framework(self, framework_id):
+        """Return a single framework with controls."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM compliance_frameworks WHERE id = %s", (framework_id,))
+        fw = cursor.fetchone()
+        if not fw:
+            cursor.close()
+            return None
+        fw = dict(fw)
+        cursor.execute(
+            "SELECT * FROM compliance_controls WHERE framework_id = %s ORDER BY display_order, id",
+            (fw['id'],)
+        )
+        fw['controls'] = [dict(r) for r in cursor.fetchall()]
+        if fw.get('created_at'):
+            fw['created_at'] = fw['created_at'].isoformat()
+        for ctrl in fw['controls']:
+            for k in ('pass_value', 'warn_value'):
+                if ctrl.get(k) is not None:
+                    ctrl[k] = float(ctrl[k])
+        cursor.close()
+        return fw
+
+    def toggle_compliance_framework(self, framework_id, enabled):
+        """Enable or disable a compliance framework."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "UPDATE compliance_frameworks SET enabled = %s WHERE id = %s RETURNING id, key, name, enabled",
+            (enabled, framework_id)
+        )
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def seed_compliance_frameworks(self):
+        """Insert default 6 frameworks if the table is empty."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM compliance_frameworks")
+        count = cursor.fetchone()[0]
+        if count > 0:
+            cursor.close()
+            return
+
+        frameworks = [
+            {
+                'key': 'soc2', 'name': 'SOC 2 (Type II)',
+                'description': 'Service Organization Control 2 — Trust Services Criteria for security, availability, processing integrity, confidentiality, and privacy.',
+                'version': 'Type II', 'display_order': 10,
+                'controls': [
+                    ('CC6.1', 'Logical Access Controls', 't0_count', '<=', 2, '<=', 5, '/identities?privilege_tier=T0'),
+                    ('CC6.2', 'Credential Management', 'expired_credentials', '==', 0, None, None, '/identities?credential_status=expired'),
+                    ('CC6.3', 'Service Account Governance', 'unowned_spns', '==', 0, '<=', 3, '/identities?identity_category=service_principal&has_owner=false'),
+                    ('CC7.2', 'System Monitoring', 'dormant_privileged', '==', 0, '<=', 2, '/identities?activity_status=stale&has_roles=true'),
+                    ('CC8.1', 'Change Management', 'excessive_permissions', '==', 0, '<=', 3, '/identities?excessive_permissions=true'),
+                ]
+            },
+            {
+                'key': 'hipaa', 'name': 'HIPAA',
+                'description': 'Health Insurance Portability and Accountability Act — Security Rule safeguards for electronic protected health information (ePHI).',
+                'version': '§164', 'display_order': 20,
+                'controls': [
+                    ('§164.312(a)', 'Access Control', 't0_count', '<=', 2, '<=', 5, '/identities?privilege_tier=T0'),
+                    ('§164.312(d)', 'Authentication', 'expired_credentials', '==', 0, None, None, '/identities?credential_status=expired'),
+                    ('§164.308(a)(3)', 'Workforce Security', 'hipaa_violations', '==', 0, '<=', 2, '/identities?hipaa_violation=true'),
+                    ('§164.308(a)(4)', 'Information Access', 'dormant_privileged', '==', 0, '<=', 2, '/identities?activity_status=stale&has_roles=true'),
+                    ('§164.312(c)', 'Integrity Controls', 'excessive_permissions', '==', 0, '<=', 5, '/identities?excessive_permissions=true'),
+                ]
+            },
+            {
+                'key': 'pci_dss', 'name': 'PCI-DSS',
+                'description': 'Payment Card Industry Data Security Standard — requirements for organizations handling cardholder data.',
+                'version': 'v4.0', 'display_order': 30,
+                'controls': [
+                    ('7.1', 'Limit Access', 't0_count', '<=', 2, '<=', 5, '/identities?privilege_tier=T0'),
+                    ('7.2.1', 'Credential Lifecycle', 'expired_credentials', '==', 0, None, None, '/identities?credential_status=expired'),
+                    ('8.3.6', 'MFA for Admin', 'mfa_not_enforced', '==', 0, '<=', 2, '/identities?mfa_enforced=false'),
+                    ('8.6', 'Service Account Controls', 'unowned_spns', '==', 0, '<=', 3, '/identities?identity_category=service_principal&has_owner=false'),
+                ]
+            },
+            {
+                'key': 'nist_800_53', 'name': 'NIST 800-53',
+                'description': 'Security and Privacy Controls for Information Systems and Organizations — comprehensive catalog of security controls.',
+                'version': 'Rev 5', 'display_order': 40,
+                'controls': [
+                    ('AC-2', 'Account Management', 'stale_accounts', '==', 0, '<=', 3, '/identities?activity_status=stale'),
+                    ('AC-6', 'Least Privilege', 't0_count', '<=', 2, '<=', 5, '/identities?privilege_tier=T0'),
+                    ('IA-5', 'Authenticator Management', 'expired_credentials', '==', 0, None, None, '/identities?credential_status=expired'),
+                    ('AC-17', 'Remote Access', 'mfa_not_enforced', '==', 0, '<=', 2, '/identities?mfa_enforced=false'),
+                    ('AU-6', 'Audit Review', 'dormant_privileged', '==', 0, '<=', 2, '/identities?activity_status=stale&has_roles=true'),
+                ]
+            },
+            {
+                'key': 'cis_azure', 'name': 'CIS Azure Foundations',
+                'description': 'CIS Microsoft Azure Foundations Benchmark — prescriptive guidance for establishing a secure baseline configuration.',
+                'version': 'v2.0', 'display_order': 50,
+                'controls': [
+                    ('1.1', 'Limit Global Admins', 't0_count', '<=', 2, '<=', 5, '/identities?privilege_tier=T0'),
+                    ('1.2', 'Unused Credentials', 'stale_accounts', '==', 0, '<=', 3, '/identities?activity_status=stale'),
+                    ('1.3', 'MFA Enforcement', 'mfa_not_enforced', '==', 0, '<=', 2, '/identities?mfa_enforced=false'),
+                    ('1.4', 'Guest Account Review', 'dormant_privileged', '==', 0, '<=', 2, '/identities?activity_status=stale&has_roles=true'),
+                    ('1.5', 'Service Principal Hygiene', 'unowned_spns', '==', 0, '<=', 3, '/identities?identity_category=service_principal&has_owner=false'),
+                ]
+            },
+            {
+                'key': 'iso_27001', 'name': 'ISO 27001:2022',
+                'description': 'International standard for information security management systems (ISMS) — Annex A controls.',
+                'version': '2022', 'display_order': 60,
+                'controls': [
+                    ('A.5.15', 'Access Control', 't0_count', '<=', 2, '<=', 5, '/identities?privilege_tier=T0'),
+                    ('A.5.16', 'Identity Management', 'stale_accounts', '==', 0, '<=', 3, '/identities?activity_status=stale'),
+                    ('A.5.17', 'Authentication', 'expired_credentials', '==', 0, None, None, '/identities?credential_status=expired'),
+                    ('A.8.2', 'Privileged Access', 'excessive_permissions', '==', 0, '<=', 5, '/identities?excessive_permissions=true'),
+                    ('A.8.5', 'Secure Authentication', 'mfa_not_enforced', '==', 0, '<=', 2, '/identities?mfa_enforced=false'),
+                ]
+            },
+        ]
+
+        for i, fw in enumerate(frameworks):
+            cursor.execute("""
+                INSERT INTO compliance_frameworks (key, name, description, version, display_order)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (fw['key'], fw['name'], fw['description'], fw['version'], fw['display_order']))
+            fw_id = cursor.fetchone()[0]
+
+            for j, ctrl in enumerate(fw['controls']):
+                control_id, name, metric, pass_op, pass_val, warn_op, warn_val, drilldown = ctrl
+                cursor.execute("""
+                    INSERT INTO compliance_controls
+                        (framework_id, control_id, name, metric, pass_operator, pass_value,
+                         warn_operator, warn_value, drilldown_url, display_order)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (fw_id, control_id, name, metric, pass_op, pass_val, warn_op, warn_val, drilldown, (j + 1) * 10))
+
+        self.conn.commit()
+        cursor.close()

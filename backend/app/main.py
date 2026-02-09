@@ -58,6 +58,8 @@ from app.api.handlers import (
     create_user_handler,
     update_user_handler,
     delete_user_handler,
+    get_compliance_frameworks_list,
+    toggle_compliance_framework_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -156,6 +158,18 @@ def create_app():
     @app.get("/api/dashboard/compliance")
     def dashboard_compliance():
         return get_dashboard_compliance()
+
+    # -----------------------
+    # Compliance Frameworks (Phase 32)
+    # -----------------------
+    @app.get("/api/compliance/frameworks")
+    def compliance_frameworks():
+        return get_compliance_frameworks_list()
+
+    @app.patch("/api/compliance/frameworks/<int:framework_id>")
+    @require_role('admin')
+    def compliance_frameworks_toggle(framework_id):
+        return toggle_compliance_framework_handler(framework_id)
 
     # -----------------------
     # Overview insights (tier distribution, action items)
@@ -402,11 +416,12 @@ def create_app():
         start_scheduler()
         atexit.register(stop_scheduler)
 
-    # Ensure default admin user exists on first startup
+    # Ensure default admin user and compliance frameworks on first startup
     from app.database import Database
     db = Database()
     try:
         db.ensure_default_admin()
+        db.seed_compliance_frameworks()
     finally:
         db.close()
 

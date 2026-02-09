@@ -540,6 +540,46 @@ export default function Settings() {
     } catch { /* ignore */ }
   }
 
+  // Compliance framework state
+  interface ComplianceFramework {
+    id: number;
+    key: string;
+    name: string;
+    description: string | null;
+    version: string | null;
+    enabled: boolean;
+    controls: { id: number; control_id: string; name: string }[];
+  }
+  const [compFrameworks, setCompFrameworks] = useState<ComplianceFramework[]>([]);
+  const [togglingFramework, setTogglingFramework] = useState<number | null>(null);
+
+  const loadComplianceFrameworks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/compliance/frameworks');
+      if (res.ok) {
+        const data = await res.json();
+        setCompFrameworks(data || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadComplianceFrameworks(); }, [loadComplianceFrameworks]);
+
+  async function handleToggleFramework(fw: ComplianceFramework) {
+    setTogglingFramework(fw.id);
+    try {
+      const res = await fetch(`/api/compliance/frameworks/${fw.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !fw.enabled }),
+      });
+      if (res.ok) {
+        loadComplianceFrameworks();
+      }
+    } catch { /* ignore */ }
+    finally { setTogglingFramework(null); }
+  }
+
   // Test email state
   const [testingEmail, setTestingEmail] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -1217,6 +1257,65 @@ export default function Settings() {
 
             <p className="text-xs text-gray-400">
               Roles: Admin (full access), Auditor (read + remediation), Viewer (read-only). The last admin cannot be deleted or demoted.
+            </p>
+          </div>
+
+          {/* Section 8: Compliance Frameworks */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div>
+              <div className="text-lg font-semibold text-gray-900">Compliance Frameworks</div>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Enable or disable compliance frameworks evaluated against your identity posture
+              </p>
+            </div>
+
+            {compFrameworks.length === 0 ? (
+              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
+                No compliance frameworks found. They will be seeded on backend startup.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {compFrameworks.map(fw => (
+                  <div key={fw.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <button
+                        onClick={() => handleToggleFramework(fw)}
+                        disabled={togglingFramework === fw.id}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
+                          fw.enabled ? 'bg-green-500' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                          fw.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                        }`} />
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                          {fw.name}
+                          {fw.version && (
+                            <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[10px] font-medium rounded">
+                              {fw.version}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {fw.controls?.length || 0} controls
+                          {fw.description && <> &middot; {fw.description.slice(0, 80)}{fw.description.length > 80 ? '...' : ''}</>}
+                        </div>
+                      </div>
+                    </div>
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                      fw.enabled ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'
+                    }`}>
+                      {fw.enabled ? 'Active' : 'Disabled'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-400">
+              Disabled frameworks are excluded from the compliance dashboard and gap analysis. Controls are evaluated on each API call using current identity posture data.
             </p>
           </div>
 
