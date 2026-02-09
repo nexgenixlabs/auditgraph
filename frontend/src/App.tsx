@@ -34,6 +34,9 @@ import {
   CloudComparison,
   InsightsPanel,
 } from './components/overview';
+import SearchModal from './components/SearchModal';
+import ErrorBoundary from './components/ErrorBoundary';
+import StaleDataBanner from './components/StaleDataBanner';
 
 // ============================================================
 // Overview Page - Enterprise Risk Intelligence
@@ -233,6 +236,9 @@ const Overview: React.FC = () => {
         </div>
       </div>
 
+      {/* Stale Data Warning */}
+      <StaleDataBanner completedAt={stats?.latest_run?.completed_at} />
+
       {/* Section 1: Global Risk Cards */}
       <div>
         <div className="text-sm font-semibold text-gray-700 mb-3">Global Risk Summary</div>
@@ -249,6 +255,19 @@ const Overview: React.FC = () => {
 };
 
 function App() {
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setSearchOpen(prev => !prev);
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
     <Router>
       <div className="App">
@@ -271,34 +290,32 @@ function App() {
                 </Link>
 
                 {/* Navigation Links */}
-                <NavLinks />
+                <NavLinks onSearchOpen={() => setSearchOpen(true)} />
               </div>
             </div>
           </div>
         </nav>
 
+        {/* Global Search Modal */}
+        <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
+
         {/* Page Content */}
         <Routes>
-          {/* Front page blocks */}
-          <Route path="/" element={<Overview />} />
-
-          {/* Existing dashboard moved here */}
-          <Route path="/dashboard" element={<Dashboard />} />
-
-          {/* Existing identities pages */}
-          <Route path="/identities" element={<Identities />} />
-          <Route path="/identities/:id" element={<IdentityDetail />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/drift" element={<DriftHistory />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/activity" element={<ActivityLog />} />
+          <Route path="/" element={<ErrorBoundary><Overview /></ErrorBoundary>} />
+          <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
+          <Route path="/identities" element={<ErrorBoundary><Identities /></ErrorBoundary>} />
+          <Route path="/identities/:id" element={<ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
+          <Route path="/reports" element={<ErrorBoundary><Reports /></ErrorBoundary>} />
+          <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
+          <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
+          <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
         </Routes>
       </div>
     </Router>
   );
 }
 
-function NavLinks() {
+function NavLinks({ onSearchOpen }: { onSearchOpen: () => void }) {
   const location = useLocation();
 
   const isActive = (path: string) => {
@@ -306,8 +323,10 @@ function NavLinks() {
     return location.pathname.startsWith(path);
   };
 
+  const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent);
+
   return (
-    <div className="flex items-baseline space-x-1">
+    <div className="flex items-center space-x-1">
       <Link
         to="/"
         className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
@@ -384,6 +403,16 @@ function NavLinks() {
       >
         Activity
       </Link>
+
+      <button
+        onClick={onSearchOpen}
+        className="ml-2 flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm text-gray-500 bg-gray-100 hover:bg-gray-200 transition border border-gray-200"
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <span className="hidden sm:inline text-xs text-gray-400">{isMac ? '\u2318' : 'Ctrl+'}K</span>
+      </button>
     </div>
   );
 }

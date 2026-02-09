@@ -7,6 +7,7 @@ import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
 import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress } from '../components/dashboard';
 import Sparkline from '../components/Sparkline';
+import StaleDataBanner from '../components/StaleDataBanner';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -300,6 +301,9 @@ export default function Dashboard() {
           <ViewAllButton />
         </div>
       </div>
+
+      {/* Stale Data Warning */}
+      <StaleDataBanner completedAt={latest?.completed_at} />
 
       {/* Methodology panel */}
       <RiskMethodology />
