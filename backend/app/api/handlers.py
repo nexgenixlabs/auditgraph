@@ -2604,6 +2604,15 @@ def post_bulk_remediation():
         db.close()
 
 
+def get_role_usage_stats():
+    """Get role usage_status and risk_level distribution for dashboard chart."""
+    db = _db()
+    try:
+        return jsonify(db.get_role_usage_stats())
+    finally:
+        db.close()
+
+
 def get_remediation_dashboard_summary():
     """Get aggregated remediation progress for the dashboard widget."""
     db = _db()

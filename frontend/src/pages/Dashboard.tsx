@@ -5,7 +5,7 @@ import { CATEGORY_DISPLAY_ORDER } from '../constants/metrics';
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
-import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress } from '../components/dashboard';
+import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress, RiskTrendChart, RoleUsageChart } from '../components/dashboard';
 import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
 import { useToast } from '../components/ToastProvider';
@@ -93,6 +93,7 @@ export default function Dashboard() {
   const [driftData, setDriftData] = useState<any>(null);
   const [trends, setTrends] = useState<Array<{ run_id: number; date: string | null; total: number; critical: number; high: number; medium: number; low: number; dormant: number }>>([]);
   const [remediationSummary, setRemediationSummary] = useState<{ open: number; acknowledged: number; completed: number; skipped: number; total: number; completion_pct: number } | null>(null);
+  const [roleUsage, setRoleUsage] = useState<{ statuses: Record<string, number>; by_risk: Record<string, number>; total: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +158,13 @@ export default function Dashboard() {
           if (remRes.ok) remSummaryJson = await remRes.json();
         } catch { /* ignore */ }
 
+        // Fetch role usage stats (non-blocking)
+        let roleUsageJson = null;
+        try {
+          const ruRes = await fetch('/api/dashboard/role-usage');
+          if (ruRes.ok) roleUsageJson = await ruRes.json();
+        } catch { /* ignore */ }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
@@ -167,6 +175,7 @@ export default function Dashboard() {
           setDriftData(driftJson);
           setTrends(trendsJson);
           setRemediationSummary(remSummaryJson);
+          setRoleUsage(roleUsageJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -396,6 +405,22 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Risk Trend + Role Usage Charts */}
+          {trends.length >= 2 && (
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+              <div className="xl:col-span-2">
+                <RiskTrendChart data={trends} />
+              </div>
+              <div>
+                <RoleUsageChart
+                  statuses={roleUsage?.statuses || {}}
+                  byRisk={roleUsage?.by_risk || {}}
+                  total={roleUsage?.total || 0}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Discovery Runs Panel (toggled by clicking Discovery Runs card) */}
           {showRuns && (

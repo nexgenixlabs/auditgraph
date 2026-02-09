@@ -2092,3 +2092,55 @@ class Database:
             'total': total,
             'completion_pct': completion_pct,
         }
+
+    def get_role_usage_stats(self):
+        """Aggregate usage_status and risk_level counts across all role assignments from latest run."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT MAX(discovery_run_id) FROM identities")
+        row = cursor.fetchone()
+        latest_run = row['max'] if row else None
+        if not latest_run:
+            cursor.close()
+            return {'statuses': {}, 'by_risk': {}, 'total': 0}
+
+        # Count by usage_status (RBAC + Entra combined)
+        cursor.execute("""
+            SELECT COALESCE(r.usage_status, 'unknown') as status, COUNT(*) as count
+            FROM role_assignments r
+            JOIN identities i ON r.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+            GROUP BY COALESCE(r.usage_status, 'unknown')
+            UNION ALL
+            SELECT COALESCE(e.usage_status, 'unknown') as status, COUNT(*) as count
+            FROM entra_role_assignments e
+            JOIN identities i ON e.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+            GROUP BY COALESCE(e.usage_status, 'unknown')
+        """, (latest_run, latest_run))
+        rows = cursor.fetchall()
+        merged = {}
+        for r in rows:
+            merged[r['status']] = merged.get(r['status'], 0) + r['count']
+        total = sum(merged.values())
+
+        # Count by risk_level
+        cursor.execute("""
+            SELECT COALESCE(r.risk_level, 'unknown') as risk, COUNT(*) as count
+            FROM role_assignments r
+            JOIN identities i ON r.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+            GROUP BY COALESCE(r.risk_level, 'unknown')
+            UNION ALL
+            SELECT COALESCE(e.risk_level, 'unknown') as risk, COUNT(*) as count
+            FROM entra_role_assignments e
+            JOIN identities i ON e.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+            GROUP BY COALESCE(e.risk_level, 'unknown')
+        """, (latest_run, latest_run))
+        risk_rows = cursor.fetchall()
+        risk_merged = {}
+        for r in risk_rows:
+            risk_merged[r['risk']] = risk_merged.get(r['risk'], 0) + r['count']
+
+        cursor.close()
+        return {'statuses': merged, 'by_risk': risk_merged, 'total': total}

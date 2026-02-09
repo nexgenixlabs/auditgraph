@@ -32,6 +32,7 @@ from app.api.handlers import (
     post_remediation_action,
     get_remediation_dashboard_summary,
     post_bulk_remediation,
+    get_role_usage_stats,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -200,6 +201,13 @@ def create_app():
     @app.post("/api/bulk/remediation")
     def bulk_remediation():
         return post_bulk_remediation()
+
+    # -----------------------
+    # Dashboard Charts (Phase 26)
+    # -----------------------
+    @app.get("/api/dashboard/role-usage")
+    def dashboard_role_usage():
+        return get_role_usage_stats()
 
     # -----------------------
     # Historical Trends (Phase 20)

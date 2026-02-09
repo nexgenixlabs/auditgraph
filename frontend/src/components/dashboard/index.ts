@@ -8,3 +8,5 @@ export { default as ConditionalAccessCard } from './ConditionalAccessCard';
 export { default as CloudContextBanner } from './CloudContextBanner';
 export { default as RecentChanges } from './RecentChanges';
 export { default as RemediationProgress } from './RemediationProgress';
+export { default as RiskTrendChart } from './RiskTrendChart';
+export { default as RoleUsageChart } from './RoleUsageChart';
