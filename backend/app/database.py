@@ -2146,6 +2146,179 @@ class Database:
         return {'statuses': merged, 'by_risk': risk_merged, 'total': total}
 
     # ========================================================================
+    # Role Mining & Optimization (Phase 37)
+    # ========================================================================
+
+    @staticmethod
+    def _role_mining_recommendation(finding_type, role_name, redundant_with):
+        if finding_type == 'definitely_unused':
+            return f'Remove "{role_name}" — confirmed unused'
+        elif finding_type == 'likely_unused':
+            return f'Review and likely remove "{role_name}" — appears unused'
+        elif finding_type == 'redundant':
+            return f'Remove "{role_name}" — superseded by "{redundant_with}"'
+        elif finding_type == 'orphaned':
+            return f'Remove "{role_name}" — target resource no longer exists'
+        elif finding_type == 'overprivileged':
+            return f'Review "{role_name}" — high-privilege role with low usage signals'
+        return f'Review "{role_name}"'
+
+    def get_role_mining_data(self) -> dict:
+        """Compute role mining & optimization insights from latest discovery run."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute("SELECT MAX(discovery_run_id) as max FROM identities")
+        row = cursor.fetchone()
+        latest_run = row['max'] if row else None
+        if not latest_run:
+            cursor.close()
+            return {
+                'summary': {'total_roles': 0, 'unused': 0, 'redundant': 0, 'orphaned': 0, 'overprivileged': 0, 'optimization_pct': 0},
+                'findings': [], 'role_frequency': [], 'role_bundles': [],
+            }
+
+        # Findings: UNION ALL across categories
+        cursor.execute("""
+            -- UNUSED (RBAC)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   r.role_name, 'azure' as source, r.usage_status as finding_type,
+                   COALESCE(r.risk_level,'unknown') as risk_level, r.days_since_assigned,
+                   r.redundant_with, r.scope
+            FROM role_assignments r JOIN identities i ON r.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND r.usage_status IN ('definitely_unused','likely_unused')
+            UNION ALL
+            -- UNUSED (Entra)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   e.role_name, 'entra' as source, e.usage_status as finding_type,
+                   COALESCE(e.risk_level,'unknown') as risk_level, e.days_since_assigned,
+                   e.redundant_with, e.directory_scope as scope
+            FROM entra_role_assignments e JOIN identities i ON e.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND e.usage_status IN ('definitely_unused','likely_unused')
+            UNION ALL
+            -- REDUNDANT (RBAC)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   r.role_name, 'azure' as source, 'redundant' as finding_type,
+                   COALESCE(r.risk_level,'unknown') as risk_level, r.days_since_assigned,
+                   r.redundant_with, r.scope
+            FROM role_assignments r JOIN identities i ON r.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND r.redundant_with IS NOT NULL
+              AND COALESCE(r.usage_status,'unknown') NOT IN ('definitely_unused','likely_unused')
+            UNION ALL
+            -- REDUNDANT (Entra)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   e.role_name, 'entra' as source, 'redundant' as finding_type,
+                   COALESCE(e.risk_level,'unknown') as risk_level, e.days_since_assigned,
+                   e.redundant_with, e.directory_scope as scope
+            FROM entra_role_assignments e JOIN identities i ON e.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND e.redundant_with IS NOT NULL
+              AND COALESCE(e.usage_status,'unknown') NOT IN ('definitely_unused','likely_unused')
+            UNION ALL
+            -- ORPHANED (RBAC only)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   r.role_name, 'azure' as source, 'orphaned' as finding_type,
+                   COALESCE(r.risk_level,'unknown') as risk_level, r.days_since_assigned,
+                   r.redundant_with, r.scope
+            FROM role_assignments r JOIN identities i ON r.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND r.scope_exists = false
+              AND COALESCE(r.usage_status,'unknown') NOT IN ('definitely_unused','likely_unused')
+              AND r.redundant_with IS NULL
+            UNION ALL
+            -- OVERPRIVILEGED (RBAC)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   r.role_name, 'azure' as source, 'overprivileged' as finding_type,
+                   COALESCE(r.risk_level,'unknown') as risk_level, r.days_since_assigned,
+                   r.redundant_with, r.scope
+            FROM role_assignments r JOIN identities i ON r.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND r.risk_level IN ('critical','high')
+              AND COALESCE(r.usage_status,'unknown') NOT IN ('assumed_active','definitely_unused','likely_unused')
+              AND COALESCE(r.scope_exists, true) = true AND r.redundant_with IS NULL
+            UNION ALL
+            -- OVERPRIVILEGED (Entra)
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category,'') as identity_category,
+                   e.role_name, 'entra' as source, 'overprivileged' as finding_type,
+                   COALESCE(e.risk_level,'unknown') as risk_level, e.days_since_assigned,
+                   e.redundant_with, e.directory_scope as scope
+            FROM entra_role_assignments e JOIN identities i ON e.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND e.risk_level IN ('critical','high')
+              AND COALESCE(e.usage_status,'unknown') NOT IN ('assumed_active','definitely_unused','likely_unused')
+              AND e.redundant_with IS NULL
+        """, (latest_run,) * 7)
+        findings_raw = cursor.fetchall()
+
+        findings = []
+        for f in findings_raw:
+            findings.append({
+                'identity_id': f['identity_id'],
+                'identity_name': f['display_name'],
+                'identity_category': f['identity_category'],
+                'role_name': f['role_name'],
+                'source': f['source'],
+                'type': f['finding_type'],
+                'risk_level': f['risk_level'],
+                'days_since_assigned': f['days_since_assigned'],
+                'scope': f['scope'],
+                'recommendation': self._role_mining_recommendation(f['finding_type'], f['role_name'], f.get('redundant_with')),
+            })
+
+        # Role frequency: top 10
+        cursor.execute("""
+            SELECT role_name, source, COUNT(*) as assignment_count FROM (
+                SELECT r.role_name, 'azure' as source FROM role_assignments r
+                JOIN identities i ON r.identity_db_id = i.id WHERE i.discovery_run_id = %s
+                UNION ALL
+                SELECT e.role_name, 'entra' as source FROM entra_role_assignments e
+                JOIN identities i ON e.identity_db_id = i.id WHERE i.discovery_run_id = %s
+            ) combined GROUP BY role_name, source ORDER BY assignment_count DESC LIMIT 10
+        """, (latest_run, latest_run))
+        role_frequency = [dict(r) for r in cursor.fetchall()]
+
+        # Total roles
+        cursor.execute("""
+            SELECT (
+                SELECT COUNT(*) FROM role_assignments r JOIN identities i ON r.identity_db_id = i.id WHERE i.discovery_run_id = %s
+            ) + (
+                SELECT COUNT(*) FROM entra_role_assignments e JOIN identities i ON e.identity_db_id = i.id WHERE i.discovery_run_id = %s
+            ) as total
+        """, (latest_run, latest_run))
+        total_roles = cursor.fetchone()['total']
+
+        # Role bundles: co-assigned pairs
+        cursor.execute("""
+            WITH identity_roles AS (
+                SELECT r.identity_db_id, r.role_name FROM role_assignments r
+                JOIN identities i ON r.identity_db_id = i.id WHERE i.discovery_run_id = %s
+                UNION ALL
+                SELECT e.identity_db_id, e.role_name FROM entra_role_assignments e
+                JOIN identities i ON e.identity_db_id = i.id WHERE i.discovery_run_id = %s
+            )
+            SELECT a.role_name as role_a, b.role_name as role_b, COUNT(DISTINCT a.identity_db_id) as co_count
+            FROM identity_roles a JOIN identity_roles b
+              ON a.identity_db_id = b.identity_db_id AND a.role_name < b.role_name
+            GROUP BY a.role_name, b.role_name HAVING COUNT(DISTINCT a.identity_db_id) >= 2
+            ORDER BY co_count DESC LIMIT 10
+        """, (latest_run, latest_run))
+        role_bundles = [dict(r) for r in cursor.fetchall()]
+
+        cursor.close()
+
+        unused = sum(1 for f in findings if f['type'] in ('definitely_unused', 'likely_unused'))
+        redundant = sum(1 for f in findings if f['type'] == 'redundant')
+        orphaned = sum(1 for f in findings if f['type'] == 'orphaned')
+        overprivileged = sum(1 for f in findings if f['type'] == 'overprivileged')
+        actionable = unused + redundant + orphaned + overprivileged
+        optimization_pct = round(actionable / total_roles * 100) if total_roles > 0 else 0
+
+        return {
+            'summary': {
+                'total_roles': total_roles, 'unused': unused, 'redundant': redundant,
+                'orphaned': orphaned, 'overprivileged': overprivileged, 'optimization_pct': optimization_pct,
+            },
+            'findings': findings,
+            'role_frequency': role_frequency,
+            'role_bundles': role_bundles,
+        }
+
+    # ========================================================================
     # Phase 28: Webhook & Alert Integration
     # ========================================================================
 

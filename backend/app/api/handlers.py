@@ -3183,6 +3183,15 @@ def get_role_usage_stats():
         db.close()
 
 
+def get_role_mining():
+    """GET /api/role-mining — role mining & optimization analysis."""
+    db = _db()
+    try:
+        return jsonify(db.get_role_mining_data())
+    finally:
+        db.close()
+
+
 def get_remediation_dashboard_summary():
     """Get aggregated remediation progress for the dashboard widget."""
     db = _db()

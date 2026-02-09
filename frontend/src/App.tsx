@@ -35,6 +35,7 @@ import NotificationCenter from './pages/NotificationCenter';
 import Compliance from './pages/Compliance';
 import Exports from './pages/Exports';
 import AccessReviews from './pages/AccessReviews';
+import RoleMining from './pages/RoleMining';
 import Login from './pages/Login';
 import {
   GlobalRiskCards,
@@ -360,6 +361,7 @@ function AppContent() {
                 <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
                 <Route path="/exports" element={<ErrorBoundary><Exports /></ErrorBoundary>} />
                 <Route path="/access-reviews" element={<ErrorBoundary><AccessReviews /></ErrorBoundary>} />
+                <Route path="/role-mining" element={<ErrorBoundary><RoleMining /></ErrorBoundary>} />
                 <Route path="/settings" element={
                   <ProtectedRoute requiredRole="admin">
                     <ErrorBoundary><Settings /></ErrorBoundary>
@@ -509,6 +511,17 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         }`}
       >
         Reviews
+      </Link>
+
+      <Link
+        to="/role-mining"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/role-mining')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Role Mining
       </Link>
 
       {isAdmin && (

@@ -34,6 +34,7 @@ from app.api.handlers import (
     get_remediation_dashboard_summary,
     post_bulk_remediation,
     get_role_usage_stats,
+    get_role_mining,
     get_webhooks_list,
     create_webhook,
     update_webhook,
@@ -316,6 +317,13 @@ def create_app():
     @app.get("/api/dashboard/role-usage")
     def dashboard_role_usage():
         return get_role_usage_stats()
+
+    # -----------------------
+    # Role Mining & Optimization (Phase 37)
+    # -----------------------
+    @app.get("/api/role-mining")
+    def role_mining():
+        return get_role_mining()
 
     # -----------------------
     # Historical Trends (Phase 20)
