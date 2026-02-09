@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS } from '../utils/exportUtils';
 import {
   type IdentityCategory, type RiskLevel, type DormantStatus,
   CATEGORY_FILTER_OPTIONS, RISK_FILTER_OPTIONS, RISK_ORDER, RISK_BADGE, RISK_SOLID, CLOUD_BADGE,
@@ -479,6 +480,22 @@ export default function IdentitiesPage() {
     doc.save(`auditgraph-grc-report-${new Date().toISOString().split('T')[0]}.pdf`);
   }
 
+  // Export All (filtered, no selection required)
+  function exportAllCSV() {
+    const data = filtered.map(i => ({
+      ...i,
+      privilege_tier: `T${getPrivilegeTier(i)}`,
+      activity_status: getDormantStatus(i),
+    }));
+    downloadCSV(data as Record<string, unknown>[], IDENTITY_CSV_COLUMNS, exportFilename('identities', 'csv'));
+    addToast(`Exported ${data.length} identities as CSV`, 'success');
+  }
+
+  function exportAllJSON() {
+    downloadJSON(filtered, exportFilename('identities', 'json'));
+    addToast(`Exported ${filtered.length} identities as JSON`, 'success');
+  }
+
   const colSpan = 14; // checkbox + 13 data cols
 
   return (
@@ -549,6 +566,9 @@ export default function IdentitiesPage() {
               <span className="w-px h-5 bg-gray-300" />
               <button onClick={exportToCSV} className="px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">CSV</button>
               <button onClick={exportToPDF} className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">PDF</button>
+              <span className="w-px h-5 bg-gray-300" />
+              <button onClick={exportAllCSV} className="px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100">Export All CSV</button>
+              <button onClick={exportAllJSON} className="px-2.5 py-1 text-xs font-medium text-purple-700 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100">Export All JSON</button>
             </>
           )}
         </div>

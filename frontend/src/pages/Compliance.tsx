@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useToast } from '../components/ToastProvider';
+import { downloadCSV, downloadJSON, exportFilename, COMPLIANCE_CSV_COLUMNS } from '../utils/exportUtils';
 
 interface ComplianceControl {
   id: string;
@@ -62,6 +64,37 @@ export default function Compliance() {
   const [error, setError] = useState<string | null>(null);
   const [expandedFw, setExpandedFw] = useState<string | null>(null);
   const [showGapOnly, setShowGapOnly] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const { addToast } = useToast();
+
+  async function handleExport(format: 'csv' | 'json') {
+    setExporting(true);
+    try {
+      const res = await fetch('/api/export/compliance');
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const exportData = await res.json();
+
+      if (format === 'json') {
+        downloadJSON(exportData, exportFilename('compliance', 'json'));
+      } else {
+        const rows = (exportData.all_controls || []).map((c: any) => ({
+          framework: c.framework_name,
+          control_id: c.control_id,
+          control_name: c.control_name,
+          status: c.status,
+          current_value: c.value,
+          threshold: c.pass_threshold,
+          detail: c.detail,
+        }));
+        downloadCSV(rows, COMPLIANCE_CSV_COLUMNS, exportFilename('compliance', 'csv'));
+      }
+      addToast(`Compliance data exported as ${format.toUpperCase()}`, 'success');
+    } catch (e: any) {
+      addToast(e?.message || 'Export failed', 'error');
+    } finally {
+      setExporting(false);
+    }
+  }
 
   useEffect(() => {
     async function load() {
@@ -135,6 +168,22 @@ export default function Compliance() {
           </p>
         </div>
         <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleExport('csv')}
+              disabled={exporting}
+              className="px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 disabled:opacity-50"
+            >
+              CSV
+            </button>
+            <button
+              onClick={() => handleExport('json')}
+              disabled={exporting}
+              className="px-2.5 py-1 text-xs font-medium text-purple-700 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100 disabled:opacity-50"
+            >
+              JSON
+            </button>
+          </div>
           <ScoreRing score={overallScore} size={64} />
           <div className="text-right">
             <div className="text-2xl font-bold text-gray-900">{overallScore}%</div>

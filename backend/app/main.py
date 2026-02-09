@@ -60,6 +60,7 @@ from app.api.handlers import (
     delete_user_handler,
     get_compliance_frameworks_list,
     toggle_compliance_framework_handler,
+    export_data,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -377,6 +378,13 @@ def create_app():
     @require_role('admin')
     def risk_rules_preview():
         return preview_risk_rule()
+
+    # -----------------------
+    # Export Pipeline (Phase 33)
+    # -----------------------
+    @app.get("/api/export/<export_type>")
+    def export(export_type):
+        return export_data(export_type)
 
     # -----------------------
     # Activity Log (Phase 17)

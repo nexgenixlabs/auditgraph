@@ -3496,3 +3496,399 @@ def delete_user_handler(user_id):
         return jsonify({'message': f'User "{existing["username"]}" deleted'})
     finally:
         db.close()
+
+
+# ── Phase 33: Export Pipeline ─────────────────────────────────────
+
+def export_data(export_type):
+    """
+    GET /api/export/<type>
+    Returns structured JSON for client-side CSV/JSON file generation.
+    Supported types: identities, compliance, drift, risk-summary
+    """
+    VALID_TYPES = {'identities', 'compliance', 'drift', 'risk-summary'}
+    if export_type not in VALID_TYPES:
+        return jsonify({'error': f'Invalid export type. Valid: {", ".join(sorted(VALID_TYPES))}'}), 400
+
+    if export_type == 'identities':
+        return _export_identities()
+    elif export_type == 'compliance':
+        return _export_compliance()
+    elif export_type == 'drift':
+        return _export_drift()
+    elif export_type == 'risk-summary':
+        return _export_risk_summary()
+
+
+def _export_identities():
+    """Export all identities (no pagination) with optional filters."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        risk_filter = request.args.get('risk_level')
+        category_filter = request.args.get('identity_category')
+
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        latest_run = cursor.fetchone()[0]
+        if not latest_run:
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        query = """
+            SELECT
+                i.identity_id, i.display_name, i.identity_type,
+                COALESCE(i.identity_category, '') as identity_category,
+                i.risk_level, i.credential_count, i.credential_status,
+                i.credential_expiration, i.created_datetime, i.activity_status,
+                (SELECT COUNT(*) FROM role_assignments ra WHERE ra.identity_db_id = i.id) as rbac_role_count,
+                (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id) as entra_role_count,
+                COALESCE(i.cloud, 'azure') as cloud,
+                COALESCE(i.status, 'active') as status,
+                i.last_seen_auth,
+                i.owner_display_name,
+                COALESCE(i.owner_count, 0) as owner_count,
+                COALESCE(i.risk_score, 0) as risk_score,
+                COALESCE(i.api_permission_count, 0) as api_permission_count,
+                COALESCE(i.app_role_count, 0) as app_role_count,
+                i.enabled,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator', 'privileged role administrator',
+                            'privileged authentication administrator',
+                            'application administrator', 'cloud application administrator',
+                            'hybrid identity administrator'
+                        )
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner', 'user access administrator')
+                        AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
+                             AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'user administrator', 'exchange administrator',
+                            'sharepoint administrator', 'teams administrator',
+                            'security administrator', 'compliance administrator',
+                            'conditional access administrator', 'helpdesk administrator'
+                        )
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator')
+                    ) THEN 1
+                    WHEN EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id) THEN 2
+                    WHEN EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id) THEN 2
+                    ELSE 3
+                END as privilege_tier,
+                i.ca_coverage_status,
+                COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
+                i.risk_reasons
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+        """
+        params = [latest_run]
+
+        if risk_filter:
+            query += " AND i.risk_level = %s"
+            params.append(risk_filter)
+        if category_filter:
+            query += " AND COALESCE(i.identity_category, '') = %s"
+            params.append(category_filter)
+
+        query += """
+            ORDER BY
+                CASE i.risk_level
+                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5
+                END, i.display_name
+        """
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        identities = []
+        for row in rows:
+            identities.append({
+                'identity_id': row[0],
+                'display_name': row[1] or '',
+                'identity_type': row[2] or '',
+                'identity_category': _normalize_category_key(row[3] or ''),
+                'risk_level': row[4] or 'info',
+                'credential_count': int(row[5] or 0),
+                'credential_status': row[6] or 'unknown',
+                'credential_expiration': row[7].isoformat() if row[7] else None,
+                'created_datetime': row[8].isoformat() if row[8] else None,
+                'activity_status': row[9] or 'unknown',
+                'rbac_role_count': int(row[10] or 0),
+                'entra_role_count': int(row[11] or 0),
+                'cloud': row[12] or 'azure',
+                'status': row[13] or 'active',
+                'last_seen_auth': row[14].isoformat() if row[14] else None,
+                'owner_display_name': row[15],
+                'owner_count': int(row[16] or 0),
+                'risk_score': int(row[17] or 0),
+                'api_permission_count': int(row[18] or 0),
+                'app_role_count': int(row[19] or 0),
+                'enabled': row[20] if row[20] is not None else True,
+                'privilege_tier': f'T{row[21]}' if row[21] is not None else 'T3',
+                'ca_coverage_status': row[22] or None,
+                'ca_mfa_enforced': bool(row[23]) if row[23] is not None else False,
+                'risk_reasons': row[24] if row[24] else [],
+            })
+
+        try:
+            db.log_activity('export', f'Identities export generated ({len(identities)} records)',
+                            {'export_type': 'identities', 'count': len(identities)})
+        except Exception:
+            pass
+
+        return jsonify({
+            'export_type': 'identities',
+            'generated_at': datetime.utcnow().isoformat(),
+            'run_id': latest_run,
+            'total_count': len(identities),
+            'filters': {'risk_level': risk_filter, 'identity_category': category_filter},
+            'identities': identities,
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _export_compliance():
+    """Export compliance framework evaluations with gap analysis."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        latest_run = cursor.fetchone()[0]
+        if not latest_run:
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        metrics = _compute_compliance_metrics(cursor, latest_run)
+        frameworks = db.get_compliance_frameworks(enabled_only=True)
+
+        scorecard = {}
+        all_controls = []
+        gap_analysis = []
+
+        for fw in frameworks:
+            controls_out = []
+            for ctrl in fw['controls']:
+                status, value = _evaluate_control(ctrl, metrics)
+                label = _format_metric_label(ctrl['metric'])
+                if status == 'pass':
+                    detail = f"{value} {label} — within limits"
+                elif status == 'warn':
+                    detail = f"{value} {label} — approaching threshold"
+                else:
+                    detail = f"{value} {label} — exceeds acceptable limit (target: {ctrl['pass_operator']}{int(ctrl['pass_value'])})"
+
+                ctrl_data = {
+                    'id': ctrl['control_id'],
+                    'name': ctrl['name'],
+                    'status': status,
+                    'detail': detail,
+                    'metric': ctrl['metric'],
+                    'value': value,
+                    'pass_threshold': f"{ctrl['pass_operator']}{int(ctrl['pass_value'])}",
+                }
+                controls_out.append(ctrl_data)
+
+                # Flat record for all_controls and gap_analysis
+                flat = {
+                    'framework': fw['name'],
+                    'framework_key': fw['key'],
+                    'control_id': ctrl['control_id'],
+                    'control_name': ctrl['name'],
+                    'status': status,
+                    'current_value': value,
+                    'threshold': f"{ctrl['pass_operator']}{int(ctrl['pass_value'])}",
+                    'detail': detail,
+                }
+                all_controls.append(flat)
+                if status != 'pass':
+                    gap_analysis.append(flat)
+
+            passes = sum(1 for c in controls_out if c['status'] == 'pass')
+            scorecard[fw['key']] = {
+                'name': fw['name'],
+                'version': fw.get('version'),
+                'score': round(passes / len(controls_out) * 100) if controls_out else 0,
+                'pass_count': passes,
+                'warn_count': sum(1 for c in controls_out if c['status'] == 'warn'),
+                'fail_count': sum(1 for c in controls_out if c['status'] == 'fail'),
+                'total_controls': len(controls_out),
+                'controls': controls_out,
+            }
+
+        total_controls = sum(fw['total_controls'] for fw in scorecard.values())
+        total_passing = sum(fw['pass_count'] for fw in scorecard.values())
+        overall_score = round((total_passing / total_controls) * 100) if total_controls > 0 else 0
+
+        try:
+            db.log_activity('export', f'Compliance export generated ({len(frameworks)} frameworks)',
+                            {'export_type': 'compliance', 'frameworks': len(frameworks)})
+        except Exception:
+            pass
+
+        return jsonify({
+            'export_type': 'compliance',
+            'generated_at': datetime.utcnow().isoformat(),
+            'run_id': latest_run,
+            'overall_score': overall_score,
+            'raw_metrics': metrics,
+            'frameworks': scorecard,
+            'all_controls': all_controls,
+            'gap_analysis': gap_analysis,
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _export_drift():
+    """Export latest drift report with flattened changes."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs WHERE status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        run_id = row[0]
+        report = db.get_drift_report(run_id)
+        if not report:
+            return jsonify({
+                'export_type': 'drift',
+                'generated_at': datetime.utcnow().isoformat(),
+                'has_data': False,
+                'total_changes': 0,
+                'changes': [],
+            })
+
+        # Flatten all change types into a single list
+        flat_changes = []
+        changes = report.get('changes') or {}
+        if isinstance(changes, str):
+            changes = json.loads(changes)
+
+        for item in (changes.get('new_identities') or []):
+            flat_changes.append({
+                'change_type': 'new_identity',
+                'identity_id': item.get('identity_id', ''),
+                'display_name': item.get('display_name', ''),
+                'detail': f"New {item.get('identity_category', 'identity')} discovered",
+                'risk_level': item.get('risk_level', ''),
+            })
+        for item in (changes.get('removed_identities') or []):
+            flat_changes.append({
+                'change_type': 'removed_identity',
+                'identity_id': item.get('identity_id', ''),
+                'display_name': item.get('display_name', ''),
+                'detail': 'Identity removed from environment',
+                'risk_level': item.get('risk_level', ''),
+            })
+        for item in (changes.get('permission_changes') or []):
+            detail_parts = []
+            if item.get('added_roles'):
+                detail_parts.append(f"Added: {', '.join(item['added_roles'])}")
+            if item.get('removed_roles'):
+                detail_parts.append(f"Removed: {', '.join(item['removed_roles'])}")
+            flat_changes.append({
+                'change_type': 'permission_change',
+                'identity_id': item.get('identity_id', ''),
+                'display_name': item.get('display_name', ''),
+                'detail': '; '.join(detail_parts) if detail_parts else 'Permission change detected',
+                'risk_level': item.get('risk_level', ''),
+            })
+        for item in (changes.get('risk_changes') or []):
+            flat_changes.append({
+                'change_type': 'risk_change',
+                'identity_id': item.get('identity_id', ''),
+                'display_name': item.get('display_name', ''),
+                'detail': f"{item.get('old_risk', '?')} -> {item.get('new_risk', '?')}",
+                'risk_level': item.get('new_risk', ''),
+            })
+        for item in (changes.get('credential_changes') or []):
+            flat_changes.append({
+                'change_type': 'credential_change',
+                'identity_id': item.get('identity_id', ''),
+                'display_name': item.get('display_name', ''),
+                'detail': f"{item.get('old_status', '?')} -> {item.get('new_status', '?')}",
+                'risk_level': item.get('risk_level', ''),
+            })
+
+        try:
+            db.log_activity('export', f'Drift export generated ({len(flat_changes)} changes)',
+                            {'export_type': 'drift', 'run_id': run_id})
+        except Exception:
+            pass
+
+        return jsonify({
+            'export_type': 'drift',
+            'generated_at': datetime.utcnow().isoformat(),
+            'run_id': run_id,
+            'previous_run_id': report.get('previous_run_id'),
+            'total_changes': report.get('total_changes', 0),
+            'has_data': True,
+            'summary': {
+                'new_identities': report.get('new_identities_count', 0),
+                'removed_identities': report.get('removed_identities_count', 0),
+                'permission_changes': report.get('permission_changes_count', 0),
+                'risk_changes': report.get('risk_changes_count', 0),
+                'credential_changes': report.get('credential_changes_count', 0),
+            },
+            'changes': flat_changes,
+        })
+    finally:
+        db.close()
+
+
+def _export_risk_summary():
+    """Export executive risk summary for SIEM/GRC integration."""
+    db = _db()
+    try:
+        data = db.get_report_data()
+        if data is None:
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        top_risks = []
+        for tr in data.get('top_risks', []):
+            top_risks.append({
+                'identity_id': tr.get('identity_id'),
+                'display_name': tr.get('display_name'),
+                'identity_category': tr.get('identity_category'),
+                'risk_level': tr.get('risk_level'),
+                'risk_score': tr.get('risk_score'),
+                'risk_reasons': tr.get('risk_reasons', []),
+                'top_remediation': tr['remediations'][0]['title'] if tr.get('remediations') else None,
+            })
+
+        try:
+            db.log_activity('export', 'Risk summary export generated',
+                            {'export_type': 'risk-summary'})
+        except Exception:
+            pass
+
+        return jsonify({
+            'export_type': 'risk-summary',
+            'generated_at': datetime.utcnow().isoformat(),
+            'run_id': data.get('run_id'),
+            'collected_at': data.get('collected_at'),
+            'risk_distribution': data.get('stats'),
+            'credential_health': data.get('credential_health'),
+            'conditional_access': data.get('conditional_access'),
+            'top_risks': top_risks,
+            'remediation_priorities': data.get('remediation_summary', {}).get('top_priorities', []),
+        })
+    finally:
+        db.close()
