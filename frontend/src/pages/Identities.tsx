@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
+import { useAuth } from '../contexts/AuthContext';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS } from '../utils/exportUtils';
@@ -45,6 +46,19 @@ interface IdentityRow {
   has_permanent_assignment?: boolean;
   ca_coverage_status?: string | null;
   ca_mfa_enforced?: boolean;
+}
+
+interface SavedView {
+  id: number;
+  name: string;
+  description: string | null;
+  filters: Record<string, string>;
+  sort_field: string | null;
+  sort_direction: string | null;
+  is_default: boolean;
+  is_shared: boolean;
+  user_id: number;
+  creator_name?: string;
 }
 
 type SortField =
@@ -224,7 +238,17 @@ export default function IdentitiesPage() {
   const [bulkConfirm, setBulkConfirm] = useState<{ status: string; label: string } | null>(null);
   const bulkMenuRef = useRef<HTMLDivElement>(null);
 
+  // Saved Views state (Phase 34)
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [activeViewId, setActiveViewId] = useState<number | null>(null);
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [editingView, setEditingView] = useState<SavedView | null>(null);
+  const [viewForm, setViewForm] = useState({ name: '', description: '', is_shared: false });
+  const [viewSaving, setViewSaving] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+
   const { addToast } = useToast();
+  const { user, isAdmin } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -303,6 +327,134 @@ export default function IdentitiesPage() {
     load();
     return () => { cancelled = true; };
   }, []);
+
+  // ─── Saved Views (Phase 34) ─────────────────────────────────────
+  const loadViews = useCallback(async () => {
+    try {
+      const res = await fetch('/api/saved-views');
+      if (res.ok) {
+        const data = await res.json();
+        setSavedViews(data.views || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadViews(); }, [loadViews]);
+
+  // Auto-apply default view on mount (only if no URL params)
+  useEffect(() => {
+    if (savedViews.length === 0 || location.search) return;
+    const defaultView = savedViews.find(v => v.is_default && v.user_id === user?.id);
+    if (defaultView) applyView(defaultView);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedViews.length]);
+
+  function getCurrentFilters(): Record<string, string> {
+    const f: Record<string, string> = {};
+    if (search) f.search = search;
+    if (riskFilter !== 'all') f.risk_level = riskFilter;
+    if (categoryFilter !== 'all') f.category = categoryFilter;
+    if (ownerFilter !== 'all') f.owner_status = ownerFilter;
+    if (activityFilter !== 'all') f.activity_status = activityFilter;
+    if (tierFilter !== 'all') f.privilege_tier = tierFilter.join(',');
+    if (credentialFilter !== 'all') f.credential_status = credentialFilter;
+    if (caFilter !== 'all') f.ca_coverage = caFilter;
+    return f;
+  }
+
+  function applyView(view: SavedView) {
+    const f = view.filters || {};
+    setSearch(f.search || '');
+    setRiskFilter((f.risk_level as RiskLevel) || 'all');
+    setCategoryFilter((f.category as IdentityCategory) || 'all');
+    setOwnerFilter(f.owner_status === 'unowned' ? 'unowned' : 'all');
+    setActivityFilter(f.activity_status === 'dormant' ? 'dormant' : 'all');
+    if (f.privilege_tier) {
+      const tiers = f.privilege_tier.split(',').map(Number).filter(t => [0, 1, 2, 3].includes(t));
+      setTierFilter(tiers.length > 0 ? tiers : 'all');
+    } else {
+      setTierFilter('all');
+    }
+    setCredentialFilter((f.credential_status as any) || 'all');
+    setCaFilter((f.ca_coverage as any) || 'all');
+    if (view.sort_field) setSortField(view.sort_field as SortField);
+    if (view.sort_direction) setSortDir(view.sort_direction as 'asc' | 'desc');
+    setActiveViewId(view.id);
+  }
+
+  async function saveView() {
+    if (!viewForm.name.trim()) return;
+    setViewSaving(true);
+    try {
+      const body: any = {
+        name: viewForm.name.trim(),
+        description: viewForm.description.trim() || null,
+        filters: getCurrentFilters(),
+        sort_field: sortField,
+        sort_direction: sortDir,
+        is_shared: viewForm.is_shared,
+      };
+
+      const isEdit = !!editingView;
+      const url = isEdit ? `/api/saved-views/${editingView!.id}` : '/api/saved-views';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || 'Failed to save view');
+      }
+      const saved = await res.json();
+      addToast(`View "${saved.name}" ${isEdit ? 'updated' : 'saved'}`, 'success');
+      setSaveModalOpen(false);
+      setEditingView(null);
+      setViewForm({ name: '', description: '', is_shared: false });
+      setActiveViewId(saved.id);
+      await loadViews();
+    } catch (e: any) {
+      addToast(e?.message || 'Failed to save view', 'error');
+    } finally {
+      setViewSaving(false);
+    }
+  }
+
+  async function deleteView(viewId: number) {
+    try {
+      const res = await fetch(`/api/saved-views/${viewId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete');
+      addToast('View deleted', 'success');
+      if (activeViewId === viewId) setActiveViewId(null);
+      setDeleteConfirmId(null);
+      await loadViews();
+    } catch (e: any) {
+      addToast(e?.message || 'Failed to delete view', 'error');
+    }
+  }
+
+  async function toggleDefault(view: SavedView) {
+    try {
+      if (view.is_default) {
+        // Unset default by updating is_default to false
+        await fetch(`/api/saved-views/${view.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_default: false }),
+        });
+      } else {
+        await fetch(`/api/saved-views/${view.id}/default`, { method: 'POST' });
+      }
+      await loadViews();
+    } catch { /* ignore */ }
+  }
+
+  // Clear activeViewId when filters change manually
+  function clearActiveView() {
+    if (activeViewId !== null) setActiveViewId(null);
+  }
 
   // Filter & sort
   const filtered = useMemo(() => {
@@ -574,18 +726,184 @@ export default function IdentitiesPage() {
         </div>
       </div>
 
+      {/* Saved Views Bar */}
+      {savedViews.length > 0 || !loading ? (
+        <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1">
+          <span className="text-[10px] text-gray-500 uppercase font-semibold flex-shrink-0">Views:</span>
+          {savedViews.map(v => (
+            <div key={v.id} className="flex items-center gap-0.5 flex-shrink-0 group">
+              <button
+                onClick={() => applyView(v)}
+                className={`px-2.5 py-1 rounded-l-lg text-xs font-medium border transition ${
+                  activeViewId === v.id
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                }`}
+                title={v.description || v.name}
+              >
+                {v.is_default && <span className="mr-1 text-yellow-300">&#9733;</span>}
+                {v.name}
+                {v.is_shared && v.user_id !== user?.id && (
+                  <span className="ml-1 text-[9px] opacity-60">({v.creator_name})</span>
+                )}
+              </button>
+              <div className="flex border-y border-r border-gray-300 rounded-r-lg overflow-hidden">
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleDefault(v); }}
+                  className={`px-1 py-1 text-[10px] hover:bg-yellow-50 transition ${v.is_default ? 'text-yellow-500' : 'text-gray-300 hover:text-yellow-400'}`}
+                  title={v.is_default ? 'Remove default' : 'Set as default'}
+                >
+                  &#9733;
+                </button>
+                {(v.user_id === user?.id || isAdmin) && (
+                  <>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingView(v);
+                        setViewForm({ name: v.name, description: v.description || '', is_shared: v.is_shared });
+                        setSaveModalOpen(true);
+                      }}
+                      className="px-1 py-1 text-[10px] text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition"
+                      title="Edit view"
+                    >
+                      &#9998;
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(v.id); }}
+                      className="px-1 py-1 text-[10px] text-gray-400 hover:text-red-600 hover:bg-red-50 transition"
+                      title="Delete view"
+                    >
+                      &times;
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+          <button
+            onClick={() => {
+              setEditingView(null);
+              setViewForm({ name: '', description: '', is_shared: false });
+              setSaveModalOpen(true);
+            }}
+            className="px-2.5 py-1 rounded-lg text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 flex-shrink-0 flex items-center gap-1"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Save Current
+          </button>
+        </div>
+      ) : null}
+
+      {/* Delete Confirmation */}
+      {deleteConfirmId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4 p-5">
+            <h3 className="text-base font-bold text-gray-900 mb-2">Delete View?</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              This saved view will be permanently removed.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setDeleteConfirmId(null)} className="px-3 py-1.5 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">Cancel</button>
+              <button onClick={() => deleteView(deleteConfirmId)} className="px-3 py-1.5 text-sm text-white bg-red-600 rounded-lg hover:bg-red-700">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save View Modal */}
+      {saveModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-bold text-gray-900 mb-4">
+              {editingView ? 'Edit View' : 'Save Current Filters as View'}
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  value={viewForm.name}
+                  onChange={e => setViewForm(f => ({ ...f, name: e.target.value }))}
+                  placeholder="e.g., Critical T0 SPNs"
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
+                  autoFocus
+                  maxLength={100}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
+                <input
+                  value={viewForm.description}
+                  onChange={e => setViewForm(f => ({ ...f, description: e.target.value }))}
+                  placeholder="What this view shows…"
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+              {isAdmin && (
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={viewForm.is_shared}
+                    onChange={e => setViewForm(f => ({ ...f, is_shared: e.target.checked }))}
+                    className="w-4 h-4 text-blue-600 rounded"
+                  />
+                  Share with all users
+                </label>
+              )}
+              {!editingView && (
+                <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500">
+                  <span className="font-medium text-gray-700">Current filters:</span>{' '}
+                  {(() => {
+                    const f = getCurrentFilters();
+                    const keys = Object.keys(f);
+                    return keys.length > 0
+                      ? keys.map(k => `${k}=${f[k]}`).join(', ')
+                      : 'No filters (all identities)';
+                  })()}
+                  <br />
+                  <span className="font-medium text-gray-700">Sort:</span> {sortField} ({sortDir})
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => { setSaveModalOpen(false); setEditingView(null); }}
+                className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveView}
+                disabled={viewSaving || !viewForm.name.trim()}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {viewSaving && (
+                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                )}
+                {editingView ? 'Update' : 'Save View'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="bg-white border rounded-xl p-3 mb-3 shadow-sm">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, ID, owner…"
+          <input value={search} onChange={e => { setSearch(e.target.value); clearActiveView(); }} placeholder="Search name, ID, owner…"
             className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
-          <select value={riskFilter} onChange={e => setRiskFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
+          <select value={riskFilter} onChange={e => { setRiskFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
             {RISK_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as any)} className="border rounded-lg px-3 py-1.5 text-sm">
+          <select value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
             {CATEGORY_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); navigate('/identities', { replace: true }); }}
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setActiveViewId(null); navigate('/identities', { replace: true }); }}
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>

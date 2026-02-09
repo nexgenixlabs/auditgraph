@@ -3892,3 +3892,132 @@ def _export_risk_summary():
         })
     finally:
         db.close()
+
+
+# ─── Saved Views (Phase 34) ─────────────────────────────────────────
+
+def get_saved_views_list():
+    """GET /api/saved-views — list current user's views + shared views."""
+    user = g.current_user
+    db = _db()
+    try:
+        views = db.get_saved_views(user['id'])
+        return jsonify({'views': views, 'count': len(views)})
+    finally:
+        db.close()
+
+
+def create_saved_view_handler():
+    """POST /api/saved-views — create a new saved view."""
+    user = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name is required'}), 400
+    if len(name) > 100:
+        return jsonify({'error': 'Name must be 100 characters or less'}), 400
+
+    filters = data.get('filters', {})
+    if not isinstance(filters, dict):
+        return jsonify({'error': 'Filters must be an object'}), 400
+
+    db = _db()
+    try:
+        view = db.create_saved_view(
+            user_id=user['id'],
+            name=name,
+            description=(data.get('description') or '').strip() or None,
+            filters=filters,
+            sort_field=data.get('sort_field'),
+            sort_direction=data.get('sort_direction', 'desc'),
+            is_shared=bool(data.get('is_shared', False)) and user['role'] == 'admin',
+        )
+        try:
+            db.log_activity('saved_view', f'Created saved view "{name}"',
+                            {'view_id': view['id'], 'user': user['username']})
+        except Exception:
+            pass
+        return jsonify(view), 201
+    finally:
+        db.close()
+
+
+def update_saved_view_handler(view_id):
+    """PUT /api/saved-views/<id> — update an existing saved view."""
+    user = g.current_user
+    data = request.get_json(silent=True) or {}
+
+    db = _db()
+    try:
+        existing = db.get_saved_view(view_id)
+        if not existing:
+            return jsonify({'error': 'View not found'}), 404
+        if existing['user_id'] != user['id'] and user['role'] != 'admin':
+            return jsonify({'error': 'Not authorized'}), 403
+
+        update_fields = {}
+        if 'name' in data:
+            name = (data['name'] or '').strip()
+            if not name:
+                return jsonify({'error': 'Name is required'}), 400
+            if len(name) > 100:
+                return jsonify({'error': 'Name must be 100 characters or less'}), 400
+            update_fields['name'] = name
+        if 'description' in data:
+            update_fields['description'] = (data['description'] or '').strip() or None
+        if 'filters' in data:
+            if not isinstance(data['filters'], dict):
+                return jsonify({'error': 'Filters must be an object'}), 400
+            update_fields['filters'] = data['filters']
+        if 'sort_field' in data:
+            update_fields['sort_field'] = data['sort_field']
+        if 'sort_direction' in data:
+            update_fields['sort_direction'] = data['sort_direction']
+        if 'is_shared' in data and user['role'] == 'admin':
+            update_fields['is_shared'] = bool(data['is_shared'])
+
+        view = db.update_saved_view(view_id, **update_fields)
+        try:
+            db.log_activity('saved_view', f'Updated saved view "{view["name"]}"',
+                            {'view_id': view_id, 'user': user['username']})
+        except Exception:
+            pass
+        return jsonify(view)
+    finally:
+        db.close()
+
+
+def delete_saved_view_handler(view_id):
+    """DELETE /api/saved-views/<id> — delete a saved view."""
+    user = g.current_user
+    db = _db()
+    try:
+        existing = db.get_saved_view(view_id)
+        if not existing:
+            return jsonify({'error': 'View not found'}), 404
+        if existing['user_id'] != user['id'] and user['role'] != 'admin':
+            return jsonify({'error': 'Not authorized'}), 403
+
+        db.delete_saved_view(view_id)
+        try:
+            db.log_activity('saved_view', f'Deleted saved view "{existing["name"]}"',
+                            {'view_id': view_id, 'user': user['username']})
+        except Exception:
+            pass
+        return jsonify({'status': 'deleted', 'id': view_id})
+    finally:
+        db.close()
+
+
+def set_default_view_handler(view_id):
+    """POST /api/saved-views/<id>/default — set view as user's default."""
+    user = g.current_user
+    db = _db()
+    try:
+        view = db.set_default_view(user['id'], view_id)
+        if not view:
+            return jsonify({'error': 'View not found'}), 404
+        return jsonify(view)
+    finally:
+        db.close()

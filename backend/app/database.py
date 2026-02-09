@@ -3070,3 +3070,142 @@ class Database:
 
         self.conn.commit()
         cursor.close()
+
+    # ─── Saved Views (Phase 34) ──────────────────────────────────────
+
+    def _ensure_saved_views_table(self):
+        """Create saved_views table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS saved_views (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                filters JSONB NOT NULL DEFAULT '{}',
+                sort_field VARCHAR(50),
+                sort_direction VARCHAR(10) DEFAULT 'desc',
+                is_default BOOLEAN DEFAULT false,
+                is_shared BOOLEAN DEFAULT false,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_views_user ON saved_views(user_id)")
+        self.conn.commit()
+        cursor.close()
+
+    def get_saved_views(self, user_id: int) -> list:
+        """Get user's views + shared views, ordered by default first then name."""
+        self._ensure_saved_views_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT sv.*, u.display_name as creator_name
+            FROM saved_views sv
+            JOIN users u ON u.id = sv.user_id
+            WHERE sv.user_id = %s OR sv.is_shared = true
+            ORDER BY (sv.user_id = %s AND sv.is_default) DESC, sv.name ASC
+        """, (user_id, user_id))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
+            r['updated_at'] = r['updated_at'].isoformat() if r.get('updated_at') else None
+        return rows
+
+    def get_saved_view(self, view_id: int) -> dict:
+        """Get a single saved view by ID."""
+        self._ensure_saved_views_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM saved_views WHERE id = %s", (view_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result
+
+    def create_saved_view(self, user_id: int, name: str, description: str = None,
+                          filters: dict = None, sort_field: str = None,
+                          sort_direction: str = 'desc', is_shared: bool = False) -> dict:
+        """Create a new saved view."""
+        self._ensure_saved_views_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO saved_views (user_id, name, description, filters, sort_field, sort_direction, is_shared)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (user_id, name, description, json.dumps(filters or {}), sort_field, sort_direction, is_shared))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        row['created_at'] = row['created_at'].isoformat() if row.get('created_at') else None
+        row['updated_at'] = row['updated_at'].isoformat() if row.get('updated_at') else None
+        return row
+
+    def update_saved_view(self, view_id: int, **fields) -> dict:
+        """Update specific fields on a saved view."""
+        self._ensure_saved_views_table()
+        allowed = {'name', 'description', 'filters', 'sort_field', 'sort_direction', 'is_default', 'is_shared'}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return self.get_saved_view(view_id)
+
+        set_parts = []
+        params = []
+        for key, val in updates.items():
+            if key == 'filters':
+                set_parts.append(f"{key} = %s")
+                params.append(json.dumps(val) if isinstance(val, dict) else val)
+            else:
+                set_parts.append(f"{key} = %s")
+                params.append(val)
+        set_parts.append("updated_at = NOW()")
+        params.append(view_id)
+
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE saved_views SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result
+
+    def delete_saved_view(self, view_id: int) -> bool:
+        """Delete a saved view."""
+        self._ensure_saved_views_table()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM saved_views WHERE id = %s", (view_id,))
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return deleted
+
+    def set_default_view(self, user_id: int, view_id: int) -> dict:
+        """Set a view as default for the user, clearing other defaults."""
+        self._ensure_saved_views_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("UPDATE saved_views SET is_default = false WHERE user_id = %s AND is_default = true", (user_id,))
+        cursor.execute("""
+            UPDATE saved_views SET is_default = true, updated_at = NOW()
+            WHERE id = %s AND (user_id = %s OR is_shared = true)
+            RETURNING *
+        """, (view_id, user_id))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result

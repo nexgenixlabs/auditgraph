@@ -61,6 +61,11 @@ from app.api.handlers import (
     get_compliance_frameworks_list,
     toggle_compliance_framework_handler,
     export_data,
+    get_saved_views_list,
+    create_saved_view_handler,
+    update_saved_view_handler,
+    delete_saved_view_handler,
+    set_default_view_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -385,6 +390,29 @@ def create_app():
     @app.get("/api/export/<export_type>")
     def export(export_type):
         return export_data(export_type)
+
+    # -----------------------
+    # Saved Views (Phase 34)
+    # -----------------------
+    @app.get("/api/saved-views")
+    def saved_views_list():
+        return get_saved_views_list()
+
+    @app.post("/api/saved-views")
+    def saved_views_create():
+        return create_saved_view_handler()
+
+    @app.put("/api/saved-views/<int:view_id>")
+    def saved_views_update(view_id):
+        return update_saved_view_handler(view_id)
+
+    @app.delete("/api/saved-views/<int:view_id>")
+    def saved_views_delete(view_id):
+        return delete_saved_view_handler(view_id)
+
+    @app.post("/api/saved-views/<int:view_id>/default")
+    def saved_views_set_default(view_id):
+        return set_default_view_handler(view_id)
 
     # -----------------------
     # Activity Log (Phase 17)
