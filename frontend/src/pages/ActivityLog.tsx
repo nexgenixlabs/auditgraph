@@ -18,6 +18,10 @@ const ACTION_CONFIG: Record<string, { label: string; color: string; bg: string; 
   settings_updated: { label: 'Settings Updated', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
   report_generated: { label: 'Report Generated', color: 'text-orange-700', bg: 'bg-orange-50', icon: 'D' },
   drift_reviewed: { label: 'Drift Reviewed', color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '~' },
+  test_email_sent: { label: 'Test Email Sent', color: 'text-teal-700', bg: 'bg-teal-50', icon: '@' },
+  test_email_failed: { label: 'Test Email Failed', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
+  report_emailed: { label: 'Report Emailed', color: 'text-green-700', bg: 'bg-green-50', icon: '@' },
+  report_email_failed: { label: 'Report Email Failed', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
 };
 
 function getActionConfig(type: string) {
@@ -92,6 +96,25 @@ export default function ActivityLog() {
 
   const actionTypes = Object.keys(ACTION_CONFIG);
 
+  function exportCsv() {
+    const header = ['ID', 'Action Type', 'Description', 'Metadata', 'Timestamp'];
+    const rows = entries.map(e => [
+      e.id,
+      getActionConfig(e.action_type).label,
+      e.description,
+      e.metadata ? JSON.stringify(e.metadata) : '',
+      new Date(e.created_at).toISOString(),
+    ]);
+    const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `activity-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Header */}
@@ -111,6 +134,13 @@ export default function ActivityLog() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={exportCsv}
+            disabled={entries.length === 0}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition disabled:opacity-40 disabled:cursor-not-allowed mr-2"
+          >
+            Export CSV
+          </button>
           <span className="text-xs text-gray-500 mr-1">Filter:</span>
           <button
             onClick={() => setFilter('')}

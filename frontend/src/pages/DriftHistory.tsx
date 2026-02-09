@@ -147,6 +147,30 @@ export default function DriftHistory() {
   const totalReports = reports.length;
   const totalChanges = reports.reduce((sum, r) => sum + r.total_changes, 0);
 
+  function exportCsv() {
+    const header = ['Report ID', 'Current Run', 'Previous Run', 'Date', 'Total Changes', 'New', 'Removed', 'Permissions', 'Risk', 'Credentials'];
+    const rows = reports.map(r => [
+      r.id,
+      r.current_run_id,
+      r.previous_run_id,
+      r.run_completed_at ? new Date(r.run_completed_at).toISOString() : new Date(r.created_at).toISOString(),
+      r.total_changes,
+      r.new_identities_count,
+      r.removed_identities_count,
+      r.permission_changes_count,
+      r.risk_changes_count,
+      r.credential_changes_count,
+    ]);
+    const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `drift-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   // ── Loading ────────────────────────────────────────────────
   if (loading) {
     return (
@@ -206,6 +230,13 @@ export default function DriftHistory() {
               <div className="text-2xl font-bold text-gray-900">{totalChanges}</div>
               <div className="text-xs text-gray-500">Total Changes</div>
             </div>
+            <div className="w-px h-10 bg-gray-200" />
+            <button
+              onClick={exportCsv}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition"
+            >
+              Export CSV
+            </button>
             <div className="w-px h-10 bg-gray-200" />
             <div className="flex items-center gap-4 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /> New</span>
