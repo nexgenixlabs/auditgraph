@@ -100,7 +100,32 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim' | 'remediation';
+
+interface RemediationItem {
+  id: number;
+  title: string;
+  description: string;
+  steps: string[];
+  impact: string;
+  effort: string;
+  priority_score: number;
+  compliance_refs: string[];
+  category: string;
+  matched_reason: string;
+}
+
+interface RemediationData {
+  identity_id: string;
+  display_name: string;
+  risk_level: string;
+  remediations: RemediationItem[];
+  summary: {
+    total: number;
+    critical_actions: number;
+    quick_wins: number;
+  };
+}
 
 interface PimEligible {
   role_name: string;
@@ -326,6 +351,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'access_graph' as TabId, label: 'Access Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
     { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
+    { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
   ];
 
   return (
@@ -374,6 +400,8 @@ export default function IdentityDetail() {
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [pimData, setPimData] = useState<PimData | null>(null);
   const [pimLoading, setPimLoading] = useState(false);
+  const [remediationData, setRemediationData] = useState<RemediationData | null>(null);
+  const [remediationLoading, setRemediationLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -410,6 +438,19 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [activeTab, id, pimData, pimLoading]);
 
+  // Lazy-load Remediation data when tab is selected
+  useEffect(() => {
+    if (activeTab !== 'remediation' || remediationData || remediationLoading || !id) return;
+    let cancelled = false;
+    setRemediationLoading(true);
+    fetch(`/api/identities/${encodeURIComponent(id)}/remediations`)
+      .then(res => res.ok ? res.json() : Promise.reject('Remediation fetch failed'))
+      .then(json => { if (!cancelled) setRemediationData(json); })
+      .catch(() => { if (!cancelled) setRemediationData({ identity_id: id, display_name: '', risk_level: '', remediations: [], summary: { total: 0, critical_actions: 0, quick_wins: 0 } }); })
+      .finally(() => { if (!cancelled) setRemediationLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, remediationData, remediationLoading]);
+
   const identity = data?.identity;
 
   const groupedRoles = useMemo(() => {
@@ -440,6 +481,7 @@ export default function IdentityDetail() {
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
     pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
+    remediation: remediationData?.summary?.total ?? 0,
   };
 
   return (
@@ -1447,9 +1489,150 @@ export default function IdentityDetail() {
                   <DataSource label="AuditGraph Intelligence Engine" apiSource="Role-based GRC mapping" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
+
+              {/* ═══ REMEDIATION TAB ═══ */}
+              {activeTab === 'remediation' && (
+                <div className="space-y-6">
+                  {remediationLoading ? (
+                    <div className="animate-pulse space-y-4">
+                      {[1, 2, 3].map(i => <div key={i} className="h-32 bg-gray-100 rounded-xl" />)}
+                    </div>
+                  ) : !remediationData || remediationData.remediations.length === 0 ? (
+                    <div className="text-center py-12">
+                      <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <div className="text-sm font-medium text-gray-600">No remediations needed</div>
+                      <div className="text-xs text-gray-400 mt-1">This identity has no risk factors matching the remediation playbook library.</div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Summary bar */}
+                      <div className="grid grid-cols-3 gap-4">
+                        <div className="bg-gray-50 rounded-xl p-4 text-center">
+                          <div className="text-2xl font-bold text-gray-900">{remediationData.summary.total}</div>
+                          <div className="text-xs text-gray-500 mt-1">Total Actions</div>
+                        </div>
+                        <div className="bg-red-50 rounded-xl p-4 text-center">
+                          <div className="text-2xl font-bold text-red-700">{remediationData.summary.critical_actions}</div>
+                          <div className="text-xs text-red-600 mt-1">Critical Actions</div>
+                        </div>
+                        <div className="bg-green-50 rounded-xl p-4 text-center">
+                          <div className="text-2xl font-bold text-green-700">{remediationData.summary.quick_wins}</div>
+                          <div className="text-xs text-green-600 mt-1">Quick Wins (Low Effort)</div>
+                        </div>
+                      </div>
+
+                      {/* Remediation cards */}
+                      <div className="space-y-4">
+                        {remediationData.remediations.map((rem, idx) => (
+                          <RemediationCard key={rem.id} remediation={rem} index={idx} />
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <DataSource label="AuditGraph Remediation Engine" apiSource="Pattern-matched playbook library" collectedAt={data?.evidence?.collected_at} />
+                </div>
+              )}
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/* ═══ Remediation Card Component ═══ */
+function RemediationCard({ remediation, index }: { remediation: RemediationItem; index: number }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const impactColors: Record<string, string> = {
+    critical: 'bg-red-100 text-red-700',
+    high: 'bg-orange-100 text-orange-700',
+    medium: 'bg-yellow-100 text-yellow-700',
+    low: 'bg-green-100 text-green-700',
+  };
+
+  const effortColors: Record<string, string> = {
+    low: 'bg-green-100 text-green-700',
+    medium: 'bg-yellow-100 text-yellow-700',
+    high: 'bg-red-100 text-red-700',
+  };
+
+  const categoryLabels: Record<string, string> = {
+    access_control: 'Access Control',
+    credential_hygiene: 'Credential Hygiene',
+    governance: 'Governance',
+    monitoring: 'Monitoring',
+  };
+
+  return (
+    <div className="border rounded-xl overflow-hidden hover:shadow-md transition">
+      {/* Header — always visible */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left bg-white px-5 py-4 flex items-start justify-between gap-4"
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs font-bold text-gray-400">P{index + 1}</span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${impactColors[remediation.impact] || 'bg-gray-100 text-gray-600'}`}>
+              {remediation.impact}
+            </span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${effortColors[remediation.effort] || 'bg-gray-100 text-gray-600'}`}>
+              {remediation.effort} effort
+            </span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700">
+              {categoryLabels[remediation.category] || remediation.category}
+            </span>
+          </div>
+          <div className="font-semibold text-sm text-gray-900">{remediation.title}</div>
+          <div className="text-xs text-gray-500 mt-1 line-clamp-1">{remediation.description}</div>
+        </div>
+        <svg className={`w-5 h-5 text-gray-400 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Expandable content */}
+      {expanded && (
+        <div className="border-t bg-gray-50 px-5 py-4 space-y-4">
+          <div className="text-xs text-gray-700">{remediation.description}</div>
+
+          {/* Step-by-step instructions */}
+          <div>
+            <div className="text-xs font-semibold text-gray-700 mb-2">Step-by-Step Remediation</div>
+            <ol className="space-y-2">
+              {remediation.steps.map((step, sIdx) => (
+                <li key={sIdx} className="flex gap-3 text-xs text-gray-700">
+                  <span className="flex-shrink-0 w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-[10px]">
+                    {sIdx + 1}
+                  </span>
+                  <span className="pt-0.5">{step}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {/* Compliance references */}
+          {remediation.compliance_refs.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-gray-700 mb-1.5">Compliance References</div>
+              <div className="flex flex-wrap gap-1.5">
+                {remediation.compliance_refs.map((ref, rIdx) => (
+                  <span key={rIdx} className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-50 text-purple-700 border border-purple-200">
+                    {ref}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Matched reason */}
+          <div className="text-[10px] text-gray-400 italic">
+            Matched: {remediation.matched_reason}
+          </div>
+        </div>
       )}
     </div>
   );

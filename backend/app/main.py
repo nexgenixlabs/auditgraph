@@ -19,6 +19,8 @@ from app.api.handlers import (
     get_drift_report,
     trigger_discovery,
     get_scheduler_status,
+    get_identity_remediations,
+    get_report_data,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -140,6 +142,20 @@ def create_app():
     @app.get("/api/scheduler")
     def scheduler_status():
         return get_scheduler_status()
+
+    # -----------------------
+    # Remediation Engine (Phase 12)
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/remediations")
+    def identity_remediations(identity_id):
+        return get_identity_remediations(identity_id)
+
+    # -----------------------
+    # Report Generation (Phase 13)
+    # -----------------------
+    @app.get("/api/reports/data")
+    def report_data():
+        return get_report_data()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

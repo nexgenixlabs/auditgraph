@@ -721,6 +721,79 @@ def get_scheduler_status():
     })
 
 
+def get_identity_remediations(identity_id: str):
+    """
+    Get matched remediation playbooks for a specific identity.
+    Matches the identity's risk factors against the playbook library.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        # Get identity data
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                   i.risk_reasons, i.activity_status, i.credential_status,
+                   i.credential_risk, COALESCE(i.owner_count, 0) as owner_count,
+                   i.ca_coverage_status
+            FROM identities i
+            WHERE i.identity_id = %s
+            ORDER BY i.discovery_run_id DESC
+            LIMIT 1
+        """, (identity_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Identity not found"}), 404
+
+        identity_db_id = row[0]
+
+        # Get roles
+        cursor.execute("""
+            SELECT role_name FROM role_assignments WHERE identity_db_id = %s
+            UNION ALL
+            SELECT role_name FROM entra_role_assignments WHERE identity_db_id = %s
+        """, (identity_db_id, identity_db_id))
+        roles = [{"role_name": r[0]} for r in cursor.fetchall()]
+
+        identity_data = {
+            "risk_reasons": _parse_risk_reasons(row[4]),
+            "roles": roles,
+            "activity_status": row[5],
+            "credential_status": row[6],
+            "credential_risk": row[7],
+            "owner_count": row[8],
+            "ca_coverage_status": row[9],
+        }
+
+        result = db.get_identity_remediations(identity_db_id, identity_data)
+
+        return jsonify({
+            "identity_id": identity_id,
+            "display_name": row[2],
+            "risk_level": row[3],
+            **result,
+        })
+
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_report_data():
+    """
+    Get comprehensive JSON data for PDF report generation.
+    Includes stats, compliance, top risks, and remediation summary.
+    """
+    db = _db()
+    try:
+        data = db.get_report_data()
+        if data is None:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+        return jsonify(data)
+    finally:
+        db.close()
+
+
 def _normalize_category_key(raw_category: str) -> str:
     """
     Normalize category value to canonical snake_case key.

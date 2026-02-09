@@ -1153,6 +1153,322 @@ class Database:
             "weak_policy_flags": weak_flags,
         }
 
+    # ========================================================================
+    # Remediation Engine Methods
+    # ========================================================================
+
+    def get_identity_remediations(self, identity_db_id: int, identity_data: Dict) -> Dict:
+        """
+        Match an identity's risk factors against remediation playbooks.
+
+        Args:
+            identity_db_id: The database ID of the identity
+            identity_data: Dict with risk_reasons, roles, activity_status, etc.
+
+        Returns:
+            Dict with remediations list and summary
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get all playbooks
+        cursor.execute("""
+            SELECT id, risk_pattern, pattern_type, title, description,
+                   steps, impact, effort, priority_score, compliance_refs, category
+            FROM remediation_playbooks
+            ORDER BY priority_score DESC
+        """)
+        playbooks = [dict(row) for row in cursor.fetchall()]
+
+        # Build the searchable text from identity risk factors
+        risk_reasons = identity_data.get("risk_reasons", [])
+        if isinstance(risk_reasons, str):
+            try:
+                risk_reasons = json.loads(risk_reasons)
+            except Exception:
+                risk_reasons = [risk_reasons]
+
+        # Get role names
+        roles = identity_data.get("roles", [])
+        role_names = [r.get("role_name", "") for r in roles] if roles else []
+
+        activity_status = identity_data.get("activity_status", "")
+        credential_status = identity_data.get("credential_status", "")
+        credential_risk = identity_data.get("credential_risk", "")
+        owner_count = identity_data.get("owner_count", 0)
+        ca_coverage = identity_data.get("ca_coverage_status", "")
+
+        # Build search corpus
+        search_texts = []
+        search_texts.extend([r.lower() for r in risk_reasons if isinstance(r, str)])
+        search_texts.extend([r.lower() for r in role_names])
+        if activity_status:
+            search_texts.append(activity_status.lower())
+        if credential_status:
+            search_texts.append(credential_status.lower())
+        if credential_risk:
+            search_texts.append(credential_risk.lower())
+        if owner_count == 0:
+            search_texts.append("no_owner")
+        if ca_coverage in ("no_coverage", None, ""):
+            search_texts.append("no_conditional_access")
+            search_texts.append("no_mfa")
+
+        # Check for multiple high privilege roles
+        high_priv_roles = [r for r in role_names if r.lower() in (
+            'global administrator', 'owner', 'privileged role administrator',
+            'user access administrator', 'exchange administrator',
+            'application administrator', 'security administrator'
+        )]
+        if len(high_priv_roles) >= 2:
+            search_texts.append("multiple_high_privilege")
+
+        search_corpus = " ".join(search_texts)
+
+        # Match playbooks
+        matched = []
+        for pb in playbooks:
+            pattern = pb["risk_pattern"].lower()
+            ptype = pb["pattern_type"]
+            match_found = False
+            matched_reason = ""
+
+            if ptype == "exact":
+                for text in search_texts:
+                    if text == pattern:
+                        match_found = True
+                        matched_reason = text
+                        break
+            elif ptype == "startswith":
+                for text in search_texts:
+                    if text.startswith(pattern):
+                        match_found = True
+                        matched_reason = text
+                        break
+            else:  # contains (default)
+                for text in search_texts:
+                    if pattern in text:
+                        match_found = True
+                        matched_reason = text
+                        break
+
+            if match_found:
+                steps = pb["steps"]
+                if isinstance(steps, str):
+                    try:
+                        steps = json.loads(steps)
+                    except Exception:
+                        steps = [steps]
+
+                compliance_refs = pb["compliance_refs"]
+                if isinstance(compliance_refs, str):
+                    try:
+                        compliance_refs = json.loads(compliance_refs)
+                    except Exception:
+                        compliance_refs = []
+
+                matched.append({
+                    "id": pb["id"],
+                    "title": pb["title"],
+                    "description": pb["description"],
+                    "steps": steps,
+                    "impact": pb["impact"],
+                    "effort": pb["effort"],
+                    "priority_score": pb["priority_score"],
+                    "compliance_refs": compliance_refs or [],
+                    "category": pb["category"],
+                    "matched_reason": matched_reason,
+                })
+
+        cursor.close()
+
+        critical_actions = len([m for m in matched if m["impact"] == "critical"])
+        quick_wins = len([m for m in matched if m["effort"] == "low"])
+
+        return {
+            "remediations": matched,
+            "summary": {
+                "total": len(matched),
+                "critical_actions": critical_actions,
+                "quick_wins": quick_wins,
+            }
+        }
+
+    def get_report_data(self) -> Dict:
+        """
+        Get comprehensive data for PDF report generation.
+        Returns stats, posture, compliance, top risks, and remediation summary.
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get latest run
+        cursor.execute("""
+            SELECT id, completed_at, total_identities, critical_count, high_count, medium_count, low_count
+            FROM discovery_runs WHERE status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """)
+        run = cursor.fetchone()
+        if not run:
+            cursor.close()
+            return None
+
+        run_id = run["id"]
+
+        # Previous run for trend
+        cursor.execute("""
+            SELECT id, total_identities, critical_count, high_count, medium_count
+            FROM discovery_runs WHERE status = 'completed'
+            ORDER BY id DESC LIMIT 1 OFFSET 1
+        """)
+        prev_run = cursor.fetchone()
+
+        # Top 20 critical/high identities
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   i.risk_level, i.risk_score, i.risk_reasons,
+                   i.activity_status, i.credential_status, i.owner_display_name,
+                   COALESCE(i.owner_count, 0) as owner_count,
+                   i.ca_coverage_status
+            FROM identities i
+            WHERE i.discovery_run_id = %s AND i.risk_level IN ('critical', 'high')
+            ORDER BY
+                CASE i.risk_level WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END,
+                COALESCE(i.risk_score, 0) DESC
+            LIMIT 20
+        """, (run_id,))
+        top_risks_rows = [dict(r) for r in cursor.fetchall()]
+
+        # Get roles for each top risk identity for remediation matching
+        top_risks = []
+        for identity_row in top_risks_rows:
+            db_id = identity_row["id"]
+            # Get roles
+            cursor.execute("""
+                SELECT role_name FROM role_assignments WHERE identity_db_id = %s
+                UNION ALL
+                SELECT role_name FROM entra_role_assignments WHERE identity_db_id = %s
+            """, (db_id, db_id))
+            roles = [{"role_name": r["role_name"]} for r in cursor.fetchall()]
+
+            risk_reasons = identity_row.get("risk_reasons", [])
+            if isinstance(risk_reasons, str):
+                try:
+                    risk_reasons = json.loads(risk_reasons)
+                except Exception:
+                    risk_reasons = []
+
+            identity_data = {
+                "risk_reasons": risk_reasons,
+                "roles": roles,
+                "activity_status": identity_row.get("activity_status"),
+                "credential_status": identity_row.get("credential_status"),
+                "owner_count": identity_row.get("owner_count", 0),
+                "ca_coverage_status": identity_row.get("ca_coverage_status"),
+            }
+            remediations = self.get_identity_remediations(db_id, identity_data)
+
+            top_risks.append({
+                "identity_id": identity_row["identity_id"],
+                "display_name": identity_row["display_name"],
+                "identity_category": identity_row["identity_category"],
+                "risk_level": identity_row["risk_level"],
+                "risk_score": identity_row.get("risk_score", 0),
+                "risk_reasons": risk_reasons,
+                "remediations": remediations["remediations"][:3],  # Top 3 per identity
+            })
+
+        # Aggregate remediation summary
+        all_remediations = {}
+        for tr in top_risks:
+            for rem in tr.get("remediations", []):
+                rid = rem["id"]
+                if rid not in all_remediations:
+                    all_remediations[rid] = {**rem, "affected_identities": 0}
+                all_remediations[rid]["affected_identities"] += 1
+
+        remediation_list = sorted(all_remediations.values(), key=lambda x: -x["priority_score"])
+
+        by_category = {}
+        by_impact = {}
+        for r in remediation_list:
+            cat = r.get("category", "other")
+            by_category[cat] = by_category.get(cat, 0) + 1
+            imp = r.get("impact", "medium")
+            by_impact[imp] = by_impact.get(imp, 0) + 1
+
+        quick_wins = [r for r in remediation_list if r.get("effort") == "low"]
+
+        # Credential health
+        cursor.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE credential_risk = 'expired') as expired,
+                COUNT(*) FILTER (WHERE credential_risk = 'expiring_soon') as expiring_soon,
+                COUNT(*) FILTER (WHERE credential_risk = 'healthy') as healthy,
+                COUNT(*) FILTER (WHERE credential_risk IS NULL OR credential_risk = 'unknown') as unknown
+            FROM identities WHERE discovery_run_id = %s
+        """, (run_id,))
+        cred_row = cursor.fetchone() or {}
+
+        # CA coverage
+        cursor.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE ca_coverage_status = 'covered') as covered,
+                COUNT(*) FILTER (WHERE ca_coverage_status = 'no_coverage' OR ca_coverage_status IS NULL) as not_covered,
+                COUNT(*) as total
+            FROM identities WHERE discovery_run_id = %s
+        """, (run_id,))
+        ca_row = cursor.fetchone() or {}
+
+        cursor.close()
+
+        return {
+            "generated_at": datetime.utcnow().isoformat(),
+            "run_id": run_id,
+            "collected_at": run["completed_at"].isoformat() if run.get("completed_at") else None,
+            "stats": {
+                "total_identities": run.get("total_identities", 0),
+                "critical": run.get("critical_count", 0),
+                "high": run.get("high_count", 0),
+                "medium": run.get("medium_count", 0),
+                "low": run.get("low_count", 0),
+            },
+            "previous_run": {
+                "total_identities": prev_run["total_identities"] if prev_run else None,
+                "critical": prev_run["critical_count"] if prev_run else None,
+                "high": prev_run["high_count"] if prev_run else None,
+            } if prev_run else None,
+            "credential_health": {
+                "expired": int(cred_row.get("expired", 0)),
+                "expiring_soon": int(cred_row.get("expiring_soon", 0)),
+                "healthy": int(cred_row.get("healthy", 0)),
+                "unknown": int(cred_row.get("unknown", 0)),
+            },
+            "conditional_access": {
+                "covered": int(ca_row.get("covered", 0)),
+                "not_covered": int(ca_row.get("not_covered", 0)),
+                "total": int(ca_row.get("total", 0)),
+            },
+            "top_risks": top_risks,
+            "remediation_summary": {
+                "total_actions": len(remediation_list),
+                "by_category": by_category,
+                "by_impact": by_impact,
+                "quick_wins": quick_wins[:5],
+                "top_priorities": remediation_list[:10],
+            },
+            "evidence": {
+                "sources": {
+                    "identity": "Microsoft Graph API /servicePrincipals or /users",
+                    "roles_azure": "Azure Resource Manager /roleAssignments",
+                    "roles_entra": "Microsoft Graph API /roleManagement/directory",
+                    "permissions": "Microsoft Graph API /servicePrincipals/{id}/appRoleAssignments",
+                    "credentials": "Microsoft Graph API /applications/{id}/passwordCredentials + keyCredentials",
+                    "owners": "Microsoft Graph API /servicePrincipals/{id}/owners",
+                    "pim": "Microsoft Graph API /roleManagement/directory/roleEligibilityScheduleInstances",
+                    "ca_policies": "Microsoft Graph API /identity/conditionalAccess/policies",
+                },
+            },
+        }
+
     def close(self):
         """Close database connection"""
         if self.conn:

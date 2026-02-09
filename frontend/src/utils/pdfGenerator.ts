@@ -1,0 +1,532 @@
+/**
+ * AuditGraph PDF Report Generator
+ *
+ * Generates professional security audit reports using jsPDF + autotable.
+ * Called from the Reports page with data from /api/reports/data.
+ */
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+
+// Extend jsPDF type for autotable
+declare module 'jspdf' {
+  interface jsPDF {
+    lastAutoTable: { finalY: number };
+  }
+}
+
+interface ReportData {
+  generated_at: string;
+  run_id: number;
+  collected_at: string | null;
+  stats: {
+    total_identities: number;
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  previous_run?: {
+    total_identities: number;
+    critical: number;
+    high: number;
+  } | null;
+  credential_health: {
+    expired: number;
+    expiring_soon: number;
+    healthy: number;
+    unknown: number;
+  };
+  conditional_access: {
+    covered: number;
+    not_covered: number;
+    total: number;
+  };
+  top_risks: {
+    identity_id: string;
+    display_name: string;
+    identity_category: string;
+    risk_level: string;
+    risk_score: number;
+    risk_reasons: string[];
+    remediations: {
+      title: string;
+      impact: string;
+      effort: string;
+      steps: string[];
+      compliance_refs: string[];
+    }[];
+  }[];
+  remediation_summary: {
+    total_actions: number;
+    by_category: Record<string, number>;
+    by_impact: Record<string, number>;
+    quick_wins: {
+      title: string;
+      impact: string;
+      effort: string;
+      affected_identities: number;
+    }[];
+    top_priorities: {
+      title: string;
+      impact: string;
+      effort: string;
+      priority_score: number;
+      affected_identities: number;
+      compliance_refs: string[];
+    }[];
+  };
+  evidence: {
+    sources: Record<string, string>;
+  };
+}
+
+// Colors (tuple types for jsPDF)
+type RGB = [number, number, number];
+const BLUE: RGB = [37, 99, 235];       // brand blue
+const DARK: RGB = [17, 24, 39];        // gray-900
+const GRAY: RGB = [107, 114, 128];     // gray-500
+const RED: RGB = [220, 38, 38];        // red-600
+const ORANGE: RGB = [234, 88, 12];     // orange-600
+const GREEN: RGB = [22, 163, 74];      // green-600
+
+function riskColor(level: string): RGB {
+  switch (level?.toLowerCase()) {
+    case 'critical': return RED;
+    case 'high': return ORANGE;
+    case 'medium': return [202, 138, 4]; // yellow-600
+    case 'low': return GREEN;
+    default: return GRAY;
+  }
+}
+
+// Helpers to avoid TS spread errors with jsPDF tuple params
+function fill(doc: jsPDF, c: RGB) { doc.setFillColor(c[0], c[1], c[2]); }
+function txt(doc: jsPDF, c: RGB) { doc.setTextColor(c[0], c[1], c[2]); }
+function draw(doc: jsPDF, c: RGB) { doc.setDrawColor(c[0], c[1], c[2]); }
+
+export function generateReport(data: ReportData, clientName?: string): void {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 20;
+  const contentWidth = pageWidth - margin * 2;
+
+  // ═══════════════════════════════════════════
+  // PAGE 1: Cover
+  // ═══════════════════════════════════════════
+  // Blue header band
+  fill(doc, BLUE);
+  doc.rect(0, 0, pageWidth, 80, 'F');
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(28);
+  doc.setFont('helvetica', 'bold');
+  doc.text('AuditGraph', margin, 35);
+
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Identity Security Audit Report', margin, 48);
+
+  doc.setFontSize(9);
+  doc.text('Map. Monitor. Secure.', margin, 58);
+
+  // Client info block
+  txt(doc, DARK);
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.text(clientName || 'Security Audit Report', margin, 105);
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  txt(doc, GRAY);
+  const reportDate = new Date(data.generated_at).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  });
+  doc.text(`Generated: ${reportDate}`, margin, 115);
+  doc.text(`Discovery Run: #${data.run_id}`, margin, 122);
+  if (data.collected_at) {
+    doc.text(`Data Collected: ${new Date(data.collected_at).toLocaleString()}`, margin, 129);
+  }
+
+  // Stats summary on cover
+  const statsY = 155;
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Discovery Summary', margin, statsY);
+
+  const statsData = [
+    ['Total Identities', String(data.stats.total_identities)],
+    ['Critical Risk', String(data.stats.critical)],
+    ['High Risk', String(data.stats.high)],
+    ['Medium Risk', String(data.stats.medium)],
+    ['Low Risk', String(data.stats.low)],
+  ];
+
+  autoTable(doc, {
+    startY: statsY + 5,
+    head: [['Metric', 'Count']],
+    body: statsData,
+    theme: 'grid',
+    headStyles: { fillColor: BLUE, textColor: [255, 255, 255], fontSize: 9 },
+    bodyStyles: { fontSize: 9, textColor: DARK },
+    columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 30, halign: 'center' } },
+    margin: { left: margin, right: margin },
+    tableWidth: 100,
+  });
+
+  // Trend comparison
+  if (data.previous_run) {
+    const trendY = (doc as any).lastAutoTable.finalY + 10;
+    doc.setFontSize(9);
+    txt(doc, GRAY);
+    const critDelta = data.stats.critical - data.previous_run.critical;
+    const highDelta = data.stats.high - data.previous_run.high;
+    const trendText = `Trend vs previous run: Critical ${critDelta >= 0 ? '+' : ''}${critDelta}, High ${highDelta >= 0 ? '+' : ''}${highDelta}`;
+    doc.text(trendText, margin, trendY);
+  }
+
+  // Footer
+  addFooter(doc, 1);
+
+  // ═══════════════════════════════════════════
+  // PAGE 2: Executive Summary
+  // ═══════════════════════════════════════════
+  doc.addPage();
+  let y = addHeader(doc, 'Executive Summary', margin);
+
+  // Posture metrics
+  const total = data.stats.total_identities || 1;
+  const highRisk = data.stats.critical + data.stats.high + data.stats.medium;
+  const postureScore = Math.round(((total - highRisk) / total) * 100);
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Security Posture Score', margin, y);
+  y += 8;
+
+  // Score bar
+  doc.setFillColor(229, 231, 235); // gray-200
+  doc.roundedRect(margin, y, contentWidth, 8, 2, 2, 'F');
+  const scoreColor = postureScore >= 70 ? GREEN : postureScore >= 40 ? ORANGE : RED;
+  fill(doc, scoreColor);
+  doc.roundedRect(margin, y, contentWidth * (postureScore / 100), 8, 2, 2, 'F');
+  doc.setFontSize(8);
+  doc.setTextColor(255, 255, 255);
+  doc.text(`${postureScore}%`, margin + 4, y + 5.5);
+  y += 16;
+
+  // Risk breakdown
+  txt(doc, DARK);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Risk Distribution', margin, y);
+  y += 5;
+
+  const riskRows = [
+    ['Critical', String(data.stats.critical), `${Math.round((data.stats.critical / total) * 100)}%`],
+    ['High', String(data.stats.high), `${Math.round((data.stats.high / total) * 100)}%`],
+    ['Medium', String(data.stats.medium), `${Math.round((data.stats.medium / total) * 100)}%`],
+    ['Low', String(data.stats.low), `${Math.round((data.stats.low / total) * 100)}%`],
+  ];
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Risk Level', 'Count', '% of Total']],
+    body: riskRows,
+    theme: 'striped',
+    headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 9 },
+    bodyStyles: { fontSize: 9 },
+    margin: { left: margin, right: margin },
+    tableWidth: 120,
+    didParseCell(hookData) {
+      if (hookData.section === 'body' && hookData.column.index === 0) {
+        const level = hookData.cell.raw as string;
+        hookData.cell.styles.textColor = riskColor(level);
+        hookData.cell.styles.fontStyle = 'bold';
+      }
+    },
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 12;
+
+  // Credential health
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Credential Health', margin, y);
+  y += 5;
+
+  const credRows = [
+    ['Expired', String(data.credential_health.expired)],
+    ['Expiring (<30d)', String(data.credential_health.expiring_soon)],
+    ['Healthy', String(data.credential_health.healthy)],
+    ['Unknown', String(data.credential_health.unknown)],
+  ];
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Status', 'Count']],
+    body: credRows,
+    theme: 'striped',
+    headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 9 },
+    bodyStyles: { fontSize: 9 },
+    margin: { left: margin, right: margin },
+    tableWidth: 100,
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 12;
+
+  // Conditional Access
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Conditional Access Coverage', margin, y);
+  y += 5;
+
+  const caTotal = data.conditional_access.total || 1;
+  const caPct = Math.round((data.conditional_access.covered / caTotal) * 100);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Status', 'Count', '%']],
+    body: [
+      ['Covered', String(data.conditional_access.covered), `${caPct}%`],
+      ['Not Covered', String(data.conditional_access.not_covered), `${100 - caPct}%`],
+    ],
+    theme: 'striped',
+    headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 9 },
+    bodyStyles: { fontSize: 9 },
+    margin: { left: margin, right: margin },
+    tableWidth: 100,
+  });
+
+  addFooter(doc, 2);
+
+  // ═══════════════════════════════════════════
+  // PAGE 3+: Top Risks
+  // ═══════════════════════════════════════════
+  doc.addPage();
+  y = addHeader(doc, 'Top Risk Identities', margin);
+
+  const riskTableData = data.top_risks.map(tr => [
+    tr.display_name.length > 30 ? tr.display_name.substring(0, 27) + '...' : tr.display_name,
+    (tr.risk_level || '').toUpperCase(),
+    String(tr.risk_score),
+    (tr.risk_reasons || []).slice(0, 2).join('; ').substring(0, 60),
+    tr.remediations.length > 0 ? tr.remediations[0].title.substring(0, 40) : 'None',
+  ]);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Identity', 'Risk', 'Score', 'Top Risk Reasons', 'Priority Remediation']],
+    body: riskTableData,
+    theme: 'striped',
+    headStyles: { fillColor: BLUE, textColor: [255, 255, 255], fontSize: 8 },
+    bodyStyles: { fontSize: 7 },
+    columnStyles: {
+      0: { cellWidth: 35 },
+      1: { cellWidth: 15, halign: 'center' },
+      2: { cellWidth: 15, halign: 'center' },
+      3: { cellWidth: 55 },
+      4: { cellWidth: 45 },
+    },
+    margin: { left: margin, right: margin },
+    didParseCell(hookData) {
+      if (hookData.section === 'body' && hookData.column.index === 1) {
+        const level = (hookData.cell.raw as string).toLowerCase();
+        hookData.cell.styles.textColor = riskColor(level);
+        hookData.cell.styles.fontStyle = 'bold';
+      }
+    },
+  });
+
+  addFooter(doc, 3);
+
+  // ═══════════════════════════════════════════
+  // PAGE 4+: Remediation Playbook
+  // ═══════════════════════════════════════════
+  doc.addPage();
+  y = addHeader(doc, 'Remediation Playbook', margin);
+
+  // Summary stats
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  txt(doc, GRAY);
+  doc.text(`Total Actions: ${data.remediation_summary.total_actions}`, margin, y);
+  y += 5;
+
+  const byCat = data.remediation_summary.by_category;
+  const catText = Object.entries(byCat).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join('  |  ');
+  doc.text(`By Category: ${catText}`, margin, y);
+  y += 10;
+
+  // Top priority remediations
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Priority Remediation Actions', margin, y);
+  y += 5;
+
+  const remData = data.remediation_summary.top_priorities.map((r, idx) => [
+    `P${idx + 1}`,
+    r.title.length > 45 ? r.title.substring(0, 42) + '...' : r.title,
+    (r.impact || '').toUpperCase(),
+    r.effort || '',
+    String(r.affected_identities),
+    (r.compliance_refs || []).slice(0, 2).join(', '),
+  ]);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['#', 'Remediation Action', 'Impact', 'Effort', 'Affected', 'Compliance']],
+    body: remData,
+    theme: 'striped',
+    headStyles: { fillColor: BLUE, textColor: [255, 255, 255], fontSize: 8 },
+    bodyStyles: { fontSize: 7 },
+    columnStyles: {
+      0: { cellWidth: 10, halign: 'center' },
+      1: { cellWidth: 55 },
+      2: { cellWidth: 18, halign: 'center' },
+      3: { cellWidth: 18, halign: 'center' },
+      4: { cellWidth: 18, halign: 'center' },
+      5: { cellWidth: 40 },
+    },
+    margin: { left: margin, right: margin },
+    didParseCell(hookData) {
+      if (hookData.section === 'body' && hookData.column.index === 2) {
+        const level = (hookData.cell.raw as string).toLowerCase();
+        hookData.cell.styles.textColor = riskColor(level);
+        hookData.cell.styles.fontStyle = 'bold';
+      }
+    },
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 12;
+
+  // Quick wins section
+  if (data.remediation_summary.quick_wins.length > 0) {
+    // Check if we need a new page
+    if (y > pageHeight - 60) {
+      doc.addPage();
+      y = addHeader(doc, 'Quick Wins (Low Effort)', margin);
+    } else {
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      txt(doc, DARK);
+      doc.text('Quick Wins (Low Effort)', margin, y);
+      y += 5;
+    }
+
+    const qwData = data.remediation_summary.quick_wins.map(qw => [
+      qw.title,
+      (qw.impact || '').toUpperCase(),
+      String(qw.affected_identities),
+    ]);
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Action', 'Impact', 'Affected Identities']],
+      body: qwData,
+      theme: 'striped',
+      headStyles: { fillColor: GREEN, textColor: [255, 255, 255], fontSize: 8 },
+      bodyStyles: { fontSize: 8 },
+      margin: { left: margin, right: margin },
+      tableWidth: contentWidth,
+    });
+  }
+
+  addFooter(doc, 4);
+
+  // ═══════════════════════════════════════════
+  // LAST PAGE: Evidence & Methodology
+  // ═══════════════════════════════════════════
+  doc.addPage();
+  y = addHeader(doc, 'Evidence & Methodology', margin);
+
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  txt(doc, DARK);
+  doc.text('This report was generated using data collected from the following Microsoft Azure and Entra ID APIs:', margin, y);
+  y += 8;
+
+  const sourceRows = Object.entries(data.evidence.sources).map(([key, value]) => [
+    key.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()),
+    value,
+  ]);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Data Source', 'API Endpoint']],
+    body: sourceRows,
+    theme: 'striped',
+    headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 8 },
+    bodyStyles: { fontSize: 7 },
+    margin: { left: margin, right: margin },
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 12;
+
+  doc.setFontSize(8);
+  txt(doc, GRAY);
+  doc.text('Methodology:', margin, y);
+  y += 5;
+  const methodLines = [
+    '1. Identity Discovery: Enumerate all identities (service principals, managed identities, users) via Microsoft Graph API.',
+    '2. Role Analysis: Map Azure RBAC and Entra ID directory role assignments with privilege tier classification (T0-T3).',
+    '3. Risk Scoring: Points-based risk calculation considering role criticality, credential health, activity status, and ownership.',
+    '4. Remediation Matching: Pattern-match risk factors against the AuditGraph playbook library for actionable fix steps.',
+    '5. Compliance Mapping: Map findings to SOC 2, HIPAA, PCI-DSS, and NIST 800-53 control requirements.',
+  ];
+
+  methodLines.forEach(line => {
+    doc.text(line, margin, y, { maxWidth: contentWidth });
+    y += 7;
+  });
+
+  y += 5;
+  doc.setFontSize(7);
+  doc.text('This report is generated by AuditGraph and should be reviewed by qualified security professionals.', margin, y);
+  doc.text('The remediation recommendations are based on industry best practices and should be adapted to your organization\'s specific context.', margin, y + 4);
+
+  addFooter(doc, doc.internal.pages.length - 1);
+
+  // Save
+  const dateStr = new Date().toISOString().split('T')[0];
+  const safeName = (clientName || 'AuditGraph').replace(/[^a-zA-Z0-9]/g, '_');
+  doc.save(`${safeName}_Security_Report_${dateStr}.pdf`);
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+function addHeader(doc: jsPDF, title: string, margin: number): number {
+  const pageWidth = doc.internal.pageSize.getWidth();
+
+  // Blue accent line
+  fill(doc, BLUE);
+  doc.rect(0, 0, pageWidth, 3, 'F');
+
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text(title, margin, 20);
+
+  // Thin separator
+  doc.setDrawColor(229, 231, 235);
+  doc.setLineWidth(0.5);
+  doc.line(margin, 24, pageWidth - margin, 24);
+
+  return 32; // return Y position after header
+}
+
+function addFooter(doc: jsPDF, pageNum: number): void {
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+
+  doc.setFontSize(7);
+  txt(doc, GRAY);
+  doc.text('AuditGraph Security Report', 20, pageHeight - 10);
+  doc.text(`Page ${pageNum}`, pageWidth - 35, pageHeight - 10);
+  doc.text('CONFIDENTIAL', pageWidth / 2, pageHeight - 10, { align: 'center' });
+}

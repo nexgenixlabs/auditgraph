@@ -25,6 +25,7 @@ import {
 import Dashboard from './pages/Dashboard';
 import Identities from './pages/Identities';
 import IdentityDetail from './pages/IdentityDetail';
+import Reports from './pages/Reports';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -263,6 +264,7 @@ function App() {
           {/* Existing identities pages */}
           <Route path="/identities" element={<Identities />} />
           <Route path="/identities/:id" element={<IdentityDetail />} />
+          <Route path="/reports" element={<Reports />} />
         </Routes>
       </div>
     </Router>
@@ -310,6 +312,17 @@ function NavLinks() {
         }`}
       >
         Identities
+      </Link>
+
+      <Link
+        to="/reports"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/reports')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Reports
       </Link>
     </div>
   );
