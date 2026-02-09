@@ -11,6 +11,7 @@ from flask import jsonify, request, g
 from dotenv import load_dotenv
 import json
 
+from psycopg2.extras import RealDictCursor
 from app.database import Database
 from app.engines.drift_detector import DriftDetector
 from app.api.auth import generate_access_token, generate_refresh_token, hash_refresh_token
@@ -4019,5 +4020,227 @@ def set_default_view_handler(view_id):
         if not view:
             return jsonify({'error': 'View not found'}), 404
         return jsonify(view)
+    finally:
+        db.close()
+
+
+# ─── Identity Lifecycle (Phase 35) ──────────────────────────────────
+
+_RISK_SEVERITY = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0}
+
+def _lifecycle_severity_for_risk(level):
+    """Map risk level to event severity."""
+    if level in ('critical', 'high'):
+        return level
+    return 'medium'
+
+
+def _compare_snapshots(prev, curr, timestamp, run_id):
+    """Compare two identity snapshots and return lifecycle events."""
+    events = []
+
+    def _add(event_type, category, desc, prev_val, curr_val, severity):
+        events.append({
+            'timestamp': timestamp,
+            'run_id': run_id,
+            'event_type': event_type,
+            'category': category,
+            'description': desc,
+            'previous_value': str(prev_val) if prev_val is not None else None,
+            'current_value': str(curr_val) if curr_val is not None else None,
+            'severity': severity,
+        })
+
+    # Risk level
+    p_risk = (prev.get('risk_level') or 'info').lower()
+    c_risk = (curr.get('risk_level') or 'info').lower()
+    if p_risk != c_risk:
+        p_ord = _RISK_SEVERITY.get(p_risk, 0)
+        c_ord = _RISK_SEVERITY.get(c_risk, 0)
+        if c_ord > p_ord:
+            _add('risk_escalation', 'risk',
+                 f'Risk level escalated: {p_risk} \u2192 {c_risk}',
+                 p_risk, c_risk, _lifecycle_severity_for_risk(c_risk))
+        else:
+            _add('risk_deescalation', 'risk',
+                 f'Risk level decreased: {p_risk} \u2192 {c_risk}',
+                 p_risk, c_risk, 'info')
+
+    # Risk score
+    p_score = int(prev.get('risk_score') or 0)
+    c_score = int(curr.get('risk_score') or 0)
+    delta = c_score - p_score
+    if abs(delta) >= 5:
+        if delta > 0:
+            _add('risk_score_increase', 'risk',
+                 f'Risk score increased: {p_score} \u2192 {c_score} (+{delta})',
+                 p_score, c_score, 'medium')
+        else:
+            _add('risk_score_decrease', 'risk',
+                 f'Risk score decreased: {p_score} \u2192 {c_score} ({delta})',
+                 p_score, c_score, 'info')
+
+    # Enabled
+    p_enabled = prev.get('enabled')
+    c_enabled = curr.get('enabled')
+    if p_enabled is not None and c_enabled is not None and p_enabled != c_enabled:
+        if c_enabled:
+            _add('enabled_changed', 'lifecycle', 'Identity re-enabled',
+                 'disabled', 'enabled', 'high')
+        else:
+            _add('enabled_changed', 'lifecycle', 'Identity disabled',
+                 'enabled', 'disabled', 'medium')
+
+    # Activity status
+    p_act = prev.get('activity_status') or 'unknown'
+    c_act = curr.get('activity_status') or 'unknown'
+    if p_act != c_act:
+        sev = 'medium' if c_act in ('stale', 'never_used') else 'info'
+        _add('activity_status_changed', 'activity',
+             f'Activity status: {p_act} \u2192 {c_act}',
+             p_act, c_act, sev)
+
+    # Credential status
+    p_cred = prev.get('credential_status') or 'unknown'
+    c_cred = curr.get('credential_status') or 'unknown'
+    if p_cred != c_cred:
+        sev = 'high' if c_cred == 'expired' else ('medium' if c_cred in ('critical', 'warning') else 'info')
+        _add('credential_status_changed', 'credential',
+             f'Credential status: {p_cred} \u2192 {c_cred}',
+             p_cred, c_cred, sev)
+
+    # Credential count
+    p_cc = int(prev.get('credential_count') or 0)
+    c_cc = int(curr.get('credential_count') or 0)
+    if p_cc != c_cc:
+        direction = 'added' if c_cc > p_cc else 'removed'
+        _add('credential_count_changed', 'credential',
+             f'Credentials {direction}: {p_cc} \u2192 {c_cc}',
+             p_cc, c_cc, 'medium')
+
+    # API permissions
+    p_perm = int(prev.get('api_permission_count') or 0)
+    c_perm = int(curr.get('api_permission_count') or 0)
+    if p_perm != c_perm:
+        sev = 'high' if c_perm > p_perm else 'info'
+        direction = 'granted' if c_perm > p_perm else 'revoked'
+        _add('permissions_changed', 'access',
+             f'API permissions {direction}: {p_perm} \u2192 {c_perm}',
+             p_perm, c_perm, sev)
+
+    # Owner
+    p_owner = prev.get('owner_display_name') or ''
+    c_owner = curr.get('owner_display_name') or ''
+    if p_owner != c_owner:
+        if not p_owner and c_owner:
+            desc = f'Owner assigned: {c_owner}'
+        elif p_owner and not c_owner:
+            desc = f'Owner removed (was: {p_owner})'
+        else:
+            desc = f'Owner changed: {p_owner} \u2192 {c_owner}'
+        _add('ownership_changed', 'lifecycle', desc, p_owner or None, c_owner or None, 'medium')
+
+    # CA coverage
+    p_ca = prev.get('ca_coverage_status') or 'unknown'
+    c_ca = curr.get('ca_coverage_status') or 'unknown'
+    if p_ca != c_ca:
+        sev = 'high' if c_ca in ('no_coverage', 'excluded') else 'info'
+        _add('ca_coverage_changed', 'compliance',
+             f'CA coverage: {p_ca} \u2192 {c_ca}',
+             p_ca, c_ca, sev)
+
+    return events
+
+
+def get_identity_lifecycle(identity_id):
+    """GET /api/identities/<identity_id>/lifecycle — lifecycle timeline."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
+                   i.enabled, i.activity_status, i.credential_status, i.credential_count,
+                   COALESCE(i.api_permission_count, 0) as api_permission_count,
+                   i.owner_display_name, i.ca_coverage_status, i.ca_mfa_enforced,
+                   i.created_datetime, i.discovery_run_id,
+                   dr.completed_at as run_completed_at
+            FROM identities i
+            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            WHERE i.identity_id = %s AND dr.status = 'completed'
+            ORDER BY dr.completed_at ASC
+        """, (identity_id,))
+        snapshots = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        if not snapshots:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        events = []
+        first = snapshots[0]
+        first_ts = first['run_completed_at'].isoformat() if first.get('run_completed_at') else first.get('created_datetime', '')
+        if isinstance(first_ts, str):
+            pass
+        else:
+            first_ts = first_ts.isoformat() if first_ts else ''
+
+        # "Created" event
+        created_ts = first.get('created_datetime')
+        events.append({
+            'timestamp': created_ts.isoformat() if created_ts else first_ts,
+            'run_id': first.get('discovery_run_id'),
+            'event_type': 'identity_created',
+            'category': 'lifecycle',
+            'description': f'Identity first discovered: {first.get("display_name", identity_id)}',
+            'previous_value': None,
+            'current_value': (first.get('risk_level') or 'info'),
+            'severity': 'info',
+        })
+
+        # Summary counters
+        summary = {
+            'total_runs_observed': len(snapshots),
+            'first_seen': first_ts,
+            'last_seen': None,
+            'risk_changes': 0,
+            'credential_events': 0,
+            'access_changes': 0,
+            'status_changes': 0,
+        }
+
+        # Compare consecutive snapshots
+        for i in range(1, len(snapshots)):
+            prev_snap = snapshots[i - 1]
+            curr_snap = snapshots[i]
+            ts = curr_snap['run_completed_at']
+            ts_str = ts.isoformat() if ts else ''
+            run_id = curr_snap.get('discovery_run_id')
+
+            new_events = _compare_snapshots(prev_snap, curr_snap, ts_str, run_id)
+            for ev in new_events:
+                cat = ev['category']
+                if cat == 'risk':
+                    summary['risk_changes'] += 1
+                elif cat == 'credential':
+                    summary['credential_events'] += 1
+                elif cat == 'access':
+                    summary['access_changes'] += 1
+                elif cat in ('lifecycle', 'activity', 'compliance'):
+                    summary['status_changes'] += 1
+            events.extend(new_events)
+
+        last = snapshots[-1]
+        last_ts = last['run_completed_at']
+        summary['last_seen'] = last_ts.isoformat() if last_ts else ''
+
+        # Sort events newest-first for display
+        events.sort(key=lambda e: e.get('timestamp', ''), reverse=True)
+
+        return jsonify({
+            'identity_id': identity_id,
+            'display_name': first.get('display_name', identity_id),
+            'total_events': len(events),
+            'events': events,
+            'summary': summary,
+        })
     finally:
         db.close()

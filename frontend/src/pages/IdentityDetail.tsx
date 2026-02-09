@@ -101,7 +101,7 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim' | 'remediation';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim' | 'remediation' | 'lifecycle';
 
 interface RemediationItem {
   id: number;
@@ -363,6 +363,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
+    { id: 'lifecycle' as TabId, label: 'Lifecycle', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
   return (
@@ -416,6 +417,9 @@ export default function IdentityDetail() {
   const [remediationLoading, setRemediationLoading] = useState(false);
   const [remediationActions, setRemediationActions] = useState<RemediationActionsMap>({});
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [lifecycleData, setLifecycleData] = useState<any>(null);
+  const [lifecycleLoading, setLifecycleLoading] = useState(false);
+  const [lifecycleFilter, setLifecycleFilter] = useState<string>('all');
 
   useEffect(() => {
     let cancelled = false;
@@ -476,6 +480,19 @@ export default function IdentityDetail() {
 
     return () => { cancelled = true; };
   }, [activeTab, id, remediationData, remediationLoading]);
+
+  // Lazy-load Lifecycle data when tab is selected
+  useEffect(() => {
+    if (activeTab !== 'lifecycle' || lifecycleData || lifecycleLoading || !id) return;
+    let cancelled = false;
+    setLifecycleLoading(true);
+    fetch(`/api/identities/${encodeURIComponent(id)}/lifecycle`)
+      .then(res => res.ok ? res.json() : Promise.reject('Lifecycle fetch failed'))
+      .then(json => { if (!cancelled) setLifecycleData(json); })
+      .catch(() => { if (!cancelled) setLifecycleData({ events: [], summary: { total_runs_observed: 0, first_seen: null, last_seen: null, risk_changes: 0, credential_events: 0, access_changes: 0, status_changes: 0 }, total_events: 0 }); })
+      .finally(() => { if (!cancelled) setLifecycleLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, lifecycleData, lifecycleLoading]);
 
   const handleRemediationAction = async (playbookId: number, status: RemediationStatus, notes?: string) => {
     if (!id) return;
@@ -539,6 +556,7 @@ export default function IdentityDetail() {
     pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
     remediation: remediationData?.summary?.total ?? 0,
+    lifecycle: lifecycleData?.total_events ?? 0,
   };
 
   return (
@@ -1608,6 +1626,134 @@ export default function IdentityDetail() {
                     </>
                   )}
                   <DataSource label="AuditGraph Remediation Engine" apiSource="Pattern-matched playbook library" collectedAt={data?.evidence?.collected_at} />
+                </div>
+              )}
+
+              {/* ─── Lifecycle Tab ─── */}
+              {activeTab === 'lifecycle' && (
+                <div className="space-y-6">
+                  {lifecycleLoading ? (
+                    <div className="animate-pulse space-y-4">
+                      <div className="h-20 bg-gray-100 rounded-xl" />
+                      {[1, 2, 3, 4].map(i => <div key={i} className="h-16 bg-gray-100 rounded-xl" />)}
+                    </div>
+                  ) : !lifecycleData || lifecycleData.total_events === 0 ? (
+                    <div className="text-center py-12">
+                      <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <div className="text-sm font-medium text-gray-600">No lifecycle events</div>
+                      <div className="text-xs text-gray-400 mt-1">Run multiple discovery scans to build a change timeline.</div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Summary bar */}
+                      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                        <div className="bg-gray-50 rounded-xl p-3 text-center">
+                          <div className="text-xl font-bold text-gray-900">{lifecycleData.summary.total_runs_observed}</div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">Runs Observed</div>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3 text-center">
+                          <div className="text-xl font-bold text-gray-900">{lifecycleData.total_events}</div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">Total Events</div>
+                        </div>
+                        <div className="bg-red-50 rounded-xl p-3 text-center">
+                          <div className="text-xl font-bold text-red-700">{lifecycleData.summary.risk_changes}</div>
+                          <div className="text-[10px] text-red-600 mt-0.5">Risk Changes</div>
+                        </div>
+                        <div className="bg-orange-50 rounded-xl p-3 text-center">
+                          <div className="text-xl font-bold text-orange-700">{lifecycleData.summary.credential_events}</div>
+                          <div className="text-[10px] text-orange-600 mt-0.5">Credential Events</div>
+                        </div>
+                        <div className="bg-blue-50 rounded-xl p-3 text-center">
+                          <div className="text-xl font-bold text-blue-700">{lifecycleData.summary.access_changes}</div>
+                          <div className="text-[10px] text-blue-600 mt-0.5">Access Changes</div>
+                        </div>
+                        <div className="bg-purple-50 rounded-xl p-3 text-center">
+                          <div className="text-xl font-bold text-purple-700">{lifecycleData.summary.status_changes}</div>
+                          <div className="text-[10px] text-purple-600 mt-0.5">Status Changes</div>
+                        </div>
+                      </div>
+
+                      {/* Date range */}
+                      <div className="text-xs text-gray-500 flex items-center gap-2">
+                        <span>First seen: {lifecycleData.summary.first_seen ? new Date(lifecycleData.summary.first_seen).toLocaleDateString() : 'N/A'}</span>
+                        <span className="text-gray-300">|</span>
+                        <span>Last seen: {lifecycleData.summary.last_seen ? new Date(lifecycleData.summary.last_seen).toLocaleDateString() : 'N/A'}</span>
+                      </div>
+
+                      {/* Category filter */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {['all', 'risk', 'credential', 'access', 'lifecycle', 'activity', 'compliance'].map(cat => (
+                          <button
+                            key={cat}
+                            onClick={() => setLifecycleFilter(cat)}
+                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition ${
+                              lifecycleFilter === cat
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                            }`}
+                          >
+                            {cat === 'all' ? 'All' : cat.charAt(0).toUpperCase() + cat.slice(1)}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Timeline */}
+                      <div className="relative">
+                        {/* Vertical line */}
+                        <div className="absolute left-[7px] top-2 bottom-2 w-0.5 bg-gray-200" />
+
+                        <div className="space-y-0">
+                          {(lifecycleData.events as any[])
+                            .filter((ev: any) => lifecycleFilter === 'all' || ev.category === lifecycleFilter)
+                            .map((ev: any, idx: number) => {
+                              const sevColors: Record<string, string> = {
+                                critical: 'bg-red-500',
+                                high: 'bg-orange-500',
+                                medium: 'bg-yellow-500',
+                                info: 'bg-blue-400',
+                              };
+                              const catBadge: Record<string, string> = {
+                                risk: 'bg-red-50 text-red-700',
+                                credential: 'bg-orange-50 text-orange-700',
+                                access: 'bg-blue-50 text-blue-700',
+                                lifecycle: 'bg-purple-50 text-purple-700',
+                                activity: 'bg-cyan-50 text-cyan-700',
+                                compliance: 'bg-green-50 text-green-700',
+                              };
+                              return (
+                                <div key={idx} className="flex items-start gap-4 py-3 group">
+                                  {/* Dot */}
+                                  <div className={`w-3.5 h-3.5 rounded-full flex-shrink-0 mt-0.5 ring-2 ring-white ${sevColors[ev.severity] || 'bg-gray-400'}`} />
+
+                                  {/* Content */}
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-sm font-medium text-gray-900">{ev.description}</span>
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${catBadge[ev.category] || 'bg-gray-100 text-gray-600'}`}>
+                                        {ev.category}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-400">
+                                      <span>{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : 'Unknown'}</span>
+                                      {ev.run_id && <span>Run #{ev.run_id}</span>}
+                                      {ev.previous_value && ev.current_value && (
+                                        <span className="font-mono text-gray-500">{ev.previous_value} &rarr; {ev.current_value}</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          {(lifecycleData.events as any[]).filter((ev: any) => lifecycleFilter === 'all' || ev.category === lifecycleFilter).length === 0 && (
+                            <div className="text-center py-8 text-sm text-gray-400">No events in this category.</div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  <DataSource label="AuditGraph Lifecycle Engine" apiSource="Cross-run identity snapshot comparison" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
             </div>

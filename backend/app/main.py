@@ -66,6 +66,7 @@ from app.api.handlers import (
     update_saved_view_handler,
     delete_saved_view_handler,
     set_default_view_handler,
+    get_identity_lifecycle,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -208,6 +209,13 @@ def create_app():
     @app.get("/api/identities/<identity_id>/graph-data")
     def identity_graph_data(identity_id):
         return get_identity_graph_data(identity_id)
+
+    # -----------------------
+    # Identity Lifecycle (Phase 35)
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/lifecycle")
+    def identity_lifecycle(identity_id):
+        return get_identity_lifecycle(identity_id)
 
     # -----------------------
     # Identity PIM data (eligible roles, activations, overuse)
