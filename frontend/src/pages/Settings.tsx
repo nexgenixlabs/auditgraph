@@ -44,6 +44,66 @@ const WEBHOOK_EVENT_LABELS: Record<string, string> = {
 
 const ALL_WEBHOOK_EVENTS = Object.keys(WEBHOOK_EVENT_LABELS);
 
+// Risk Rule types
+interface RiskRuleCondition {
+  field: string;
+  op: string;
+  value: string | number | boolean;
+}
+
+interface RiskRuleData {
+  id: number;
+  name: string;
+  description: string | null;
+  conditions: { all: RiskRuleCondition[] };
+  action_type: 'adjust_points' | 'force_level';
+  points_adjustment: number;
+  force_level: string | null;
+  reason_text: string | null;
+  enabled: boolean;
+  priority: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+interface RiskRuleFormData {
+  name: string;
+  description: string;
+  conditions: RiskRuleCondition[];
+  action_type: 'adjust_points' | 'force_level';
+  points_adjustment: number;
+  force_level: string;
+  reason_text: string;
+  priority: number;
+}
+
+const RULE_FIELDS: { value: string; label: string; type: 'select' | 'text' | 'number' | 'boolean'; options?: string[] }[] = [
+  { value: 'identity_category', label: 'Identity Category', type: 'select', options: ['service_principal', 'human_user', 'guest', 'managed_identity_system', 'managed_identity_user'] },
+  { value: 'activity_status', label: 'Activity Status', type: 'select', options: ['active', 'inactive', 'stale', 'never_used'] },
+  { value: 'has_entra_role', label: 'Has Entra Role (contains)', type: 'text' },
+  { value: 'has_rbac_role', label: 'Has RBAC Role (contains)', type: 'text' },
+  { value: 'has_write_permissions', label: 'Has Write Permissions', type: 'boolean' },
+  { value: 'role_count', label: 'Role Count', type: 'number' },
+  { value: 'api_permission_count', label: 'API Permission Count', type: 'number' },
+  { value: 'risk_score', label: 'Default Risk Score', type: 'number' },
+  { value: 'enabled', label: 'Identity Enabled', type: 'boolean' },
+  { value: 'display_name', label: 'Display Name (contains)', type: 'text' },
+  { value: 'credential_status', label: 'Credential Status', type: 'select', options: ['expired', 'expiring_soon', 'healthy'] },
+  { value: 'app_role_count', label: 'App Role Count', type: 'number' },
+];
+
+const OPS_FOR_TYPE: Record<string, { value: string; label: string }[]> = {
+  select: [{ value: 'eq', label: '=' }, { value: 'neq', label: '!=' }, { value: 'in', label: 'in' }],
+  text: [{ value: 'contains', label: 'contains' }, { value: 'eq', label: '=' }, { value: 'neq', label: '!=' }],
+  number: [{ value: 'gt', label: '>' }, { value: 'gte', label: '>=' }, { value: 'lt', label: '<' }, { value: 'lte', label: '<=' }, { value: 'eq', label: '=' }],
+  boolean: [{ value: 'eq', label: '=' }],
+};
+
+const EMPTY_RULE_FORM: RiskRuleFormData = {
+  name: '', description: '', conditions: [{ field: 'identity_category', op: 'eq', value: '' }],
+  action_type: 'adjust_points', points_adjustment: 0, force_level: 'critical', reason_text: '', priority: 100,
+};
+
 interface SettingsData {
   org_name: string;
   discovery_interval_hours: string;
@@ -239,6 +299,146 @@ export default function Settings() {
       event_types: prev.event_types.includes(event)
         ? prev.event_types.filter(e => e !== event)
         : [...prev.event_types, event],
+    }));
+  }
+
+  // Risk rule state
+  const [riskRules, setRiskRules] = useState<RiskRuleData[]>([]);
+  const [ruleModal, setRuleModal] = useState(false);
+  const [editingRule, setEditingRule] = useState<RiskRuleData | null>(null);
+  const [ruleForm, setRuleForm] = useState<RiskRuleFormData>({ ...EMPTY_RULE_FORM });
+  const [ruleSaving, setRuleSaving] = useState(false);
+  const [ruleError, setRuleError] = useState<string | null>(null);
+  const [ruleDeleteConfirm, setRuleDeleteConfirm] = useState<number | null>(null);
+  const [previewResult, setPreviewResult] = useState<{ count: number; identities: { display_name: string; risk_level: string }[] } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  const loadRiskRules = useCallback(async () => {
+    try {
+      const res = await fetch('/api/risk-rules');
+      if (res.ok) {
+        const data = await res.json();
+        setRiskRules(data.rules || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadRiskRules(); }, [loadRiskRules]);
+
+  function openRuleModal(rule?: RiskRuleData) {
+    if (rule) {
+      setEditingRule(rule);
+      setRuleForm({
+        name: rule.name,
+        description: rule.description || '',
+        conditions: rule.conditions?.all || [{ field: 'identity_category', op: 'eq', value: '' }],
+        action_type: rule.action_type,
+        points_adjustment: rule.points_adjustment,
+        force_level: rule.force_level || 'critical',
+        reason_text: rule.reason_text || '',
+        priority: rule.priority,
+      });
+    } else {
+      setEditingRule(null);
+      setRuleForm({ ...EMPTY_RULE_FORM, conditions: [{ field: 'identity_category', op: 'eq', value: '' }] });
+    }
+    setRuleError(null);
+    setPreviewResult(null);
+    setRuleModal(true);
+  }
+
+  async function handleRuleSave() {
+    setRuleSaving(true);
+    setRuleError(null);
+    try {
+      const payload = {
+        name: ruleForm.name,
+        description: ruleForm.description || null,
+        conditions: { all: ruleForm.conditions },
+        action_type: ruleForm.action_type,
+        points_adjustment: ruleForm.action_type === 'adjust_points' ? ruleForm.points_adjustment : 0,
+        force_level: ruleForm.action_type === 'force_level' ? ruleForm.force_level : null,
+        reason_text: ruleForm.reason_text || null,
+        priority: ruleForm.priority,
+      };
+      const method = editingRule ? 'PUT' : 'POST';
+      const url = editingRule ? `/api/risk-rules/${editingRule.id}` : '/api/risk-rules';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      setRuleModal(false);
+      setEditingRule(null);
+      loadRiskRules();
+    } catch (e: any) {
+      setRuleError(e?.message || 'Failed to save rule');
+    } finally {
+      setRuleSaving(false);
+    }
+  }
+
+  async function handleRuleDelete(id: number) {
+    try {
+      await fetch(`/api/risk-rules/${id}`, { method: 'DELETE' });
+      setRuleDeleteConfirm(null);
+      loadRiskRules();
+    } catch { /* ignore */ }
+  }
+
+  async function handleToggleRule(rule: RiskRuleData) {
+    try {
+      await fetch(`/api/risk-rules/${rule.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !rule.enabled }),
+      });
+      loadRiskRules();
+    } catch { /* ignore */ }
+  }
+
+  async function handlePreview() {
+    setPreviewing(true);
+    setPreviewResult(null);
+    try {
+      const res = await fetch('/api/risk-rules/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conditions: { all: ruleForm.conditions },
+          action_type: ruleForm.action_type,
+          points_adjustment: ruleForm.points_adjustment,
+          force_level: ruleForm.force_level,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPreviewResult({ count: data.affected_count, identities: data.affected || [] });
+      }
+    } catch { /* ignore */ }
+    finally { setPreviewing(false); }
+  }
+
+  function addCondition() {
+    setRuleForm(prev => ({
+      ...prev,
+      conditions: [...prev.conditions, { field: 'identity_category', op: 'eq', value: '' }],
+    }));
+  }
+
+  function removeCondition(idx: number) {
+    setRuleForm(prev => ({
+      ...prev,
+      conditions: prev.conditions.filter((_, i) => i !== idx),
+    }));
+  }
+
+  function updateCondition(idx: number, updates: Partial<RiskRuleCondition>) {
+    setRuleForm(prev => ({
+      ...prev,
+      conditions: prev.conditions.map((c, i) => i === idx ? { ...c, ...updates } : c),
     }));
   }
 
@@ -707,6 +907,115 @@ export default function Settings() {
             </p>
           </div>
 
+          {/* Section 6: Custom Risk Rules */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">Custom Risk Rules</div>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Adjust risk scoring with custom conditions — runs after default scoring
+                </p>
+              </div>
+              <button
+                onClick={() => openRuleModal()}
+                disabled={riskRules.length >= 50}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  riskRules.length >= 50
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                + Add Rule
+              </button>
+            </div>
+
+            {riskRules.length === 0 ? (
+              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
+                No custom risk rules configured. Add one to customize risk scoring.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {riskRules.map(rule => (
+                  <div key={rule.id} className="border rounded-lg px-4 py-3 flex items-center justify-between">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <button
+                        onClick={() => handleToggleRule(rule)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
+                          rule.enabled ? 'bg-green-500' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                          rule.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                        }`} />
+                      </button>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">{rule.name}</div>
+                        <div className="text-xs text-gray-400">
+                          {(rule.conditions?.all || []).length} condition{(rule.conditions?.all || []).length !== 1 ? 's' : ''} · Priority {rule.priority}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {/* Action badge */}
+                      {rule.action_type === 'force_level' ? (
+                        <span className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
+                          rule.force_level === 'critical' ? 'bg-red-100 text-red-700' :
+                          rule.force_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                          rule.force_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                          'bg-green-100 text-green-700'
+                        }`}>
+                          FORCE {(rule.force_level || '').toUpperCase()}
+                        </span>
+                      ) : (
+                        <span className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
+                          rule.points_adjustment > 0 ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'
+                        }`}>
+                          {rule.points_adjustment > 0 ? '+' : ''}{rule.points_adjustment} pts
+                        </span>
+                      )}
+
+                      <button
+                        onClick={() => openRuleModal(rule)}
+                        className="px-2 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition"
+                      >
+                        Edit
+                      </button>
+                      {ruleDeleteConfirm === rule.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleRuleDelete(rule.id)}
+                            className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setRuleDeleteConfirm(null)}
+                            className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setRuleDeleteConfirm(rule.id)}
+                          className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-400">
+              Maximum 50 rules. Rules run after default scoring on every discovery run, ordered by priority (lower runs first).
+            </p>
+          </div>
+
           {/* Save button */}
           <div className="flex items-center gap-4">
             <button
@@ -732,6 +1041,279 @@ export default function Settings() {
             </button>
           </div>
         </>
+      )}
+
+      {/* Risk Rule Add/Edit Modal */}
+      {ruleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setRuleModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-2xl mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="text-lg font-semibold text-gray-900">
+              {editingRule ? 'Edit Risk Rule' : 'Add Risk Rule'}
+            </div>
+
+            {ruleError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                {ruleError}
+              </div>
+            )}
+
+            {/* Name & Description */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  value={ruleForm.name}
+                  onChange={e => setRuleForm(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="e.g., Guest write access = critical"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                <input
+                  type="number"
+                  value={ruleForm.priority}
+                  onChange={e => setRuleForm(prev => ({ ...prev, priority: parseInt(e.target.value) || 100 }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={ruleForm.description}
+                onChange={e => setRuleForm(prev => ({ ...prev, description: e.target.value }))}
+                placeholder="Optional description"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            {/* Conditions builder */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Conditions <span className="text-gray-400 font-normal">(ALL must match)</span>
+              </label>
+              <div className="space-y-2">
+                {ruleForm.conditions.map((cond, idx) => {
+                  const fieldDef = RULE_FIELDS.find(f => f.value === cond.field);
+                  const ops = OPS_FOR_TYPE[fieldDef?.type || 'text'] || OPS_FOR_TYPE.text;
+                  return (
+                    <div key={idx} className="flex items-center gap-2">
+                      {/* Field */}
+                      <select
+                        value={cond.field}
+                        onChange={e => {
+                          const newField = RULE_FIELDS.find(f => f.value === e.target.value);
+                          const defaultOp = newField?.type === 'boolean' ? 'eq' : newField?.type === 'number' ? 'gt' : newField?.type === 'text' ? 'contains' : 'eq';
+                          const defaultVal = newField?.type === 'boolean' ? true : '';
+                          updateCondition(idx, { field: e.target.value, op: defaultOp, value: defaultVal });
+                        }}
+                        className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white flex-1 min-w-0"
+                      >
+                        {RULE_FIELDS.map(f => (
+                          <option key={f.value} value={f.value}>{f.label}</option>
+                        ))}
+                      </select>
+
+                      {/* Op */}
+                      <select
+                        value={cond.op}
+                        onChange={e => updateCondition(idx, { op: e.target.value })}
+                        className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white w-20"
+                      >
+                        {ops.map(o => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+
+                      {/* Value */}
+                      {fieldDef?.type === 'boolean' ? (
+                        <select
+                          value={String(cond.value)}
+                          onChange={e => updateCondition(idx, { value: e.target.value === 'true' })}
+                          className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white w-24"
+                        >
+                          <option value="true">true</option>
+                          <option value="false">false</option>
+                        </select>
+                      ) : fieldDef?.type === 'select' && fieldDef.options ? (
+                        <select
+                          value={String(cond.value)}
+                          onChange={e => updateCondition(idx, { value: e.target.value })}
+                          className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white flex-1 min-w-0"
+                        >
+                          <option value="">Select...</option>
+                          {fieldDef.options.map(o => (
+                            <option key={o} value={o}>{o.replace(/_/g, ' ')}</option>
+                          ))}
+                        </select>
+                      ) : fieldDef?.type === 'number' ? (
+                        <input
+                          type="number"
+                          value={String(cond.value)}
+                          onChange={e => updateCondition(idx, { value: parseInt(e.target.value) || 0 })}
+                          className="px-2 py-1.5 border border-gray-300 rounded text-sm w-24"
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          value={String(cond.value)}
+                          onChange={e => updateCondition(idx, { value: e.target.value })}
+                          placeholder="Value"
+                          className="px-2 py-1.5 border border-gray-300 rounded text-sm flex-1 min-w-0"
+                        />
+                      )}
+
+                      {/* Remove */}
+                      {ruleForm.conditions.length > 1 && (
+                        <button
+                          onClick={() => removeCondition(idx)}
+                          className="text-red-400 hover:text-red-600 text-sm px-1"
+                        >
+                          x
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <button
+                onClick={addCondition}
+                className="mt-2 text-sm text-blue-600 hover:text-blue-700 font-medium"
+              >
+                + Add Condition
+              </button>
+            </div>
+
+            {/* Action */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Action</label>
+              <div className="flex gap-3 mb-3">
+                <button
+                  onClick={() => setRuleForm(prev => ({ ...prev, action_type: 'adjust_points' }))}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                    ruleForm.action_type === 'adjust_points'
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Adjust Points
+                </button>
+                <button
+                  onClick={() => setRuleForm(prev => ({ ...prev, action_type: 'force_level' }))}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                    ruleForm.action_type === 'force_level'
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Force Risk Level
+                </button>
+              </div>
+
+              {ruleForm.action_type === 'adjust_points' ? (
+                <div className="flex items-center gap-3">
+                  <label className="text-sm text-gray-600">Points:</label>
+                  <input
+                    type="number"
+                    value={ruleForm.points_adjustment}
+                    onChange={e => setRuleForm(prev => ({ ...prev, points_adjustment: parseInt(e.target.value) || 0 }))}
+                    className="w-24 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="text-xs text-gray-400">Positive = increase risk, negative = decrease</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <label className="text-sm text-gray-600">Level:</label>
+                  <select
+                    value={ruleForm.force_level}
+                    onChange={e => setRuleForm(prev => ({ ...prev, force_level: e.target.value }))}
+                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
+                  >
+                    <option value="critical">Critical</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                    <option value="info">Info</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Reason text */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Reason Text <span className="text-gray-400 font-normal">(shown in risk reasons)</span>
+              </label>
+              <input
+                type="text"
+                value={ruleForm.reason_text}
+                onChange={e => setRuleForm(prev => ({ ...prev, reason_text: e.target.value }))}
+                placeholder="e.g., Guest with write access violates policy"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            {/* Preview */}
+            <div className="border-t pt-3">
+              <button
+                onClick={handlePreview}
+                disabled={previewing || ruleForm.conditions.length === 0}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+              >
+                {previewing ? 'Checking...' : 'Preview Affected Identities'}
+              </button>
+              {previewResult && (
+                <div className="mt-2 text-sm">
+                  <span className="font-medium text-gray-900">{previewResult.count}</span>
+                  <span className="text-gray-500"> {previewResult.count === 1 ? 'identity' : 'identities'} would match</span>
+                  {previewResult.identities.length > 0 && (
+                    <div className="mt-1 space-y-0.5">
+                      {previewResult.identities.slice(0, 5).map((id, i) => (
+                        <div key={i} className="text-xs text-gray-500 flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            id.risk_level === 'critical' ? 'bg-red-500' :
+                            id.risk_level === 'high' ? 'bg-orange-500' :
+                            id.risk_level === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
+                          }`} />
+                          {id.display_name}
+                        </div>
+                      ))}
+                      {previewResult.count > 5 && (
+                        <div className="text-xs text-gray-400">...and {previewResult.count - 5} more</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setRuleModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRuleSave}
+                disabled={ruleSaving || !ruleForm.name || ruleForm.conditions.length === 0}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
+                  ruleSaving || !ruleForm.name || ruleForm.conditions.length === 0
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {ruleSaving ? 'Saving...' : editingRule ? 'Update Rule' : 'Create Rule'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Webhook Add/Edit Modal */}

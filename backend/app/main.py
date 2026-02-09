@@ -39,6 +39,11 @@ from app.api.handlers import (
     delete_webhook,
     test_webhook_endpoint,
     get_webhook_deliveries,
+    get_risk_rules_list,
+    create_risk_rule,
+    update_risk_rule,
+    delete_risk_rule,
+    preview_risk_rule,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -263,6 +268,29 @@ def create_app():
     @app.get("/api/webhooks/<int:webhook_id>/deliveries")
     def webhooks_deliveries(webhook_id):
         return get_webhook_deliveries(webhook_id)
+
+    # -----------------------
+    # Custom Risk Rules (Phase 29)
+    # -----------------------
+    @app.get("/api/risk-rules")
+    def risk_rules_list():
+        return get_risk_rules_list()
+
+    @app.post("/api/risk-rules")
+    def risk_rules_create():
+        return create_risk_rule()
+
+    @app.put("/api/risk-rules/<int:rule_id>")
+    def risk_rules_update(rule_id):
+        return update_risk_rule(rule_id)
+
+    @app.delete("/api/risk-rules/<int:rule_id>")
+    def risk_rules_delete(rule_id):
+        return delete_risk_rule(rule_id)
+
+    @app.post("/api/risk-rules/preview")
+    def risk_rules_preview():
+        return preview_risk_rule()
 
     # -----------------------
     # Activity Log (Phase 17)

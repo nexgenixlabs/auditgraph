@@ -2337,3 +2337,129 @@ class Database:
             r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
             r['delivered_at'] = r['delivered_at'].isoformat() if r.get('delivered_at') else None
         return rows
+
+    # ========================================================================
+    # Phase 29: Custom Risk Rule Engine
+    # ========================================================================
+
+    def _ensure_custom_risk_rules_table(self):
+        """Create custom_risk_rules table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS custom_risk_rules (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                conditions JSONB NOT NULL,
+                action_type VARCHAR(20) NOT NULL DEFAULT 'adjust_points',
+                points_adjustment INTEGER DEFAULT 0,
+                force_level VARCHAR(20),
+                reason_text TEXT,
+                enabled BOOLEAN DEFAULT true,
+                priority INTEGER DEFAULT 100,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        self.conn.commit()
+        cursor.close()
+
+    def get_custom_risk_rules(self) -> list:
+        """Get all custom risk rules ordered by priority."""
+        self._ensure_custom_risk_rules_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM custom_risk_rules ORDER BY priority, id")
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
+            r['updated_at'] = r['updated_at'].isoformat() if r.get('updated_at') else None
+        return rows
+
+    def get_custom_risk_rule(self, rule_id: int) -> dict:
+        """Get a single custom risk rule by ID."""
+        self._ensure_custom_risk_rules_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE id = %s", (rule_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result
+
+    def create_custom_risk_rule(self, name, description, conditions, action_type,
+                                 points_adjustment, force_level, reason_text, priority) -> dict:
+        """Create a new custom risk rule."""
+        self._ensure_custom_risk_rules_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO custom_risk_rules
+                (name, description, conditions, action_type, points_adjustment, force_level, reason_text, priority, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+            RETURNING *
+        """, (name, description, json.dumps(conditions), action_type,
+              points_adjustment or 0, force_level, reason_text, priority or 100))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        row['created_at'] = row['created_at'].isoformat() if row.get('created_at') else None
+        row['updated_at'] = row['updated_at'].isoformat() if row.get('updated_at') else None
+        return row
+
+    def update_custom_risk_rule(self, rule_id: int, **fields) -> dict:
+        """Update specific fields on a custom risk rule."""
+        self._ensure_custom_risk_rules_table()
+        allowed = {'name', 'description', 'conditions', 'action_type', 'points_adjustment',
+                   'force_level', 'reason_text', 'enabled', 'priority'}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return self.get_custom_risk_rule(rule_id)
+
+        set_parts = []
+        params = []
+        for key, val in updates.items():
+            if key == 'conditions':
+                set_parts.append(f"{key} = %s")
+                params.append(json.dumps(val) if isinstance(val, (dict, list)) else val)
+            else:
+                set_parts.append(f"{key} = %s")
+                params.append(val)
+        set_parts.append("updated_at = NOW()")
+        params.append(rule_id)
+
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE custom_risk_rules SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        result['created_at'] = result['created_at'].isoformat() if result.get('created_at') else None
+        result['updated_at'] = result['updated_at'].isoformat() if result.get('updated_at') else None
+        return result
+
+    def delete_custom_risk_rule(self, rule_id: int) -> bool:
+        """Delete a custom risk rule."""
+        self._ensure_custom_risk_rules_table()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM custom_risk_rules WHERE id = %s", (rule_id,))
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return deleted
+
+    def get_enabled_risk_rules(self) -> list:
+        """Get only enabled custom risk rules, ordered by priority."""
+        self._ensure_custom_risk_rules_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE enabled = true ORDER BY priority, id")
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows

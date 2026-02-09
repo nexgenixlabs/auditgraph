@@ -50,9 +50,12 @@ Dependencies:
     - azure-mgmt-resource: Subscription discovery
 """
 import os
+import logging
 import asyncio
 from datetime import datetime
 from typing import Dict, List, Any, Set
+
+logger = logging.getLogger(__name__)
 from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
 from azure.mgmt.authorization import AuthorizationManagementClient
@@ -1852,6 +1855,45 @@ class AzureDiscoveryEngine:
                 risk_level = 'info'
                 risk_reasons = ['No elevated privileges detected']
 
+            # ============================================================
+            # Apply custom risk rules (post-scoring adjustment)
+            # ============================================================
+            try:
+                custom_rules = self._get_custom_rules()
+                if custom_rules:
+                    from app.engines.risk_rules import RiskRuleEngine
+                    engine = RiskRuleEngine()
+                    rule_identity = {
+                        **identity,
+                        'risk_score': risk_score,
+                        'role_count': len(identity_roles) + len(identity_entra_roles),
+                        'api_permission_count': len(identity_permissions),
+                        'app_role_count': len(identity_app_roles),
+                        'roles': identity_roles,
+                        'entra_roles': identity_entra_roles,
+                        '_permissions': identity_permissions,
+                        '_credentials': identity_credentials,
+                    }
+                    adj, extra_reasons, forced = engine.evaluate_rules(rule_identity, custom_rules)
+                    if forced:
+                        risk_level = forced
+                        risk_reasons.extend(extra_reasons)
+                    elif adj != 0:
+                        risk_score += adj
+                        risk_reasons.extend(extra_reasons)
+                        if risk_score >= 120:
+                            risk_level = 'critical'
+                        elif risk_score >= 70:
+                            risk_level = 'high'
+                        elif risk_score >= 40:
+                            risk_level = 'medium'
+                        elif risk_score > 0:
+                            risk_level = 'low'
+                        else:
+                            risk_level = 'info'
+            except Exception as e:
+                logger.warning(f"Custom risk rules error: {e}")
+
             # Calculate role usage status (inference-based)
             identity_roles, identity_entra_roles = self._calculate_role_usage_status(
                 identity, identity_roles, identity_entra_roles
@@ -1883,7 +1925,16 @@ class AzureDiscoveryEngine:
         print(f"     🔴 Critical: {critical_count}  🟠 High: {high_count}")
 
         return identities
-    
+
+    def _get_custom_rules(self):
+        """Fetch enabled custom risk rules (cached per discovery run)."""
+        if not hasattr(self, '_cached_custom_rules'):
+            try:
+                self._cached_custom_rules = self.db.get_enabled_risk_rules()
+            except Exception:
+                self._cached_custom_rules = []
+        return self._cached_custom_rules
+
     def _check_credentials(self, identities: List[Dict]) -> List[Dict]:
         print(f"  Checking {len(identities)} identities...")
         for identity in identities:

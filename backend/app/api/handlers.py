@@ -1278,6 +1278,276 @@ def get_webhook_deliveries(webhook_id):
         db.close()
 
 
+# ============================================================
+# Phase 29: Custom Risk Rule Engine
+# ============================================================
+
+VALID_RULE_FIELDS = {
+    'identity_category', 'identity_type', 'display_name', 'enabled',
+    'activity_status', 'role_count', 'api_permission_count',
+    'has_write_permissions', 'has_entra_role', 'has_rbac_role',
+    'risk_score', 'credential_status', 'app_role_count',
+}
+
+VALID_RULE_OPS = {'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'contains'}
+
+VALID_ACTION_TYPES = {'adjust_points', 'force_level'}
+
+VALID_FORCE_LEVELS = {'critical', 'high', 'medium', 'low', 'info'}
+
+
+def _validate_rule_data(data: dict, db, existing_id=None):
+    """Validate risk rule data. Returns list of errors."""
+    errors = []
+
+    name = str(data.get('name', '')).strip()
+    if not name:
+        errors.append("name is required")
+    elif len(name) > 255:
+        errors.append("name must be 255 characters or less")
+
+    conditions = data.get('conditions')
+    if not conditions or not isinstance(conditions, dict):
+        errors.append("conditions must be a JSON object")
+    else:
+        all_conds = conditions.get('all')
+        if not all_conds or not isinstance(all_conds, list):
+            errors.append("conditions.all must be a non-empty list")
+        else:
+            for i, cond in enumerate(all_conds):
+                if not isinstance(cond, dict):
+                    errors.append(f"condition {i}: must be an object")
+                    continue
+                field = cond.get('field', '')
+                if field not in VALID_RULE_FIELDS:
+                    errors.append(f"condition {i}: invalid field '{field}'")
+                op = cond.get('op', 'eq')
+                if op not in VALID_RULE_OPS:
+                    errors.append(f"condition {i}: invalid op '{op}'")
+                if 'value' not in cond:
+                    errors.append(f"condition {i}: value is required")
+
+    action_type = data.get('action_type', 'adjust_points')
+    if action_type not in VALID_ACTION_TYPES:
+        errors.append(f"action_type must be one of: {', '.join(VALID_ACTION_TYPES)}")
+
+    if action_type == 'force_level':
+        force_level = data.get('force_level', '')
+        if force_level not in VALID_FORCE_LEVELS:
+            errors.append(f"force_level must be one of: {', '.join(VALID_FORCE_LEVELS)}")
+
+    # Max 50 rules
+    if not existing_id:
+        existing_rules = db.get_custom_risk_rules()
+        if len(existing_rules) >= 50:
+            errors.append("Maximum of 50 custom risk rules allowed")
+
+    return errors
+
+
+def get_risk_rules_list():
+    """GET /api/risk-rules — list all custom risk rules."""
+    db = _db()
+    try:
+        rules = db.get_custom_risk_rules()
+        return jsonify({"rules": rules, "count": len(rules)})
+    finally:
+        db.close()
+
+
+def create_risk_rule():
+    """POST /api/risk-rules — create a new custom risk rule."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+        errors = _validate_rule_data(data, db)
+        if errors:
+            return jsonify({"error": "; ".join(errors)}), 400
+
+        rule = db.create_custom_risk_rule(
+            name=str(data['name']).strip(),
+            description=str(data.get('description', '')).strip() or None,
+            conditions=data['conditions'],
+            action_type=data.get('action_type', 'adjust_points'),
+            points_adjustment=int(data.get('points_adjustment', 0)),
+            force_level=data.get('force_level'),
+            reason_text=str(data.get('reason_text', '')).strip() or None,
+            priority=int(data.get('priority', 100)),
+        )
+
+        db.log_activity('risk_rule_created',
+            f'Custom risk rule "{rule["name"]}" created',
+            {'rule_id': rule['id'], 'action_type': rule['action_type']})
+
+        return jsonify(rule), 201
+    finally:
+        db.close()
+
+
+def update_risk_rule(rule_id):
+    """PUT /api/risk-rules/<id> — update a custom risk rule."""
+    db = _db()
+    try:
+        existing = db.get_custom_risk_rule(rule_id)
+        if not existing:
+            return jsonify({"error": "Risk rule not found"}), 404
+
+        data = request.get_json(silent=True) or {}
+        updates = {}
+
+        if 'name' in data:
+            name = str(data['name']).strip()
+            if not name:
+                return jsonify({"error": "name cannot be empty"}), 400
+            if len(name) > 255:
+                return jsonify({"error": "name must be 255 characters or less"}), 400
+            updates['name'] = name
+
+        if 'description' in data:
+            updates['description'] = str(data['description']).strip() or None
+
+        if 'conditions' in data:
+            conditions = data['conditions']
+            if not conditions or not isinstance(conditions, dict):
+                return jsonify({"error": "conditions must be a JSON object"}), 400
+            all_conds = conditions.get('all')
+            if not all_conds or not isinstance(all_conds, list):
+                return jsonify({"error": "conditions.all must be a non-empty list"}), 400
+            for i, cond in enumerate(all_conds):
+                if not isinstance(cond, dict):
+                    return jsonify({"error": f"condition {i}: must be an object"}), 400
+                if cond.get('field', '') not in VALID_RULE_FIELDS:
+                    return jsonify({"error": f"condition {i}: invalid field"}), 400
+                if cond.get('op', 'eq') not in VALID_RULE_OPS:
+                    return jsonify({"error": f"condition {i}: invalid op"}), 400
+            updates['conditions'] = conditions
+
+        if 'action_type' in data:
+            if data['action_type'] not in VALID_ACTION_TYPES:
+                return jsonify({"error": "invalid action_type"}), 400
+            updates['action_type'] = data['action_type']
+
+        if 'points_adjustment' in data:
+            updates['points_adjustment'] = int(data['points_adjustment'])
+
+        if 'force_level' in data:
+            if data['force_level'] and data['force_level'] not in VALID_FORCE_LEVELS:
+                return jsonify({"error": "invalid force_level"}), 400
+            updates['force_level'] = data['force_level']
+
+        if 'reason_text' in data:
+            updates['reason_text'] = str(data['reason_text']).strip() or None
+
+        if 'priority' in data:
+            updates['priority'] = int(data['priority'])
+
+        if 'enabled' in data:
+            updates['enabled'] = bool(data['enabled'])
+
+        if not updates:
+            return jsonify(existing)
+
+        rule = db.update_custom_risk_rule(rule_id, **updates)
+        db.log_activity('risk_rule_updated',
+            f'Custom risk rule "{rule["name"]}" updated: {", ".join(updates.keys())}',
+            {'rule_id': rule_id, 'updated_fields': list(updates.keys())})
+
+        return jsonify(rule)
+    finally:
+        db.close()
+
+
+def delete_risk_rule(rule_id):
+    """DELETE /api/risk-rules/<id> — delete a custom risk rule."""
+    db = _db()
+    try:
+        existing = db.get_custom_risk_rule(rule_id)
+        if not existing:
+            return jsonify({"error": "Risk rule not found"}), 404
+
+        db.delete_custom_risk_rule(rule_id)
+        db.log_activity('risk_rule_deleted',
+            f'Custom risk rule "{existing["name"]}" deleted',
+            {'rule_id': rule_id})
+
+        return jsonify({"status": "deleted", "id": rule_id})
+    finally:
+        db.close()
+
+
+def preview_risk_rule():
+    """POST /api/risk-rules/preview — preview which identities a rule would affect."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+
+        conditions = data.get('conditions')
+        if not conditions or not isinstance(conditions, dict):
+            return jsonify({"error": "conditions is required"}), 400
+
+        rule = {
+            'id': 0,
+            'conditions': conditions,
+            'action_type': data.get('action_type', 'adjust_points'),
+            'points_adjustment': int(data.get('points_adjustment', 0)),
+            'force_level': data.get('force_level'),
+            'reason_text': data.get('reason_text', 'Preview'),
+            'name': data.get('name', 'Preview Rule'),
+        }
+
+        # Get latest run identities
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        latest_run = cursor.fetchone()[0]
+        if not latest_run:
+            return jsonify({"affected_count": 0, "affected": []})
+
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_type,
+                   COALESCE(i.identity_category, '') as identity_category,
+                   i.risk_level, i.activity_status,
+                   COALESCE(i.enabled, true) as enabled,
+                   COALESCE(i.risk_score, 0) as risk_score,
+                   (SELECT COUNT(*) FROM role_assignments ra WHERE ra.identity_db_id = i.id) as rbac_count,
+                   (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id) as entra_count,
+                   (SELECT COUNT(*) FROM graph_api_permissions gap WHERE gap.identity_db_id = i.id) as perm_count
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+        """, (latest_run,))
+        cols = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        from app.engines.risk_rules import RiskRuleEngine
+        engine = RiskRuleEngine()
+        affected = []
+
+        for row in rows:
+            identity = dict(zip(cols, row))
+            identity['role_count'] = (identity.get('rbac_count', 0) or 0) + (identity.get('entra_count', 0) or 0)
+            identity['api_permission_count'] = identity.get('perm_count', 0) or 0
+            identity['app_role_count'] = 0
+            identity['roles'] = []
+            identity['entra_roles'] = []
+            identity['_permissions'] = []
+            identity['_credentials'] = []
+
+            if engine._matches(identity, rule):
+                affected.append({
+                    'identity_id': identity['identity_id'],
+                    'display_name': identity['display_name'],
+                    'identity_category': identity['identity_category'],
+                    'risk_level': identity['risk_level'],
+                    'risk_score': identity.get('risk_score', 0),
+                })
+
+            if len(affected) >= 50:
+                break
+
+        return jsonify({"affected_count": len(affected), "affected": affected})
+    finally:
+        db.close()
+
+
 def _normalize_category_key(raw_category: str) -> str:
     """
     Normalize category value to canonical snake_case key.
