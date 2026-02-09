@@ -23,6 +23,8 @@ from app.api.handlers import (
     get_report_data,
     get_latest_drift,
     get_drift_history,
+    get_app_settings,
+    save_app_settings,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -169,6 +171,17 @@ def create_app():
     @app.get("/api/drift/history")
     def drift_history():
         return get_drift_history()
+
+    # -----------------------
+    # Settings (Phase 15)
+    # -----------------------
+    @app.get("/api/settings")
+    def app_settings():
+        return get_app_settings()
+
+    @app.post("/api/settings")
+    def app_settings_save():
+        return save_app_settings()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

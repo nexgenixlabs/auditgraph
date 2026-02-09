@@ -155,22 +155,45 @@ def _send_change_notification_if_needed():
                 f"{perm_count} permission, {risk_count} risk, {cred_count} credential"
             )
 
-            # Get category counts for both runs
-            category_counts = _get_category_counts(db, current_run_id, previous_run_id)
-
-            # Send email notification
-            email_service = EmailService()
-            success = email_service.send_identity_change_report(
-                changes=changes,
-                current_run_id=current_run_id,
-                previous_run_id=previous_run_id,
-                category_counts=category_counts
-            )
-
-            if success:
-                logger.info("Change report email sent successfully")
+            # Phase 15: Check notification settings before sending email
+            email_enabled = db.get_setting('email_enabled', 'true') == 'true'
+            if not email_enabled:
+                logger.info("Email notifications disabled in settings - skipping")
             else:
-                logger.warning("Failed to send change report email")
+                # Filter changes based on per-type notification flags
+                filtered_changes = {}
+                notify_map = {
+                    'new_identities': 'notify_new_identities',
+                    'removed_identities': 'notify_removed_identities',
+                    'permission_changes': 'notify_permission_changes',
+                    'risk_changes': 'notify_risk_changes',
+                    'credential_changes': 'notify_credential_changes',
+                }
+                for change_key, setting_key in notify_map.items():
+                    if db.get_setting(setting_key, 'true') == 'true':
+                        filtered_changes[change_key] = changes.get(change_key, [])
+                    else:
+                        filtered_changes[change_key] = []
+
+                # Only send if there are still notifiable changes
+                notifiable_count = sum(len(v) for v in filtered_changes.values())
+                if notifiable_count > 0:
+                    category_counts = _get_category_counts(db, current_run_id, previous_run_id)
+
+                    email_service = EmailService()
+                    success = email_service.send_identity_change_report(
+                        changes=filtered_changes,
+                        current_run_id=current_run_id,
+                        previous_run_id=previous_run_id,
+                        category_counts=category_counts
+                    )
+
+                    if success:
+                        logger.info("Change report email sent successfully")
+                    else:
+                        logger.warning("Failed to send change report email")
+                else:
+                    logger.info("No notifiable changes after filtering by settings")
         else:
             logger.info("No changes detected - no email notification needed")
 

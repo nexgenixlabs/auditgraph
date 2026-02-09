@@ -117,12 +117,24 @@ class EmailService:
             category_counts=category_counts
         )
 
+        # Phase 15: Read email_to from DB settings (fall back to env var)
+        to_email = self.to_email
+        try:
+            from app.database import Database
+            db = Database()
+            db_email = db.get_setting('email_to')
+            if db_email and '@' in db_email:
+                to_email = db_email
+            db.close()
+        except Exception:
+            pass  # Fall back to env var default
+
         # Always create a fresh event loop to avoid "Event loop is closed" errors
         # This is necessary because the scheduler runs in a background thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            return loop.run_until_complete(self._send_email_graph(subject, html_body, self.to_email))
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
         finally:
             loop.close()
 

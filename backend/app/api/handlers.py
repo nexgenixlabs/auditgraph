@@ -762,6 +762,92 @@ def get_drift_history():
         db.close()
 
 
+def get_app_settings():
+    """Return all settings plus connection/scheduler status."""
+    db = _db()
+    try:
+        settings = db.get_settings()
+
+        # Check Azure credential configuration
+        azure_configured = all([
+            os.getenv('AZURE_TENANT_ID'),
+            os.getenv('AZURE_CLIENT_ID'),
+            os.getenv('AZURE_CLIENT_SECRET'),
+        ])
+
+        # Check scheduler state
+        from app.scheduler import get_next_run_time, scheduler as _sched
+        next_run = get_next_run_time()
+
+        return jsonify({
+            "settings": settings,
+            "status": {
+                "azure_configured": azure_configured,
+                "email_configured": azure_configured,
+                "scheduler_running": _sched is not None,
+                "next_run": next_run.isoformat() if next_run else None,
+            }
+        })
+    finally:
+        db.close()
+
+
+def save_app_settings():
+    """Update settings from JSON body. Validates known keys."""
+    data = request.get_json()
+    if not data or not isinstance(data, dict):
+        return jsonify({"error": "Expected JSON object"}), 400
+
+    VALID_KEYS = {
+        'org_name', 'discovery_interval_hours', 'email_enabled', 'email_to',
+        'notify_new_identities', 'notify_removed_identities',
+        'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
+    }
+    BOOLEAN_KEYS = {
+        'email_enabled', 'notify_new_identities', 'notify_removed_identities',
+        'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
+    }
+
+    # Filter to valid keys only
+    updates = {}
+    errors = []
+    for key, value in data.items():
+        if key not in VALID_KEYS:
+            errors.append(f"Unknown setting: {key}")
+            continue
+
+        value = str(value).strip()
+
+        if key == 'discovery_interval_hours':
+            if value not in ('6', '12', '24'):
+                errors.append("discovery_interval_hours must be 6, 12, or 24")
+                continue
+
+        if key in BOOLEAN_KEYS:
+            if value.lower() not in ('true', 'false'):
+                errors.append(f"{key} must be true or false")
+                continue
+            value = value.lower()
+
+        if key == 'email_to' and value:
+            if '@' not in value:
+                errors.append("email_to must be a valid email address")
+                continue
+
+        updates[key] = value
+
+    if errors:
+        return jsonify({"error": "; ".join(errors)}), 400
+
+    db = _db()
+    try:
+        db.save_settings(updates)
+        settings = db.get_settings()
+        return jsonify({"settings": settings, "updated": list(updates.keys())})
+    finally:
+        db.close()
+
+
 def trigger_discovery():
     """Trigger a manual discovery run in a background thread."""
     import threading

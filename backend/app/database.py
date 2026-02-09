@@ -1565,6 +1565,40 @@ class Database:
         cursor.close()
         return rows
 
+    # ========================================================================
+    # Phase 15: Settings & Configuration
+    # ========================================================================
+
+    def get_settings(self) -> Dict[str, str]:
+        """Returns all settings as a key-value dict."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT key, value FROM settings ORDER BY key")
+        result = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.close()
+        return result
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Returns a single setting value, or default if not found."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
+        row = cursor.fetchone()
+        cursor.close()
+        return row[0] if row else default
+
+    def save_settings(self, settings_dict: Dict[str, str]) -> None:
+        """Upsert multiple settings in one call."""
+        cursor = self.conn.cursor()
+        for key, value in settings_dict.items():
+            cursor.execute("""
+                INSERT INTO settings (key, value, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = NOW()
+            """, (key, value))
+        self.conn.commit()
+        cursor.close()
+
     def close(self):
         """Close database connection"""
         if self.conn:
