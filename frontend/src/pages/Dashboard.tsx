@@ -6,6 +6,7 @@ import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
 import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges } from '../components/dashboard';
+import Sparkline from '../components/Sparkline';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -87,6 +88,7 @@ export default function Dashboard() {
   const [showRuns, setShowRuns] = useState(false);
   const [runs, setRuns] = useState<any[]>([]);
   const [driftData, setDriftData] = useState<any>(null);
+  const [trends, setTrends] = useState<Array<{ run_id: number; date: string | null; total: number; critical: number; high: number; medium: number; low: number; dormant: number }>>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -134,6 +136,16 @@ export default function Dashboard() {
           if (driftRes.ok) driftJson = await driftRes.json();
         } catch { /* ignore */ }
 
+        // Fetch trend data for sparklines (non-blocking)
+        let trendsJson: typeof trends = [];
+        try {
+          const trendsRes = await fetch('/api/trends');
+          if (trendsRes.ok) {
+            const trendsData = await trendsRes.json();
+            trendsJson = trendsData.runs || [];
+          }
+        } catch { /* ignore */ }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
@@ -142,6 +154,7 @@ export default function Dashboard() {
           setCaData(caJson);
           setSchedulerInfo(schedJson);
           setDriftData(driftJson);
+          setTrends(trendsJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -173,6 +186,10 @@ export default function Dashboard() {
     if (current > previous) return 'up';
     if (current < previous) return 'down';
     return 'neutral';
+  }
+
+  function trendSeries(key: 'total' | 'critical' | 'high' | 'medium' | 'low' | 'dormant'): number[] {
+    return trends.map(t => t[key] ?? 0);
   }
 
   const categoryCards = useMemo(() => {
@@ -293,45 +310,73 @@ export default function Dashboard() {
         <>
           {/* Top Stats */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <StatsCard
-              title="Total Identities"
-              value={latest?.total_identities ?? 0}
-              icon="🧩"
-              color="blue"
-              trend={trendDir(latest?.total_identities ?? 0, prev?.total_identities)}
-              trendDelta={prev ? (latest?.total_identities ?? 0) - prev.total_identities : undefined}
-              trendNeutral
-              onClick={() => navigate('/identities')}
-            />
-            <StatsCard
-              title="Critical"
-              value={latest?.critical_count ?? 0}
-              icon="🔴"
-              color="red"
-              trend={(() => {
-                const d = trendDir(latest?.critical_count ?? 0, prev?.critical_count);
-                // For critical, up is bad → flip colors by swapping direction label
-                return d;
-              })()}
-              trendDelta={prev ? (latest?.critical_count ?? 0) - prev.critical_count : undefined}
-              onClick={() => navigate('/identities?risk_level=critical')}
-            />
-            <StatsCard
-              title="High"
-              value={latest?.high_count ?? 0}
-              icon="🟠"
-              color="yellow"
-              trend={trendDir(latest?.high_count ?? 0, prev?.high_count)}
-              trendDelta={prev ? (latest?.high_count ?? 0) - prev.high_count : undefined}
-              onClick={() => navigate('/identities?risk_level=high')}
-            />
-            <StatsCard
-              title="Discovery Runs"
-              value={stats?.total_discovery_runs ?? 0}
-              icon="🔄"
-              color="gray"
-              onClick={() => setShowRuns(!showRuns)}
-            />
+            <div>
+              <StatsCard
+                title="Total Identities"
+                value={latest?.total_identities ?? 0}
+                icon="🧩"
+                color="blue"
+                trend={trendDir(latest?.total_identities ?? 0, prev?.total_identities)}
+                trendDelta={prev ? (latest?.total_identities ?? 0) - prev.total_identities : undefined}
+                trendNeutral
+                onClick={() => navigate('/identities')}
+              />
+              {trends.length >= 2 && (
+                <div className="mt-1 px-3">
+                  <Sparkline data={trendSeries('total')} color="#3b82f6" width={200} height={28} />
+                </div>
+              )}
+            </div>
+            <div>
+              <StatsCard
+                title="Critical"
+                value={latest?.critical_count ?? 0}
+                icon="🔴"
+                color="red"
+                trend={(() => {
+                  const d = trendDir(latest?.critical_count ?? 0, prev?.critical_count);
+                  return d;
+                })()}
+                trendDelta={prev ? (latest?.critical_count ?? 0) - prev.critical_count : undefined}
+                onClick={() => navigate('/identities?risk_level=critical')}
+              />
+              {trends.length >= 2 && (
+                <div className="mt-1 px-3">
+                  <Sparkline data={trendSeries('critical')} color="#ef4444" width={200} height={28} />
+                </div>
+              )}
+            </div>
+            <div>
+              <StatsCard
+                title="High"
+                value={latest?.high_count ?? 0}
+                icon="🟠"
+                color="yellow"
+                trend={trendDir(latest?.high_count ?? 0, prev?.high_count)}
+                trendDelta={prev ? (latest?.high_count ?? 0) - prev.high_count : undefined}
+                onClick={() => navigate('/identities?risk_level=high')}
+              />
+              {trends.length >= 2 && (
+                <div className="mt-1 px-3">
+                  <Sparkline data={trendSeries('high')} color="#f97316" width={200} height={28} />
+                </div>
+              )}
+            </div>
+            <div>
+              <StatsCard
+                title="Discovery Runs"
+                value={stats?.total_discovery_runs ?? 0}
+                icon="🔄"
+                color="gray"
+                onClick={() => setShowRuns(!showRuns)}
+              />
+              {trends.length >= 2 && (
+                <div className="mt-1 px-3">
+                  <Sparkline data={trendSeries('dormant')} color="#6b7280" width={200} height={28} />
+                  <div className="text-[10px] text-gray-400 mt-0.5">Dormant trend</div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Discovery Runs Panel (toggled by clicking Discovery Runs card) */}

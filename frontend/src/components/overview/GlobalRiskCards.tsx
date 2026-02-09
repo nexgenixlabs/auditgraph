@@ -1,4 +1,5 @@
 import React from 'react';
+import Sparkline from '../Sparkline';
 
 interface RiskCounts {
   critical: number;
@@ -12,9 +13,18 @@ interface RiskCounts {
 interface GlobalRiskCardsProps {
   counts: RiskCounts;
   onCardClick?: (level: string) => void;
+  trends?: { critical: number[]; high: number[]; medium: number[]; low: number[]; info: number[] };
 }
 
-export default function GlobalRiskCards({ counts, onCardClick }: GlobalRiskCardsProps) {
+const SPARKLINE_COLORS: Record<string, string> = {
+  critical: '#dc2626',
+  high: '#ea580c',
+  medium: '#ca8a04',
+  low: '#16a34a',
+  info: '#2563eb',
+};
+
+export default function GlobalRiskCards({ counts, onCardClick, trends }: GlobalRiskCardsProps) {
   const cards = [
     {
       level: 'critical',
@@ -108,6 +118,16 @@ export default function GlobalRiskCards({ counts, onCardClick }: GlobalRiskCards
           <div className={`text-xs ${card.textColor} opacity-60 mt-2`}>
             {((card.count / (counts.total || 1)) * 100).toFixed(1)}% of total
           </div>
+          {trends && trends[card.level as keyof typeof trends] && trends[card.level as keyof typeof trends].length >= 2 && (
+            <div className="mt-2">
+              <Sparkline
+                data={trends[card.level as keyof typeof trends]}
+                color={SPARKLINE_COLORS[card.level] || '#6b7280'}
+                width={140}
+                height={24}
+              />
+            </div>
+          )}
         </button>
       ))}
     </div>

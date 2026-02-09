@@ -766,6 +766,70 @@ def get_drift_history():
         db.close()
 
 
+def get_trends():
+    """
+    Historical trend data: risk counts per discovery run for the last N completed runs.
+    Used by frontend sparklines to visualize risk level trends over time.
+
+    Query params:
+        limit: Number of runs to return (default 10, max 30)
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        limit = request.args.get('limit', 10, type=int)
+        limit = min(max(limit, 2), 30)
+
+        cursor.execute(
+            """
+            SELECT
+                dr.id,
+                dr.completed_at,
+                dr.total_identities,
+                dr.critical_count,
+                dr.high_count,
+                dr.medium_count,
+                dr.low_count,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM identities i
+                    WHERE i.discovery_run_id = dr.id
+                      AND i.activity_status IN ('stale', 'inactive')
+                ), 0) as dormant_count
+            FROM discovery_runs dr
+            WHERE dr.status = 'completed'
+            ORDER BY dr.id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cursor.fetchall()
+
+        # Reverse to chronological order (oldest first) for sparkline rendering
+        runs = []
+        for r in reversed(rows):
+            runs.append({
+                "run_id": r[0],
+                "date": r[1].isoformat() if r[1] else None,
+                "total": r[2] or 0,
+                "critical": r[3] or 0,
+                "high": r[4] or 0,
+                "medium": r[5] or 0,
+                "low": r[6] or 0,
+                "dormant": r[7] or 0,
+            })
+
+        return jsonify({
+            "count": len(runs),
+            "runs": runs,
+        })
+
+    finally:
+        cursor.close()
+        db.close()
+
+
 def get_app_settings():
     """Return all settings plus connection/scheduler status."""
     db = _db()

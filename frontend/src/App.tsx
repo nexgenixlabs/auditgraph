@@ -75,6 +75,7 @@ const Overview: React.FC = () => {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
   const [insights, setInsights] = useState<any>(null);
+  const [trends, setTrends] = useState<any>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,10 +99,18 @@ const Overview: React.FC = () => {
         ]);
         const insightsJson = insightsRes.ok ? await insightsRes.json() : null;
 
+        // Fetch trend data for sparklines (non-blocking)
+        let trendsJson = null;
+        try {
+          const trendsRes = await fetch('/api/trends');
+          if (trendsRes.ok) trendsJson = await trendsRes.json();
+        } catch { /* ignore */ }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
           setInsights(insightsJson);
+          setTrends(trendsJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load overview data');
@@ -130,6 +139,18 @@ const Overview: React.FC = () => {
 
     return { critical, high, medium, low, info, total };
   }, [summary]);
+
+  // Compute trend arrays for sparklines
+  const trendArrays = useMemo(() => {
+    if (!trends?.runs || trends.runs.length < 2) return undefined;
+    return {
+      critical: trends.runs.map((r: any) => r.critical),
+      high: trends.runs.map((r: any) => r.high),
+      medium: trends.runs.map((r: any) => r.medium),
+      low: trends.runs.map((r: any) => r.low),
+      info: trends.runs.map((r: any) => r.total - r.critical - r.high - r.medium - r.low),
+    };
+  }, [trends]);
 
   // Compute cloud risk data (currently Azure only)
   const cloudData = useMemo(() => {
@@ -215,7 +236,7 @@ const Overview: React.FC = () => {
       {/* Section 1: Global Risk Cards */}
       <div>
         <div className="text-sm font-semibold text-gray-700 mb-3">Global Risk Summary</div>
-        <GlobalRiskCards counts={riskCounts} onCardClick={handleRiskCardClick} />
+        <GlobalRiskCards counts={riskCounts} onCardClick={handleRiskCardClick} trends={trendArrays} />
       </div>
 
       {/* Section 2: Cloud Risk Comparison */}
@@ -329,6 +350,17 @@ function NavLinks() {
         }`}
       >
         Reports
+      </Link>
+
+      <Link
+        to="/drift"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/drift')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Drift
       </Link>
 
       <Link

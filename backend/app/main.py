@@ -23,6 +23,7 @@ from app.api.handlers import (
     get_report_data,
     get_latest_drift,
     get_drift_history,
+    get_trends,
     get_app_settings,
     save_app_settings,
     test_email,
@@ -173,6 +174,13 @@ def create_app():
     @app.get("/api/drift/history")
     def drift_history():
         return get_drift_history()
+
+    # -----------------------
+    # Historical Trends (Phase 20)
+    # -----------------------
+    @app.get("/api/trends")
+    def trends():
+        return get_trends()
 
     # -----------------------
     # Settings (Phase 15)
