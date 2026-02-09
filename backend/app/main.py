@@ -3,6 +3,7 @@ from flask_cors import CORS
 from datetime import datetime
 import atexit
 
+from app.api.auth import auth_middleware, require_role
 from app.api.handlers import (
     get_stats,
     get_identities,
@@ -49,12 +50,23 @@ from app.api.handlers import (
     mark_notification_handler,
     mark_all_notifications_read_handler,
     delete_notification_handler,
+    auth_login,
+    auth_refresh,
+    auth_logout,
+    auth_me,
+    get_users_list,
+    create_user_handler,
+    update_user_handler,
+    delete_user_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
 def create_app():
     app = Flask(__name__)
     CORS(app, resources={r"/*": {"origins": "*"}})
+
+    # Authentication middleware (Phase 31)
+    app.before_request(auth_middleware)
 
     # -----------------------
     # Health
@@ -67,6 +79,48 @@ def create_app():
             "status": "healthy",
             "timestamp": datetime.utcnow().isoformat()
         })
+
+    # -----------------------
+    # Authentication (Phase 31)
+    # -----------------------
+    @app.post("/api/auth/login")
+    def login():
+        return auth_login()
+
+    @app.post("/api/auth/refresh")
+    def refresh():
+        return auth_refresh()
+
+    @app.post("/api/auth/logout")
+    def logout():
+        return auth_logout()
+
+    @app.get("/api/auth/me")
+    def me():
+        return auth_me()
+
+    # -----------------------
+    # User Management (Phase 31 - Admin only)
+    # -----------------------
+    @app.get("/api/users")
+    @require_role('admin')
+    def users_list():
+        return get_users_list()
+
+    @app.post("/api/users")
+    @require_role('admin')
+    def users_create():
+        return create_user_handler()
+
+    @app.put("/api/users/<int:user_id>")
+    @require_role('admin')
+    def users_update(user_id):
+        return update_user_handler(user_id)
+
+    @app.delete("/api/users/<int:user_id>")
+    @require_role('admin')
+    def users_delete(user_id):
+        return delete_user_handler(user_id)
 
     # -----------------------
     # Summary endpoints
@@ -157,6 +211,7 @@ def create_app():
         return get_discovery_runs()
 
     @app.post("/api/runs/trigger")
+    @require_role('admin')
     def runs_trigger():
         return trigger_discovery()
 
@@ -204,6 +259,7 @@ def create_app():
         return get_remediation_status(identity_id)
 
     @app.post("/api/identities/<identity_id>/remediation-action")
+    @require_role('auditor', 'admin')
     def identity_remediation_action(identity_id):
         return post_remediation_action(identity_id)
 
@@ -215,6 +271,7 @@ def create_app():
     # Bulk Operations (Phase 25)
     # -----------------------
     @app.post("/api/bulk/remediation")
+    @require_role('auditor', 'admin')
     def bulk_remediation():
         return post_bulk_remediation()
 
@@ -233,40 +290,46 @@ def create_app():
         return get_trends()
 
     # -----------------------
-    # Settings (Phase 15)
+    # Settings (Phase 15 - Admin only for writes)
     # -----------------------
     @app.get("/api/settings")
     def app_settings():
         return get_app_settings()
 
     @app.post("/api/settings")
+    @require_role('admin')
     def app_settings_save():
         return save_app_settings()
 
     @app.post("/api/settings/test-email")
+    @require_role('admin')
     def settings_test_email():
         return test_email()
 
     # -----------------------
-    # Webhooks (Phase 28)
+    # Webhooks (Phase 28 - Admin only for writes)
     # -----------------------
     @app.get("/api/webhooks")
     def webhooks_list():
         return get_webhooks_list()
 
     @app.post("/api/webhooks")
+    @require_role('admin')
     def webhooks_create():
         return create_webhook()
 
     @app.put("/api/webhooks/<int:webhook_id>")
+    @require_role('admin')
     def webhooks_update(webhook_id):
         return update_webhook(webhook_id)
 
     @app.delete("/api/webhooks/<int:webhook_id>")
+    @require_role('admin')
     def webhooks_delete(webhook_id):
         return delete_webhook(webhook_id)
 
     @app.post("/api/webhooks/<int:webhook_id>/test")
+    @require_role('admin')
     def webhooks_test(webhook_id):
         return test_webhook_endpoint(webhook_id)
 
@@ -275,25 +338,29 @@ def create_app():
         return get_webhook_deliveries(webhook_id)
 
     # -----------------------
-    # Custom Risk Rules (Phase 29)
+    # Custom Risk Rules (Phase 29 - Admin only for writes)
     # -----------------------
     @app.get("/api/risk-rules")
     def risk_rules_list():
         return get_risk_rules_list()
 
     @app.post("/api/risk-rules")
+    @require_role('admin')
     def risk_rules_create():
         return create_risk_rule()
 
     @app.put("/api/risk-rules/<int:rule_id>")
+    @require_role('admin')
     def risk_rules_update(rule_id):
         return update_risk_rule(rule_id)
 
     @app.delete("/api/risk-rules/<int:rule_id>")
+    @require_role('admin')
     def risk_rules_delete(rule_id):
         return delete_risk_rule(rule_id)
 
     @app.post("/api/risk-rules/preview")
+    @require_role('admin')
     def risk_rules_preview():
         return preview_risk_rule()
 
@@ -334,6 +401,14 @@ def create_app():
     if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         start_scheduler()
         atexit.register(stop_scheduler)
+
+    # Ensure default admin user exists on first startup
+    from app.database import Database
+    db = Database()
+    try:
+        db.ensure_default_admin()
+    finally:
+        db.close()
 
     return app
 

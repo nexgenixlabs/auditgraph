@@ -18,6 +18,7 @@ import {
   Routes,
   Route,
   Link,
+  Navigate,
   useLocation,
   useNavigate,
 } from 'react-router-dom';
@@ -31,6 +32,7 @@ import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
 import IdentityComparison from './pages/IdentityComparison';
 import NotificationCenter from './pages/NotificationCenter';
+import Login from './pages/Login';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -40,6 +42,7 @@ import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import StaleDataBanner from './components/StaleDataBanner';
 import { ToastProvider } from './components/ToastProvider';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useTheme } from './hooks/useTheme';
 
 // ============================================================
@@ -258,7 +261,30 @@ const Overview: React.FC = () => {
   );
 };
 
-function App() {
+function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode; requiredRole?: string }) {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-16 text-center">
+        <div className="animate-spin h-8 w-8 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (requiredRole === 'admin' && user.role !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+
+  return <>{children}</>;
+}
+
+function AppContent() {
+  const { user, loading } = useAuth();
   const [searchOpen, setSearchOpen] = useState(false);
   const { dark, toggle: toggleTheme } = useTheme();
 
@@ -273,53 +299,83 @@ function App() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin h-10 w-10 border-3 border-blue-600 border-t-transparent rounded-full" />
+      </div>
+    );
+  }
+
+  return (
+    <ToastProvider>
+      <Routes>
+        {/* Login route - no nav bar */}
+        <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
+
+        {/* All other routes - with nav bar, protected */}
+        <Route path="/*" element={
+          <ProtectedRoute>
+            <div className="App">
+              {/* Navigation Bar */}
+              <nav className="bg-white shadow-lg border-b-2 border-blue-600">
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                  <div className="flex items-center justify-between h-20">
+                    <div className="flex items-center gap-8">
+                      {/* Logo & Brand */}
+                      <Link to="/" className="flex items-center gap-3 hover:opacity-80 transition">
+                        <img
+                          src="/auditgraph-logo.png"
+                          alt="AuditGraph Logo"
+                          className="h-16 w-auto"
+                        />
+                        <div>
+                          <h1 className="text-2xl font-bold text-gray-900">AuditGraph</h1>
+                          <p className="text-xs text-gray-500 font-medium">Map. Monitor. Secure.</p>
+                        </div>
+                      </Link>
+
+                      {/* Navigation Links */}
+                      <NavLinks onSearchOpen={() => setSearchOpen(true)} dark={dark} onToggleTheme={toggleTheme} />
+                    </div>
+                  </div>
+                </div>
+              </nav>
+
+              {/* Global Search Modal */}
+              <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
+
+              {/* Page Content */}
+              <Routes>
+                <Route path="/" element={<ErrorBoundary><Overview /></ErrorBoundary>} />
+                <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
+                <Route path="/identities" element={<ErrorBoundary><Identities /></ErrorBoundary>} />
+                <Route path="/identities/compare" element={<ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
+                <Route path="/identities/:id" element={<ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
+                <Route path="/reports" element={<ErrorBoundary><Reports /></ErrorBoundary>} />
+                <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
+                <Route path="/settings" element={
+                  <ProtectedRoute requiredRole="admin">
+                    <ErrorBoundary><Settings /></ErrorBoundary>
+                  </ProtectedRoute>
+                } />
+                <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
+                <Route path="/notifications" element={<ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
+              </Routes>
+            </div>
+          </ProtectedRoute>
+        } />
+      </Routes>
+    </ToastProvider>
+  );
+}
+
+function App() {
   return (
     <Router>
-      <ToastProvider>
-      <div className="App">
-        {/* Navigation Bar */}
-        <nav className="bg-white shadow-lg border-b-2 border-blue-600">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center justify-between h-20">
-              <div className="flex items-center gap-8">
-                {/* Logo & Brand */}
-                <Link to="/" className="flex items-center gap-3 hover:opacity-80 transition">
-                  <img
-                    src="/auditgraph-logo.png"
-                    alt="AuditGraph Logo"
-                    className="h-16 w-auto"
-                  />
-                  <div>
-                    <h1 className="text-2xl font-bold text-gray-900">AuditGraph</h1>
-                    <p className="text-xs text-gray-500 font-medium">Map. Monitor. Secure.</p>
-                  </div>
-                </Link>
-
-                {/* Navigation Links */}
-                <NavLinks onSearchOpen={() => setSearchOpen(true)} dark={dark} onToggleTheme={toggleTheme} />
-              </div>
-            </div>
-          </div>
-        </nav>
-
-        {/* Global Search Modal */}
-        <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
-
-        {/* Page Content */}
-        <Routes>
-          <Route path="/" element={<ErrorBoundary><Overview /></ErrorBoundary>} />
-          <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
-          <Route path="/identities" element={<ErrorBoundary><Identities /></ErrorBoundary>} />
-          <Route path="/identities/compare" element={<ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
-          <Route path="/identities/:id" element={<ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-          <Route path="/reports" element={<ErrorBoundary><Reports /></ErrorBoundary>} />
-          <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
-          <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
-          <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
-          <Route path="/notifications" element={<ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
-        </Routes>
-      </div>
-      </ToastProvider>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
     </Router>
   );
 }
@@ -327,6 +383,7 @@ function App() {
 function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => void; dark: boolean; onToggleTheme: () => void }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const { user, logout, isAdmin } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
@@ -351,6 +408,12 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
   };
 
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent);
+
+  const ROLE_COLORS: Record<string, string> = {
+    admin: 'bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-400',
+    auditor: 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+    viewer: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
+  };
 
   return (
     <div className="flex items-center space-x-1">
@@ -409,16 +472,18 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         Drift
       </Link>
 
-      <Link
-        to="/settings"
-        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-          isActive('/settings')
-            ? 'bg-blue-600 text-white'
-            : 'text-gray-700 hover:bg-gray-100'
-        }`}
-      >
-        Settings
-      </Link>
+      {isAdmin && (
+        <Link
+          to="/settings"
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+            isActive('/settings')
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-700 hover:bg-gray-100'
+          }`}
+        >
+          Settings
+        </Link>
+      )}
 
       <Link
         to="/activity"
@@ -475,6 +540,27 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
           </svg>
         )}
       </button>
+
+      {/* User menu */}
+      {user && (
+        <div className="ml-2 flex items-center gap-2 pl-2 border-l border-gray-200 dark:border-gray-600">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
+            {user.display_name}
+            <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${ROLE_COLORS[user.role] || ROLE_COLORS.viewer}`}>
+              {user.role}
+            </span>
+          </span>
+          <button
+            onClick={() => { logout(); navigate('/login'); }}
+            className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-gray-100 transition"
+            title="Sign out"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

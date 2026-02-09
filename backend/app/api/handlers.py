@@ -5,13 +5,15 @@ This module contains all HTTP endpoint handler functions for the AuditGraph API.
 """
 
 import os
+import bcrypt
 from datetime import datetime
-from flask import jsonify, request
+from flask import jsonify, request, g
 from dotenv import load_dotenv
 import json
 
 from app.database import Database
 from app.engines.drift_detector import DriftDetector
+from app.api.auth import generate_access_token, generate_refresh_token, hash_refresh_token
 
 load_dotenv(".env.local")
 load_dotenv()
@@ -3162,5 +3164,311 @@ def get_remediation_dashboard_summary():
     try:
         summary = db.get_remediation_summary()
         return jsonify(summary)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 31: Authentication & User Management
+# ================================================================
+
+VALID_ROLES = {'admin', 'auditor', 'viewer'}
+
+
+def auth_login():
+    """POST /api/auth/login — authenticate with username/password."""
+    data = request.get_json(silent=True) or {}
+    username = str(data.get('username', '')).strip()
+    password = str(data.get('password', ''))
+
+    if not username or not password:
+        return jsonify({'error': 'Username and password are required'}), 400
+
+    db = _db()
+    try:
+        user = db.get_user_by_username(username)
+
+        if not user or not user.get('enabled'):
+            try:
+                db.log_activity('auth_failed', f'Login failed for "{username}": user not found or disabled',
+                                {'username': username, 'ip': request.remote_addr})
+            except Exception:
+                pass
+            return jsonify({'error': 'Invalid credentials'}), 401
+
+        if not bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            try:
+                db.log_activity('auth_failed', f'Login failed for "{username}": wrong password',
+                                {'username': username, 'ip': request.remote_addr})
+            except Exception:
+                pass
+            return jsonify({'error': 'Invalid credentials'}), 401
+
+        access_token = generate_access_token(user)
+        refresh_token = generate_refresh_token(user)
+        db.update_last_login(user['id'])
+
+        try:
+            db.log_activity('auth_login', f'User "{username}" logged in',
+                            {'user_id': user['id'], 'role': user['role'], 'ip': request.remote_addr})
+        except Exception:
+            pass
+
+        return jsonify({
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'display_name': user['display_name'],
+                'role': user['role'],
+            }
+        })
+    finally:
+        db.close()
+
+
+def auth_refresh():
+    """POST /api/auth/refresh — exchange refresh token for new tokens."""
+    data = request.get_json(silent=True) or {}
+    raw_refresh = data.get('refresh_token', '')
+
+    if not raw_refresh:
+        return jsonify({'error': 'Refresh token required'}), 400
+
+    db = _db()
+    try:
+        token_hash = hash_refresh_token(raw_refresh)
+        token_record = db.get_refresh_token(token_hash)
+
+        if not token_record or token_record.get('revoked'):
+            return jsonify({'error': 'Invalid refresh token'}), 401
+
+        if token_record['expires_at'].replace(tzinfo=None) < datetime.utcnow():
+            return jsonify({'error': 'Refresh token expired'}), 401
+
+        user = db.get_user_by_id(token_record['user_id'])
+        if not user or not user.get('enabled'):
+            return jsonify({'error': 'User disabled'}), 401
+
+        db.revoke_refresh_token(token_hash)
+
+        access_token = generate_access_token(user)
+        new_refresh = generate_refresh_token(user)
+
+        return jsonify({
+            'access_token': access_token,
+            'refresh_token': new_refresh,
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'display_name': user['display_name'],
+                'role': user['role'],
+            }
+        })
+    finally:
+        db.close()
+
+
+def auth_logout():
+    """POST /api/auth/logout — revoke refresh token."""
+    data = request.get_json(silent=True) or {}
+    raw_refresh = data.get('refresh_token', '')
+
+    db = _db()
+    try:
+        if raw_refresh:
+            db.revoke_refresh_token(hash_refresh_token(raw_refresh))
+
+        user = getattr(g, 'current_user', None)
+        if user:
+            try:
+                db.log_activity('auth_logout', f'User "{user["username"]}" logged out',
+                                {'user_id': user['id']})
+            except Exception:
+                pass
+
+        return jsonify({'message': 'Logged out'})
+    finally:
+        db.close()
+
+
+def auth_me():
+    """GET /api/auth/me — return current authenticated user profile."""
+    user = g.current_user
+    db = _db()
+    try:
+        full_user = db.get_user_by_id(user['id'])
+        if not full_user:
+            return jsonify({'error': 'User not found'}), 404
+        return jsonify({'user': full_user})
+    finally:
+        db.close()
+
+
+def get_users_list():
+    """GET /api/users — list all users (admin only)."""
+    db = _db()
+    try:
+        users = db.get_users()
+        return jsonify({'users': users})
+    finally:
+        db.close()
+
+
+def create_user_handler():
+    """POST /api/users — create a new user (admin only)."""
+    data = request.get_json(silent=True) or {}
+    username = str(data.get('username', '')).strip().lower()
+    display_name = str(data.get('display_name', '')).strip()
+    password = str(data.get('password', ''))
+    role = str(data.get('role', 'viewer')).strip().lower()
+
+    errors = []
+    if not username:
+        errors.append('username is required')
+    elif len(username) < 3:
+        errors.append('username must be at least 3 characters')
+    elif len(username) > 100:
+        errors.append('username must be 100 characters or less')
+
+    if not display_name:
+        errors.append('display_name is required')
+    elif len(display_name) > 255:
+        errors.append('display_name must be 255 characters or less')
+
+    if not password:
+        errors.append('password is required')
+    elif len(password) < 8:
+        errors.append('password must be at least 8 characters')
+
+    if role not in VALID_ROLES:
+        errors.append(f'role must be one of: {", ".join(sorted(VALID_ROLES))}')
+
+    if errors:
+        return jsonify({'error': '; '.join(errors)}), 400
+
+    db = _db()
+    try:
+        existing = db.get_user_by_username(username)
+        if existing:
+            return jsonify({'error': f'Username "{username}" already exists'}), 409
+
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        current_user = getattr(g, 'current_user', None)
+        created_by = current_user['id'] if current_user else None
+
+        user = db.create_user(username, hashed, display_name, role, created_by)
+
+        try:
+            db.log_activity('user_created', f'User "{username}" created with role "{role}"',
+                            {'user_id': user['id'], 'role': role, 'created_by': created_by})
+        except Exception:
+            pass
+
+        return jsonify({'user': user, 'message': 'User created'}), 201
+    finally:
+        db.close()
+
+
+def update_user_handler(user_id):
+    """PUT /api/users/<id> — update a user (admin only)."""
+    data = request.get_json(silent=True) or {}
+
+    db = _db()
+    try:
+        existing = db.get_user_by_id(user_id)
+        if not existing:
+            return jsonify({'error': 'User not found'}), 404
+
+        updates = {}
+        errors = []
+
+        if 'display_name' in data:
+            dn = str(data['display_name']).strip()
+            if not dn:
+                errors.append('display_name cannot be empty')
+            else:
+                updates['display_name'] = dn
+
+        if 'role' in data:
+            role = str(data['role']).strip().lower()
+            if role not in VALID_ROLES:
+                errors.append(f'role must be one of: {", ".join(sorted(VALID_ROLES))}')
+            elif existing['role'] == 'admin' and role != 'admin':
+                if db.count_admins() <= 1:
+                    errors.append('Cannot demote the last admin user')
+                else:
+                    updates['role'] = role
+            else:
+                updates['role'] = role
+
+        if 'enabled' in data:
+            enabled = bool(data['enabled'])
+            if existing['role'] == 'admin' and not enabled:
+                if db.count_admins() <= 1:
+                    errors.append('Cannot disable the last admin user')
+                else:
+                    updates['enabled'] = enabled
+            else:
+                updates['enabled'] = enabled
+
+        if 'password' in data and data['password']:
+            pwd = str(data['password'])
+            if len(pwd) < 8:
+                errors.append('password must be at least 8 characters')
+            else:
+                updates['password_hash'] = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        if errors:
+            return jsonify({'error': '; '.join(errors)}), 400
+
+        if not updates:
+            return jsonify({'user': existing, 'message': 'No changes'})
+
+        user = db.update_user(user_id, **updates)
+
+        if 'password_hash' in updates:
+            db.revoke_all_user_tokens(user_id)
+
+        try:
+            changed_fields = [k for k in updates if k != 'password_hash']
+            if 'password_hash' in updates:
+                changed_fields.append('password')
+            db.log_activity('user_updated', f'User "{existing["username"]}" updated: {", ".join(changed_fields)}',
+                            {'user_id': user_id, 'changes': changed_fields})
+        except Exception:
+            pass
+
+        return jsonify({'user': user, 'message': 'User updated'})
+    finally:
+        db.close()
+
+
+def delete_user_handler(user_id):
+    """DELETE /api/users/<id> — delete a user (admin only)."""
+    db = _db()
+    try:
+        existing = db.get_user_by_id(user_id)
+        if not existing:
+            return jsonify({'error': 'User not found'}), 404
+
+        current_user = getattr(g, 'current_user', None)
+        if current_user and current_user['id'] == user_id:
+            return jsonify({'error': 'Cannot delete your own account'}), 400
+
+        if existing['role'] == 'admin' and db.count_admins() <= 1:
+            return jsonify({'error': 'Cannot delete the last admin user'}), 400
+
+        db.revoke_all_user_tokens(user_id)
+        db.delete_user(user_id)
+
+        try:
+            db.log_activity('user_deleted', f'User "{existing["username"]}" deleted',
+                            {'deleted_user_id': user_id, 'deleted_by': current_user['id'] if current_user else None})
+        except Exception:
+            pass
+
+        return jsonify({'message': f'User "{existing["username"]}" deleted'})
     finally:
         db.close()

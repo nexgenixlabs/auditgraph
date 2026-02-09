@@ -2648,3 +2648,218 @@ class Database:
         self.conn.commit()
         cursor.close()
         return count
+
+    # ================================================================
+    # Phase 31: Authentication & RBAC
+    # ================================================================
+
+    def _ensure_users_table(self):
+        """Create users and refresh_tokens tables if they don't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(100) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                display_name VARCHAR(255) NOT NULL,
+                role VARCHAR(20) NOT NULL DEFAULT 'viewer',
+                enabled BOOLEAN DEFAULT true,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                last_login_at TIMESTAMPTZ,
+                created_by INTEGER
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                token_hash VARCHAR(255) NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                revoked BOOLEAN DEFAULT false
+            )
+        """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash)")
+        self.conn.commit()
+        cursor.close()
+
+    def create_user(self, username, password_hash, display_name, role='viewer', created_by=None):
+        """Create a new user. Returns user dict (without password_hash)."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO users (username, password_hash, display_name, role, created_by)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by
+        """, (username, password_hash, display_name, role, created_by))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        for ts in ('created_at', 'updated_at', 'last_login_at'):
+            if row.get(ts):
+                row[ts] = row[ts].isoformat()
+        return row
+
+    def get_user_by_username(self, username):
+        """Get user by username. Returns full dict INCLUDING password_hash (for auth)."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_login_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def get_user_by_id(self, user_id):
+        """Get user by ID. Returns user dict WITHOUT password_hash."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by
+            FROM users WHERE id = %s
+        """, (user_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_login_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def get_users(self):
+        """Get all users. Returns list of user dicts WITHOUT password_hash."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by
+            FROM users ORDER BY id
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            for ts in ('created_at', 'updated_at', 'last_login_at'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+        return rows
+
+    def update_user(self, user_id, **kwargs):
+        """Update user fields. Allowed: display_name, role, enabled, password_hash."""
+        self._ensure_users_table()
+        allowed = {'display_name', 'role', 'enabled', 'password_hash'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return self.get_user_by_id(user_id)
+        set_parts = []
+        params = []
+        for k, v in updates.items():
+            set_parts.append(f"{k} = %s")
+            params.append(v)
+        set_parts.append("updated_at = NOW()")
+        params.append(user_id)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE users SET {', '.join(set_parts)}
+            WHERE id = %s
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_login_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def delete_user(self, user_id):
+        """Delete user. Returns True if deleted."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return deleted
+
+    def count_admins(self):
+        """Count active admin users."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = true")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        return count
+
+    def update_last_login(self, user_id):
+        """Update last_login_at timestamp."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE users SET last_login_at = NOW() WHERE id = %s", (user_id,))
+        self.conn.commit()
+        cursor.close()
+
+    def save_refresh_token(self, user_id, token_hash, expires_at):
+        """Save a hashed refresh token."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+            VALUES (%s, %s, %s)
+        """, (user_id, token_hash, expires_at))
+        self.conn.commit()
+        cursor.close()
+
+    def get_refresh_token(self, token_hash):
+        """Look up a refresh token by its hash."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM refresh_tokens WHERE token_hash = %s", (token_hash,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def revoke_refresh_token(self, token_hash):
+        """Mark a refresh token as revoked."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE refresh_tokens SET revoked = true WHERE token_hash = %s", (token_hash,))
+        self.conn.commit()
+        cursor.close()
+
+    def revoke_all_user_tokens(self, user_id):
+        """Revoke all refresh tokens for a user."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE refresh_tokens SET revoked = true WHERE user_id = %s AND revoked = false", (user_id,))
+        self.conn.commit()
+        cursor.close()
+
+    def ensure_default_admin(self):
+        """Create default admin user if no users exist."""
+        import bcrypt as bcrypt_lib
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        if count == 0:
+            username = os.getenv('ADMIN_USERNAME', 'admin')
+            password = os.getenv('ADMIN_PASSWORD', 'changeme')
+            hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
+            self.create_user(username, hashed, 'Administrator', 'admin')
+            try:
+                self.log_activity('auth', f'Default admin user "{username}" created on first startup', {'username': username})
+            except Exception:
+                pass

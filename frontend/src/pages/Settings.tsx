@@ -442,6 +442,104 @@ export default function Settings() {
     }));
   }
 
+  // User management state
+  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; }
+  interface UserFormData { username: string; display_name: string; password: string; role: string; }
+
+  const [users, setUsers] = useState<UserData[]>([]);
+  const [userModal, setUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserData | null>(null);
+  const [userForm, setUserForm] = useState<UserFormData>({ username: '', display_name: '', password: '', role: 'viewer' });
+  const [userSaving, setUserSaving] = useState(false);
+  const [userError, setUserError] = useState<string | null>(null);
+  const [userDeleteConfirm, setUserDeleteConfirm] = useState<number | null>(null);
+
+  const loadUsers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        setUsers(data.users || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadUsers(); }, [loadUsers]);
+
+  function openUserModal(u?: UserData) {
+    if (u) {
+      setEditingUser(u);
+      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role });
+    } else {
+      setEditingUser(null);
+      setUserForm({ username: '', display_name: '', password: '', role: 'viewer' });
+    }
+    setUserError(null);
+    setUserModal(true);
+  }
+
+  async function handleUserSave() {
+    setUserSaving(true);
+    setUserError(null);
+    try {
+      const method = editingUser ? 'PUT' : 'POST';
+      const url = editingUser ? `/api/users/${editingUser.id}` : '/api/users';
+      const payload: Record<string, unknown> = {
+        display_name: userForm.display_name,
+        role: userForm.role,
+      };
+      if (!editingUser) {
+        payload.username = userForm.username;
+        payload.password = userForm.password;
+      } else if (userForm.password) {
+        payload.password = userForm.password;
+      }
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      setUserModal(false);
+      setEditingUser(null);
+      loadUsers();
+    } catch (e: unknown) {
+      setUserError(e instanceof Error ? e.message : 'Failed to save user');
+    } finally {
+      setUserSaving(false);
+    }
+  }
+
+  async function handleUserDelete(id: number) {
+    try {
+      const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        setUserError(data.error || 'Delete failed');
+        return;
+      }
+      setUserDeleteConfirm(null);
+      loadUsers();
+    } catch { /* ignore */ }
+  }
+
+  async function handleToggleUser(u: UserData) {
+    try {
+      const res = await fetch(`/api/users/${u.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !u.enabled }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setUserError(data.error || 'Toggle failed');
+        return;
+      }
+      loadUsers();
+    } catch { /* ignore */ }
+  }
+
   // Test email state
   const [testingEmail, setTestingEmail] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -1016,6 +1114,112 @@ export default function Settings() {
             </p>
           </div>
 
+          {/* Section 7: User Management */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">User Management</div>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Manage user accounts and role-based access control
+                </p>
+              </div>
+              <button
+                onClick={() => openUserModal()}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+              >
+                + Add User
+              </button>
+            </div>
+
+            {userError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                {userError}
+                <button onClick={() => setUserError(null)} className="ml-2 font-medium underline">Dismiss</button>
+              </div>
+            )}
+
+            {users.length === 0 ? (
+              <p className="text-sm text-gray-400 py-4 text-center">No users configured</p>
+            ) : (
+              <div className="space-y-2">
+                {users.map(u => (
+                  <div key={u.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600 uppercase">
+                        {u.display_name.charAt(0)}
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                          {u.display_name}
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
+                            u.role === 'admin' ? 'bg-red-50 text-red-700' :
+                            u.role === 'auditor' ? 'bg-blue-50 text-blue-700' :
+                            'bg-gray-100 text-gray-600'
+                          }`}>
+                            {u.role}
+                          </span>
+                          {!u.enabled && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          @{u.username}
+                          {u.last_login_at && <> &middot; Last login: {new Date(u.last_login_at).toLocaleDateString()}</>}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleToggleUser(u)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                          u.enabled ? 'bg-green-500' : 'bg-gray-300'
+                        }`}
+                        title={u.enabled ? 'Disable user' : 'Enable user'}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                          u.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                        }`} />
+                      </button>
+                      <button
+                        onClick={() => openUserModal(u)}
+                        className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition"
+                      >
+                        Edit
+                      </button>
+                      {userDeleteConfirm === u.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleUserDelete(u.id)}
+                            className="px-2 py-1 text-xs text-white bg-red-600 hover:bg-red-700 rounded transition"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setUserDeleteConfirm(null)}
+                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded transition"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setUserDeleteConfirm(u.id)}
+                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded transition"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-400">
+              Roles: Admin (full access), Auditor (read + remediation), Viewer (read-only). The last admin cannot be deleted or demoted.
+            </p>
+          </div>
+
           {/* Save button */}
           <div className="flex items-center gap-4">
             <button
@@ -1405,6 +1609,106 @@ export default function Settings() {
                 }`}
               >
                 {webhookSaving ? 'Saving...' : editingWebhook ? 'Update' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* User Add/Edit Modal */}
+      {userModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setUserModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="text-lg font-semibold text-gray-900">
+              {editingUser ? 'Edit User' : 'Add User'}
+            </div>
+
+            {userError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{userError}</div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
+              <input
+                type="text"
+                value={userForm.username}
+                onChange={e => setUserForm(prev => ({ ...prev, username: e.target.value }))}
+                disabled={!!editingUser}
+                placeholder="e.g., john.doe"
+                className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
+                  editingUser ? 'bg-gray-100 text-gray-500' : ''
+                }`}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+              <input
+                type="text"
+                value={userForm.display_name}
+                onChange={e => setUserForm(prev => ({ ...prev, display_name: e.target.value }))}
+                placeholder="e.g., John Doe"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Password {editingUser && <span className="font-normal text-gray-400">(leave blank to keep current)</span>}
+              </label>
+              <input
+                type="password"
+                value={userForm.password}
+                onChange={e => setUserForm(prev => ({ ...prev, password: e.target.value }))}
+                placeholder={editingUser ? 'Unchanged' : 'Minimum 8 characters'}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+              <div className="flex gap-2">
+                {['admin', 'auditor', 'viewer'].map(role => (
+                  <button
+                    key={role}
+                    onClick={() => setUserForm(prev => ({ ...prev, role }))}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                      userForm.role === role
+                        ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
+                          : role === 'auditor' ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-gray-600 text-white border-gray-600'
+                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    {role.charAt(0).toUpperCase() + role.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                {userForm.role === 'admin' ? 'Full access: settings, users, discovery, webhooks, rules'
+                  : userForm.role === 'auditor' ? 'Read + remediation actions, exports, reports'
+                  : 'Read-only: view dashboards, identities, reports'}
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setUserModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUserSave}
+                disabled={userSaving || !userForm.display_name || (!editingUser && (!userForm.username || userForm.password.length < 8))}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
+                  userSaving || !userForm.display_name || (!editingUser && (!userForm.username || userForm.password.length < 8))
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {userSaving ? 'Saving...' : editingUser ? 'Update' : 'Create'}
               </button>
             </div>
           </div>
