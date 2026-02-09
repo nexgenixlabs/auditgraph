@@ -8,6 +8,7 @@ import RiskMethodology from '../components/RiskMethodology';
 import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress } from '../components/dashboard';
 import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
+import { useToast } from '../components/ToastProvider';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -76,6 +77,7 @@ interface PostureResponse {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { addToast } = useToast();
 
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -256,6 +258,7 @@ export default function Dashboard() {
               try {
                 const res = await fetch('/api/runs/trigger', { method: 'POST' });
                 if (!res.ok) throw new Error('Trigger failed');
+                addToast('Discovery run started', 'success');
                 // Poll for completion
                 const poll = setInterval(async () => {
                   const runsRes = await fetch('/api/runs');
@@ -265,13 +268,15 @@ export default function Dashboard() {
                     if (latest?.status === 'completed') {
                       clearInterval(poll);
                       setDiscoveryRunning(false);
+                      addToast('Discovery completed! Refreshing...', 'success');
                       window.location.reload();
                     }
                   }
                 }, 5000);
                 // Safety timeout: stop polling after 10 minutes
-                setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); }, 600000);
-              } catch {
+                setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Discovery timed out. Check runs panel for status.', 'error'); }, 600000);
+              } catch (e: any) {
+                addToast(e?.message || 'Failed to trigger discovery run', 'error');
                 setDiscoveryRunning(false);
               }
             }}

@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { generateReport } from '../utils/pdfGenerator';
+import { useToast } from '../components/ToastProvider';
 
 export default function Reports() {
+  const { addToast } = useToast();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientName, setClientName] = useState('');
@@ -18,8 +20,11 @@ export default function Reports() {
       setPreviewData(data);
       generateReport(data, clientName || undefined);
       setLastGenerated(new Date().toLocaleString());
+      addToast('Report generated successfully', 'success');
     } catch (e: any) {
-      setError(e?.message || 'Failed to generate report');
+      const msg = e?.message || 'Failed to generate report';
+      setError(msg);
+      addToast(msg, 'error');
     } finally {
       setLoading(false);
     }

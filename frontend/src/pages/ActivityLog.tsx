@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useToast } from '../components/ToastProvider';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ function timeAgo(dateStr: string): string {
 // ── Component ──────────────────────────────────────────────────
 
 export default function ActivityLog() {
+  const { addToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
@@ -114,6 +116,7 @@ export default function ActivityLog() {
     a.download = `activity-log-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    addToast(`Exported ${entries.length} entries to CSV`, 'success');
   }
 
   return (

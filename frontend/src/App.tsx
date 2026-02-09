@@ -37,6 +37,7 @@ import {
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import StaleDataBanner from './components/StaleDataBanner';
+import { ToastProvider } from './components/ToastProvider';
 
 // ============================================================
 // Overview Page - Enterprise Risk Intelligence
@@ -270,6 +271,7 @@ function App() {
 
   return (
     <Router>
+      <ToastProvider>
       <div className="App">
         {/* Navigation Bar */}
         <nav className="bg-white shadow-lg border-b-2 border-blue-600">
@@ -311,6 +313,7 @@ function App() {
           <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
         </Routes>
       </div>
+      </ToastProvider>
     </Router>
   );
 }

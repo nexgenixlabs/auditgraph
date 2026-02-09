@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useToast } from '../components/ToastProvider';
 import { AccessGraphTab } from '../components/graph';
 import {
   type IdentityCategory, type RiskLevel,
@@ -403,6 +404,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
 
 export default function IdentityDetail() {
   const { id } = useParams<{ id: string }>();
+  const { addToast } = useToast();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -494,8 +496,13 @@ export default function IdentityDetail() {
             updated_at: result.updated_at,
           },
         }));
+        addToast(`Remediation marked as ${result.status}`, 'success');
+      } else {
+        addToast('Failed to update remediation status', 'error');
       }
-    } catch { /* silently fail */ }
+    } catch {
+      addToast('Failed to update remediation status', 'error');
+    }
     finally {
       setActionLoading(null);
     }

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useToast } from '../components/ToastProvider';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -78,6 +79,7 @@ function categoryLabel(cat: string) {
 // ── Component ──────────────────────────────────────────────────
 
 export default function DriftHistory() {
+  const { addToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reports, setReports] = useState<DriftReport[]>([]);
@@ -169,6 +171,7 @@ export default function DriftHistory() {
     a.download = `drift-history-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    addToast(`Exported ${reports.length} drift reports to CSV`, 'success');
   }
 
   // ── Loading ────────────────────────────────────────────────
