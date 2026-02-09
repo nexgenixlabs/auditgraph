@@ -31,6 +31,7 @@ from app.api.handlers import (
     get_remediation_status,
     post_remediation_action,
     get_remediation_dashboard_summary,
+    post_bulk_remediation,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -192,6 +193,13 @@ def create_app():
     @app.get("/api/remediation-summary")
     def remediation_summary():
         return get_remediation_dashboard_summary()
+
+    # -----------------------
+    # Bulk Operations (Phase 25)
+    # -----------------------
+    @app.post("/api/bulk/remediation")
+    def bulk_remediation():
+        return post_bulk_remediation()
 
     # -----------------------
     # Historical Trends (Phase 20)

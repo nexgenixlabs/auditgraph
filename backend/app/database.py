@@ -1949,6 +1949,101 @@ class Database:
         cursor.close()
         return row
 
+    def bulk_upsert_remediation_actions(self, identity_ids, status, notes=None):
+        """
+        Apply a remediation status to all matched playbooks for multiple identities.
+        For each identity: fetch matched playbooks, then upsert actions.
+        Returns { updated_count, identity_count, errors }.
+        """
+        self._ensure_remediation_actions_table()
+        self._ensure_remediation_playbooks()
+        updated_count = 0
+        identity_count = 0
+        errors = []
+
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        for identity_id in identity_ids:
+            try:
+                # Fetch identity data (latest run)
+                cursor.execute("""
+                    SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                           i.risk_reasons, i.activity_status, i.credential_status,
+                           i.credential_risk, COALESCE(i.owner_count, 0) as owner_count,
+                           i.ca_coverage_status
+                    FROM identities i
+                    WHERE i.identity_id = %s
+                    ORDER BY i.discovery_run_id DESC
+                    LIMIT 1
+                """, (identity_id,))
+                row = cursor.fetchone()
+                if not row:
+                    continue
+
+                identity_db_id = row['id']
+
+                # Get roles
+                cursor.execute("""
+                    SELECT role_name FROM role_assignments WHERE identity_db_id = %s
+                    UNION ALL
+                    SELECT role_name FROM entra_role_assignments WHERE identity_db_id = %s
+                """, (identity_db_id, identity_db_id))
+                roles = [{"role_name": r['role_name']} for r in cursor.fetchall()]
+
+                # Parse risk_reasons
+                risk_reasons = row['risk_reasons']
+                if isinstance(risk_reasons, str):
+                    import json as _json
+                    try:
+                        risk_reasons = _json.loads(risk_reasons)
+                    except Exception:
+                        risk_reasons = []
+                elif not isinstance(risk_reasons, list):
+                    risk_reasons = []
+
+                identity_data = {
+                    "risk_reasons": risk_reasons,
+                    "roles": roles,
+                    "activity_status": row['activity_status'],
+                    "credential_status": row['credential_status'],
+                    "credential_risk": row['credential_risk'],
+                    "owner_count": row['owner_count'],
+                    "ca_coverage_status": row['ca_coverage_status'],
+                }
+
+                # Get matched playbooks
+                result = self.get_identity_remediations(identity_db_id, identity_data)
+                matched = result.get('remediations', [])
+
+                if not matched:
+                    continue
+
+                identity_count += 1
+
+                # Upsert action for each matched playbook
+                for pb in matched:
+                    cursor.execute("""
+                        INSERT INTO remediation_actions (identity_id, playbook_id, status, notes, updated_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (identity_id, playbook_id) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            notes = EXCLUDED.notes,
+                            updated_at = NOW()
+                    """, (identity_id, pb['id'], status, notes))
+                    updated_count += 1
+
+            except Exception as e:
+                errors.append({"identity_id": identity_id, "error": str(e)[:100]})
+
+        self.conn.commit()
+        cursor.close()
+
+        return {
+            "updated_count": updated_count,
+            "identity_count": identity_count,
+            "errors": errors,
+        }
+
     def get_remediation_actions(self, identity_id: str):
         """Get all remediation action statuses for an identity."""
         self._ensure_remediation_actions_table()

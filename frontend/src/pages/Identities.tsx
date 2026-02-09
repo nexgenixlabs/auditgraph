@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { useToast } from '../components/ToastProvider';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import {
@@ -217,7 +218,12 @@ export default function IdentitiesPage() {
   const [sortField, setSortField] = useState<SortField>('risk_level');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkConfirm, setBulkConfirm] = useState<{ status: string; label: string } | null>(null);
+  const bulkMenuRef = useRef<HTMLDivElement>(null);
 
+  const { addToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -382,6 +388,43 @@ export default function IdentitiesPage() {
 
   const selectedIdentities = useMemo(() => selectedIds.size === 0 ? [] : filtered.filter(i => selectedIds.has(i.identity_id)), [filtered, selectedIds]);
 
+  // Close bulk menu on click outside
+  useEffect(() => {
+    if (!bulkMenuOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (bulkMenuRef.current && !bulkMenuRef.current.contains(e.target as Node)) {
+        setBulkMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [bulkMenuOpen]);
+
+  // Bulk remediation action
+  async function executeBulkAction(status: string) {
+    setBulkLoading(true);
+    setBulkConfirm(null);
+    try {
+      const res = await fetch('/api/bulk/remediation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identity_ids: Array.from(selectedIds),
+          status,
+          notes: `Bulk ${status} from identities table`,
+        }),
+      });
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      const result = await res.json();
+      addToast(`${result.updated_count} remediations marked as ${status} across ${result.identity_count} identities`, 'success');
+    } catch (e: any) {
+      addToast(e?.message || 'Bulk action failed', 'error');
+    } finally {
+      setBulkLoading(false);
+      setBulkMenuOpen(false);
+    }
+  }
+
   // Export CSV
   function exportToCSV() {
     if (selectedIds.size === 0) { alert('Select identities first.'); return; }
@@ -469,6 +512,39 @@ export default function IdentitiesPage() {
                 >
                   Compare
                 </button>
+              )}
+              {selectedIds.size > 0 && (
+                <div className="relative" ref={bulkMenuRef}>
+                  <button
+                    onClick={() => setBulkMenuOpen(!bulkMenuOpen)}
+                    disabled={bulkLoading}
+                    className="px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 disabled:opacity-50"
+                  >
+                    {bulkLoading ? 'Applying…' : 'Bulk Actions \u25BE'}
+                  </button>
+                  {bulkMenuOpen && (
+                    <div className="absolute right-0 mt-1 w-56 bg-white border rounded-xl shadow-lg z-20 py-1">
+                      <button
+                        onClick={() => { setBulkMenuOpen(false); setBulkConfirm({ status: 'acknowledged', label: 'Acknowledge' }); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition"
+                      >
+                        Acknowledge All Remediations
+                      </button>
+                      <button
+                        onClick={() => { setBulkMenuOpen(false); setBulkConfirm({ status: 'completed', label: 'Complete' }); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-green-50 hover:text-green-700 transition"
+                      >
+                        Mark All Remediated
+                      </button>
+                      <button
+                        onClick={() => { setBulkMenuOpen(false); setBulkConfirm({ status: 'skipped', label: 'Skip' }); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-yellow-50 hover:text-yellow-700 transition"
+                      >
+                        Skip All Remediations
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
               <span className="w-px h-5 bg-gray-300" />
               <button onClick={exportToCSV} className="px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">CSV</button>
@@ -705,6 +781,45 @@ export default function IdentitiesPage() {
         T3 = Standard.
         Activity: Stale 90d+ = no sign-in 90+ days | Never Used = created &gt;30d, no sign-in | Idle 30-90d | New = created &lt;30d.
       </div>
+
+      {/* Bulk Action Confirmation Modal */}
+      {bulkConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Confirm Bulk Action</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Apply <span className="font-semibold text-gray-900">{bulkConfirm.label}</span> to
+              all matched remediations for <span className="font-semibold text-blue-600">{selectedIds.size}</span> selected
+              {selectedIds.size === 1 ? ' identity' : ' identities'}?
+            </p>
+            <p className="text-xs text-gray-400 mb-5">
+              This will find all matching remediation playbooks for each selected identity and update their status.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setBulkConfirm(null)}
+                disabled={bulkLoading}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => executeBulkAction(bulkConfirm.status)}
+                disabled={bulkLoading}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition disabled:opacity-50 flex items-center gap-2"
+              >
+                {bulkLoading && (
+                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                )}
+                {bulkLoading ? 'Applying…' : `${bulkConfirm.label} All`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

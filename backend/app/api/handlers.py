@@ -2568,6 +2568,42 @@ def post_remediation_action(identity_id: str):
         db.close()
 
 
+def post_bulk_remediation():
+    """Apply a remediation status to all matched playbooks for multiple identities."""
+    db = _db()
+    try:
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        identity_ids = body.get('identity_ids', [])
+        status = body.get('status')
+        notes = body.get('notes')
+
+        if not identity_ids or not isinstance(identity_ids, list):
+            return jsonify({'error': 'identity_ids must be a non-empty list'}), 400
+
+        if len(identity_ids) > 50:
+            return jsonify({'error': 'Maximum 50 identities per bulk action'}), 400
+
+        valid_statuses = ('acknowledged', 'completed', 'skipped')
+        if status not in valid_statuses:
+            return jsonify({'error': f'status must be one of: {", ".join(valid_statuses)}'}), 400
+
+        result = db.bulk_upsert_remediation_actions(identity_ids, status, notes)
+
+        db.log_activity('remediation_updated', f'Bulk {status} applied to {result["identity_count"]} identities ({result["updated_count"]} actions)', {
+            'bulk': True,
+            'status': status,
+            'identity_count': result['identity_count'],
+            'updated_count': result['updated_count'],
+        })
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 def get_remediation_dashboard_summary():
     """Get aggregated remediation progress for the dashboard widget."""
     db = _db()
