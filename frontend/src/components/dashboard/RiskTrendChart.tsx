@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
+import { useTheme } from '../../hooks/useTheme';
 
 interface TrendPoint {
   date: string | null;
@@ -37,7 +38,7 @@ function CustomTooltip({ active, payload, label }: any) {
     <div className="bg-white border rounded-lg shadow-lg px-4 py-3 text-sm">
       <div className="font-semibold text-gray-900 mb-1">
         {formatDate(label)}
-        {point?.run_id && <span className="ml-2 text-xs text-gray-400">Run #{point.run_id}</span>}
+        {!!point?.run_id && <span className="ml-2 text-xs text-gray-400">Run #{point.run_id}</span>}
       </div>
       <div className="space-y-0.5">
         <div className="flex items-center gap-2">
@@ -66,6 +67,8 @@ function CustomTooltip({ active, payload, label }: any) {
 }
 
 export default function RiskTrendChart({ data }: RiskTrendChartProps) {
+  const { dark } = useTheme();
+
   const chartData = useMemo(() =>
     data.map(d => ({
       ...d,
@@ -74,6 +77,10 @@ export default function RiskTrendChart({ data }: RiskTrendChartProps) {
   [data]);
 
   if (data.length < 2) return null;
+
+  const tickFill = dark ? '#9ca3af' : '#9ca3af';
+  const gridStroke = dark ? '#374151' : '#f3f4f6';
+  const legendColor = dark ? '#d1d5db' : undefined;
 
   return (
     <div className="bg-white border rounded-xl p-5">
@@ -104,14 +111,14 @@ export default function RiskTrendChart({ data }: RiskTrendChartProps) {
               <stop offset="95%" stopColor={RISK_COLORS.low} stopOpacity={0.05} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-          <XAxis dataKey="date" tickFormatter={formatDate} tick={{ fontSize: 11, fill: '#9ca3af' }} />
-          <YAxis tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
+          <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+          <XAxis dataKey="date" tickFormatter={formatDate} tick={{ fontSize: 11, fill: tickFill }} />
+          <YAxis tick={{ fontSize: 11, fill: tickFill }} allowDecimals={false} />
           <Tooltip content={<CustomTooltip />} />
           <Legend
             iconType="circle"
             iconSize={8}
-            wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
+            wrapperStyle={{ fontSize: 11, paddingTop: 8, color: legendColor }}
           />
           <Area
             type="monotone"

@@ -3,6 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
   PieChart, Pie,
 } from 'recharts';
+import { useTheme } from '../../hooks/useTheme';
 
 interface RoleUsageChartProps {
   statuses: Record<string, number>;
@@ -57,6 +58,8 @@ function CustomTooltip({ active, payload }: any) {
 }
 
 export default function RoleUsageChart({ statuses, byRisk, total }: RoleUsageChartProps) {
+  const { dark } = useTheme();
+
   const barData = useMemo(() => {
     return USAGE_ORDER
       .filter(key => (statuses[key] || 0) > 0)
@@ -104,14 +107,14 @@ export default function RoleUsageChart({ statuses, byRisk, total }: RoleUsageCha
       {/* Horizontal bar chart */}
       <ResponsiveContainer width="100%" height={barData.length * 36 + 10}>
         <BarChart data={barData} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
-          <XAxis type="number" tick={{ fontSize: 10, fill: '#9ca3af' }} allowDecimals={false} />
+          <XAxis type="number" tick={{ fontSize: 10, fill: dark ? '#9ca3af' : '#9ca3af' }} allowDecimals={false} />
           <YAxis
             type="category"
             dataKey="label"
-            tick={{ fontSize: 11, fill: '#6b7280' }}
+            tick={{ fontSize: 11, fill: dark ? '#d1d5db' : '#6b7280' }}
             width={100}
           />
-          <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f9fafb' }} />
+          <Tooltip content={<CustomTooltip />} cursor={{ fill: dark ? '#374151' : '#f9fafb' }} />
           <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={20}>
             {barData.map((entry) => (
               <Cell key={entry.key} fill={entry.fill} />

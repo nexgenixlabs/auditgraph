@@ -28,9 +28,9 @@ const ICON_PATHS: Record<ToastType, string> = {
 };
 
 const TYPE_STYLES: Record<ToastType, string> = {
-  success: 'bg-green-50 border-green-200 text-green-800',
-  error: 'bg-red-50 border-red-200 text-red-800',
-  info: 'bg-blue-50 border-blue-200 text-blue-800',
+  success: 'bg-green-50 border-green-200 text-green-800 dark:text-green-200',
+  error: 'bg-red-50 border-red-200 text-red-800 dark:text-red-200',
+  info: 'bg-blue-50 border-blue-200 text-blue-800 dark:text-blue-200',
 };
 
 function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: string) => void }) {
