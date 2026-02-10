@@ -60,6 +60,11 @@ from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.resource import SubscriptionClient
+from azure.mgmt.storage import StorageManagementClient
+from azure.mgmt.keyvault import KeyVaultManagementClient
+from azure.keyvault.secrets import SecretClient
+from azure.keyvault.keys import KeyClient
+from azure.keyvault.certificates import CertificateClient
 from app.database import Database
 from .models import DiscoveryResult
 import json
@@ -238,7 +243,24 @@ class AzureDiscoveryEngine:
         print("\n💾 Saving identities to database...")
         saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map, pim_map, ca_policies)
         print(f"  ✓ Saved {saved_count} identities")
-        
+
+        # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
+        print("\n🗄️  Discovering Azure Resources...")
+        storage_accounts = self._discover_storage_accounts()
+        print(f"  ✓ Found {len(storage_accounts)} storage accounts")
+        key_vaults = self._discover_key_vaults()
+        print(f"  ✓ Found {len(key_vaults)} key vaults")
+
+        # Save resources to database
+        tenant_id_val = getattr(self, '_tenant_id', None)
+        for sa in storage_accounts:
+            sa['tenant_id'] = tenant_id_val
+            self.db.save_storage_account(run_id, sa)
+        for kv in key_vaults:
+            kv['tenant_id'] = tenant_id_val
+            self.db.save_key_vault(run_id, kv)
+        print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
+
         # Step 10: Complete discovery run
         print("\n✅ Completing discovery run...")
         critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
@@ -1353,6 +1375,308 @@ class AzureDiscoveryEngine:
             print(f"  ❌ Error discovering Entra roles: {e}")
             return []
 
+
+    # ─── Phase 52: Azure Resource Discovery ──────────────────────────
+
+    def _discover_storage_accounts(self) -> list:
+        """Discover all storage accounts across all subscriptions with security audit."""
+        from datetime import datetime, timezone, timedelta
+        storage_accounts = []
+        for sub in self.subscriptions:
+            sub_id = sub['id']
+            sub_name = sub['name']
+            try:
+                storage_client = StorageManagementClient(self.credential, sub_id)
+                for account in storage_client.storage_accounts.list():
+                    resource_id = account.id
+                    name = account.name
+                    location = account.location
+                    rg = resource_id.split('/resourceGroups/')[1].split('/')[0] if '/resourceGroups/' in resource_id else None
+
+                    # Security settings
+                    public_blob = getattr(account, 'allow_blob_public_access', None)
+                    if public_blob is None:
+                        public_blob = getattr(account, 'allow_blob_public_access', False)
+                    https_only = getattr(account, 'enable_https_traffic_only', True)
+                    tls = str(getattr(account, 'minimum_tls_version', 'TLS1_2') or 'TLS1_2')
+                    shared_key = getattr(account, 'allow_shared_key_access', True)
+                    if shared_key is None:
+                        shared_key = True
+                    cross_tenant = getattr(account, 'allow_cross_tenant_replication', False)
+
+                    # Network rules
+                    net = account.network_rule_set
+                    default_action = str(net.default_action) if net and net.default_action else 'Allow'
+                    ip_count = len(net.ip_rules) if net and net.ip_rules else 0
+                    vnet_count = len(net.virtual_network_rules) if net and net.virtual_network_rules else 0
+                    pe_conns = getattr(account, 'private_endpoint_connections', None) or []
+                    pe_count = len(pe_conns)
+                    bypass = str(net.bypass) if net and net.bypass else 'AzureServices'
+
+                    # Encryption
+                    enc = account.encryption
+                    infra_enc = False
+                    cmk = False
+                    kv_uri = None
+                    if enc:
+                        infra_enc = getattr(enc, 'require_infrastructure_encryption', False) or False
+                        key_source = getattr(enc, 'key_source', None)
+                        cmk = str(key_source).lower().find('keyvault') >= 0 if key_source else False
+                        kv_props = getattr(enc, 'key_vault_properties', None)
+                        if kv_props:
+                            kv_uri = getattr(kv_props, 'key_vault_uri', None)
+
+                    # Key rotation check
+                    key1_created = None
+                    key2_created = None
+                    key_stale = False
+                    try:
+                        keys_result = storage_client.storage_accounts.list_keys(rg, name)
+                        for key in (keys_result.keys or []):
+                            created = getattr(key, 'creation_time', None)
+                            if key.key_name == 'key1':
+                                key1_created = created.isoformat() if created else None
+                            elif key.key_name == 'key2':
+                                key2_created = created.isoformat() if created else None
+                            if created and (datetime.now(timezone.utc) - created).days > 90:
+                                key_stale = True
+                    except Exception:
+                        pass  # listKeys may need elevated permissions
+
+                    risk_score, risk_reasons = self._compute_storage_risk(
+                        public_blob, https_only, tls, shared_key,
+                        default_action, pe_count, cmk, key_stale
+                    )
+                    risk_level = self._resource_risk_level(risk_score)
+
+                    storage_accounts.append({
+                        'resource_id': resource_id, 'name': name, 'location': location,
+                        'resource_group': rg, 'subscription_id': sub_id,
+                        'subscription_name': sub_name,
+                        'sku': account.sku.name if account.sku else None,
+                        'kind': str(account.kind) if account.kind else None,
+                        'access_tier': str(account.access_tier) if account.access_tier else None,
+                        'public_blob_access': bool(public_blob),
+                        'https_only': bool(https_only),
+                        'minimum_tls_version': tls,
+                        'shared_key_access': bool(shared_key),
+                        'allow_cross_tenant_replication': bool(cross_tenant),
+                        'default_network_action': default_action,
+                        'ip_rules_count': ip_count, 'vnet_rules_count': vnet_count,
+                        'private_endpoint_count': pe_count, 'bypass_settings': bypass,
+                        'network_rules': {'ip_count': ip_count, 'vnet_count': vnet_count, 'bypass': bypass},
+                        'infrastructure_encryption': infra_enc,
+                        'customer_managed_keys': cmk, 'key_vault_uri': kv_uri,
+                        'encryption_details': {'infra_enc': infra_enc, 'cmk': cmk, 'kv_uri': kv_uri},
+                        'key1_created_at': key1_created, 'key2_created_at': key2_created,
+                        'key_rotation_stale': key_stale,
+                        'risk_level': risk_level, 'risk_score': risk_score,
+                        'risk_reasons': risk_reasons,
+                        'tags': dict(account.tags or {}),
+                    })
+            except Exception as e:
+                print(f"    ⚠️  Storage discovery failed for {sub_name}: {e}")
+                continue
+        return storage_accounts
+
+    def _discover_key_vaults(self) -> list:
+        """Discover all key vaults across all subscriptions with security audit."""
+        from datetime import datetime, timezone, timedelta
+        key_vaults = []
+        for sub in self.subscriptions:
+            sub_id = sub['id']
+            sub_name = sub['name']
+            try:
+                kv_mgmt = KeyVaultManagementClient(self.credential, sub_id)
+                for vault_item in kv_mgmt.vaults.list():
+                    resource_id = vault_item.id
+                    vault_name = vault_item.name
+                    location = getattr(vault_item, 'location', None)
+                    rg = resource_id.split('/resourceGroups/')[1].split('/')[0] if '/resourceGroups/' in resource_id else None
+
+                    # Get full vault details
+                    try:
+                        vault = kv_mgmt.vaults.get(rg, vault_name)
+                        props = vault.properties
+                    except Exception:
+                        props = None
+
+                    if not props:
+                        continue
+
+                    # Security settings
+                    soft_delete = getattr(props, 'enable_soft_delete', False) or False
+                    retention = getattr(props, 'soft_delete_retention_in_days', 0) or 0
+                    purge_prot = getattr(props, 'enable_purge_protection', False) or False
+                    rbac_auth = getattr(props, 'enable_rbac_authorization', False) or False
+
+                    # Network rules
+                    net = getattr(props, 'network_acls', None)
+                    public_access = str(getattr(props, 'public_network_access', 'Enabled') or 'Enabled')
+                    default_action = str(net.default_action) if net and net.default_action else 'Allow'
+                    ip_count = len(net.ip_rules) if net and net.ip_rules else 0
+                    vnet_count = len(net.virtual_network_rules) if net and net.virtual_network_rules else 0
+                    pe_conns = getattr(props, 'private_endpoint_connections', None) or []
+                    pe_count = len(pe_conns)
+
+                    # Access policies (non-RBAC mode)
+                    access_policies_list = []
+                    ap_count = 0
+                    if not rbac_auth:
+                        for ap in (getattr(props, 'access_policies', None) or []):
+                            ap_count += 1
+                            perms = getattr(ap, 'permissions', None)
+                            access_policies_list.append({
+                                'object_id': getattr(ap, 'object_id', ''),
+                                'tenant_id': getattr(ap, 'tenant_id', ''),
+                                'permissions': {
+                                    'keys': [str(p) for p in (perms.keys or [])] if perms else [],
+                                    'secrets': [str(p) for p in (perms.secrets or [])] if perms else [],
+                                    'certificates': [str(p) for p in (perms.certificates or [])] if perms else [],
+                                }
+                            })
+
+                    # Data plane: enumerate secrets/keys/certs (may lack permissions)
+                    vault_url = getattr(props, 'vault_uri', f'https://{vault_name}.vault.azure.net/')
+                    now = datetime.now(timezone.utc)
+                    thirty_days = timedelta(days=30)
+                    secrets_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
+                    keys_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
+                    certs_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
+
+                    try:
+                        sc = SecretClient(vault_url=vault_url, credential=self.credential)
+                        for s in sc.list_properties_of_secrets():
+                            secrets_summary['total'] += 1
+                            if s.expires_on:
+                                if s.expires_on < now:
+                                    secrets_summary['expired'] += 1
+                                elif s.expires_on < now + thirty_days:
+                                    secrets_summary['expiring_soon'] += 1
+                    except Exception:
+                        pass
+
+                    try:
+                        kc = KeyClient(vault_url=vault_url, credential=self.credential)
+                        for k in kc.list_properties_of_keys():
+                            keys_summary['total'] += 1
+                            if k.expires_on:
+                                if k.expires_on < now:
+                                    keys_summary['expired'] += 1
+                                elif k.expires_on < now + thirty_days:
+                                    keys_summary['expiring_soon'] += 1
+                    except Exception:
+                        pass
+
+                    try:
+                        cc = CertificateClient(vault_url=vault_url, credential=self.credential)
+                        for c in cc.list_properties_of_certificates():
+                            certs_summary['total'] += 1
+                            if c.expires_on:
+                                if c.expires_on < now:
+                                    certs_summary['expired'] += 1
+                                elif c.expires_on < now + thirty_days:
+                                    certs_summary['expiring_soon'] += 1
+                    except Exception:
+                        pass
+
+                    risk_score, risk_reasons = self._compute_keyvault_risk(
+                        soft_delete, purge_prot, public_access, default_action,
+                        pe_count, secrets_summary, keys_summary, certs_summary
+                    )
+                    risk_level = self._resource_risk_level(risk_score)
+
+                    key_vaults.append({
+                        'resource_id': resource_id, 'name': vault_name,
+                        'location': location, 'resource_group': rg,
+                        'subscription_id': sub_id, 'subscription_name': sub_name,
+                        'sku': str(getattr(props, 'sku', {}).name) if getattr(props, 'sku', None) else None,
+                        'soft_delete_enabled': soft_delete,
+                        'soft_delete_retention_days': retention,
+                        'purge_protection': purge_prot,
+                        'enable_rbac_authorization': rbac_auth,
+                        'public_network_access': public_access,
+                        'default_network_action': default_action,
+                        'ip_rules_count': ip_count, 'vnet_rules_count': vnet_count,
+                        'private_endpoint_count': pe_count,
+                        'network_rules': {'ip_count': ip_count, 'vnet_count': vnet_count},
+                        'secrets_total': secrets_summary['total'],
+                        'secrets_expired': secrets_summary['expired'],
+                        'secrets_expiring_soon': secrets_summary['expiring_soon'],
+                        'keys_total': keys_summary['total'],
+                        'keys_expired': keys_summary['expired'],
+                        'keys_expiring_soon': keys_summary['expiring_soon'],
+                        'certs_total': certs_summary['total'],
+                        'certs_expired': certs_summary['expired'],
+                        'certs_expiring_soon': certs_summary['expiring_soon'],
+                        'access_policy_count': ap_count,
+                        'access_policies': access_policies_list,
+                        'risk_level': risk_level, 'risk_score': risk_score,
+                        'risk_reasons': risk_reasons,
+                        'tags': dict(getattr(vault, 'tags', None) or {}),
+                    })
+            except Exception as e:
+                print(f"    ⚠️  Key Vault discovery failed for {sub_name}: {e}")
+                continue
+        return key_vaults
+
+    def _compute_storage_risk(self, public_blob, https_only, tls, shared_key,
+                              default_action, pe_count, cmk, key_stale):
+        """Compute risk score for a storage account."""
+        score = 0
+        reasons = []
+        if public_blob:
+            score += 40; reasons.append("Public blob access enabled (+40)")
+        if not https_only:
+            score += 30; reasons.append("HTTP traffic allowed (+30)")
+        if 'Allow' in str(default_action):
+            score += 25; reasons.append("Network allows all traffic (+25)")
+        if tls not in ('TLS1_2', 'TLS1_3'):
+            score += 20; reasons.append(f"Old TLS version: {tls} (+20)")
+        if not cmk:
+            score += 20; reasons.append("No customer-managed encryption keys (+20)")
+        if key_stale:
+            score += 20; reasons.append("Storage keys not rotated in 90+ days (+20)")
+        if shared_key:
+            score += 15; reasons.append("Shared key access enabled (+15)")
+        if pe_count == 0:
+            score += 15; reasons.append("No private endpoints (+15)")
+        return (score, reasons)
+
+    def _compute_keyvault_risk(self, soft_delete, purge_prot, public_access,
+                               default_action, pe_count, secrets, keys, certs):
+        """Compute risk score for a key vault."""
+        score = 0
+        reasons = []
+        if secrets.get('expired', 0) > 0:
+            score += 35; reasons.append(f"{secrets['expired']} expired secrets (+35)")
+        if keys.get('expired', 0) > 0:
+            score += 35; reasons.append(f"{keys['expired']} expired keys (+35)")
+        if certs.get('expired', 0) > 0:
+            score += 35; reasons.append(f"{certs['expired']} expired certificates (+35)")
+        if not soft_delete:
+            score += 30; reasons.append("Soft delete disabled (+30)")
+        if str(public_access) != 'Disabled' and 'Allow' in str(default_action):
+            score += 25; reasons.append("Network allows all traffic (+25)")
+        if not purge_prot:
+            score += 20; reasons.append("Purge protection disabled (+20)")
+        if pe_count == 0:
+            score += 15; reasons.append("No private endpoints (+15)")
+        if secrets.get('expiring_soon', 0) > 0:
+            score += 10; reasons.append(f"{secrets['expiring_soon']} secrets expiring within 30 days (+10)")
+        if keys.get('expiring_soon', 0) > 0:
+            score += 10; reasons.append(f"{keys['expiring_soon']} keys expiring within 30 days (+10)")
+        if certs.get('expiring_soon', 0) > 0:
+            score += 10; reasons.append(f"{certs['expiring_soon']} certificates expiring within 30 days (+10)")
+        return (score, reasons)
+
+    def _resource_risk_level(self, score):
+        """Map risk score to risk level for resources."""
+        if score >= 80: return 'critical'
+        if score >= 50: return 'high'
+        if score >= 25: return 'medium'
+        if score > 0: return 'low'
+        return 'info'
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """

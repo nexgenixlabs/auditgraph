@@ -75,6 +75,7 @@ function diffBorder(result: DiffResult): string {
   return 'border-gray-200';
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function diffCellBg(result: DiffResult): string {
   if (result === 'better') return 'bg-green-50';
   if (result === 'worse') return 'bg-red-50';

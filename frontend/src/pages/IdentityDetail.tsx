@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine,
+} from 'recharts';
 import { useToast } from '../components/ToastProvider';
 import { AccessGraphTab } from '../components/graph';
 import {
   type IdentityCategory, type RiskLevel,
-  RISK_BADGE, RISK_ORDER, CLOUD_BADGE, DATA_EXPLANATIONS, DORMANT_LABELS,
+  RISK_BADGE, DATA_EXPLANATIONS, DORMANT_LABELS,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getDormantStatus as getDormantStatusFromActivity,
 } from '../constants/metrics';
 
@@ -101,7 +105,7 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'compliance' | 'pim' | 'remediation' | 'lifecycle';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate';
 
 interface RemediationItem {
   id: number;
@@ -360,10 +364,12 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'credentials', label: 'Credentials', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
     { id: 'ownership', label: 'Ownership', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
     { id: 'access_graph' as TabId, label: 'Access Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+    { id: 'anomalies' as TabId, label: 'Anomalies', icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z' },
     { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
     { id: 'lifecycle' as TabId, label: 'Lifecycle', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
+    { id: 'simulate' as TabId, label: 'What If', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
   ];
 
   return (
@@ -421,6 +427,58 @@ export default function IdentityDetail() {
   const [lifecycleLoading, setLifecycleLoading] = useState(false);
   const [lifecycleFilter, setLifecycleFilter] = useState<string>('all');
   const [identityGroups, setIdentityGroups] = useState<{id: number; name: string; color: string; group_type: string}[]>([]);
+  const [anomalyData, setAnomalyData] = useState<{anomalies: any[]; count: number} | null>(null);
+  const [anomalyLoading, setAnomalyLoading] = useState(false);
+  const [riskHistory, setRiskHistory] = useState<{run_id: number; date: string; risk_score: number; risk_level: string}[]>([]);
+
+  // Simulation state (What If tab)
+  const [simRemovedRoles, setSimRemovedRoles] = useState<Set<string>>(new Set());
+  const [simRemovedPerms, setSimRemovedPerms] = useState<Set<string>>(new Set());
+  const [simAddedRoles, setSimAddedRoles] = useState<{role_name: string; role_type: string; scope_type: string}[]>([]);
+  const [simAddedPerms, setSimAddedPerms] = useState<{permission_name: string; risk_level: string}[]>([]);
+  const [simResult, setSimResult] = useState<{current: {risk_score: number; risk_level: string; risk_reasons: string[]}; simulated: {risk_score: number; risk_level: string; risk_reasons: string[]}; delta: number; level_change: string; removed_reasons: string[]; added_reasons: string[]} | null>(null);
+  const [simulating, setSimulating] = useState(false);
+  const [simAddRoleOpen, setSimAddRoleOpen] = useState(false);
+  const [simAddPermOpen, setSimAddPermOpen] = useState(false);
+  const [simNewRole, setSimNewRole] = useState({role_name: '', role_type: 'azure', scope_type: 'subscription'});
+  const [simNewPerm, setSimNewPerm] = useState({permission_name: '', risk_level: 'medium'});
+
+  const runSimulation = async () => {
+    if (!id) return;
+    setSimulating(true);
+    try {
+      const res = await fetch(`/api/identities/${encodeURIComponent(id)}/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          remove_roles: Array.from(simRemovedRoles),
+          add_roles: simAddedRoles,
+          remove_permissions: Array.from(simRemovedPerms),
+          add_permissions: simAddedPerms,
+        }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        setSimResult(result);
+      } else {
+        addToast('Simulation failed', 'error');
+      }
+    } catch {
+      addToast('Simulation failed', 'error');
+    } finally {
+      setSimulating(false);
+    }
+  };
+
+  const resetSimulation = () => {
+    setSimRemovedRoles(new Set());
+    setSimRemovedPerms(new Set());
+    setSimAddedRoles([]);
+    setSimAddedPerms([]);
+    setSimResult(null);
+    setSimAddRoleOpen(false);
+    setSimAddPermOpen(false);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -441,6 +499,17 @@ export default function IdentityDetail() {
     }
 
     if (id) load();
+    return () => { cancelled = true; };
+  }, [id]);
+
+  // Fetch risk score history (non-blocking)
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    fetch(`/api/identities/${encodeURIComponent(id)}/risk-history?limit=20`)
+      .then(res => res.ok ? res.json() : null)
+      .then(json => { if (!cancelled && json?.points) setRiskHistory(json.points); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [id]);
 
@@ -494,6 +563,19 @@ export default function IdentityDetail() {
       .finally(() => { if (!cancelled) setLifecycleLoading(false); });
     return () => { cancelled = true; };
   }, [activeTab, id, lifecycleData, lifecycleLoading]);
+
+  // Lazy-load Anomaly data when tab is selected
+  useEffect(() => {
+    if (activeTab !== 'anomalies' || anomalyData || anomalyLoading || !id) return;
+    let cancelled = false;
+    setAnomalyLoading(true);
+    fetch(`/api/identities/${encodeURIComponent(id)}/anomalies`)
+      .then(res => res.ok ? res.json() : Promise.reject('Anomalies fetch failed'))
+      .then(json => { if (!cancelled) setAnomalyData(json); })
+      .catch(() => { if (!cancelled) setAnomalyData({ anomalies: [], count: 0 }); })
+      .finally(() => { if (!cancelled) setAnomalyLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, anomalyData, anomalyLoading]);
 
   // Load identity groups
   useEffect(() => {
@@ -565,10 +647,12 @@ export default function IdentityDetail() {
     credentials: identity?.credential_count ?? 0,
     ownership: (data?.owners || []).length,
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
+    anomalies: anomalyData?.count ?? 0,
     pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
     remediation: remediationData?.summary?.total ?? 0,
     lifecycle: lifecycleData?.total_events ?? 0,
+    simulate: 0,
   };
 
   return (
@@ -849,6 +933,73 @@ export default function IdentityDetail() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Risk Score Trajectory */}
+                  {riskHistory.length >= 2 && (
+                    <div className="border border-gray-200 rounded-xl p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900">Risk Score Trajectory</div>
+                          <div className="text-[10px] text-gray-500">Score trend across discovery runs</div>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                          <span>{riskHistory.length} runs</span>
+                          <span className="text-gray-300">|</span>
+                          <span>
+                            {riskHistory[0].risk_score} pts → {riskHistory[riskHistory.length - 1].risk_score} pts
+                            {riskHistory[riskHistory.length - 1].risk_score > riskHistory[0].risk_score
+                              ? <span className="text-red-500 ml-1">↑</span>
+                              : riskHistory[riskHistory.length - 1].risk_score < riskHistory[0].risk_score
+                                ? <span className="text-green-500 ml-1">↓</span>
+                                : <span className="text-gray-400 ml-1">→</span>
+                            }
+                          </span>
+                        </div>
+                      </div>
+                      <ResponsiveContainer width="100%" height={160}>
+                        <LineChart data={riskHistory} margin={{ top: 5, right: 10, left: -15, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                          <XAxis
+                            dataKey="date"
+                            tick={{ fontSize: 9, fill: '#9ca3af' }}
+                            tickFormatter={(d: string) => {
+                              try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { return ''; }
+                            }}
+                          />
+                          <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} domain={[0, 'auto']} allowDecimals={false} />
+                          <ReferenceLine y={70} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.4} label={{ value: 'Critical', fontSize: 8, fill: '#ef4444' }} />
+                          <Tooltip
+                            content={({ active, payload }) => {
+                              if (!active || !payload?.length) return null;
+                              const p = payload[0]?.payload as {date: string; risk_score: number; risk_level: string} | undefined;
+                              if (!p) return null;
+                              const levelColor: Record<string, string> = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#22c55e' };
+                              return (
+                                <div className="bg-white border rounded-lg shadow-lg px-3 py-2 text-xs">
+                                  <div className="text-gray-500 mb-1">
+                                    {(() => { try { return new Date(p.date).toLocaleDateString(); } catch { return p.date; } })()}
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: levelColor[p.risk_level] || '#6b7280' }} />
+                                    <span className="font-semibold">{p.risk_score}</span>
+                                    <span className="capitalize text-gray-400">{p.risk_level}</span>
+                                  </div>
+                                </div>
+                              );
+                            }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="risk_score"
+                            stroke="#7c3aed"
+                            strokeWidth={2}
+                            dot={{ r: 3, fill: '#7c3aed', strokeWidth: 0 }}
+                            activeDot={{ r: 5, fill: '#7c3aed' }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
 
                   {/* Privilege Tier Explanation */}
                   {(() => {
@@ -1265,6 +1416,89 @@ export default function IdentityDetail() {
                 <AccessGraphTab identityId={identity.identity_id} />
               )}
 
+              {/* Anomalies Tab */}
+              {activeTab === 'anomalies' && (
+                <div className="space-y-4">
+                  {anomalyLoading ? (
+                    <div className="animate-pulse space-y-3">
+                      <div className="h-16 bg-gray-100 rounded-xl" />
+                      <div className="h-16 bg-gray-100 rounded-xl" />
+                      <div className="h-16 bg-gray-100 rounded-xl" />
+                    </div>
+                  ) : !anomalyData || anomalyData.anomalies.length === 0 ? (
+                    <div className="text-center py-8">
+                      <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      <p className="text-gray-500">No anomalies detected for this identity</p>
+                    </div>
+                  ) : (
+                    anomalyData.anomalies.map((a: any) => {
+                      const severityColors: Record<string, string> = {
+                        critical: 'border-red-300 bg-red-50',
+                        high: 'border-orange-300 bg-orange-50',
+                        medium: 'border-yellow-300 bg-yellow-50',
+                        low: 'border-blue-300 bg-blue-50',
+                      };
+                      const dotColors: Record<string, string> = {
+                        critical: 'bg-red-500',
+                        high: 'bg-orange-500',
+                        medium: 'bg-yellow-400',
+                        low: 'bg-blue-400',
+                      };
+                      const typeLabels: Record<string, string> = {
+                        permission_escalation: 'Permission Escalation',
+                        risk_score_spike: 'Risk Spike',
+                        dormant_reactivation: 'Dormant Reactivation',
+                        credential_surge: 'Credential Surge',
+                        off_hours_pim: 'Off-Hours PIM',
+                        excessive_pim_usage: 'Excessive PIM',
+                      };
+                      return (
+                        <div key={a.id} className={`rounded-xl border p-4 ${severityColors[a.severity] || 'border-gray-200 bg-gray-50'}`}>
+                          <div className="flex items-start gap-3">
+                            <span className={`w-3 h-3 rounded-full mt-1 flex-shrink-0 ${dotColors[a.severity] || 'bg-gray-400'}`} />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-xs font-semibold uppercase text-gray-500">
+                                  {typeLabels[a.anomaly_type] || a.anomaly_type}
+                                </span>
+                                <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                                  a.severity === 'critical' ? 'bg-red-200 text-red-800' :
+                                  a.severity === 'high' ? 'bg-orange-200 text-orange-800' :
+                                  a.severity === 'medium' ? 'bg-yellow-200 text-yellow-800' :
+                                  'bg-blue-200 text-blue-800'
+                                }`}>
+                                  {a.severity}
+                                </span>
+                                {!!a.resolved && (
+                                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-100 text-green-700">Resolved</span>
+                                )}
+                              </div>
+                              <h4 className="text-sm font-medium text-gray-900">{a.title}</h4>
+                              <p className="text-xs text-gray-600 mt-1">{a.description}</p>
+                              {!!a.details && (
+                                <details className="mt-2">
+                                  <summary className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700">View details</summary>
+                                  <pre className="mt-1 text-[10px] text-gray-500 bg-white/70 rounded p-2 overflow-auto max-h-32">
+                                    {JSON.stringify(a.details, null, 2)}
+                                  </pre>
+                                </details>
+                              )}
+                              {!!a.created_at && (
+                                <p className="text-[10px] text-gray-400 mt-2">
+                                  Detected: {new Date(a.created_at).toLocaleString()}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
               {/* PIM Tab */}
               {activeTab === 'pim' && (
                 <div className="space-y-6">
@@ -1437,6 +1671,7 @@ export default function IdentityDetail() {
                         const risk = safeLower(identity.risk_level);
                         const hasPrivRoles = (data?.roles || []).length > 0;
                         const hasHipaa = roleIntel.some(ri => ri.hipaa_violations.length > 0);
+                        // eslint-disable-next-line @typescript-eslint/no-unused-vars
                         const hasAttacks = roleIntel.some(ri => ri.attack_patterns.length > 0);
                         const isHuman = identity.identity_category === 'human_user' || identity.identity_category === 'guest';
 
@@ -1785,6 +2020,373 @@ export default function IdentityDetail() {
                     </>
                   )}
                   <DataSource label="AuditGraph Lifecycle Engine" apiSource="Cross-run identity snapshot comparison" collectedAt={data?.evidence?.collected_at} />
+                </div>
+              )}
+
+              {/* ─── What If Simulation Tab ─── */}
+              {activeTab === 'simulate' && (
+                <div className="space-y-6">
+                  {/* Header */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg font-bold text-gray-900">What-If Risk Simulation</h3>
+                      <p className="text-xs text-gray-500 mt-0.5">Toggle roles and permissions to see how the risk score would change.</p>
+                    </div>
+                    <button onClick={resetSimulation} className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition">
+                      Reset
+                    </button>
+                  </div>
+
+                  {/* Score comparison cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-gray-50 rounded-xl p-4 border">
+                      <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Current</div>
+                      <div className="text-3xl font-bold text-gray-900">{simResult?.current?.risk_score ?? identity?.risk_score ?? '—'}</div>
+                      <div className="mt-1">{riskBadge(simResult?.current?.risk_level ?? identity?.risk_level)}</div>
+                    </div>
+                    <div className={`rounded-xl p-4 border ${simResult ? 'bg-blue-50 border-blue-200' : 'bg-gray-50'}`}>
+                      <div className="text-xs font-semibold text-blue-600 uppercase mb-1">Simulated</div>
+                      <div className="text-3xl font-bold text-gray-900">{simResult?.simulated?.risk_score ?? '—'}</div>
+                      {simResult && <div className="mt-1">{riskBadge(simResult.simulated.risk_level)}</div>}
+                      {!simResult && <div className="text-xs text-gray-400 mt-2">Click "Simulate" to compute</div>}
+                    </div>
+                    <div className={`rounded-xl p-4 border ${simResult ? (simResult.delta < 0 ? 'bg-green-50 border-green-200' : simResult.delta > 0 ? 'bg-red-50 border-red-200' : 'bg-gray-50') : 'bg-gray-50'}`}>
+                      <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Delta</div>
+                      {simResult ? (
+                        <>
+                          <div className={`text-3xl font-bold ${simResult.delta < 0 ? 'text-green-700' : simResult.delta > 0 ? 'text-red-700' : 'text-gray-500'}`}>
+                            {simResult.delta > 0 ? '+' : ''}{simResult.delta}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1">{simResult.level_change}</div>
+                        </>
+                      ) : (
+                        <div className="text-3xl font-bold text-gray-300">—</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Roles section */}
+                  <div className="border rounded-xl overflow-hidden">
+                    <div className="bg-gray-50 px-4 py-3 border-b flex items-center justify-between">
+                      <div className="text-sm font-semibold text-gray-700">Roles ({(data?.roles?.length || 0) + simAddedRoles.length - simRemovedRoles.size} active)</div>
+                      <button
+                        onClick={() => setSimAddRoleOpen(!simAddRoleOpen)}
+                        className="px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                      >
+                        + Add Role
+                      </button>
+                    </div>
+                    <div className="divide-y max-h-64 overflow-y-auto">
+                      {(data?.roles || []).map((r: any, idx: number) => {
+                        const key = r.role_name || `role-${idx}`;
+                        const removed = simRemovedRoles.has(key);
+                        return (
+                          <label key={`existing-${idx}`} className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition ${removed ? 'opacity-50 line-through' : ''}`}>
+                            <input
+                              type="checkbox"
+                              checked={!removed}
+                              onChange={() => {
+                                setSimRemovedRoles(prev => {
+                                  const next = new Set(prev);
+                                  if (next.has(key)) next.delete(key); else next.add(key);
+                                  return next;
+                                });
+                                setSimResult(null);
+                              }}
+                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-sm text-gray-900">{r.role_name}</span>
+                              <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                safeLower(r.role_type) === 'entra' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                              }`}>
+                                {(r.role_type || 'azure').toUpperCase()}
+                              </span>
+                              {r.scope && <span className="ml-1 text-[10px] text-gray-400 font-mono truncate">{r.scope}</span>}
+                            </div>
+                            {removed && <span className="text-xs font-medium text-red-500">removed</span>}
+                          </label>
+                        );
+                      })}
+                      {simAddedRoles.map((r, idx) => (
+                        <div key={`added-${idx}`} className="flex items-center gap-3 px-4 py-2.5 bg-green-50">
+                          <div className="w-4 h-4 rounded bg-green-500 flex items-center justify-center">
+                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-sm text-green-800 font-medium">{r.role_name}</span>
+                            <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              r.role_type === 'entra' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                            }`}>
+                              {r.role_type.toUpperCase()}
+                            </span>
+                            <span className="ml-1 text-[10px] text-gray-400">{r.scope_type}</span>
+                          </div>
+                          <button
+                            onClick={() => { setSimAddedRoles(prev => prev.filter((_, i) => i !== idx)); setSimResult(null); }}
+                            className="text-xs text-red-500 hover:text-red-700 font-medium"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                      {(data?.roles?.length || 0) === 0 && simAddedRoles.length === 0 && (
+                        <div className="px-4 py-6 text-center text-sm text-gray-400">No roles assigned</div>
+                      )}
+                    </div>
+                    {simAddRoleOpen && (
+                      <div className="border-t bg-blue-50 px-4 py-3">
+                        <div className="flex items-end gap-2">
+                          <div className="flex-1">
+                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Role Name</label>
+                            <input
+                              type="text"
+                              value={simNewRole.role_name}
+                              onChange={e => setSimNewRole(prev => ({...prev, role_name: e.target.value}))}
+                              placeholder="e.g. Reader, Contributor"
+                              className="w-full px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Type</label>
+                            <select
+                              value={simNewRole.role_type}
+                              onChange={e => setSimNewRole(prev => ({...prev, role_type: e.target.value}))}
+                              className="px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            >
+                              <option value="azure">Azure RBAC</option>
+                              <option value="entra">Entra ID</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Scope</label>
+                            <select
+                              value={simNewRole.scope_type}
+                              onChange={e => setSimNewRole(prev => ({...prev, scope_type: e.target.value}))}
+                              className="px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            >
+                              <option value="subscription">Subscription</option>
+                              <option value="resource_group">Resource Group</option>
+                              <option value="resource">Resource</option>
+                              <option value="management_group">Management Group</option>
+                            </select>
+                          </div>
+                          <button
+                            onClick={() => {
+                              if (!simNewRole.role_name.trim()) return;
+                              setSimAddedRoles(prev => [...prev, {...simNewRole}]);
+                              setSimNewRole({role_name: '', role_type: 'azure', scope_type: 'subscription'});
+                              setSimAddRoleOpen(false);
+                              setSimResult(null);
+                            }}
+                            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                          >
+                            Add
+                          </button>
+                          <button
+                            onClick={() => setSimAddRoleOpen(false)}
+                            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Permissions section */}
+                  <div className="border rounded-xl overflow-hidden">
+                    <div className="bg-gray-50 px-4 py-3 border-b flex items-center justify-between">
+                      <div className="text-sm font-semibold text-gray-700">Graph API Permissions ({(data?.graph_permissions?.length || 0) + simAddedPerms.length - simRemovedPerms.size} active)</div>
+                      <button
+                        onClick={() => setSimAddPermOpen(!simAddPermOpen)}
+                        className="px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                      >
+                        + Add Permission
+                      </button>
+                    </div>
+                    <div className="divide-y max-h-48 overflow-y-auto">
+                      {(data?.graph_permissions || []).map((p: any, idx: number) => {
+                        const key = p.permission_name || `perm-${idx}`;
+                        const removed = simRemovedPerms.has(key);
+                        return (
+                          <label key={`existing-perm-${idx}`} className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition ${removed ? 'opacity-50 line-through' : ''}`}>
+                            <input
+                              type="checkbox"
+                              checked={!removed}
+                              onChange={() => {
+                                setSimRemovedPerms(prev => {
+                                  const next = new Set(prev);
+                                  if (next.has(key)) next.delete(key); else next.add(key);
+                                  return next;
+                                });
+                                setSimResult(null);
+                              }}
+                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-sm text-gray-900 font-mono">{p.permission_name}</span>
+                              {p.consent_type && (
+                                <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                  p.consent_type === 'Application' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'
+                                }`}>
+                                  {p.consent_type}
+                                </span>
+                              )}
+                            </div>
+                            {removed && <span className="text-xs font-medium text-red-500">removed</span>}
+                          </label>
+                        );
+                      })}
+                      {simAddedPerms.map((p, idx) => (
+                        <div key={`added-perm-${idx}`} className="flex items-center gap-3 px-4 py-2.5 bg-green-50">
+                          <div className="w-4 h-4 rounded bg-green-500 flex items-center justify-center">
+                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-sm text-green-800 font-medium font-mono">{p.permission_name}</span>
+                            <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              p.risk_level === 'high' ? 'bg-red-100 text-red-700' : p.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'
+                            }`}>
+                              {p.risk_level}
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => { setSimAddedPerms(prev => prev.filter((_, i) => i !== idx)); setSimResult(null); }}
+                            className="text-xs text-red-500 hover:text-red-700 font-medium"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                      {(data?.graph_permissions?.length || 0) === 0 && simAddedPerms.length === 0 && (
+                        <div className="px-4 py-6 text-center text-sm text-gray-400">No Graph API permissions</div>
+                      )}
+                    </div>
+                    {simAddPermOpen && (
+                      <div className="border-t bg-blue-50 px-4 py-3">
+                        <div className="flex items-end gap-2">
+                          <div className="flex-1">
+                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Permission Name</label>
+                            <input
+                              type="text"
+                              value={simNewPerm.permission_name}
+                              onChange={e => setSimNewPerm(prev => ({...prev, permission_name: e.target.value}))}
+                              placeholder="e.g. Mail.Read, Files.ReadWrite.All"
+                              className="w-full px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Risk Level</label>
+                            <select
+                              value={simNewPerm.risk_level}
+                              onChange={e => setSimNewPerm(prev => ({...prev, risk_level: e.target.value}))}
+                              className="px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            >
+                              <option value="high">High (Write/ReadWrite)</option>
+                              <option value="medium">Medium (Read)</option>
+                              <option value="low">Low</option>
+                            </select>
+                          </div>
+                          <button
+                            onClick={() => {
+                              if (!simNewPerm.permission_name.trim()) return;
+                              setSimAddedPerms(prev => [...prev, {...simNewPerm}]);
+                              setSimNewPerm({permission_name: '', risk_level: 'medium'});
+                              setSimAddPermOpen(false);
+                              setSimResult(null);
+                            }}
+                            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                          >
+                            Add
+                          </button>
+                          <button
+                            onClick={() => setSimAddPermOpen(false)}
+                            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Simulate button */}
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={runSimulation}
+                      disabled={simulating}
+                      className="px-6 py-2.5 rounded-xl font-semibold text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition flex items-center gap-2"
+                    >
+                      {simulating ? (
+                        <>
+                          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                            <path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" fill="currentColor" className="opacity-75" />
+                          </svg>
+                          Simulating...
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                          </svg>
+                          Simulate
+                        </>
+                      )}
+                    </button>
+                    {(simRemovedRoles.size > 0 || simAddedRoles.length > 0 || simRemovedPerms.size > 0 || simAddedPerms.length > 0) && !simResult && (
+                      <span className="text-xs text-amber-600 font-medium">
+                        {simRemovedRoles.size + simRemovedPerms.size} removed, {simAddedRoles.length + simAddedPerms.length} added — click Simulate to see impact
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Risk reasons comparison */}
+                  {simResult && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="border rounded-xl p-4">
+                        <div className="text-xs font-semibold text-gray-500 uppercase mb-2">Current Risk Reasons</div>
+                        <div className="space-y-1.5">
+                          {(simResult.current.risk_reasons || []).map((r, i) => {
+                            const isRemoved = (simResult.removed_reasons || []).includes(r);
+                            return (
+                              <div key={i} className={`text-xs px-2 py-1.5 rounded ${isRemoved ? 'bg-red-50 text-red-700 line-through' : 'bg-gray-50 text-gray-700'}`}>
+                                {r}
+                                {isRemoved && <span className="ml-1 font-semibold text-red-500 no-underline">(removed)</span>}
+                              </div>
+                            );
+                          })}
+                          {(simResult.current.risk_reasons || []).length === 0 && (
+                            <div className="text-xs text-gray-400">No risk factors</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="border rounded-xl p-4 border-blue-200">
+                        <div className="text-xs font-semibold text-blue-600 uppercase mb-2">Simulated Risk Reasons</div>
+                        <div className="space-y-1.5">
+                          {(simResult.simulated.risk_reasons || []).map((r, i) => {
+                            const isNew = (simResult.added_reasons || []).includes(r);
+                            return (
+                              <div key={i} className={`text-xs px-2 py-1.5 rounded ${isNew ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-700'}`}>
+                                {r}
+                                {isNew && <span className="ml-1 font-semibold text-green-600">(new)</span>}
+                              </div>
+                            );
+                          })}
+                          {(simResult.simulated.risk_reasons || []).length === 0 && (
+                            <div className="text-xs text-gray-400">No risk factors</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <DataSource label="AuditGraph Risk Simulation" apiSource="What-if analysis engine (no changes applied)" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
             </div>

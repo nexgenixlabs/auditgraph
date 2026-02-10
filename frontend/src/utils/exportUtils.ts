@@ -86,3 +86,14 @@ export const DRIFT_CSV_COLUMNS: CsvColumn[] = [
   { key: 'detail', header: 'Detail' },
   { key: 'risk_level', header: 'Risk Level' },
 ];
+
+export const RESOURCE_CSV_COLUMNS: CsvColumn[] = [
+  { key: 'name', header: 'Name' },
+  { key: 'resource_type', header: 'Type' },
+  { key: 'location', header: 'Location' },
+  { key: 'resource_group', header: 'Resource Group' },
+  { key: 'subscription_name', header: 'Subscription' },
+  { key: 'risk_level', header: 'Risk Level' },
+  { key: 'risk_score', header: 'Risk Score' },
+  { key: 'resource_id', header: 'Resource ID' },
+];

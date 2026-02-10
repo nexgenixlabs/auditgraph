@@ -111,4 +111,37 @@ export const getIdentity = async (identityId: string): Promise<Identity> => {
   }
 };
 
+// Phase 39: Advanced Query Builder
+
+export const queryIdentities = async (
+  groups: Array<{ conditions: Array<{ field: string; operator: string; value: any }> }>,
+  sortField?: string,
+  sortDirection?: string,
+  limit?: number,
+  offset?: number,
+) => {
+  try {
+    const body: any = { groups };
+    if (sortField) body.sort_field = sortField;
+    if (sortDirection) body.sort_direction = sortDirection;
+    if (limit) body.limit = limit;
+    if (offset) body.offset = offset;
+    const res = await api.post('/identities/query', body);
+    return res.data;
+  } catch (error) {
+    console.error('Failed to query identities:', error);
+    throw error;
+  }
+};
+
+export const getQueryFields = async () => {
+  try {
+    const res = await api.get('/identities/query/fields');
+    return res.data;
+  } catch (error) {
+    console.error('Failed to fetch query fields:', error);
+    throw error;
+  }
+};
+
 export default api;

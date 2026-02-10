@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 
 interface WebhookData {
   id: number;
@@ -128,12 +129,20 @@ interface StatusData {
 }
 
 export default function Settings() {
+  const { isSuperAdmin } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [status, setStatus] = useState<StatusData | null>(null);
+
+  // Phase 45: Tenant management state
+  const [currentTenant, setCurrentTenant] = useState<any>(null);
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [tenantModal, setTenantModal] = useState<{ mode: 'create' | 'edit'; tenant?: any } | null>(null);
+  const [tenantForm, setTenantForm] = useState({ name: '', slug: '', plan: 'free' });
+  const [tenantSaving, setTenantSaving] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -152,6 +161,75 @@ export default function Settings() {
     }
     load();
   }, []);
+
+  // Phase 45: Load tenant data
+  useEffect(() => {
+    async function loadTenant() {
+      try {
+        const res = await fetch('/api/tenant');
+        if (res.ok) {
+          const data = await res.json();
+          setCurrentTenant(data.tenant);
+        }
+      } catch { /* ignore */ }
+    }
+    loadTenant();
+  }, []);
+
+  const loadTenants = useCallback(async () => {
+    if (!isSuperAdmin) return;
+    try {
+      const res = await fetch('/api/tenants');
+      if (res.ok) {
+        const data = await res.json();
+        setTenants(data.tenants || []);
+      }
+    } catch { /* ignore */ }
+  }, [isSuperAdmin]);
+
+  useEffect(() => { loadTenants(); }, [loadTenants]);
+
+  const handleTenantSave = useCallback(async () => {
+    setTenantSaving(true);
+    try {
+      const isEdit = tenantModal?.mode === 'edit';
+      const url = isEdit ? `/api/tenants/${tenantModal?.tenant?.id}` : '/api/tenants';
+      const method = isEdit ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tenantForm),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Failed to save tenant');
+        return;
+      }
+      setTenantModal(null);
+      setSuccess(isEdit ? 'Tenant updated' : 'Tenant created');
+      loadTenants();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to save tenant');
+    } finally {
+      setTenantSaving(false);
+    }
+  }, [tenantModal, tenantForm, loadTenants]);
+
+  const handleTenantDelete = useCallback(async (id: number, name: string) => {
+    if (!window.confirm(`Delete tenant "${name}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/tenants/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Failed to delete tenant');
+        return;
+      }
+      setSuccess('Tenant deleted');
+      loadTenants();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to delete tenant');
+    }
+  }, [loadTenants]);
 
   async function handleSave() {
     if (!settings) return;
@@ -476,8 +554,8 @@ export default function Settings() {
   };
 
   // User management state
-  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; }
-  interface UserFormData { username: string; display_name: string; password: string; role: string; }
+  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; tenant_id?: number; tenant_name?: string; is_superadmin?: boolean; }
+  interface UserFormData { username: string; display_name: string; password: string; role: string; tenant_id?: number; is_superadmin?: boolean; }
 
   const [users, setUsers] = useState<UserData[]>([]);
   const [userModal, setUserModal] = useState(false);
@@ -502,10 +580,10 @@ export default function Settings() {
   function openUserModal(u?: UserData) {
     if (u) {
       setEditingUser(u);
-      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role });
+      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role, tenant_id: u.tenant_id, is_superadmin: u.is_superadmin });
     } else {
       setEditingUser(null);
-      setUserForm({ username: '', display_name: '', password: '', role: 'viewer' });
+      setUserForm({ username: '', display_name: '', password: '', role: 'viewer', tenant_id: undefined, is_superadmin: false });
     }
     setUserError(null);
     setUserModal(true);
@@ -526,6 +604,11 @@ export default function Settings() {
         payload.password = userForm.password;
       } else if (userForm.password) {
         payload.password = userForm.password;
+      }
+      // Phase 46: Include tenant fields for superadmins
+      if (isSuperAdmin) {
+        if (userForm.tenant_id !== undefined) payload.tenant_id = userForm.tenant_id;
+        payload.is_superadmin = !!userForm.is_superadmin;
       }
       const res = await fetch(url, {
         method,
@@ -613,6 +696,320 @@ export default function Settings() {
     finally { setTogglingFramework(null); }
   }
 
+  // API Key management state
+  interface ApiKeyData {
+    id: number;
+    key_prefix: string;
+    name: string;
+    description: string | null;
+    role: string;
+    enabled: boolean;
+    created_by: number | null;
+    created_by_name: string | null;
+    created_at: string | null;
+    last_used_at: string | null;
+    expires_at: string | null;
+    usage_count: number;
+  }
+
+  interface ApiKeyFormData {
+    name: string;
+    description: string;
+    role: string;
+    expires_at: string;
+  }
+
+  const [apiKeys, setApiKeys] = useState<ApiKeyData[]>([]);
+  const [apiKeyModal, setApiKeyModal] = useState(false);
+  const [editingApiKey, setEditingApiKey] = useState<ApiKeyData | null>(null);
+  const [apiKeyForm, setApiKeyForm] = useState<ApiKeyFormData>({
+    name: '', description: '', role: 'viewer', expires_at: ''
+  });
+  const [apiKeySaving, setApiKeySaving] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  const [apiKeyDeleteConfirm, setApiKeyDeleteConfirm] = useState<number | null>(null);
+  const [newKeyValue, setNewKeyValue] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
+
+  const loadApiKeys = useCallback(async () => {
+    try {
+      const res = await fetch('/api/api-keys');
+      if (res.ok) {
+        const data = await res.json();
+        setApiKeys(data.api_keys || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadApiKeys(); }, [loadApiKeys]);
+
+  function openApiKeyModal(key?: ApiKeyData) {
+    if (key) {
+      setEditingApiKey(key);
+      setApiKeyForm({
+        name: key.name,
+        description: key.description || '',
+        role: key.role,
+        expires_at: key.expires_at ? key.expires_at.split('T')[0] : '',
+      });
+    } else {
+      setEditingApiKey(null);
+      setApiKeyForm({ name: '', description: '', role: 'viewer', expires_at: '' });
+    }
+    setApiKeyError(null);
+    setNewKeyValue(null);
+    setCopiedKey(false);
+    setApiKeyModal(true);
+  }
+
+  async function handleApiKeySave() {
+    setApiKeySaving(true);
+    setApiKeyError(null);
+    try {
+      const method = editingApiKey ? 'PUT' : 'POST';
+      const url = editingApiKey ? `/api/api-keys/${editingApiKey.id}` : '/api/api-keys';
+      const payload: Record<string, unknown> = {
+        name: apiKeyForm.name,
+        description: apiKeyForm.description || null,
+        role: apiKeyForm.role,
+      };
+      if (!editingApiKey && apiKeyForm.expires_at) {
+        payload.expires_at = apiKeyForm.expires_at;
+      }
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+
+      if (data.key) {
+        setNewKeyValue(data.key);
+        loadApiKeys();
+      } else {
+        setApiKeyModal(false);
+        setEditingApiKey(null);
+        loadApiKeys();
+      }
+    } catch (e: unknown) {
+      setApiKeyError(e instanceof Error ? e.message : 'Failed to save API key');
+    } finally {
+      setApiKeySaving(false);
+    }
+  }
+
+  async function handleApiKeyDelete(id: number) {
+    try {
+      const res = await fetch(`/api/api-keys/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        setApiKeyError(data.error || 'Delete failed');
+        return;
+      }
+      setApiKeyDeleteConfirm(null);
+      loadApiKeys();
+    } catch { /* ignore */ }
+  }
+
+  async function handleToggleApiKey(key: ApiKeyData) {
+    try {
+      const res = await fetch(`/api/api-keys/${key.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !key.enabled }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setApiKeyError(data.error || 'Toggle failed');
+        return;
+      }
+      loadApiKeys();
+    } catch { /* ignore */ }
+  }
+
+  function handleCopyKey() {
+    if (newKeyValue) {
+      navigator.clipboard.writeText(newKeyValue);
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2000);
+    }
+  }
+
+  // SOAR Playbook state
+  interface SoarPlaybookData {
+    id: number;
+    name: string;
+    description: string | null;
+    enabled: boolean;
+    trigger_type: string;
+    trigger_conditions: Record<string, unknown>;
+    action_type: string;
+    action_config: Record<string, unknown>;
+    integration: string;
+    cooldown_minutes: number;
+    created_by: string | null;
+    created_at: string | null;
+    last_triggered_at: string | null;
+    trigger_count: number;
+  }
+
+  interface SoarFormData {
+    name: string;
+    description: string;
+    trigger_type: string;
+    trigger_conditions: string;
+    action_type: string;
+    action_config: string;
+    integration: string;
+    cooldown_minutes: number;
+  }
+
+  const SOAR_TRIGGER_LABELS: Record<string, string> = {
+    anomaly: 'Anomaly Detected',
+    risk_escalation: 'Risk Escalation',
+    drift: 'Drift Detected',
+    new_identity: 'New Identity',
+  };
+
+  const SOAR_ACTION_LABELS: Record<string, string> = {
+    webhook: 'Webhook',
+    create_ticket: 'Create Ticket',
+    send_notification: 'In-App Notification',
+    tag_for_review: 'Tag for Review',
+  };
+
+  const SOAR_INTEGRATION_LABELS: Record<string, string> = {
+    slack: 'Slack',
+    teams: 'Teams',
+    pagerduty: 'PagerDuty',
+    servicenow: 'ServiceNow',
+    jira: 'Jira',
+    custom_webhook: 'Custom Webhook',
+    internal: 'Internal',
+  };
+
+  const [soarPlaybooks, setSoarPlaybooks] = useState<SoarPlaybookData[]>([]);
+  const [soarModal, setSoarModal] = useState(false);
+  const [editingSoar, setEditingSoar] = useState<SoarPlaybookData | null>(null);
+  const [soarForm, setSoarForm] = useState<SoarFormData>({
+    name: '', description: '', trigger_type: 'anomaly', trigger_conditions: '{}',
+    action_type: 'send_notification', action_config: '{}', integration: 'internal', cooldown_minutes: 60,
+  });
+  const [soarSaving, setSoarSaving] = useState(false);
+  const [soarError, setSoarError] = useState<string | null>(null);
+  const [soarDeleteConfirm, setSoarDeleteConfirm] = useState<number | null>(null);
+  const [testingSoarId, setTestingSoarId] = useState<number | null>(null);
+  const [soarTestResult, setSoarTestResult] = useState<Record<string, unknown> | null>(null);
+
+  const loadSoarPlaybooks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/soar/playbooks');
+      if (res.ok) {
+        const data = await res.json();
+        setSoarPlaybooks(data.playbooks || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadSoarPlaybooks(); }, [loadSoarPlaybooks]);
+
+  function openSoarModal(pb?: SoarPlaybookData) {
+    if (pb) {
+      setEditingSoar(pb);
+      setSoarForm({
+        name: pb.name,
+        description: pb.description || '',
+        trigger_type: pb.trigger_type,
+        trigger_conditions: JSON.stringify(pb.trigger_conditions || {}, null, 2),
+        action_type: pb.action_type,
+        action_config: JSON.stringify(pb.action_config || {}, null, 2),
+        integration: pb.integration,
+        cooldown_minutes: pb.cooldown_minutes,
+      });
+    } else {
+      setEditingSoar(null);
+      setSoarForm({
+        name: '', description: '', trigger_type: 'anomaly', trigger_conditions: '{}',
+        action_type: 'send_notification', action_config: '{}', integration: 'internal', cooldown_minutes: 60,
+      });
+    }
+    setSoarError(null);
+    setSoarTestResult(null);
+    setSoarModal(true);
+  }
+
+  async function handleSoarSave() {
+    setSoarSaving(true);
+    setSoarError(null);
+    try {
+      let triggerConditions: Record<string, unknown> = {};
+      let actionConfig: Record<string, unknown> = {};
+      try { triggerConditions = JSON.parse(soarForm.trigger_conditions); } catch { /* ignore */ }
+      try { actionConfig = JSON.parse(soarForm.action_config); } catch { /* ignore */ }
+
+      const payload = {
+        name: soarForm.name,
+        description: soarForm.description || null,
+        trigger_type: soarForm.trigger_type,
+        trigger_conditions: triggerConditions,
+        action_type: soarForm.action_type,
+        action_config: actionConfig,
+        integration: soarForm.integration,
+        cooldown_minutes: soarForm.cooldown_minutes,
+      };
+
+      const method = editingSoar ? 'PUT' : 'POST';
+      const url = editingSoar ? `/api/soar/playbooks/${editingSoar.id}` : '/api/soar/playbooks';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      setSoarModal(false);
+      setEditingSoar(null);
+      loadSoarPlaybooks();
+    } catch (e: unknown) {
+      setSoarError(e instanceof Error ? e.message : 'Failed to save playbook');
+    } finally {
+      setSoarSaving(false);
+    }
+  }
+
+  async function handleSoarDelete(id: number) {
+    try {
+      await fetch(`/api/soar/playbooks/${id}`, { method: 'DELETE' });
+      setSoarDeleteConfirm(null);
+      loadSoarPlaybooks();
+    } catch { /* ignore */ }
+  }
+
+  async function handleToggleSoar(pb: SoarPlaybookData) {
+    try {
+      await fetch(`/api/soar/playbooks/${pb.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !pb.enabled }),
+      });
+      loadSoarPlaybooks();
+    } catch { /* ignore */ }
+  }
+
+  async function handleSoarTest(id: number) {
+    setTestingSoarId(id);
+    setSoarTestResult(null);
+    try {
+      const res = await fetch(`/api/soar/playbooks/${id}/test`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setSoarTestResult(data);
+      }
+    } catch { /* ignore */ }
+    finally { setTestingSoarId(null); }
+  }
+
   // Test email state
   const [testingEmail, setTestingEmail] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -635,6 +1032,145 @@ export default function Settings() {
       setTestResult({ type: 'error', message: e?.message || 'Failed to send test email' });
     } finally {
       setTestingEmail(false);
+    }
+  }
+
+  // Phase 54: SSO/SAML state
+  const [ssoConfig, setSsoConfig] = useState({
+    sso_enabled: 'false',
+    sso_idp_entity_id: '',
+    sso_idp_sso_url: '',
+    sso_idp_slo_url: '',
+    sso_idp_x509_cert: '',
+    sso_role_mapping: '{}',
+    sso_default_role: 'viewer',
+    sso_jit_enabled: 'true',
+    sso_force_sso: 'false',
+  });
+  const [ssoSpInfo, setSsoSpInfo] = useState({ sp_entity_id: '', sp_acs_url: '', sp_metadata_url: '' });
+  const [ssoRoleMappings, setSsoRoleMappings] = useState<{ group: string; role: string }[]>([]);
+  const [ssoSaving, setSsoSaving] = useState(false);
+  const [ssoParsing, setSsoParsing] = useState(false);
+  const [ssoMetadataUrl, setSsoMetadataUrl] = useState('');
+  const [ssoMessage, setSsoMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // SA Governance settings (Phase 63)
+  const [saGov, setSaGov] = useState({
+    sa_gov_max_credential_age_days: '365',
+    sa_gov_attestation_interval_days: '90',
+    sa_gov_dormant_threshold_days: '90',
+    sa_gov_require_owner: 'true',
+  });
+  const [saGovSaving, setSaGovSaving] = useState(false);
+  const [saGovMsg, setSaGovMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    fetch('/api/settings/sa-governance')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.settings) setSaGov(prev => ({ ...prev, ...data.settings }));
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleSaGovSave() {
+    setSaGovSaving(true);
+    setSaGovMsg(null);
+    try {
+      const res = await fetch('/api/settings/sa-governance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(saGov),
+      });
+      if (res.ok) {
+        setSaGovMsg({ type: 'success', text: 'SA governance settings saved' });
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setSaGovMsg({ type: 'error', text: d.error || 'Save failed' });
+      }
+    } catch {
+      setSaGovMsg({ type: 'error', text: 'Network error' });
+    }
+    setSaGovSaving(false);
+  }
+
+  useEffect(() => {
+    fetch('/api/settings/sso')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        setSsoConfig(prev => ({
+          ...prev,
+          sso_enabled: data.sso_enabled || 'false',
+          sso_idp_entity_id: data.sso_idp_entity_id || '',
+          sso_idp_sso_url: data.sso_idp_sso_url || '',
+          sso_idp_slo_url: data.sso_idp_slo_url || '',
+          sso_idp_x509_cert: data.sso_idp_x509_cert || '',
+          sso_role_mapping: data.sso_role_mapping || '{}',
+          sso_default_role: data.sso_default_role || 'viewer',
+          sso_jit_enabled: data.sso_jit_enabled || 'true',
+          sso_force_sso: data.sso_force_sso || 'false',
+        }));
+        setSsoSpInfo({
+          sp_entity_id: data.sp_entity_id || '',
+          sp_acs_url: data.sp_acs_url || '',
+          sp_metadata_url: data.sp_metadata_url || '',
+        });
+        try {
+          const mapping = JSON.parse(data.sso_role_mapping || '{}');
+          setSsoRoleMappings(Object.entries(mapping).map(([group, role]) => ({ group, role: role as string })));
+        } catch { /* ignore */ }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleSsoParseMetadata() {
+    if (!ssoMetadataUrl) return;
+    setSsoParsing(true);
+    setSsoMessage(null);
+    try {
+      const res = await fetch('/api/settings/sso/parse-metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metadata_url: ssoMetadataUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to parse metadata');
+      setSsoConfig(prev => ({
+        ...prev,
+        sso_idp_entity_id: data.idp_entity_id || prev.sso_idp_entity_id,
+        sso_idp_sso_url: data.idp_sso_url || prev.sso_idp_sso_url,
+        sso_idp_slo_url: data.idp_slo_url || prev.sso_idp_slo_url,
+        sso_idp_x509_cert: data.idp_x509_cert || prev.sso_idp_x509_cert,
+      }));
+      setSsoMessage({ type: 'success', text: 'IdP metadata parsed successfully' });
+    } catch (e: any) {
+      setSsoMessage({ type: 'error', text: e?.message || 'Failed to parse metadata' });
+    } finally {
+      setSsoParsing(false);
+    }
+  }
+
+  async function handleSsoSave() {
+    setSsoSaving(true);
+    setSsoMessage(null);
+    try {
+      const mapping: Record<string, string> = {};
+      ssoRoleMappings.forEach(m => { if (m.group.trim()) mapping[m.group.trim()] = m.role; });
+      const payload = { ...ssoConfig, sso_role_mapping: JSON.stringify(mapping) };
+      const res = await fetch('/api/settings/sso', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save SSO settings');
+      setSsoMessage({ type: 'success', text: 'SSO settings saved' });
+      setTimeout(() => setSsoMessage(null), 4000);
+    } catch (e: any) {
+      setSsoMessage({ type: 'error', text: e?.message || 'Failed to save' });
+    } finally {
+      setSsoSaving(false);
     }
   }
 
@@ -693,7 +1229,152 @@ export default function Settings() {
                 Appears on PDF report cover pages and email notifications
               </p>
             </div>
+
+            {/* Tenant info */}
+            {currentTenant && (
+              <div className="flex items-center gap-3 pt-2 border-t">
+                <span className="text-xs text-gray-500">Tenant:</span>
+                <span className="text-sm font-medium text-gray-800">{currentTenant.name}</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500">{currentTenant.slug}</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                  currentTenant.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
+                  currentTenant.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
+                  'bg-gray-100 text-gray-600'
+                }`}>{currentTenant.plan}</span>
+              </div>
+            )}
+
+            {/* Superadmin: Tenant Management */}
+            {isSuperAdmin && tenants.length > 0 && (
+              <div className="pt-3 border-t space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-700">All Tenants</div>
+                  <button
+                    onClick={() => {
+                      setTenantForm({ name: '', slug: '', plan: 'free' });
+                      setTenantModal({ mode: 'create' });
+                    }}
+                    className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+                  >
+                    + Add Tenant
+                  </button>
+                </div>
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wider">
+                        <th className="px-4 py-2">Name</th>
+                        <th className="px-4 py-2">Slug</th>
+                        <th className="px-4 py-2">Plan</th>
+                        <th className="px-4 py-2">Users</th>
+                        <th className="px-4 py-2">Status</th>
+                        <th className="px-4 py-2 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {tenants.map(t => (
+                        <tr key={t.id} className="hover:bg-gray-50">
+                          <td className="px-4 py-2 font-medium text-gray-900">{t.name}</td>
+                          <td className="px-4 py-2 text-gray-500 font-mono text-xs">{t.slug}</td>
+                          <td className="px-4 py-2">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                              t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
+                              t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
+                              'bg-gray-100 text-gray-600'
+                            }`}>{t.plan}</span>
+                          </td>
+                          <td className="px-4 py-2 text-gray-500">{t.user_count ?? 0}</td>
+                          <td className="px-4 py-2">
+                            <span className={`w-2 h-2 rounded-full inline-block ${t.enabled ? 'bg-green-500' : 'bg-red-400'}`} />
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            <button
+                              onClick={() => {
+                                setTenantForm({ name: t.name, slug: t.slug, plan: t.plan });
+                                setTenantModal({ mode: 'edit', tenant: t });
+                              }}
+                              className="text-xs text-blue-600 hover:text-blue-800 mr-3"
+                            >Edit</button>
+                            {t.slug !== 'default' && (
+                              <button
+                                onClick={() => handleTenantDelete(t.id, t.name)}
+                                className="text-xs text-red-500 hover:text-red-700"
+                              >Delete</button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Tenant Create/Edit Modal */}
+          {tenantModal && (
+            <>
+              <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setTenantModal(null)} />
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-2xl border w-full max-w-md p-6 space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {tenantModal.mode === 'edit' ? 'Edit Tenant' : 'Create Tenant'}
+                  </h3>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                    <input
+                      type="text"
+                      value={tenantForm.name}
+                      onChange={e => setTenantForm(f => ({ ...f, name: e.target.value }))}
+                      placeholder="Organization name"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Slug</label>
+                    <input
+                      type="text"
+                      value={tenantForm.slug}
+                      onChange={e => setTenantForm(f => ({ ...f, slug: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') }))}
+                      placeholder="url-safe-slug"
+                      disabled={tenantModal.mode === 'edit'}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+                    />
+                    <p className="text-[10px] text-gray-400 mt-0.5">Lowercase, alphanumeric, hyphens and underscores only</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Plan</label>
+                    <select
+                      value={tenantForm.plan}
+                      onChange={e => setTenantForm(f => ({ ...f, plan: e.target.value }))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      <option value="free">Free</option>
+                      <option value="pro">Pro</option>
+                      <option value="enterprise">Enterprise</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center justify-end gap-3 pt-2">
+                    <button
+                      onClick={() => setTenantModal(null)}
+                      className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition"
+                    >Cancel</button>
+                    <button
+                      onClick={handleTenantSave}
+                      disabled={tenantSaving || !tenantForm.name || !tenantForm.slug}
+                      className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
+                        tenantSaving || !tenantForm.name || !tenantForm.slug
+                          ? 'bg-gray-400 cursor-not-allowed'
+                          : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      {tenantSaving ? 'Saving...' : tenantModal.mode === 'edit' ? 'Update' : 'Create'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Section 2: Discovery Schedule */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
@@ -1286,6 +1967,12 @@ export default function Settings() {
                           {!u.enabled && (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
                           )}
+                          {isSuperAdmin && u.tenant_name && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">{u.tenant_name}</span>
+                          )}
+                          {u.is_superadmin && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700">SUPER</span>
+                          )}
                         </div>
                         <div className="text-xs text-gray-500">
                           @{u.username}
@@ -1345,7 +2032,318 @@ export default function Settings() {
             </p>
           </div>
 
-          {/* Section 8: Compliance Frameworks */}
+          {/* Section 8: API Keys */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">API Keys</div>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Manage programmatic access keys for integrations and automations
+                </p>
+              </div>
+              <button
+                onClick={() => openApiKeyModal()}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+              >
+                + Create API Key
+              </button>
+            </div>
+
+            {apiKeyError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                {apiKeyError}
+                <button onClick={() => setApiKeyError(null)} className="ml-2 font-medium underline">Dismiss</button>
+              </div>
+            )}
+
+            {apiKeys.length === 0 ? (
+              <p className="text-sm text-gray-400 py-4 text-center">No API keys configured</p>
+            ) : (
+              <div className="space-y-2">
+                {apiKeys.map(k => (
+                  <div key={k.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-600">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                          {k.name}
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
+                            k.role === 'admin' ? 'bg-red-50 text-red-700' :
+                            k.role === 'auditor' ? 'bg-blue-50 text-blue-700' :
+                            'bg-gray-100 text-gray-600'
+                          }`}>
+                            {k.role}
+                          </span>
+                          {!k.enabled && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          <span className="font-mono">{k.key_prefix}{'****'}</span>
+                          {' '}&middot; {k.usage_count} request{k.usage_count !== 1 ? 's' : ''}
+                          {k.last_used_at && <> &middot; Last used {new Date(k.last_used_at).toLocaleDateString()}</>}
+                          {k.expires_at && <> &middot; Expires {new Date(k.expires_at).toLocaleDateString()}</>}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleToggleApiKey(k)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                          k.enabled ? 'bg-green-500' : 'bg-gray-300'
+                        }`}
+                        title={k.enabled ? 'Disable key' : 'Enable key'}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                          k.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                        }`} />
+                      </button>
+                      <button
+                        onClick={() => openApiKeyModal(k)}
+                        className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition"
+                      >
+                        Edit
+                      </button>
+                      {apiKeyDeleteConfirm === k.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleApiKeyDelete(k.id)}
+                            className="px-2 py-1 text-xs text-white bg-red-600 hover:bg-red-700 rounded transition"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setApiKeyDeleteConfirm(null)}
+                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded transition"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setApiKeyDeleteConfirm(k.id)}
+                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded transition"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-400">
+              API keys authenticate requests via <code className="bg-gray-100 px-1 rounded">X-API-Key</code> header or Bearer token with <code className="bg-gray-100 px-1 rounded">ag_</code> prefix.
+              Keys inherit the assigned role's permissions.
+            </p>
+          </div>
+
+          {/* Section 9: SSO/SAML Configuration (Phase 54) */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">SSO / SAML</div>
+                <p className="text-sm text-gray-500 mt-0.5">Configure SAML 2.0 Single Sign-On with your identity provider</p>
+              </div>
+              <button
+                onClick={() => setSsoConfig(prev => ({ ...prev, sso_enabled: prev.sso_enabled === 'true' ? 'false' : 'true' }))}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${ssoConfig.sso_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'}`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition ${ssoConfig.sso_enabled === 'true' ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
+              </button>
+            </div>
+
+            {ssoMessage && (
+              <div className={`p-3 rounded-lg text-sm ${ssoMessage.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+                {ssoMessage.text}
+              </div>
+            )}
+
+            {/* IdP Metadata URL shortcut */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">IdP Metadata URL</label>
+              <div className="flex gap-2">
+                <input
+                  value={ssoMetadataUrl}
+                  onChange={e => setSsoMetadataUrl(e.target.value)}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="https://login.microsoftonline.com/.../federationmetadata/2007-06/federationmetadata.xml"
+                />
+                <button
+                  onClick={handleSsoParseMetadata}
+                  disabled={ssoParsing || !ssoMetadataUrl}
+                  className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 transition whitespace-nowrap"
+                >
+                  {ssoParsing ? 'Parsing...' : 'Fetch & Parse'}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1">Auto-fills the fields below from your IdP's metadata endpoint</p>
+            </div>
+
+            {/* Manual IdP config fields */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">IdP Entity ID</label>
+                <input
+                  value={ssoConfig.sso_idp_entity_id}
+                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_entity_id: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="https://sts.windows.net/..."
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">SSO URL</label>
+                <input
+                  value={ssoConfig.sso_idp_sso_url}
+                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_sso_url: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="https://login.microsoftonline.com/.../saml2"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">SLO URL (Optional)</label>
+                <input
+                  value={ssoConfig.sso_idp_slo_url}
+                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_slo_url: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="https://login.microsoftonline.com/.../saml2"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Default Role</label>
+                <select
+                  value={ssoConfig.sso_default_role}
+                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_default_role: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="auditor">Auditor</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">X.509 Certificate (PEM)</label>
+              <textarea
+                value={ssoConfig.sso_idp_x509_cert}
+                onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_x509_cert: e.target.value }))}
+                rows={3}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono"
+                placeholder="MIIDpDCCA..."
+              />
+            </div>
+
+            {/* SP Information (read-only) */}
+            {ssoSpInfo.sp_entity_id && (
+              <div className="bg-gray-50 rounded-lg p-3 space-y-1">
+                <div className="text-xs font-semibold text-gray-700 mb-1">Service Provider Information (copy to your IdP)</div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-500 w-24">Entity ID:</span>
+                  <code className="text-gray-800 bg-white px-2 py-0.5 rounded border text-[11px] flex-1">{ssoSpInfo.sp_entity_id}</code>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-500 w-24">ACS URL:</span>
+                  <code className="text-gray-800 bg-white px-2 py-0.5 rounded border text-[11px] flex-1">{ssoSpInfo.sp_acs_url}</code>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-500 w-24">Metadata:</span>
+                  <code className="text-gray-800 bg-white px-2 py-0.5 rounded border text-[11px] flex-1">{ssoSpInfo.sp_metadata_url}</code>
+                </div>
+              </div>
+            )}
+
+            {/* Role Mapping */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-medium text-gray-600">Role Mapping (IdP Group → AuditGraph Role)</label>
+                <button
+                  onClick={() => setSsoRoleMappings(prev => [...prev, { group: '', role: 'viewer' }])}
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  + Add Mapping
+                </button>
+              </div>
+              {ssoRoleMappings.length === 0 && (
+                <p className="text-xs text-gray-400 py-2">No role mappings configured. All SSO users will get the default role.</p>
+              )}
+              {ssoRoleMappings.map((m, i) => (
+                <div key={i} className="flex items-center gap-2 mb-1.5">
+                  <input
+                    value={m.group}
+                    onChange={e => {
+                      const updated = [...ssoRoleMappings];
+                      updated[i] = { ...m, group: e.target.value };
+                      setSsoRoleMappings(updated);
+                    }}
+                    className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
+                    placeholder="IdP Group Name"
+                  />
+                  <span className="text-xs text-gray-400">→</span>
+                  <select
+                    value={m.role}
+                    onChange={e => {
+                      const updated = [...ssoRoleMappings];
+                      updated[i] = { ...m, role: e.target.value };
+                      setSsoRoleMappings(updated);
+                    }}
+                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
+                  >
+                    <option value="viewer">Viewer</option>
+                    <option value="auditor">Auditor</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button
+                    onClick={() => setSsoRoleMappings(prev => prev.filter((_, j) => j !== i))}
+                    className="text-red-400 hover:text-red-600 text-xs px-1"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {/* Toggle options */}
+            <div className="flex items-center gap-6">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <button
+                  onClick={() => setSsoConfig(prev => ({ ...prev, sso_jit_enabled: prev.sso_jit_enabled === 'true' ? 'false' : 'true' }))}
+                  className={`relative inline-flex h-4 w-7 items-center rounded-full transition ${ssoConfig.sso_jit_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'}`}
+                >
+                  <span className={`inline-block h-3 w-3 rounded-full bg-white transition ${ssoConfig.sso_jit_enabled === 'true' ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+                </button>
+                JIT User Provisioning
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <button
+                  onClick={() => setSsoConfig(prev => ({ ...prev, sso_force_sso: prev.sso_force_sso === 'true' ? 'false' : 'true' }))}
+                  className={`relative inline-flex h-4 w-7 items-center rounded-full transition ${ssoConfig.sso_force_sso === 'true' ? 'bg-red-600' : 'bg-gray-300'}`}
+                >
+                  <span className={`inline-block h-3 w-3 rounded-full bg-white transition ${ssoConfig.sso_force_sso === 'true' ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+                </button>
+                Force SSO (disable local login)
+              </label>
+            </div>
+            {ssoConfig.sso_force_sso === 'true' && (
+              <p className="text-xs text-red-500">Warning: Enabling Force SSO will prevent local credential login for all non-superadmin users in this tenant.</p>
+            )}
+
+            <button
+              onClick={handleSsoSave}
+              disabled={ssoSaving}
+              className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 transition"
+            >
+              {ssoSaving ? 'Saving...' : 'Save SSO Settings'}
+            </button>
+          </div>
+
+          {/* Section 10: Compliance Frameworks */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div>
               <div className="text-lg font-semibold text-gray-900">Compliance Frameworks</div>
@@ -1402,6 +2400,224 @@ export default function Settings() {
             <p className="text-xs text-gray-400">
               Disabled frameworks are excluded from the compliance dashboard and gap analysis. Controls are evaluated on each API call using current identity posture data.
             </p>
+          </div>
+
+          {/* Section 10: SOAR Playbooks */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">SOAR Playbooks</div>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Automated response playbooks triggered by security events
+                </p>
+              </div>
+              <button
+                onClick={() => openSoarModal()}
+                disabled={soarPlaybooks.length >= 20}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  soarPlaybooks.length >= 20
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                + Add Playbook
+              </button>
+            </div>
+
+            {soarPlaybooks.length === 0 ? (
+              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
+                No SOAR playbooks configured. Add one to automate security responses.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {soarPlaybooks.map(pb => (
+                  <div key={pb.id} className="border rounded-lg px-4 py-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <button
+                          onClick={() => handleToggleSoar(pb)}
+                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
+                            pb.enabled ? 'bg-green-500' : 'bg-gray-300'
+                          }`}
+                        >
+                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                            pb.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                          }`} />
+                        </button>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-gray-900 truncate">{pb.name}</div>
+                          {pb.description && (
+                            <div className="text-xs text-gray-400 truncate">{pb.description}</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="hidden sm:flex items-center gap-1.5 mx-3 flex-shrink-0">
+                        <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded">
+                          {SOAR_TRIGGER_LABELS[pb.trigger_type] || pb.trigger_type}
+                        </span>
+                        <span className="text-gray-300 text-[10px]">&rarr;</span>
+                        <span className="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-medium rounded">
+                          {SOAR_ACTION_LABELS[pb.action_type] || pb.action_type}
+                        </span>
+                        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 text-[10px] font-medium rounded">
+                          {SOAR_INTEGRATION_LABELS[pb.integration] || pb.integration}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-xs text-gray-400">
+                          {pb.trigger_count}x
+                          {pb.last_triggered_at && (
+                            <> &middot; {new Date(pb.last_triggered_at).toLocaleDateString()}</>
+                          )}
+                        </span>
+                        <button
+                          onClick={() => handleSoarTest(pb.id)}
+                          disabled={testingSoarId === pb.id}
+                          className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
+                        >
+                          {testingSoarId === pb.id ? 'Testing...' : 'Test'}
+                        </button>
+                        <button
+                          onClick={() => openSoarModal(pb)}
+                          className="px-2 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition"
+                        >
+                          Edit
+                        </button>
+                        {soarDeleteConfirm === pb.id ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleSoarDelete(pb.id)}
+                              className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setSoarDeleteConfirm(null)}
+                              className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setSoarDeleteConfirm(pb.id)}
+                            className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Test result inline */}
+                    {soarTestResult && (soarTestResult as Record<string, unknown>).playbook_id === pb.id && (
+                      <div className="mt-2 p-2 bg-gray-50 rounded border text-xs">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`w-2 h-2 rounded-full ${(soarTestResult as Record<string, unknown>).would_match ? 'bg-green-500' : 'bg-yellow-500'}`} />
+                          <span className="font-medium text-gray-700">
+                            {(soarTestResult as Record<string, unknown>).would_match ? 'Would trigger' : 'Would NOT trigger'}
+                          </span>
+                          {!(soarTestResult as Record<string, unknown>).cooldown_ok && (
+                            <span className="text-orange-600">(cooldown active)</span>
+                          )}
+                        </div>
+                        <div className="text-gray-500">{(soarTestResult as Record<string, unknown>).summary as string}</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-400">
+              Maximum 20 playbooks. Playbooks are evaluated automatically after discovery runs detect anomalies, drift, or risk changes.
+              Cooldown prevents duplicate actions.
+            </p>
+          </div>
+
+          {/* Section 11: Service Account Governance (Phase 63) */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div>
+              <div className="text-lg font-semibold text-gray-900">Service Account Governance</div>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Configure governance policies for non-human identities (service principals, managed identities).
+              </p>
+            </div>
+
+            {saGovMsg && (
+              <div className={`rounded-lg p-3 text-sm ${saGovMsg.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+                {saGovMsg.text}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Max Credential Age (days)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={saGov.sa_gov_max_credential_age_days}
+                  onChange={e => setSaGov(prev => ({ ...prev, sa_gov_max_credential_age_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-400 mt-1">Credentials older than this are flagged</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Attestation Interval (days)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={saGov.sa_gov_attestation_interval_days}
+                  onChange={e => setSaGov(prev => ({ ...prev, sa_gov_attestation_interval_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-400 mt-1">How often owners must re-attest</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Dormant Threshold (days)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={saGov.sa_gov_dormant_threshold_days}
+                  onChange={e => setSaGov(prev => ({ ...prev, sa_gov_dormant_threshold_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-400 mt-1">No sign-in within this = dormant</p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between max-w-xs">
+              <label className="text-sm font-medium text-gray-700">Require Owner</label>
+              <button
+                type="button"
+                onClick={() => setSaGov(prev => ({ ...prev, sa_gov_require_owner: prev.sa_gov_require_owner === 'true' ? 'false' : 'true' }))}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  saGov.sa_gov_require_owner === 'true' ? 'bg-blue-600' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  saGov.sa_gov_require_owner === 'true' ? 'translate-x-6' : 'translate-x-1'
+                }`} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 -mt-2">Unowned service accounts flagged as non-compliant</p>
+
+            <button
+              onClick={handleSaGovSave}
+              disabled={saGovSaving}
+              className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${
+                saGovSaving ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+              }`}
+            >
+              {saGovSaving ? 'Saving...' : 'Save Governance Policy'}
+            </button>
           </div>
 
           {/* Save button */}
@@ -1876,6 +3092,34 @@ export default function Settings() {
               </p>
             </div>
 
+            {/* Phase 46: Tenant + Superadmin fields (superadmin only) */}
+            {isSuperAdmin && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tenant</label>
+                  <select
+                    value={userForm.tenant_id || ''}
+                    onChange={e => setUserForm(prev => ({ ...prev, tenant_id: e.target.value ? Number(e.target.value) : undefined }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="">-- Select Tenant --</option>
+                    {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!userForm.is_superadmin}
+                      onChange={e => setUserForm(prev => ({ ...prev, is_superadmin: e.target.checked }))}
+                      className="w-4 h-4 text-amber-600 border-gray-300 rounded focus:ring-amber-500"
+                    />
+                    <span className="text-sm font-medium text-gray-700">Superadmin</span>
+                  </label>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
                 onClick={() => setUserModal(false)}
@@ -1893,6 +3137,249 @@ export default function Settings() {
                 }`}
               >
                 {userSaving ? 'Saving...' : editingUser ? 'Update' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* API Key Create/Edit Modal */}
+      {apiKeyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => { setApiKeyModal(false); setNewKeyValue(null); }} />
+          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+            {newKeyValue ? (
+              <>
+                <div className="text-lg font-semibold text-gray-900">API Key Created</div>
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                  Copy this key now. It will not be shown again.
+                </div>
+                <div className="bg-gray-50 border rounded-lg p-3 font-mono text-sm break-all select-all">
+                  {newKeyValue}
+                </div>
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    onClick={handleCopyKey}
+                    className="px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition"
+                  >
+                    {copiedKey ? 'Copied!' : 'Copy to Clipboard'}
+                  </button>
+                  <button
+                    onClick={() => { setApiKeyModal(false); setNewKeyValue(null); }}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition"
+                  >
+                    Done
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-lg font-semibold text-gray-900">
+                  {editingApiKey ? 'Edit API Key' : 'Create API Key'}
+                </div>
+                {apiKeyError && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{apiKeyError}</div>
+                )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                  <input
+                    type="text"
+                    value={apiKeyForm.name}
+                    onChange={e => setApiKeyForm(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="e.g., CI/CD Pipeline Key"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={apiKeyForm.description}
+                    onChange={e => setApiKeyForm(prev => ({ ...prev, description: e.target.value }))}
+                    placeholder="Optional description"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                  <div className="flex gap-2">
+                    {['admin', 'auditor', 'viewer'].map(role => (
+                      <button
+                        key={role}
+                        onClick={() => setApiKeyForm(prev => ({ ...prev, role }))}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                          apiKeyForm.role === role
+                            ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
+                              : role === 'auditor' ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-gray-600 text-white border-gray-600'
+                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {role.charAt(0).toUpperCase() + role.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {!editingApiKey && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Expiration <span className="font-normal text-gray-400">(optional)</span>
+                    </label>
+                    <input
+                      type="date"
+                      value={apiKeyForm.expires_at}
+                      onChange={e => setApiKeyForm(prev => ({ ...prev, expires_at: e.target.value }))}
+                      className="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">Leave blank for a non-expiring key</p>
+                  </div>
+                )}
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    onClick={() => setApiKeyModal(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleApiKeySave}
+                    disabled={apiKeySaving || !apiKeyForm.name}
+                    className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
+                      apiKeySaving || !apiKeyForm.name ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    {apiKeySaving ? 'Saving...' : editingApiKey ? 'Update' : 'Create'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* SOAR Playbook Create/Edit Modal */}
+      {soarModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setSoarModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="text-lg font-semibold text-gray-900">
+              {editingSoar ? 'Edit SOAR Playbook' : 'Add SOAR Playbook'}
+            </div>
+            {soarError && (
+              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{soarError}</div>
+            )}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input
+                type="text"
+                value={soarForm.name}
+                onChange={e => setSoarForm(prev => ({ ...prev, name: e.target.value }))}
+                placeholder="e.g. Critical Anomaly Slack Alert"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={soarForm.description}
+                onChange={e => setSoarForm(prev => ({ ...prev, description: e.target.value }))}
+                placeholder="Optional description"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Trigger Type</label>
+                <select
+                  value={soarForm.trigger_type}
+                  onChange={e => setSoarForm(prev => ({ ...prev, trigger_type: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  {Object.entries(SOAR_TRIGGER_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Action Type</label>
+                <select
+                  value={soarForm.action_type}
+                  onChange={e => setSoarForm(prev => ({ ...prev, action_type: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  {Object.entries(SOAR_ACTION_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Integration</label>
+                <select
+                  value={soarForm.integration}
+                  onChange={e => setSoarForm(prev => ({ ...prev, integration: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  {Object.entries(SOAR_INTEGRATION_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cooldown (minutes)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={soarForm.cooldown_minutes}
+                  onChange={e => setSoarForm(prev => ({ ...prev, cooldown_minutes: parseInt(e.target.value) || 60 }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Trigger Conditions <span className="font-normal text-gray-400">(JSON)</span>
+              </label>
+              <textarea
+                value={soarForm.trigger_conditions}
+                onChange={e => setSoarForm(prev => ({ ...prev, trigger_conditions: e.target.value }))}
+                rows={3}
+                placeholder='{"severity": "critical"}'
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <p className="text-[10px] text-gray-400 mt-0.5">All conditions must match the event. Empty = match all events of this trigger type.</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Action Config <span className="font-normal text-gray-400">(JSON)</span>
+              </label>
+              <textarea
+                value={soarForm.action_config}
+                onChange={e => setSoarForm(prev => ({ ...prev, action_config: e.target.value }))}
+                rows={3}
+                placeholder='{"url": "https://hooks.slack.com/..."}'
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <p className="text-[10px] text-gray-400 mt-0.5">Webhook: url. Ticket: base_url, project_key, api_token. Notification/Tag: no config needed.</p>
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setSoarModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSoarSave}
+                disabled={soarSaving || !soarForm.name}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
+                  soarSaving || !soarForm.name ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {soarSaving ? 'Saving...' : editingSoar ? 'Update' : 'Create'}
               </button>
             </div>
           </div>

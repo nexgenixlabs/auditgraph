@@ -35,7 +35,6 @@ export default function PostureScore({ score, previousScore }: PostureScoreProps
 
   const scoreDelta = previousScore != null ? Math.round((score - previousScore) * 10) / 10 : null;
   const isImproved = scoreDelta !== null && scoreDelta > 0;
-  const isDeclined = scoreDelta !== null && scoreDelta < 0;
 
   return (
     <div

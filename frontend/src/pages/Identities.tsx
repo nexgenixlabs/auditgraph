@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
+import QueryBuilder from '../components/QueryBuilder';
+import type { AdvancedQuery, QueryFieldDefinition } from '../types';
+import { queryIdentities, getQueryFields } from '../services/api';
+import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS } from '../utils/exportUtils';
@@ -52,7 +56,7 @@ interface SavedView {
   id: number;
   name: string;
   description: string | null;
-  filters: Record<string, string>;
+  filters: Record<string, any>;
   sort_field: string | null;
   sort_direction: string | null;
   is_default: boolean;
@@ -251,6 +255,16 @@ export default function IdentitiesPage() {
   const [viewSaving, setViewSaving] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
 
+  // Phase 39: Advanced Query Builder state
+  const [queryMode, setQueryMode] = useState<'simple' | 'advanced'>('simple');
+  const [advancedQuery, setAdvancedQuery] = useState<AdvancedQuery>({ groups: [] });
+  const [queryFields, setQueryFields] = useState<QueryFieldDefinition[]>([]);
+  const [valueSuggestions, setValueSuggestions] = useState<Record<string, string[]>>({});
+  const [queryLoading, setQueryLoading] = useState(false);
+  const [queryResults, setQueryResults] = useState<IdentityRow[] | null>(null);
+  const [queryTotal, setQueryTotal] = useState(0);
+  const [riskHistories, setRiskHistories] = useState<Record<string, number[]>>({});
+
   const { addToast } = useToast();
   const { user, isAdmin } = useAuth();
   const navigate = useNavigate();
@@ -332,6 +346,27 @@ export default function IdentitiesPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // ─── Batch risk histories for sparkline column ─────────────────
+  useEffect(() => {
+    if (identities.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const ids = identities.map(i => i.identity_id);
+        const resp = await fetch('/api/identities/risk-history/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identity_ids: ids.slice(0, 200), limit: 10 }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (!cancelled) setRiskHistories(data.histories || {});
+        }
+      } catch { /* non-blocking */ }
+    })();
+    return () => { cancelled = true; };
+  }, [identities]);
+
   // ─── Saved Views (Phase 34) ─────────────────────────────────────
   const loadViews = useCallback(async () => {
     try {
@@ -365,6 +400,84 @@ export default function IdentitiesPage() {
       .catch(() => setGroupMemberIds(new Set()));
   }, [groupFilter]);
 
+  // Fetch query field definitions for advanced mode
+  useEffect(() => {
+    getQueryFields()
+      .then((data: any) => {
+        setQueryFields(data.fields || []);
+        setValueSuggestions(data.value_suggestions || {});
+      })
+      .catch(() => {});
+  }, []);
+
+  // Execute advanced query (debounced)
+  useEffect(() => {
+    if (queryMode !== 'advanced') { setQueryResults(null); return; }
+    const hasConditions = advancedQuery.groups.some(g => g.conditions.some(c => c.field));
+    if (!hasConditions) { setQueryResults(null); setQueryTotal(0); return; }
+
+    const timer = setTimeout(async () => {
+      setQueryLoading(true);
+      try {
+        const payload = advancedQuery.groups
+          .map(g => ({
+            conditions: g.conditions
+              .filter(c => c.field && (c.operator === 'is_empty' || c.operator === 'is_not_empty' || c.value !== ''))
+              .map(c => ({ field: c.field, operator: c.operator, value: c.value })),
+          }))
+          .filter(g => g.conditions.length > 0);
+
+        if (payload.length === 0) { setQueryResults(null); setQueryTotal(0); setQueryLoading(false); return; }
+
+        const data = await queryIdentities(payload, sortField, sortDir);
+        const rows: IdentityRow[] = (data.identities || []).map((raw: any) => ({
+          identity_id: raw.identity_id || '',
+          display_name: raw.display_name || '',
+          identity_type: raw.identity_type,
+          identity_category: normalizeCategoryFromBackend(raw.identity_category),
+          cloud: raw.cloud || 'azure',
+          created_datetime: raw.created_datetime || null,
+          last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
+          last_sign_in: raw.last_sign_in || null,
+          api_permission_count: raw.api_permission_count ?? 0,
+          role_count: raw.role_count ?? 0,
+          rbac_role_count: raw.rbac_role_count ?? 0,
+          entra_role_count: raw.entra_role_count ?? 0,
+          rbac_max_risk: safeLower(raw.rbac_max_risk || 'info') as RiskLevel,
+          entra_max_risk: safeLower(raw.entra_max_risk || 'info') as RiskLevel,
+          graph_max_risk: safeLower(raw.graph_max_risk || 'info') as RiskLevel,
+          app_role_count: raw.app_role_count ?? 0,
+          credential_count: raw.credential_count ?? 0,
+          credential_expiration: raw.credential_expiration || raw.next_expiry || null,
+          credential_status: raw.credential_status,
+          owner_display_name: raw.owner_display_name || null,
+          owner_count: raw.owner_count ?? 0,
+          status: raw.status || (raw.enabled === false ? 'disabled' : 'active'),
+          enabled: raw.enabled,
+          risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
+          risk_score: raw.risk_score ?? 0,
+          activity_status: raw.activity_status || 'unknown',
+          privilege_tier: raw.privilege_tier ?? undefined,
+          pim_eligible_count: raw.pim_eligible_count ?? 0,
+          has_permanent_assignment: raw.has_permanent_assignment ?? false,
+          ca_coverage_status: raw.ca_coverage_status || null,
+          ca_mfa_enforced: raw.ca_mfa_enforced ?? false,
+        }));
+        setQueryResults(rows);
+        setQueryTotal(data.total ?? rows.length);
+      } catch (e: any) {
+        const msg = e?.response?.data?.error || e?.message || 'Query failed';
+        addToast(msg, 'error');
+        setQueryResults(null);
+        setQueryTotal(0);
+      } finally {
+        setQueryLoading(false);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryMode, advancedQuery, sortField, sortDir]);
+
   // Auto-apply default view on mount (only if no URL params)
   useEffect(() => {
     if (savedViews.length === 0 || location.search) return;
@@ -373,7 +486,19 @@ export default function IdentitiesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedViews.length]);
 
-  function getCurrentFilters(): Record<string, string> {
+  function getCurrentFilters(): Record<string, any> {
+    if (queryMode === 'advanced') {
+      return {
+        _query_mode: 'advanced',
+        _advanced_query: {
+          groups: advancedQuery.groups.map(g => ({
+            conditions: g.conditions.map(c => ({
+              field: c.field, operator: c.operator, value: c.value,
+            })),
+          })),
+        },
+      };
+    }
     const f: Record<string, string> = {};
     if (search) f.search = search;
     if (riskFilter !== 'all') f.risk_level = riskFilter;
@@ -388,13 +513,31 @@ export default function IdentitiesPage() {
 
   function applyView(view: SavedView) {
     const f = view.filters || {};
+    if (f._query_mode === 'advanced' && f._advanced_query) {
+      setQueryMode('advanced');
+      const aq = f._advanced_query;
+      setAdvancedQuery({
+        groups: (aq.groups || []).map((g: any) => ({
+          id: Math.random().toString(36).slice(2, 10),
+          conditions: (g.conditions || []).map((c: any) => ({
+            id: Math.random().toString(36).slice(2, 10),
+            field: c.field, operator: c.operator, value: c.value,
+          })),
+        })),
+      });
+      if (view.sort_field) setSortField(view.sort_field as SortField);
+      if (view.sort_direction) setSortDir(view.sort_direction as 'asc' | 'desc');
+      setActiveViewId(view.id);
+      return;
+    }
+    setQueryMode('simple');
     setSearch(f.search || '');
     setRiskFilter((f.risk_level as RiskLevel) || 'all');
     setCategoryFilter((f.category as IdentityCategory) || 'all');
     setOwnerFilter(f.owner_status === 'unowned' ? 'unowned' : 'all');
     setActivityFilter(f.activity_status === 'dormant' ? 'dormant' : 'all');
     if (f.privilege_tier) {
-      const tiers = f.privilege_tier.split(',').map(Number).filter(t => [0, 1, 2, 3].includes(t));
+      const tiers = f.privilege_tier.split(',').map(Number).filter((t: number) => [0, 1, 2, 3].includes(t));
       setTierFilter(tiers.length > 0 ? tiers : 'all');
     } else {
       setTierFilter('all');
@@ -482,6 +625,51 @@ export default function IdentitiesPage() {
 
   // Filter & sort
   const filtered = useMemo(() => {
+    // In advanced mode, use server-filtered results
+    if (queryMode === 'advanced' && queryResults !== null) {
+      const result = [...queryResults];
+      // Client-side sort for instant re-sort without re-querying
+      result.sort((a, b) => {
+        let aVal: any, bVal: any;
+        switch (sortField) {
+          case 'display_name': aVal = safeLower(a.display_name); bVal = safeLower(b.display_name); break;
+          case 'identity_type': aVal = safeLower(a.identity_type); bVal = safeLower(b.identity_type); break;
+          case 'identity_category': aVal = safeLower(a.identity_category); bVal = safeLower(b.identity_category); break;
+          case 'cloud': aVal = safeLower(a.cloud); bVal = safeLower(b.cloud); break;
+          case 'entra_role_count': aVal = a.entra_role_count ?? 0; bVal = b.entra_role_count ?? 0; break;
+          case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
+          case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
+          case 'privilege_tier': aVal = getPrivilegeTier(a); bVal = getPrivilegeTier(b); break;
+          case 'credential_expiration':
+            aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
+            bVal = b.credential_expiration ? new Date(b.credential_expiration).getTime() : Infinity;
+            break;
+          case 'created_datetime':
+            aVal = a.created_datetime ? new Date(a.created_datetime).getTime() : 0;
+            bVal = b.created_datetime ? new Date(b.created_datetime).getTime() : 0;
+            break;
+          case 'last_seen_auth':
+            aVal = a.last_seen_auth ? new Date(a.last_seen_auth).getTime() : 0;
+            bVal = b.last_seen_auth ? new Date(b.last_seen_auth).getTime() : 0;
+            break;
+          case 'dormant':
+            const dormOrderAdv: Record<string, number> = { yes: 4, never: 3, idle: 2, no: 1, 'new': 1, unknown: 0 };
+            aVal = dormOrderAdv[getDormantStatus(a)] || 0;
+            bVal = dormOrderAdv[getDormantStatus(b)] || 0;
+            break;
+          case 'risk_level':
+          default:
+            aVal = RISK_ORDER[safeLower(a.risk_level)] || 0;
+            bVal = RISK_ORDER[safeLower(b.risk_level)] || 0;
+        }
+        if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
+        return 0;
+      });
+      return result;
+    }
+
+    // Simple filter mode (existing logic)
     let result = [...identities];
     const s = safeLower(search);
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
@@ -550,7 +738,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -675,7 +863,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 14; // checkbox + 13 data cols
+  const colSpan = 15; // checkbox + 13 data cols + trend sparkline
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -928,6 +1116,27 @@ export default function IdentitiesPage() {
 
       {/* Filters */}
       <div className="bg-white border rounded-xl p-3 mb-3 shadow-sm">
+        {/* Mode toggle */}
+        <div className="flex items-center gap-2 mb-2">
+          <button
+            onClick={() => { setQueryMode('simple'); clearActiveView(); }}
+            className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+              queryMode === 'simple' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            Simple Filters
+          </button>
+          <button
+            onClick={() => { setQueryMode('advanced'); clearActiveView(); }}
+            className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+              queryMode === 'advanced' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            Advanced Query
+          </button>
+        </div>
+
+        {queryMode === 'simple' ? (
         <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
           <input value={search} onChange={e => { setSearch(e.target.value); clearActiveView(); }} placeholder="Search name, ID, owner…"
             className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
@@ -946,8 +1155,18 @@ export default function IdentitiesPage() {
             Clear
           </button>
         </div>
-        {/* Active filter chips from recommendations */}
-        {(ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all') && (
+        ) : (
+          <QueryBuilder
+            query={advancedQuery}
+            onChange={(q) => { setAdvancedQuery(q); clearActiveView(); }}
+            fields={queryFields}
+            valueSuggestions={valueSuggestions}
+            resultCount={queryTotal}
+            loading={queryLoading}
+          />
+        )}
+        {/* Active filter chips from recommendations (simple mode only) */}
+        {queryMode === 'simple' && (ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all') && (
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <span className="text-[10px] text-gray-500 uppercase font-semibold">Active filters:</span>
             {ownerFilter === 'unowned' && (
@@ -1007,6 +1226,7 @@ export default function IdentitiesPage() {
                 <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Activity" field="dormant" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <th className="px-2 py-2.5 whitespace-nowrap text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Trend</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -1142,6 +1362,16 @@ export default function IdentitiesPage() {
 
                     {/* Dormant */}
                     <td className="px-2 py-2 text-center"><DormantBadge status={dormant} /></td>
+
+                    {/* Trend Sparkline */}
+                    <td className="px-2 py-2">
+                      {(() => {
+                        const hist = riskHistories[i.identity_id];
+                        if (!hist || hist.length < 2) return <span className="text-gray-300 text-[10px]">--</span>;
+                        const color = hist[hist.length - 1] > hist[0] ? '#ef4444' : hist[hist.length - 1] < hist[0] ? '#22c55e' : '#6b7280';
+                        return <Sparkline data={hist} color={color} width={80} height={24} filled showDot />;
+                      })()}
+                    </td>
                   </tr>
                 );
               })}

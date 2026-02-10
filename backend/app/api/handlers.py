@@ -4006,6 +4006,9 @@ def auth_login():
     if not username or not password:
         return jsonify({'error': 'Username and password are required'}), 400
 
+    # Phase 68 fix: Close DB connection BEFORE token generation to avoid
+    # deadlock between this connection's implicit transaction and the new
+    # connection opened by generate_refresh_token() → _ensure_users_table() DDL.
     db = _db()
     try:
         user = db.get_user_by_username(username)
@@ -4036,8 +4039,7 @@ def auth_login():
             if not user.get('is_superadmin') and user.get('tenant_id') != target_tenant['id']:
                 return jsonify({'error': 'You do not belong to this organization'}), 403
 
-        access_token = generate_access_token(user)
-        refresh_token = generate_refresh_token(user)
+        # Do all DB writes while connection 1 is still open
         db.update_last_login(user['id'])
 
         try:
@@ -4046,22 +4048,26 @@ def auth_login():
                             user_id=user['id'], tenant_id=user.get('tenant_id'))
         except Exception:
             pass
-
-        return jsonify({
-            'access_token': access_token,
-            'refresh_token': refresh_token,
-            'user': {
-                'id': user['id'],
-                'username': user['username'],
-                'display_name': user['display_name'],
-                'role': user['role'],
-                'tenant_id': user.get('tenant_id'),
-                'tenant_name': user.get('tenant_name'),
-                'is_superadmin': user.get('is_superadmin', False),
-            }
-        })
     finally:
         db.close()
+
+    # Generate tokens AFTER closing connection 1 (generate_refresh_token opens its own connection)
+    access_token = generate_access_token(user)
+    refresh_token = generate_refresh_token(user)
+
+    return jsonify({
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'user': {
+            'id': user['id'],
+            'username': user['username'],
+            'display_name': user['display_name'],
+            'role': user['role'],
+            'tenant_id': user.get('tenant_id'),
+            'tenant_name': user.get('tenant_name'),
+            'is_superadmin': user.get('is_superadmin', False),
+        }
+    })
 
 
 def auth_refresh():
@@ -4072,6 +4078,8 @@ def auth_refresh():
     if not raw_refresh:
         return jsonify({'error': 'Refresh token required'}), 400
 
+    # Phase 68 fix: Close DB connection BEFORE token generation to avoid deadlock
+    # (same pattern as auth_login fix)
     db = _db()
     try:
         token_hash = hash_refresh_token(raw_refresh)
@@ -4088,25 +4096,26 @@ def auth_refresh():
             return jsonify({'error': 'User disabled'}), 401
 
         db.revoke_refresh_token(token_hash)
-
-        access_token = generate_access_token(user)
-        new_refresh = generate_refresh_token(user)
-
-        return jsonify({
-            'access_token': access_token,
-            'refresh_token': new_refresh,
-            'user': {
-                'id': user['id'],
-                'username': user['username'],
-                'display_name': user['display_name'],
-                'role': user['role'],
-                'tenant_id': user.get('tenant_id'),
-                'tenant_name': user.get('tenant_name'),
-                'is_superadmin': user.get('is_superadmin', False),
-            }
-        })
     finally:
         db.close()
+
+    # Generate tokens AFTER closing connection 1
+    access_token = generate_access_token(user)
+    new_refresh = generate_refresh_token(user)
+
+    return jsonify({
+        'access_token': access_token,
+        'refresh_token': new_refresh,
+        'user': {
+            'id': user['id'],
+            'username': user['username'],
+            'display_name': user['display_name'],
+            'role': user['role'],
+            'tenant_id': user.get('tenant_id'),
+            'tenant_name': user.get('tenant_name'),
+            'is_superadmin': user.get('is_superadmin', False),
+        }
+    })
 
 
 def auth_logout():

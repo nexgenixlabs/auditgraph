@@ -5,15 +5,23 @@ interface User {
   username: string;
   display_name: string;
   role: 'admin' | 'auditor' | 'viewer';
+  tenant_id?: number;
+  tenant_name?: string;
+  is_superadmin?: boolean;
 }
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, tenantSlug?: string) => Promise<void>;
+  loginWithSsoCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
   isAuditor: boolean;
+  isSuperAdmin: boolean;
+  activeTenantId: number | null;
+  activeTenantName: string | null;
+  switchTenant: (tenantId: number | null, tenantName?: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -23,6 +31,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const originalFetchRef = useRef<typeof window.fetch>(window.fetch.bind(window));
   const refreshingRef = useRef<Promise<boolean> | null>(null);
+
+  // Phase 46: Tenant switching for superadmins
+  const [activeTenantId, setActiveTenantId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('active_tenant_id');
+    return stored ? parseInt(stored, 10) : null;
+  });
+  const [activeTenantName, setActiveTenantName] = useState<string | null>(
+    () => localStorage.getItem('active_tenant_name')
+  );
+
+  const switchTenant = useCallback((tenantId: number | null, tenantName?: string) => {
+    setActiveTenantId(tenantId);
+    setActiveTenantName(tenantName || null);
+    if (tenantId !== null) {
+      localStorage.setItem('active_tenant_id', String(tenantId));
+      localStorage.setItem('active_tenant_name', tenantName || '');
+    } else {
+      localStorage.removeItem('active_tenant_id');
+      localStorage.removeItem('active_tenant_name');
+    }
+  }, []);
 
   const tryRefresh = useCallback(async (): Promise<boolean> => {
     const refreshToken = localStorage.getItem('refresh_token');
@@ -60,6 +89,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const headers = new Headers(init?.headers);
           if (!headers.has('Authorization')) {
             headers.set('Authorization', `Bearer ${token}`);
+          }
+          // Phase 46: Attach tenant override header for superadmins
+          const activeTid = localStorage.getItem('active_tenant_id');
+          if (activeTid && !headers.has('X-Tenant-Id')) {
+            headers.set('X-Tenant-Id', activeTid);
           }
           init = { ...init, headers };
         }
@@ -120,15 +154,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setLoading(false));
   }, [tryRefresh]);
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(async (username: string, password: string, tenantSlug?: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body: any = { username, password };
+    if (tenantSlug) body.tenant_slug = tenantSlug;
     const res = await originalFetchRef.current('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || 'Login failed');
+    }
+    const data = await res.json();
+    localStorage.setItem('access_token', data.access_token);
+    localStorage.setItem('refresh_token', data.refresh_token);
+    setUser(data.user);
+  }, []);
+
+  // Phase 54: SSO code-to-token exchange
+  const loginWithSsoCode = useCallback(async (code: string) => {
+    const res = await originalFetchRef.current('/api/auth/saml/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'SSO login failed');
     }
     const data = await res.json();
     localStorage.setItem('access_token', data.access_token);
@@ -151,6 +205,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch { /* ignore */ }
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
+    localStorage.removeItem('active_tenant_id');
+    localStorage.removeItem('active_tenant_name');
+    setActiveTenantId(null);
+    setActiveTenantName(null);
     setUser(null);
   }, []);
 
@@ -158,9 +216,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     user,
     loading,
     login,
+    loginWithSsoCode,
     logout,
     isAdmin: user?.role === 'admin',
     isAuditor: user?.role === 'auditor' || user?.role === 'admin',
+    isSuperAdmin: user?.is_superadmin === true,
+    activeTenantId,
+    activeTenantName,
+    switchTenant,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

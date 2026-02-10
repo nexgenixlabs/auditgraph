@@ -9,6 +9,10 @@ interface ActivityEntry {
   description: string;
   metadata: Record<string, any> | null;
   created_at: string;
+  user_id: number | null;
+  user_username: string | null;
+  user_display_name: string | null;
+  tenant_id: number | null;
 }
 
 // ── Action type display config ─────────────────────────────────
@@ -24,6 +28,13 @@ const ACTION_CONFIG: Record<string, { label: string; shortLabel: string; color: 
   report_emailed: { label: 'Report Emailed', shortLabel: 'Emailed', color: 'text-green-700', bg: 'bg-green-50', icon: '@' },
   report_email_failed: { label: 'Report Email Failed', shortLabel: 'Email Err', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
   remediation_updated: { label: 'Remediation Updated', shortLabel: 'Remediation', color: 'text-indigo-700', bg: 'bg-indigo-50', icon: 'R' },
+  soar_action_executed: { label: 'SOAR Action Executed', shortLabel: 'SOAR OK', color: 'text-emerald-700', bg: 'bg-emerald-50', icon: 'S' },
+  soar_action_failed: { label: 'SOAR Action Failed', shortLabel: 'SOAR Fail', color: 'text-red-700', bg: 'bg-red-50', icon: 'X' },
+  soar_playbook_created: { label: 'SOAR Playbook Created', shortLabel: 'SOAR New', color: 'text-blue-700', bg: 'bg-blue-50', icon: '+' },
+  soar_playbook_updated: { label: 'SOAR Playbook Updated', shortLabel: 'SOAR Edit', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
+  soar_playbook_deleted: { label: 'SOAR Playbook Deleted', shortLabel: 'SOAR Del', color: 'text-gray-700', bg: 'bg-gray-50', icon: '-' },
+  soar_playbook_tested: { label: 'SOAR Playbook Tested', shortLabel: 'SOAR Test', color: 'text-amber-700', bg: 'bg-amber-50', icon: 'T' },
+  soar_action_manual: { label: 'SOAR Manual Trigger', shortLabel: 'SOAR Man', color: 'text-cyan-700', bg: 'bg-cyan-50', icon: '!' },
 };
 
 function getActionConfig(type: string) {
@@ -100,10 +111,11 @@ export default function ActivityLog() {
   const actionTypes = Object.keys(ACTION_CONFIG);
 
   function exportCsv() {
-    const header = ['ID', 'Action Type', 'Description', 'Metadata', 'Timestamp'];
+    const header = ['ID', 'Action Type', 'User', 'Description', 'Metadata', 'Timestamp'];
     const rows = entries.map(e => [
       e.id,
       getActionConfig(e.action_type).label,
+      e.user_display_name || 'System',
       e.description,
       e.metadata ? JSON.stringify(e.metadata) : '',
       new Date(e.created_at).toISOString(),
@@ -189,6 +201,7 @@ export default function ActivityLog() {
             <thead>
               <tr className="bg-gray-50 border-b text-left">
                 <th className="px-4 py-3 font-medium text-gray-600 w-48">Action</th>
+                <th className="px-4 py-3 font-medium text-gray-600 w-36">User</th>
                 <th className="px-4 py-3 font-medium text-gray-600">Description</th>
                 <th className="px-4 py-3 font-medium text-gray-600 w-44 text-right">Time</th>
               </tr>
@@ -203,6 +216,16 @@ export default function ActivityLog() {
                         <span className="font-mono">{cfg.icon}</span>
                         {cfg.label}
                       </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {entry.user_display_name ? (
+                        <div>
+                          <div className="text-xs font-medium text-gray-700">{entry.user_display_name}</div>
+                          <div className="text-[10px] text-gray-400">@{entry.user_username}</div>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">System</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-700">
                       {entry.description}

@@ -43,6 +43,7 @@ from dotenv import load_dotenv
 
 from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
 from app.engines.drift_detector import DriftDetector
+from app.engines.anomaly_detector import AnomalyDetector
 from app.services.email_service import EmailService
 from app.database import Database
 from typing import Dict
@@ -73,10 +74,22 @@ def run_scheduled_discovery():
         tenant_id = os.getenv("AZURE_TENANT_ID")
         client_id = os.getenv("AZURE_CLIENT_ID")
         client_secret = os.getenv("AZURE_CLIENT_SECRET")
-        
+
+        # Phase 48: Fallback to DB settings (onboarding wizard stores creds here)
+        if not all([tenant_id, client_id, client_secret]):
+            try:
+                settings_db = Database()
+                settings = settings_db.get_settings()
+                tenant_id = tenant_id or settings.get('azure_tenant_id')
+                client_id = client_id or settings.get('azure_client_id')
+                client_secret = client_secret or settings.get('azure_client_secret')
+                settings_db.close()
+            except Exception:
+                pass
+
         # Validate
         if not all([tenant_id, client_id, client_secret]):
-            logger.error("❌ Missing Azure credentials in environment")
+            logger.error("❌ Missing Azure credentials in environment and DB settings")
             return
         
         logger.info("✓ Azure credentials loaded")
@@ -205,17 +218,54 @@ def _send_change_notification_if_needed():
         else:
             logger.info("No changes detected - no email notification needed")
 
+        # Phase 43: SOAR evaluation for drift and change events
+        _evaluate_soar_triggers_for_changes(changes, db)
+
         # Phase 28: Fire webhook events
         _fire_webhook_events(current_run_id, changes, db)
 
         # Phase 30: Generate in-app notifications
         _generate_notifications(current_run_id, changes, db)
 
+        # Phase 40: Run anomaly detection
+        _run_anomaly_detection(current_run_id, previous_run_id, db)
+
+        # Phase 51: Save compliance snapshot
+        _save_compliance_snapshot(current_run_id, db)
+
         db.close()
 
     except Exception as e:
         logger.error(f"Error during change detection/notification: {e}")
         logger.exception(e)
+
+
+def _save_compliance_snapshot(run_id: int, db: Database):
+    """Compute and persist compliance scores for a completed discovery run."""
+    try:
+        from app.api.handlers import _compute_compliance_metrics, _evaluate_control
+        cursor = db.conn.cursor()
+        metrics = _compute_compliance_metrics(cursor, run_id)
+        cursor.close()
+
+        frameworks = db.get_compliance_frameworks(enabled_only=True)
+        for fw in frameworks:
+            pass_count = 0
+            for ctrl in fw['controls']:
+                status, _value = _evaluate_control(ctrl, metrics)
+                if status == 'pass':
+                    pass_count += 1
+            total = len(fw['controls'])
+            warn_count = sum(1 for c in fw['controls'] if _evaluate_control(c, metrics)[0] == 'warn')
+            fail_count = total - pass_count - warn_count
+            score = round(pass_count / total * 100) if total else 0
+            db.save_compliance_snapshot(
+                run_id, fw['key'], fw['name'], score,
+                pass_count, warn_count, fail_count, total, metrics
+            )
+        logger.info(f"Compliance snapshots saved for run #{run_id} ({len(frameworks)} frameworks)")
+    except Exception as e:
+        logger.error(f"Error saving compliance snapshot: {e}")
 
 
 def _fire_webhook_events(current_run_id: int, changes: dict, db: Database):
@@ -371,6 +421,130 @@ def _generate_notifications(current_run_id: int, changes: dict, db: Database):
 
     except Exception as e:
         logger.error(f"Error generating notifications: {e}")
+
+
+def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Database):
+    """Run anomaly detection after drift analysis and persist results."""
+    try:
+        # Load configurable thresholds from settings
+        settings = {}
+        for key in ('anomaly_pim_hours_start', 'anomaly_pim_hours_end',
+                     'anomaly_pim_frequency_threshold', 'anomaly_risk_spike_threshold'):
+            val = db.get_setting(key, None)
+            if val is not None:
+                settings[key] = val
+
+        detector = AnomalyDetector(db)
+        anomalies = detector.analyze(current_run_id, previous_run_id, settings)
+
+        if anomalies:
+            count = db.save_anomalies(current_run_id, anomalies)
+            logger.info(f"Anomaly detection: {count} anomalies saved for run #{current_run_id}")
+            _generate_anomaly_notifications(current_run_id, anomalies, db)
+            # Phase 43: SOAR evaluation for anomalies
+            _evaluate_soar_triggers('anomaly', anomalies, db)
+        else:
+            logger.info(f"Anomaly detection: no anomalies found for run #{current_run_id}")
+
+        # Cleanup old resolved anomalies
+        cleaned = db.cleanup_old_anomalies(days=180)
+        if cleaned > 0:
+            logger.info(f"Cleaned up {cleaned} old resolved anomalies")
+
+    except Exception as e:
+        logger.error(f"Anomaly detection failed: {e}")
+        logger.exception(e)
+
+
+def _generate_anomaly_notifications(current_run_id: int, anomalies: list, db: Database):
+    """Create in-app notifications for each detected anomaly."""
+    try:
+        for a in anomalies:
+            db.create_notification(
+                event_type='anomaly_detected',
+                category='anomaly',
+                severity=a.get('severity', 'medium'),
+                title=a['title'],
+                description=a['description'],
+                payload=a.get('details'),
+                related_identity_id=a.get('identity_id'),
+                related_identity_name=a.get('identity_name'),
+                related_run_id=current_run_id,
+            )
+        logger.info(f"Created {len(anomalies)} anomaly notifications for run #{current_run_id}")
+    except Exception as e:
+        logger.error(f"Error creating anomaly notifications: {e}")
+
+
+def _evaluate_soar_triggers(trigger_type: str, events: list, db: Database):
+    """Evaluate SOAR playbooks for a given trigger type and event list."""
+    try:
+        from app.engines.soar_engine import SoarEngine
+        engine = SoarEngine(db)
+        count = engine.evaluate_triggers(trigger_type, events)
+        if count > 0:
+            logger.info(f"SOAR: executed {count} action(s) for trigger '{trigger_type}'")
+    except Exception as e:
+        logger.error(f"SOAR evaluation failed for '{trigger_type}': {e}")
+
+
+def _evaluate_soar_triggers_for_changes(changes: dict, db: Database):
+    """Map drift changes to SOAR trigger types and evaluate playbooks."""
+    try:
+        from app.engines.soar_engine import SoarEngine
+        engine = SoarEngine(db)
+        total = 0
+
+        # New identities → new_identity trigger
+        new_ids = changes.get('new_identities', [])
+        if new_ids:
+            count = engine.evaluate_triggers('new_identity', new_ids)
+            total += count
+
+        # Risk changes (escalations) → risk_escalation trigger
+        risk_changes = changes.get('risk_changes', [])
+        escalations = [c for c in risk_changes
+                       if c.get('direction') == 'increased'
+                       or c.get('new_risk') in ('critical', 'high')]
+        if escalations:
+            events = []
+            for c in escalations:
+                events.append({
+                    'identity_id': c.get('identity_id'),
+                    'identity_name': c.get('display_name', ''),
+                    'risk_level': c.get('new_risk', ''),
+                    'previous_risk_level': c.get('old_risk', ''),
+                    'risk_score': c.get('new_score', 0),
+                })
+            count = engine.evaluate_triggers('risk_escalation', events)
+            total += count
+
+        # Overall drift → drift trigger
+        new_count = len(new_ids)
+        removed_count = len(changes.get('removed_identities', []))
+        perm_count = len(changes.get('permission_changes', []))
+        risk_count = len(risk_changes)
+        cred_count = len(changes.get('credential_changes', []))
+        drift_total = new_count + removed_count + perm_count + risk_count + cred_count
+        if drift_total > 0:
+            drift_event = {
+                'total_changes': drift_total,
+                'breakdown': {
+                    'new_identities': new_count,
+                    'removed_identities': removed_count,
+                    'permission_changes': perm_count,
+                    'risk_changes': risk_count,
+                    'credential_changes': cred_count,
+                },
+            }
+            count = engine.evaluate_triggers('drift', [drift_event])
+            total += count
+
+        if total > 0:
+            logger.info(f"SOAR: executed {total} total action(s) from drift changes")
+
+    except Exception as e:
+        logger.error(f"SOAR evaluation for changes failed: {e}")
 
 
 def _get_category_counts(db: Database, current_run_id: int, previous_run_id: int) -> Dict:

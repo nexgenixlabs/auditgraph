@@ -102,6 +102,7 @@ function riskColor(level: string): RGB {
 // Helpers to avoid TS spread errors with jsPDF tuple params
 function fill(doc: jsPDF, c: RGB) { doc.setFillColor(c[0], c[1], c[2]); }
 function txt(doc: jsPDF, c: RGB) { doc.setTextColor(c[0], c[1], c[2]); }
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function draw(doc: jsPDF, c: RGB) { doc.setDrawColor(c[0], c[1], c[2]); }
 
 export function generateReport(data: ReportData, clientName?: string): void {

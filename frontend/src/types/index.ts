@@ -195,3 +195,47 @@ export interface DriftReport {
     details: any;
   };
 }
+
+// Phase 39: Advanced Query Builder types
+
+export type QueryOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'not_contains'
+  | 'greater_than'
+  | 'less_than'
+  | 'in'
+  | 'not_in'
+  | 'is_empty'
+  | 'is_not_empty';
+
+export type QueryFieldType = 'string' | 'number' | 'boolean' | 'date';
+
+export interface QueryFieldDefinition {
+  name: string;
+  type: QueryFieldType;
+  label: string;
+}
+
+export interface QueryCondition {
+  id: string;
+  field: string;
+  operator: QueryOperator;
+  value: any;
+}
+
+export interface QueryGroup {
+  id: string;
+  conditions: QueryCondition[];
+}
+
+export interface AdvancedQuery {
+  groups: QueryGroup[];
+}
+
+export interface QueryFieldsResponse {
+  fields: QueryFieldDefinition[];
+  operators: QueryOperator[];
+  value_suggestions: Record<string, string[]>;
+}
