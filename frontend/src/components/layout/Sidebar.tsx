@@ -58,6 +58,14 @@ const navGroups: NavGroup[] = [
         to: '/resources', label: 'All Resources',
         icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" /></svg>,
       },
+      {
+        to: '/resources?resource_type=storage_account', label: 'Storage Accounts',
+        icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>,
+      },
+      {
+        to: '/resources?resource_type=key_vault', label: 'Key Vaults',
+        icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>,
+      },
     ],
   },
   {
@@ -140,7 +148,12 @@ const navGroups: NavGroup[] = [
 const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
   const location = useLocation();
 
-  const isActive = (path: string, exact?: boolean) => {
+  const isActive = (to: string, exact?: boolean) => {
+    const [path, query] = to.split('?');
+    if (query) {
+      // For links with query params, match both pathname and search
+      return location.pathname === path && location.search === '?' + query;
+    }
     if (exact) return location.pathname === path;
     return location.pathname === path || location.pathname.startsWith(path + '/');
   };

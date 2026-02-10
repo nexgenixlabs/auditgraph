@@ -399,7 +399,7 @@ function AppContent() {
               <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
 
               {/* Page Content */}
-              <main className="ml-60 pt-14 min-h-screen">
+              <main className="pl-60 pt-14 min-h-screen w-full overflow-x-hidden">
                 <Routes>
                   <Route path="/" element={<ErrorBoundary><Overview /></ErrorBoundary>} />
                   <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
