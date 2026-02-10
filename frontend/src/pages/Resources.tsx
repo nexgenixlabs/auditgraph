@@ -28,6 +28,12 @@ interface ResourceStats {
   key_vaults: number;
   by_risk: Record<string, number>;
   at_risk: number;
+  rotation_compliance?: { total_storage: number; keys_stale: number; avg_key_age_days: number };
+  expiry_summary?: {
+    secrets: { total: number; expired: number; expiring_soon: number };
+    keys: { total: number; expired: number; expiring_soon: number };
+    certs: { total: number; expired: number; expiring_soon: number };
+  };
 }
 
 type SortField = 'name' | 'resource_type' | 'location' | 'resource_group' | 'subscription_name' | 'risk_level' | 'risk_score';
@@ -209,12 +215,49 @@ export default function Resources() {
 
       {/* Summary Cards */}
       {stats && (
-        <div className="grid grid-cols-4 gap-3">
-          <StatCard label="Total Resources" value={stats.total} color="blue" onClick={() => { setTypeFilter(''); setRiskFilter(''); }} />
-          <StatCard label="Storage Accounts" value={stats.storage_accounts} color="sky" onClick={() => setTypeFilter('storage_account')} />
-          <StatCard label="Key Vaults" value={stats.key_vaults} color="purple" onClick={() => setTypeFilter('key_vault')} />
-          <StatCard label="At Risk" value={stats.at_risk} color="red" subtitle={`${stats.by_risk.critical || 0} critical, ${stats.by_risk.high || 0} high`} onClick={() => setRiskFilter('critical')} />
-        </div>
+        <>
+          <div className="grid grid-cols-4 gap-3">
+            <StatCard label="Total Resources" value={stats.total} color="blue" onClick={() => { setTypeFilter(''); setRiskFilter(''); }} />
+            <StatCard label="Storage Accounts" value={stats.storage_accounts} color="sky" onClick={() => setTypeFilter('storage_account')} />
+            <StatCard label="Key Vaults" value={stats.key_vaults} color="purple" onClick={() => setTypeFilter('key_vault')} />
+            <StatCard label="At Risk" value={stats.at_risk} color="red" subtitle={`${stats.by_risk.critical || 0} critical, ${stats.by_risk.high || 0} high`} onClick={() => setRiskFilter('critical')} />
+          </div>
+          {/* Rotation & Expiry row */}
+          {(stats.rotation_compliance || stats.expiry_summary) && (
+            <div className="grid grid-cols-4 gap-3">
+              {stats.rotation_compliance && (
+                <StatCard
+                  label="Keys Stale (>90d)"
+                  value={stats.rotation_compliance.keys_stale}
+                  color={stats.rotation_compliance.keys_stale > 0 ? 'red' : 'blue'}
+                  subtitle={`of ${stats.rotation_compliance.total_storage} storage accounts`}
+                />
+              )}
+              {stats.expiry_summary && (
+                <>
+                  <StatCard
+                    label="Expired Items"
+                    value={(stats.expiry_summary.secrets.expired || 0) + (stats.expiry_summary.keys.expired || 0) + (stats.expiry_summary.certs.expired || 0)}
+                    color={(stats.expiry_summary.secrets.expired + stats.expiry_summary.keys.expired + stats.expiry_summary.certs.expired) > 0 ? 'red' : 'blue'}
+                    subtitle={`${stats.expiry_summary.secrets.expired}s ${stats.expiry_summary.keys.expired}k ${stats.expiry_summary.certs.expired}c`}
+                  />
+                  <StatCard
+                    label="Expiring Soon"
+                    value={(stats.expiry_summary.secrets.expiring_soon || 0) + (stats.expiry_summary.keys.expiring_soon || 0) + (stats.expiry_summary.certs.expiring_soon || 0)}
+                    color={(stats.expiry_summary.secrets.expiring_soon + stats.expiry_summary.keys.expiring_soon + stats.expiry_summary.certs.expiring_soon) > 0 ? 'red' : 'blue'}
+                    subtitle="within 30 days"
+                  />
+                  <StatCard
+                    label="Vault Items"
+                    value={(stats.expiry_summary.secrets.total || 0) + (stats.expiry_summary.keys.total || 0) + (stats.expiry_summary.certs.total || 0)}
+                    color="blue"
+                    subtitle={`${stats.expiry_summary.secrets.total}s ${stats.expiry_summary.keys.total}k ${stats.expiry_summary.certs.total}c`}
+                  />
+                </>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {/* Filters */}

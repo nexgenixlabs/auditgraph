@@ -3360,6 +3360,8 @@ class Database:
                 key1_created_at TIMESTAMPTZ,
                 key2_created_at TIMESTAMPTZ,
                 key_rotation_stale BOOLEAN DEFAULT FALSE,
+                sas_policy_enabled BOOLEAN,
+                sas_expiration_period TEXT,
                 risk_level TEXT DEFAULT 'info',
                 risk_score INTEGER DEFAULT 0,
                 risk_reasons JSONB DEFAULT '[]',
@@ -3371,6 +3373,15 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_run ON azure_storage_accounts(discovery_run_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_risk ON azure_storage_accounts(risk_level)")
+        # Add columns if upgrading from older schema
+        for col, defn in [
+            ('sas_policy_enabled', 'BOOLEAN'),
+            ('sas_expiration_period', 'TEXT'),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE azure_storage_accounts ADD COLUMN {col} {defn}")
+            except Exception:
+                self.conn.rollback()
         self.conn.commit()
         cursor.close()
 
@@ -3409,6 +3420,9 @@ class Database:
                 certs_expiring_soon INTEGER DEFAULT 0,
                 access_policy_count INTEGER DEFAULT 0,
                 access_policies JSONB DEFAULT '[]',
+                secrets_detail JSONB DEFAULT '[]',
+                keys_detail JSONB DEFAULT '[]',
+                certs_detail JSONB DEFAULT '[]',
                 risk_level TEXT DEFAULT 'info',
                 risk_score INTEGER DEFAULT 0,
                 risk_reasons JSONB DEFAULT '[]',
@@ -3420,6 +3434,12 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_kv_run ON azure_key_vaults(discovery_run_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_kv_risk ON azure_key_vaults(risk_level)")
+        # Add columns if upgrading from older schema
+        for col in ['secrets_detail', 'keys_detail', 'certs_detail']:
+            try:
+                cursor.execute(f"ALTER TABLE azure_key_vaults ADD COLUMN {col} JSONB DEFAULT '[]'")
+            except Exception:
+                self.conn.rollback()
         self.conn.commit()
         cursor.close()
 
@@ -3437,13 +3457,14 @@ class Database:
                 private_endpoint_count, bypass_settings, network_rules,
                 infrastructure_encryption, customer_managed_keys, key_vault_uri,
                 encryption_details, key1_created_at, key2_created_at,
-                key_rotation_stale, risk_level, risk_score, risk_reasons,
+                key_rotation_stale, sas_policy_enabled, sas_expiration_period,
+                risk_level, risk_score, risk_reasons,
                 tags, tenant_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s
+                %s,%s,%s,%s,%s
             )
             ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
                 name=EXCLUDED.name, location=EXCLUDED.location,
@@ -3469,6 +3490,8 @@ class Database:
                 key1_created_at=EXCLUDED.key1_created_at,
                 key2_created_at=EXCLUDED.key2_created_at,
                 key_rotation_stale=EXCLUDED.key_rotation_stale,
+                sas_policy_enabled=EXCLUDED.sas_policy_enabled,
+                sas_expiration_period=EXCLUDED.sas_expiration_period,
                 risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
                 risk_reasons=EXCLUDED.risk_reasons, tags=EXCLUDED.tags,
                 created_at=NOW()
@@ -3490,6 +3513,8 @@ class Database:
             json.dumps(data.get('encryption_details', {})),
             data.get('key1_created_at'), data.get('key2_created_at'),
             data.get('key_rotation_stale', False),
+            data.get('sas_policy_enabled'),
+            data.get('sas_expiration_period'),
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
             json.dumps(data.get('tags', {})), data.get('tenant_id')
@@ -3515,12 +3540,13 @@ class Database:
                 keys_total, keys_expired, keys_expiring_soon,
                 certs_total, certs_expired, certs_expiring_soon,
                 access_policy_count, access_policies,
+                secrets_detail, keys_detail, certs_detail,
                 risk_level, risk_score, risk_reasons, tags, tenant_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s
+                %s,%s,%s,%s,%s,%s,%s
             )
             ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
                 name=EXCLUDED.name, location=EXCLUDED.location,
@@ -3546,6 +3572,9 @@ class Database:
                 certs_expiring_soon=EXCLUDED.certs_expiring_soon,
                 access_policy_count=EXCLUDED.access_policy_count,
                 access_policies=EXCLUDED.access_policies,
+                secrets_detail=EXCLUDED.secrets_detail,
+                keys_detail=EXCLUDED.keys_detail,
+                certs_detail=EXCLUDED.certs_detail,
                 risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
                 risk_reasons=EXCLUDED.risk_reasons, tags=EXCLUDED.tags,
                 created_at=NOW()
@@ -3571,6 +3600,9 @@ class Database:
             data.get('certs_expiring_soon', 0),
             data.get('access_policy_count', 0),
             json.dumps(data.get('access_policies', [])),
+            json.dumps(data.get('secrets_detail', [])),
+            json.dumps(data.get('keys_detail', [])),
+            json.dumps(data.get('certs_detail', [])),
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
             json.dumps(data.get('tags', {})), data.get('tenant_id')

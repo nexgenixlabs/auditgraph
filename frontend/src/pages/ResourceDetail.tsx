@@ -50,6 +50,13 @@ interface ResourceData {
   certs_expiring_soon?: number;
   access_policy_count?: number;
   access_policies?: Array<Record<string, unknown>>;
+  secrets_detail?: Array<{ name: string; enabled: boolean; expires_on: string | null; created_on: string | null; content_type?: string }>;
+  keys_detail?: Array<{ name: string; enabled: boolean; expires_on: string | null; created_on: string | null; key_type?: string; key_size?: number }>;
+  certs_detail?: Array<{ name: string; enabled: boolean; expires_on: string | null; created_on: string | null; subject?: string; thumbprint?: string }>;
+  // Storage SAS
+  sas_policy_enabled?: boolean;
+  sas_expiration_period?: string;
+  sas_risk?: { level: string; factors: string[]; recommendations: string[] };
   // Network (shared)
   default_network_action?: string;
   ip_rules_count?: number;
@@ -65,9 +72,12 @@ interface AccessIdentity {
   identity_category: string;
   risk_level: string;
   risk_score: number;
-  role_name: string;
-  scope: string;
-  scope_type: string;
+  role_name?: string;
+  scope?: string;
+  scope_type?: string;
+  access_type: 'rbac' | 'access_policy';
+  over_privileged?: boolean;
+  permissions_summary?: Record<string, string[]>;
 }
 
 type Tab = 'overview' | 'security' | 'network' | 'access' | 'compliance';
@@ -99,6 +109,30 @@ const STORAGE_COMPLIANCE: Record<string, { controls: string[]; description: stri
     controls: ['CIS Azure 3.2', 'SOC2 CC6.1'],
     description: 'Disabling shared key access forces Azure AD authentication',
   },
+  infrastructure_encryption: {
+    controls: ['CIS Azure 3.3', 'SOC2 CC6.1'],
+    description: 'Infrastructure encryption provides a second layer of encryption at the hardware level',
+  },
+  cross_tenant_replication: {
+    controls: ['CIS Azure 3.12', 'SOC2 CC6.6'],
+    description: 'Cross-tenant replication must be disabled to prevent data leakage across tenants',
+  },
+  key_rotation: {
+    controls: ['CIS Azure 3.4', 'PCI-DSS 3.6.4'],
+    description: 'Storage account keys must be rotated within 90 days',
+  },
+  private_endpoints: {
+    controls: ['CIS Azure 3.10', 'NIST SC-7'],
+    description: 'Private endpoints ensure traffic flows through Azure backbone network',
+  },
+  sas_policy: {
+    controls: ['CIS Azure 3.13'],
+    description: 'SAS expiration policy limits the lifetime of shared access signature tokens',
+  },
+  bypass_limited: {
+    controls: ['CIS Azure 3.9', 'NIST AC-4'],
+    description: 'Network bypass should be limited to AzureServices to minimize attack surface',
+  },
 };
 
 const KEYVAULT_COMPLIANCE: Record<string, { controls: string[]; description: string }> = {
@@ -121,6 +155,26 @@ const KEYVAULT_COMPLIANCE: Record<string, { controls: string[]; description: str
   network_access: {
     controls: ['CIS Azure 8.6', 'SOC2 CC6.6', 'NIST AC-4'],
     description: 'Network restrictions limit vault access to trusted networks and endpoints',
+  },
+  private_endpoints: {
+    controls: ['CIS Azure 8.8', 'NIST SC-7'],
+    description: 'Private endpoints ensure vault traffic flows through Azure backbone network',
+  },
+  key_expiry_set: {
+    controls: ['CIS Azure 8.1.1', 'SOC2 CC6.1'],
+    description: 'All keys should have expiration dates set to enforce rotation',
+  },
+  secret_expiry_set: {
+    controls: ['CIS Azure 8.2', 'PCI-DSS 3.6.4'],
+    description: 'All secrets should have expiration dates to prevent indefinite validity',
+  },
+  cert_expiry_check: {
+    controls: ['CIS Azure 8.3'],
+    description: 'Certificates expiring within 90 days should be renewed promptly',
+  },
+  retention_90d: {
+    controls: ['CIS Azure 8.4.1', 'SOC2 CC6.1'],
+    description: 'Soft delete retention should be at least 90 days for adequate recovery window',
   },
 };
 
@@ -177,8 +231,11 @@ export default function ResourceDetail() {
   const rid = searchParams.get('rid') || '';
 
   const [resource, setResource] = useState<ResourceData | null>(null);
-  const [accessIdentities, setAccessIdentities] = useState<AccessIdentity[]>([]);
+  const [rbacAccess, setRbacAccess] = useState<AccessIdentity[]>([]);
+  const [policyAccess, setPolicyAccess] = useState<AccessIdentity[]>([]);
+  const [blastRadius, setBlastRadius] = useState(0);
   const [accessLoading, setAccessLoading] = useState(false);
+  const [accessLoaded, setAccessLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
 
@@ -194,13 +251,19 @@ export default function ResourceDetail() {
 
   // Lazy-load access tab
   useEffect(() => {
-    if (activeTab !== 'access' || !rid || accessIdentities.length > 0) return;
+    if (activeTab !== 'access' || !rid || accessLoaded) return;
     setAccessLoading(true);
     fetch(`/api/resources/${encodeURIComponent(rid)}/access`)
       .then(r => r.json())
-      .then(data => { setAccessIdentities(data.identities || []); setAccessLoading(false); })
+      .then(data => {
+        setRbacAccess(data.rbac_access || []);
+        setPolicyAccess(data.policy_access || []);
+        setBlastRadius(data.blast_radius || 0);
+        setAccessLoaded(true);
+        setAccessLoading(false);
+      })
       .catch(() => setAccessLoading(false));
-  }, [activeTab, rid, accessIdentities.length]);
+  }, [activeTab, rid, accessLoaded]);
 
   if (loading) {
     return <div className="flex items-center justify-center h-64 text-gray-400">Loading resource...</div>;
@@ -276,7 +339,7 @@ export default function ResourceDetail() {
         {activeTab === 'overview' && <OverviewTab resource={resource} />}
         {activeTab === 'security' && <SecurityTab resource={resource} />}
         {activeTab === 'network' && <NetworkTab resource={resource} />}
-        {activeTab === 'access' && <AccessTab identities={accessIdentities} loading={accessLoading} />}
+        {activeTab === 'access' && <AccessTab rbacAccess={rbacAccess} policyAccess={policyAccess} blastRadius={blastRadius} loading={accessLoading} isKeyVault={!isStorage} />}
         {activeTab === 'compliance' && <ComplianceTab resource={resource} />}
       </div>
     </div>
@@ -364,40 +427,51 @@ function SecurityTab({ resource }: { resource: ResourceData }) {
 
   if (isStorage) {
     return (
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-gray-800 mb-2">Transport & Access</h3>
-          <CheckItem label="HTTPS-Only Transfer" pass={resource.https_only === true} detail={resource.https_only ? 'Enabled' : 'HTTP traffic allowed'} />
-          <CheckItem label="TLS Version" pass={resource.minimum_tls_version === 'TLS1_2'} detail={`Current: ${resource.minimum_tls_version || 'Unknown'}`} />
-          <CheckItem label="Public Blob Access Disabled" pass={resource.public_blob_access === false} detail={resource.public_blob_access ? 'Public access enabled — containers may be exposed' : 'Disabled'} />
-          <CheckItem label="Shared Key Access Disabled" pass={resource.shared_key_access === false} detail={resource.shared_key_access ? 'Enabled — consider Azure AD auth only' : 'Disabled, Azure AD auth required'} />
-          <CheckItem label="Cross-Tenant Replication" pass={resource.allow_cross_tenant_replication === false} detail={resource.allow_cross_tenant_replication ? 'Enabled' : 'Disabled'} />
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Transport & Access</h3>
+            <CheckItem label="HTTPS-Only Transfer" pass={resource.https_only === true} detail={resource.https_only ? 'Enabled' : 'HTTP traffic allowed'} />
+            <CheckItem label="TLS Version" pass={resource.minimum_tls_version === 'TLS1_2'} detail={`Current: ${resource.minimum_tls_version || 'Unknown'}`} />
+            <CheckItem label="Public Blob Access Disabled" pass={resource.public_blob_access === false} detail={resource.public_blob_access ? 'Public access enabled — containers may be exposed' : 'Disabled'} />
+            <CheckItem label="Shared Key Access Disabled" pass={resource.shared_key_access === false} detail={resource.shared_key_access ? 'Enabled — consider Azure AD auth only' : 'Disabled, Azure AD auth required'} />
+            <CheckItem label="Cross-Tenant Replication" pass={resource.allow_cross_tenant_replication === false} detail={resource.allow_cross_tenant_replication ? 'Enabled' : 'Disabled'} />
+          </div>
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Encryption & Keys</h3>
+            <CheckItem label="Customer-Managed Keys" pass={resource.customer_managed_keys === true} detail={resource.customer_managed_keys ? `Key Vault: ${resource.key_vault_uri || 'configured'}` : 'Using Microsoft-managed keys'} />
+            <CheckItem label="Infrastructure Encryption" pass={resource.infrastructure_encryption === true} detail={resource.infrastructure_encryption ? 'Double encryption enabled' : 'Single layer encryption'} />
+            <CheckItem label="Storage Key Rotation" pass={resource.key_rotation_stale === false} detail={keyRotationDetail(resource)} />
+            <KeyRotationBars resource={resource} />
+          </div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-gray-800 mb-2">Encryption & Keys</h3>
-          <CheckItem label="Customer-Managed Keys" pass={resource.customer_managed_keys === true} detail={resource.customer_managed_keys ? `Key Vault: ${resource.key_vault_uri || 'configured'}` : 'Using Microsoft-managed keys'} />
-          <CheckItem label="Infrastructure Encryption" pass={resource.infrastructure_encryption === true} detail={resource.infrastructure_encryption ? 'Double encryption enabled' : 'Single layer encryption'} />
-          <CheckItem label="Storage Key Rotation" pass={resource.key_rotation_stale === false} detail={keyRotationDetail(resource)} />
-        </div>
+
+        {/* SAS & Shared Key Security Section */}
+        <SasSecuritySection resource={resource} />
       </div>
     );
   }
 
   // Key Vault
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div className="bg-white border border-gray-200 rounded-lg p-4">
-        <h3 className="text-sm font-semibold text-gray-800 mb-2">Vault Security</h3>
-        <CheckItem label="Soft Delete" pass={resource.soft_delete_enabled === true} detail={resource.soft_delete_enabled ? `Enabled (${resource.soft_delete_retention_days || 90} day retention)` : 'Disabled — deleted secrets are permanently lost'} />
-        <CheckItem label="Purge Protection" pass={resource.purge_protection === true} detail={resource.purge_protection ? 'Enabled' : 'Disabled — soft-deleted items can be purged immediately'} />
-        <CheckItem label="RBAC Authorization" pass={resource.enable_rbac_authorization === true} detail={resource.enable_rbac_authorization ? 'Azure RBAC for data plane' : `Access Policies mode (${resource.access_policy_count || 0} policies)`} />
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Vault Security</h3>
+          <CheckItem label="Soft Delete" pass={resource.soft_delete_enabled === true} detail={resource.soft_delete_enabled ? `Enabled (${resource.soft_delete_retention_days || 90} day retention)` : 'Disabled — deleted secrets are permanently lost'} />
+          <CheckItem label="Purge Protection" pass={resource.purge_protection === true} detail={resource.purge_protection ? 'Enabled' : 'Disabled — soft-deleted items can be purged immediately'} />
+          <CheckItem label="RBAC Authorization" pass={resource.enable_rbac_authorization === true} detail={resource.enable_rbac_authorization ? 'Azure RBAC for data plane' : `Access Policies mode (${resource.access_policy_count || 0} policies)`} />
+        </div>
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Secrets, Keys & Certificates</h3>
+          <VaultItemRow label="Secrets" total={resource.secrets_total} expired={resource.secrets_expired} expiring={resource.secrets_expiring_soon} />
+          <VaultItemRow label="Keys" total={resource.keys_total} expired={resource.keys_expired} expiring={resource.keys_expiring_soon} />
+          <VaultItemRow label="Certificates" total={resource.certs_total} expired={resource.certs_expired} expiring={resource.certs_expiring_soon} />
+        </div>
       </div>
-      <div className="bg-white border border-gray-200 rounded-lg p-4">
-        <h3 className="text-sm font-semibold text-gray-800 mb-2">Secrets, Keys & Certificates</h3>
-        <VaultItemRow label="Secrets" total={resource.secrets_total} expired={resource.secrets_expired} expiring={resource.secrets_expiring_soon} />
-        <VaultItemRow label="Keys" total={resource.keys_total} expired={resource.keys_expired} expiring={resource.keys_expiring_soon} />
-        <VaultItemRow label="Certificates" total={resource.certs_total} expired={resource.certs_expired} expiring={resource.certs_expiring_soon} />
-      </div>
+
+      {/* Item-level expiry inventory */}
+      <VaultItemInventory resource={resource} />
     </div>
   );
 }
@@ -427,6 +501,182 @@ function keyRotationDetail(r: ResourceData): string {
     return `Stale (>90 days) — ${parts.join(', ') || 'creation dates unknown'}`;
   }
   return 'Keys rotated within 90 days';
+}
+
+function KeyRotationBars({ resource }: { resource: ResourceData }) {
+  const keys = [
+    { label: 'Key 1', date: resource.key1_created_at },
+    { label: 'Key 2', date: resource.key2_created_at },
+  ];
+
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700">
+      <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">Key Age (days)</div>
+      {keys.map(k => {
+        const ageDays = k.date ? Math.floor((Date.now() - new Date(k.date).getTime()) / 86400000) : null;
+        const pct = ageDays !== null ? Math.min((ageDays / 180) * 100, 100) : 0;
+        const color = ageDays === null ? 'bg-gray-200' : ageDays > 90 ? 'bg-red-500' : ageDays > 60 ? 'bg-yellow-500' : 'bg-green-500';
+        return (
+          <div key={k.label} className="flex items-center gap-2 mb-1.5">
+            <span className="text-[10px] text-gray-500 w-10">{k.label}</span>
+            <div className="flex-1 h-3 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden relative">
+              <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+              <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gray-400 dark:bg-gray-500" title="90-day threshold" />
+            </div>
+            <span className={`text-[10px] font-medium w-14 text-right ${ageDays !== null && ageDays > 90 ? 'text-red-600' : 'text-gray-600'}`}>
+              {ageDays !== null ? `${ageDays}d` : 'N/A'}
+            </span>
+          </div>
+        );
+      })}
+      <div className="text-[10px] text-gray-400 mt-0.5">Center line = 90-day rotation threshold</div>
+    </div>
+  );
+}
+
+function SasSecuritySection({ resource }: { resource: ResourceData }) {
+  const risk = resource.sas_risk;
+  const riskColor = risk?.level === 'high' ? 'border-red-200 bg-red-50' : risk?.level === 'medium' ? 'border-yellow-200 bg-yellow-50' : 'border-green-200 bg-green-50';
+  const shieldColor = risk?.level === 'high' ? 'text-red-500' : risk?.level === 'medium' ? 'text-yellow-500' : 'text-green-500';
+
+  return (
+    <div className={`border rounded-lg p-4 ${riskColor}`}>
+      <div className="flex items-center gap-2 mb-3">
+        <svg className={`w-5 h-5 ${shieldColor}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+        <h3 className="text-sm font-semibold text-gray-800">Shared Key & SAS Security</h3>
+        {risk && <span className={`ml-auto px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+          risk.level === 'high' ? 'bg-red-100 text-red-700' : risk.level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+        }`}>{risk.level} risk</span>}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+        <div className="text-sm">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Shared Key Access</div>
+          <span className={`font-medium ${resource.shared_key_access ? 'text-red-700' : 'text-green-700'}`}>
+            {resource.shared_key_access ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+        <div className="text-sm">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">SAS Expiration Policy</div>
+          <span className={`font-medium ${resource.sas_policy_enabled ? 'text-green-700' : 'text-yellow-700'}`}>
+            {resource.sas_policy_enabled ? `Enabled (${resource.sas_expiration_period || 'configured'})` : 'Not configured'}
+          </span>
+        </div>
+        <div className="text-sm">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Key Rotation</div>
+          <span className={`font-medium ${resource.key_rotation_stale ? 'text-red-700' : 'text-green-700'}`}>
+            {resource.key_rotation_stale ? 'Overdue (>90d)' : 'Current'}
+          </span>
+        </div>
+      </div>
+
+      {risk && risk.factors.length > 0 && (
+        <div className="space-y-1 mb-2">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">Risk Factors</div>
+          {risk.factors.map((f, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-xs text-gray-700">
+              <span className="text-red-400">!</span> {f}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {risk && risk.recommendations.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">Recommendations</div>
+          {risk.recommendations.map((r, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-xs text-gray-600">
+              <span className="text-blue-400">→</span> {r}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VaultItemInventory({ resource }: { resource: ResourceData }) {
+  const now = Date.now();
+  const d30 = 30 * 86400000;
+  const d90 = 90 * 86400000;
+
+  type ItemRow = { name: string; type: string; enabled: boolean; expires_on: string | null; created_on: string | null; extra?: string };
+  const items: ItemRow[] = [];
+
+  (resource.secrets_detail || []).forEach(s => items.push({ name: s.name, type: 'Secret', enabled: s.enabled, expires_on: s.expires_on, created_on: s.created_on, extra: s.content_type || undefined }));
+  (resource.keys_detail || []).forEach(k => items.push({ name: k.name, type: 'Key', enabled: k.enabled, expires_on: k.expires_on, created_on: k.created_on, extra: k.key_type || undefined }));
+  (resource.certs_detail || []).forEach(c => items.push({ name: c.name, type: 'Certificate', enabled: c.enabled, expires_on: c.expires_on, created_on: c.created_on, extra: c.subject || undefined }));
+
+  // Sort: expired first, then by expiry soonest
+  items.sort((a, b) => {
+    if (!a.expires_on && !b.expires_on) return 0;
+    if (!a.expires_on) return 1;
+    if (!b.expires_on) return -1;
+    return new Date(a.expires_on).getTime() - new Date(b.expires_on).getTime();
+  });
+
+  if (items.length === 0) return null;
+
+  function expiryBadge(exp: string | null) {
+    if (!exp) return <span className="text-gray-400 text-[10px]">No expiry set</span>;
+    const ms = new Date(exp).getTime() - now;
+    const days = Math.ceil(ms / 86400000);
+    if (ms < 0) return <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-semibold">Expired {Math.abs(days)}d ago</span>;
+    if (ms < d30) return <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded text-[10px] font-semibold">{days}d left</span>;
+    if (ms < d90) return <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-[10px] font-semibold">{days}d left</span>;
+    return <span className="text-green-600 text-[10px] font-medium">{days}d left</span>;
+  }
+
+  const typeColors: Record<string, string> = {
+    Secret: 'bg-blue-100 text-blue-700',
+    Key: 'bg-purple-100 text-purple-700',
+    Certificate: 'bg-emerald-100 text-emerald-700',
+  };
+
+  return (
+    <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+        <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Secrets & Keys Inventory</h3>
+        <p className="text-[10px] text-gray-500 mt-0.5">{items.length} items sorted by expiry</p>
+      </div>
+      <table className="min-w-full text-left text-xs">
+        <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 uppercase tracking-wider font-medium">
+          <tr>
+            <th className="px-4 py-2">Name</th>
+            <th className="px-4 py-2">Type</th>
+            <th className="px-4 py-2">Status</th>
+            <th className="px-4 py-2">Expiry</th>
+            <th className="px-4 py-2">Created</th>
+            <th className="px-4 py-2">Detail</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+          {items.slice(0, 50).map((item, i) => {
+            const isExpired = item.expires_on && new Date(item.expires_on).getTime() < now;
+            return (
+              <tr key={`${item.type}-${item.name}-${i}`} className={isExpired ? 'bg-red-50/40 dark:bg-red-900/10' : ''}>
+                <td className="px-4 py-2 font-medium text-gray-800 dark:text-gray-200">{item.name}</td>
+                <td className="px-4 py-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeColors[item.type] || 'bg-gray-100 text-gray-600'}`}>{item.type}</span>
+                </td>
+                <td className="px-4 py-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${item.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                    {item.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </td>
+                <td className="px-4 py-2">{expiryBadge(item.expires_on)}</td>
+                <td className="px-4 py-2 text-gray-500">{item.created_on ? new Date(item.created_on).toLocaleDateString() : '—'}</td>
+                <td className="px-4 py-2 text-gray-500 truncate max-w-[150px]" title={item.extra}>{item.extra || '—'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {items.length > 50 && <div className="px-4 py-2 text-xs text-gray-400 border-t">Showing first 50 of {items.length} items</div>}
+    </div>
+  );
 }
 
 // ─── Network Tab ──────────────────────────────────────────────────
@@ -510,60 +760,139 @@ function NetworkTab({ resource }: { resource: ResourceData }) {
 
 // ─── Access Control Tab ───────────────────────────────────────────
 
-function AccessTab({ identities, loading }: { identities: AccessIdentity[]; loading: boolean }) {
+function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault }: {
+  rbacAccess: AccessIdentity[]; policyAccess: AccessIdentity[]; blastRadius: number; loading: boolean; isKeyVault: boolean;
+}) {
   if (loading) {
     return <div className="flex items-center justify-center h-32 text-gray-400 text-sm">Loading access data...</div>;
   }
 
-  if (identities.length === 0) {
+  const total = rbacAccess.length + policyAccess.length;
+  if (total === 0) {
     return (
-      <div className="bg-white border border-gray-200 rounded-lg p-6 text-center">
-        <p className="text-gray-500 text-sm">No identities found with direct RBAC access to this resource.</p>
+      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-6 text-center">
+        <p className="text-gray-500 text-sm">No identities found with access to this resource.</p>
         <p className="text-xs text-gray-400 mt-1">Identities with inherited access through parent scopes may not be shown.</p>
       </div>
     );
   }
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-800">Identities with Access</h3>
-        <span className="text-xs text-gray-500">{identities.length} identities</span>
+    <div className="space-y-4">
+      {/* Summary banner */}
+      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg px-4 py-3 flex items-center justify-between">
+        <div className="text-sm text-blue-800 dark:text-blue-300">
+          <span className="font-bold">{blastRadius}</span> unique identities have access to this resource
+        </div>
+        <div className="flex gap-3 text-[10px]">
+          <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">{rbacAccess.length} RBAC</span>
+          {isKeyVault && <span className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded font-medium">{policyAccess.length} Access Policy</span>}
+        </div>
       </div>
-      <table className="min-w-full text-left text-xs">
-        <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase tracking-wider font-medium">
-          <tr>
-            <th className="px-4 py-2">Identity</th>
-            <th className="px-4 py-2">Category</th>
-            <th className="px-4 py-2">Role</th>
-            <th className="px-4 py-2">Scope Type</th>
-            <th className="px-4 py-2">Risk</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {identities.map(id => (
-            <tr key={id.id} className="hover:bg-blue-50/40">
-              <td className="px-4 py-2">
-                <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">
-                  {id.display_name}
-                </Link>
-              </td>
-              <td className="px-4 py-2">
-                <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 text-[10px] font-medium">
-                  {(id.identity_category || '').replace(/_/g, ' ')}
-                </span>
-              </td>
-              <td className="px-4 py-2 text-gray-700">{id.role_name}</td>
-              <td className="px-4 py-2 text-gray-600">{id.scope_type || '—'}</td>
-              <td className="px-4 py-2">
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(id.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
-                  {id.risk_level}
-                </span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+
+      {/* RBAC Access table */}
+      {rbacAccess.length > 0 && (
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">RBAC Access</h3>
+          </div>
+          <table className="min-w-full text-left text-xs">
+            <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 uppercase tracking-wider font-medium">
+              <tr>
+                <th className="px-4 py-2">Identity</th>
+                <th className="px-4 py-2">Category</th>
+                <th className="px-4 py-2">Role</th>
+                <th className="px-4 py-2">Scope</th>
+                <th className="px-4 py-2">Risk</th>
+                <th className="px-4 py-2">Flags</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              {rbacAccess.map((id, i) => (
+                <tr key={`rbac-${id.id}-${i}`} className={id.over_privileged ? 'bg-red-50/40 dark:bg-red-900/10' : 'hover:bg-blue-50/40'}>
+                  <td className="px-4 py-2">
+                    {id.id ? (
+                      <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
+                    ) : (
+                      <span className="text-gray-600">{id.display_name}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2">
+                    <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-[10px] font-medium">
+                      {(id.identity_category || '').replace(/_/g, ' ')}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2 text-gray-700 dark:text-gray-300">{id.role_name || '—'}</td>
+                  <td className="px-4 py-2 text-gray-600 dark:text-gray-400 text-[10px] truncate max-w-[200px]" title={id.scope}>{id.scope_type || '—'}</td>
+                  <td className="px-4 py-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(id.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
+                      {id.risk_level}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    {id.over_privileged && (
+                      <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-bold">Over-Privileged</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Access Policy table (KV only) */}
+      {isKeyVault && policyAccess.length > 0 && (
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Access Policy Principals</h3>
+          </div>
+          <table className="min-w-full text-left text-xs">
+            <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 uppercase tracking-wider font-medium">
+              <tr>
+                <th className="px-4 py-2">Identity</th>
+                <th className="px-4 py-2">Category</th>
+                <th className="px-4 py-2">Permissions</th>
+                <th className="px-4 py-2">Risk</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              {policyAccess.map((id, i) => (
+                <tr key={`pol-${id.id || i}`} className="hover:bg-purple-50/40">
+                  <td className="px-4 py-2">
+                    {id.id ? (
+                      <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
+                    ) : (
+                      <span className="text-gray-600 dark:text-gray-400">{id.display_name}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2">
+                    <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-[10px] font-medium">
+                      {(id.identity_category || '').replace(/_/g, ' ')}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <div className="flex flex-wrap gap-1">
+                      {id.permissions_summary && Object.entries(id.permissions_summary).map(([cat, perms]) =>
+                        (perms as string[]).length > 0 && (
+                          <span key={cat} className="px-1.5 py-0.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded text-[10px]">
+                            {cat}: {(perms as string[]).join(', ')}
+                          </span>
+                        )
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(id.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
+                      {id.risk_level}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -574,6 +903,14 @@ function ComplianceTab({ resource }: { resource: ResourceData }) {
   const isStorage = resource.resource_type === 'storage_account';
   const mapping = isStorage ? STORAGE_COMPLIANCE : KEYVAULT_COMPLIANCE;
 
+  const noExpiryKeys = (resource.keys_detail || []).filter(k => !k.expires_on).length;
+  const noExpirySecrets = (resource.secrets_detail || []).filter(s => !s.expires_on).length;
+  const expiringCerts90 = (resource.certs_detail || []).filter(c => {
+    if (!c.expires_on) return false;
+    const ms = new Date(c.expires_on).getTime() - Date.now();
+    return ms > 0 && ms < 90 * 86400000;
+  }).length;
+
   const checks: { key: string; label: string; pass: boolean }[] = isStorage ? [
     { key: 'public_blob_access', label: 'Public Blob Access Disabled', pass: resource.public_blob_access === false },
     { key: 'https_only', label: 'HTTPS-Only Transfer', pass: resource.https_only === true },
@@ -581,12 +918,23 @@ function ComplianceTab({ resource }: { resource: ResourceData }) {
     { key: 'customer_managed_keys', label: 'Customer-Managed Encryption Keys', pass: resource.customer_managed_keys === true },
     { key: 'default_network_action', label: 'Default Network Deny', pass: resource.default_network_action === 'Deny' },
     { key: 'shared_key_access', label: 'Shared Key Access Disabled', pass: resource.shared_key_access === false },
+    { key: 'infrastructure_encryption', label: 'Infrastructure Encryption', pass: resource.infrastructure_encryption === true },
+    { key: 'cross_tenant_replication', label: 'Cross-Tenant Replication Disabled', pass: resource.allow_cross_tenant_replication === false },
+    { key: 'key_rotation', label: 'Key Rotation (≤90 days)', pass: resource.key_rotation_stale === false },
+    { key: 'private_endpoints', label: 'Private Endpoints Configured', pass: (resource.private_endpoint_count ?? 0) > 0 },
+    { key: 'sas_policy', label: 'SAS Expiration Policy Enabled', pass: resource.sas_policy_enabled === true },
+    { key: 'bypass_limited', label: 'Bypass Limited to AzureServices', pass: resource.bypass_settings === 'AzureServices' },
   ] : [
     { key: 'soft_delete', label: 'Soft Delete Enabled', pass: resource.soft_delete_enabled === true },
     { key: 'purge_protection', label: 'Purge Protection Enabled', pass: resource.purge_protection === true },
     { key: 'rbac_authorization', label: 'RBAC Authorization', pass: resource.enable_rbac_authorization === true },
     { key: 'expired_secrets', label: 'No Expired Secrets/Keys/Certs', pass: (resource.secrets_expired ?? 0) === 0 && (resource.keys_expired ?? 0) === 0 && (resource.certs_expired ?? 0) === 0 },
     { key: 'network_access', label: 'Network Restricted', pass: resource.default_network_action === 'Deny' },
+    { key: 'private_endpoints', label: 'Private Endpoints Configured', pass: (resource.private_endpoint_count ?? 0) > 0 },
+    { key: 'key_expiry_set', label: 'All Keys Have Expiry Set', pass: (resource.keys_total ?? 0) === 0 || noExpiryKeys === 0 },
+    { key: 'secret_expiry_set', label: 'All Secrets Have Expiry Set', pass: (resource.secrets_total ?? 0) === 0 || noExpirySecrets === 0 },
+    { key: 'cert_expiry_check', label: 'No Certificates Expiring ≤90 Days', pass: expiringCerts90 === 0 },
+    { key: 'retention_90d', label: 'Soft Delete Retention ≥90 Days', pass: (resource.soft_delete_retention_days ?? 0) >= 90 },
   ];
 
   const passCount = checks.filter(c => c.pass).length;

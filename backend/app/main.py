@@ -131,6 +131,8 @@ from app.api.handlers import (
     get_resource_stats,
     get_resource_detail,
     get_resource_access,
+    get_resource_expiry_summary,
+    get_resource_compliance_summary,
     get_tenant_by_slug_public,
     provision_tenant_handler,
     get_user_tenants_handler,
@@ -901,6 +903,16 @@ def create_app():
     @require_role('viewer', 'auditor', 'admin')
     def resources_stats():
         return get_resource_stats()
+
+    @app.get("/api/resources/expiry-summary")
+    @require_role('viewer', 'auditor', 'admin')
+    def resources_expiry_summary():
+        return get_resource_expiry_summary()
+
+    @app.get("/api/resources/compliance-summary")
+    @require_role('viewer', 'auditor', 'admin')
+    def resources_compliance_summary():
+        return get_resource_compliance_summary()
 
     @app.get("/api/resources")
     @require_role('viewer', 'auditor', 'admin')

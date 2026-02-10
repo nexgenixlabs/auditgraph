@@ -26,6 +26,7 @@ export const WIDGET_REGISTRY: WidgetMeta[] = [
   { id: 'remediation_progress', label: 'Remediation Progress', description: 'Open/completed remediation actions',                   group: 'compliance', defaultVisible: true,  colSpan: 1 },
   { id: 'sa_governance',        label: 'SA Governance',        description: 'Service account governance compliance status',          group: 'monitoring', defaultVisible: true,  colSpan: 1 },
   { id: 'platform_health',      label: 'Platform Health',      description: 'API health, uptime, and database latency',              group: 'monitoring', defaultVisible: true,  colSpan: 1 },
+  { id: 'expiry_tracker',       label: 'Expiry Tracker',       description: 'Key Vault secrets, keys & certificates expiry status',  group: 'monitoring', defaultVisible: true,  colSpan: 1 },
 ];
 
 export interface WidgetPref {

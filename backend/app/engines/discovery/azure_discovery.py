@@ -1426,6 +1426,11 @@ class AzureDiscoveryEngine:
                         if kv_props:
                             kv_uri = getattr(kv_props, 'key_vault_uri', None)
 
+                    # SAS policy
+                    sas_policy = getattr(account, 'sas_policy', None)
+                    sas_policy_enabled = sas_policy is not None and getattr(sas_policy, 'sas_expiration_period', None) is not None
+                    sas_expiration_period = str(getattr(sas_policy, 'sas_expiration_period', '')) if sas_policy else None
+
                     # Key rotation check
                     key1_created = None
                     key2_created = None
@@ -1470,6 +1475,8 @@ class AzureDiscoveryEngine:
                         'encryption_details': {'infra_enc': infra_enc, 'cmk': cmk, 'kv_uri': kv_uri},
                         'key1_created_at': key1_created, 'key2_created_at': key2_created,
                         'key_rotation_stale': key_stale,
+                        'sas_policy_enabled': sas_policy_enabled,
+                        'sas_expiration_period': sas_expiration_period,
                         'risk_level': risk_level, 'risk_score': risk_score,
                         'risk_reasons': risk_reasons,
                         'tags': dict(account.tags or {}),
@@ -1543,6 +1550,9 @@ class AzureDiscoveryEngine:
                     secrets_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
                     keys_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
                     certs_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
+                    secrets_detail = []
+                    keys_detail = []
+                    certs_detail = []
 
                     try:
                         sc = SecretClient(vault_url=vault_url, credential=self.credential)
@@ -1553,6 +1563,13 @@ class AzureDiscoveryEngine:
                                     secrets_summary['expired'] += 1
                                 elif s.expires_on < now + thirty_days:
                                     secrets_summary['expiring_soon'] += 1
+                            secrets_detail.append({
+                                'name': s.name,
+                                'enabled': s.enabled,
+                                'expires_on': s.expires_on.isoformat() if s.expires_on else None,
+                                'created_on': s.created_on.isoformat() if s.created_on else None,
+                                'content_type': getattr(s, 'content_type', None),
+                            })
                     except Exception:
                         pass
 
@@ -1565,6 +1582,14 @@ class AzureDiscoveryEngine:
                                     keys_summary['expired'] += 1
                                 elif k.expires_on < now + thirty_days:
                                     keys_summary['expiring_soon'] += 1
+                            keys_detail.append({
+                                'name': k.name,
+                                'enabled': k.enabled,
+                                'expires_on': k.expires_on.isoformat() if k.expires_on else None,
+                                'created_on': k.created_on.isoformat() if k.created_on else None,
+                                'key_type': str(k.key_type) if getattr(k, 'key_type', None) else None,
+                                'key_size': getattr(k, 'key_size', None),
+                            })
                     except Exception:
                         pass
 
@@ -1577,6 +1602,14 @@ class AzureDiscoveryEngine:
                                     certs_summary['expired'] += 1
                                 elif c.expires_on < now + thirty_days:
                                     certs_summary['expiring_soon'] += 1
+                            certs_detail.append({
+                                'name': c.name,
+                                'enabled': c.enabled,
+                                'expires_on': c.expires_on.isoformat() if c.expires_on else None,
+                                'created_on': c.created_on.isoformat() if c.created_on else None,
+                                'subject': getattr(c, 'subject', None),
+                                'thumbprint': c.thumbprint.hex() if getattr(c, 'thumbprint', None) else None,
+                            })
                     except Exception:
                         pass
 
@@ -1611,6 +1644,9 @@ class AzureDiscoveryEngine:
                         'certs_expiring_soon': certs_summary['expiring_soon'],
                         'access_policy_count': ap_count,
                         'access_policies': access_policies_list,
+                        'secrets_detail': secrets_detail,
+                        'keys_detail': keys_detail,
+                        'certs_detail': certs_detail,
                         'risk_level': risk_level, 'risk_score': risk_score,
                         'risk_reasons': risk_reasons,
                         'tags': dict(getattr(vault, 'tags', None) or {}),

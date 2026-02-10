@@ -6960,6 +6960,35 @@ def get_resource_stats():
             WHERE discovery_run_id = %s{tenant_filter}
         """, params)
         kv = dict(cursor.fetchone())
+
+        # Rotation compliance (storage)
+        cursor.execute(f"""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE key_rotation_stale = true) as keys_stale,
+                   AVG(GREATEST(
+                       EXTRACT(EPOCH FROM (NOW() - key1_created_at)) / 86400,
+                       EXTRACT(EPOCH FROM (NOW() - key2_created_at)) / 86400
+                   ))::int as avg_key_age_days
+            FROM azure_storage_accounts
+            WHERE discovery_run_id = %s{tenant_filter}
+        """, params)
+        rotation_row = dict(cursor.fetchone())
+
+        # Key vault expiry stats
+        cursor.execute(f"""
+            SELECT COALESCE(SUM(secrets_total), 0) as total_secrets,
+                   COALESCE(SUM(secrets_expired), 0) as expired_secrets,
+                   COALESCE(SUM(secrets_expiring_soon), 0) as expiring_secrets,
+                   COALESCE(SUM(keys_total), 0) as total_keys,
+                   COALESCE(SUM(keys_expired), 0) as expired_keys,
+                   COALESCE(SUM(keys_expiring_soon), 0) as expiring_keys,
+                   COALESCE(SUM(certs_total), 0) as total_certs,
+                   COALESCE(SUM(certs_expired), 0) as expired_certs,
+                   COALESCE(SUM(certs_expiring_soon), 0) as expiring_certs
+            FROM azure_key_vaults
+            WHERE discovery_run_id = %s{tenant_filter}
+        """, params)
+        expiry_row = dict(cursor.fetchone())
         cursor.close()
 
         total = sa['total'] + kv['total']
@@ -6977,6 +7006,16 @@ def get_resource_stats():
             'key_vaults': kv['total'],
             'by_risk': by_risk,
             'at_risk': by_risk['critical'] + by_risk['high'],
+            'rotation_compliance': {
+                'total_storage': rotation_row['total'],
+                'keys_stale': rotation_row['keys_stale'],
+                'avg_key_age_days': rotation_row['avg_key_age_days'] or 0,
+            },
+            'expiry_summary': {
+                'secrets': {'total': expiry_row['total_secrets'], 'expired': expiry_row['expired_secrets'], 'expiring_soon': expiry_row['expiring_secrets']},
+                'keys': {'total': expiry_row['total_keys'], 'expired': expiry_row['expired_keys'], 'expiring_soon': expiry_row['expiring_keys']},
+                'certs': {'total': expiry_row['total_certs'], 'expired': expiry_row['expired_certs'], 'expiring_soon': expiry_row['expiring_certs']},
+            },
         })
     finally:
         db.close()
@@ -7023,12 +7062,44 @@ def get_resource_detail(resource_id):
         resource = dict(row)
         resource['risk_reasons'] = _parse_risk_reasons(resource.get('risk_reasons'))
         # Parse JSONB fields that may come as strings
-        for field in ['tags', 'network_rules', 'encryption_details', 'access_policies']:
+        for field in ['tags', 'network_rules', 'encryption_details', 'access_policies',
+                       'secrets_detail', 'keys_detail', 'certs_detail']:
             if field in resource and isinstance(resource[field], str):
                 try:
                     resource[field] = json.loads(resource[field])
                 except Exception:
                     pass
+
+        # SAS risk assessment for storage accounts
+        if resource.get('resource_type') == 'storage_account':
+            factors = []
+            recommendations = []
+            if resource.get('shared_key_access') is True:
+                factors.append('Shared key access is enabled')
+                recommendations.append('Disable shared key access and use Azure AD authentication')
+            if not resource.get('sas_policy_enabled'):
+                factors.append('No SAS expiration policy configured')
+                recommendations.append('Configure a SAS expiration policy to limit token lifetimes')
+            if resource.get('public_blob_access') is True:
+                factors.append('Public blob access is enabled')
+                recommendations.append('Disable public blob access unless required')
+            if resource.get('key_rotation_stale') is True:
+                factors.append('Storage keys have not been rotated in >90 days')
+                recommendations.append('Rotate storage account keys every 90 days')
+            level = 'low'
+            if len(factors) >= 3:
+                level = 'high'
+            elif len(factors) >= 2:
+                level = 'medium'
+            elif len(factors) >= 1:
+                level = 'medium'
+            else:
+                level = 'low'
+            resource['sas_risk'] = {
+                'level': level,
+                'factors': factors,
+                'recommendations': recommendations,
+            }
 
         return jsonify(resource)
     finally:
@@ -7044,7 +7115,7 @@ def get_resource_access(resource_id):
         run_id = _latest_run_query(cursor, tenant_id)
         if not run_id:
             cursor.close()
-            return jsonify({'resource_id': resource_id, 'identities': [], 'count': 0})
+            return jsonify({'resource_id': resource_id, 'rbac_access': [], 'policy_access': [], 'count': 0, 'blast_radius': 0})
 
         tenant_filter = ""
         params = [run_id, resource_id, resource_id]
@@ -7052,25 +7123,292 @@ def get_resource_access(resource_id):
             tenant_filter = " AND i.tenant_id = %s"
             params.append(tenant_id)
 
+        # RBAC access
         cursor.execute(f"""
-            SELECT DISTINCT ON (i.id)
-                i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
-                ra.role_name, ra.scope, ra.scope_type
+            SELECT i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
+                   i.object_id,
+                   ra.role_name, ra.scope, ra.scope_type
             FROM identities i
             JOIN role_assignments ra ON ra.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
               AND (ra.scope = %s OR %s LIKE ra.scope || '/%%')
               {tenant_filter}
-            ORDER BY i.id, ra.role_name
+            ORDER BY i.risk_score DESC, ra.role_name
+        """, params)
+        rbac_rows = cursor.fetchall()
+
+        OVER_PRIV_ROLES = {'Owner', 'Contributor', 'User Access Administrator'}
+        rbac_access = []
+        rbac_identity_ids = set()
+        for r in rbac_rows:
+            entry = dict(r)
+            entry['access_type'] = 'rbac'
+            entry['over_privileged'] = entry.get('role_name', '') in OVER_PRIV_ROLES and entry.get('scope', '') == resource_id
+            rbac_access.append(entry)
+            rbac_identity_ids.add(entry['id'])
+
+        # Key Vault access policy cross-reference
+        policy_access = []
+        kv_params = [run_id, resource_id]
+        if tenant_id:
+            kv_params.append(tenant_id)
+        cursor.execute(f"""
+            SELECT access_policies
+            FROM azure_key_vaults
+            WHERE discovery_run_id = %s AND resource_id = %s
+            {'AND (tenant_id = %s OR tenant_id IS NULL)' if tenant_id else ''}
+        """, kv_params)
+        kv_row = cursor.fetchone()
+        policy_identity_ids = set()
+
+        if kv_row and kv_row.get('access_policies'):
+            policies = kv_row['access_policies']
+            if isinstance(policies, str):
+                try:
+                    policies = json.loads(policies)
+                except Exception:
+                    policies = []
+
+            # Collect all object_ids from access policies
+            policy_object_ids = [p.get('object_id') for p in policies if p.get('object_id')]
+            if policy_object_ids:
+                placeholders = ','.join(['%s'] * len(policy_object_ids))
+                id_params = [run_id] + policy_object_ids
+                if tenant_id:
+                    id_params.append(tenant_id)
+                cursor.execute(f"""
+                    SELECT id, display_name, identity_category, risk_level, risk_score, object_id
+                    FROM identities
+                    WHERE discovery_run_id = %s AND object_id IN ({placeholders})
+                    {'AND tenant_id = %s' if tenant_id else ''}
+                """, id_params)
+                identity_map = {r['object_id']: dict(r) for r in cursor.fetchall()}
+
+                for pol in policies:
+                    oid = pol.get('object_id', '')
+                    identity_info = identity_map.get(oid, {})
+                    entry = {
+                        'id': identity_info.get('id'),
+                        'display_name': identity_info.get('display_name', f'Unknown ({oid[:8]}...)'),
+                        'identity_category': identity_info.get('identity_category', 'unknown'),
+                        'risk_level': identity_info.get('risk_level', 'unknown'),
+                        'risk_score': identity_info.get('risk_score', 0),
+                        'object_id': oid,
+                        'access_type': 'access_policy',
+                        'over_privileged': False,
+                        'permissions_summary': pol.get('permissions', {}),
+                    }
+                    policy_access.append(entry)
+                    if identity_info.get('id'):
+                        policy_identity_ids.add(identity_info['id'])
+
+        cursor.close()
+
+        blast_radius = len(rbac_identity_ids | policy_identity_ids)
+        return jsonify({
+            'resource_id': resource_id,
+            'rbac_access': rbac_access,
+            'policy_access': policy_access,
+            'count': len(rbac_access) + len(policy_access),
+            'blast_radius': blast_radius,
+        })
+    finally:
+        db.close()
+
+
+def get_resource_expiry_summary():
+    """GET /api/resources/expiry-summary — aggregate expiry data across all key vaults."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({'secrets': {}, 'keys': {}, 'certs': {}, 'timeline': []})
+
+        tenant_filter = ""
+        params = [run_id]
+        if tenant_id:
+            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+
+        cursor.execute(f"""
+            SELECT name, secrets_detail, keys_detail, certs_detail,
+                   secrets_total, secrets_expired, secrets_expiring_soon,
+                   keys_total, keys_expired, keys_expiring_soon,
+                   certs_total, certs_expired, certs_expiring_soon
+            FROM azure_key_vaults
+            WHERE discovery_run_id = %s{tenant_filter}
         """, params)
         rows = cursor.fetchall()
         cursor.close()
 
-        identities = [dict(r) for r in rows]
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        d7 = now + timedelta(days=7)
+        d30 = now + timedelta(days=30)
+        d90 = now + timedelta(days=90)
+
+        secrets_agg = {'total': 0, 'expired': 0, 'expiring_7d': 0, 'expiring_30d': 0, 'expiring_90d': 0, 'no_expiry': 0}
+        keys_agg = {'total': 0, 'expired': 0, 'expiring_7d': 0, 'expiring_30d': 0, 'expiring_90d': 0, 'no_expiry': 0}
+        certs_agg = {'total': 0, 'expired': 0, 'expiring_7d': 0, 'expiring_30d': 0, 'expiring_90d': 0, 'no_expiry': 0}
+        timeline = []
+
+        def parse_items(items_raw):
+            if isinstance(items_raw, str):
+                try:
+                    return json.loads(items_raw)
+                except Exception:
+                    return []
+            return items_raw or []
+
+        def classify(exp_str, agg, item_name, item_type, vault_name):
+            agg['total'] += 1
+            if not exp_str:
+                agg['no_expiry'] += 1
+                return
+            try:
+                exp = datetime.fromisoformat(exp_str.replace('Z', '+00:00'))
+            except Exception:
+                agg['no_expiry'] += 1
+                return
+            if exp < now:
+                agg['expired'] += 1
+            elif exp < d7:
+                agg['expiring_7d'] += 1
+            elif exp < d30:
+                agg['expiring_30d'] += 1
+            elif exp < d90:
+                agg['expiring_90d'] += 1
+            timeline.append({'vault': vault_name, 'item': item_name, 'type': item_type, 'expires_on': exp_str})
+
+        for row in rows:
+            vault_name = row['name']
+            for s in parse_items(row.get('secrets_detail')):
+                classify(s.get('expires_on'), secrets_agg, s.get('name', ''), 'secret', vault_name)
+            for k in parse_items(row.get('keys_detail')):
+                classify(k.get('expires_on'), keys_agg, k.get('name', ''), 'key', vault_name)
+            for c in parse_items(row.get('certs_detail')):
+                classify(c.get('expires_on'), certs_agg, c.get('name', ''), 'certificate', vault_name)
+
+        # Sort timeline by expiry (soonest first), filter out no-expiry
+        timeline.sort(key=lambda x: x['expires_on'] or '9999')
+
         return jsonify({
-            'resource_id': resource_id,
-            'identities': identities,
-            'count': len(identities),
+            'secrets': secrets_agg,
+            'keys': keys_agg,
+            'certs': certs_agg,
+            'timeline': timeline[:50],  # Top 50 soonest
+        })
+    finally:
+        db.close()
+
+
+def get_resource_compliance_summary():
+    """GET /api/resources/compliance-summary — aggregate compliance pass/fail across all resources."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({'storage': {}, 'key_vault': {}})
+
+        tenant_filter = ""
+        params = [run_id]
+        if tenant_id:
+            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+
+        # Storage compliance
+        cursor.execute(f"""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE public_blob_access = false) as public_blob_pass,
+                   COUNT(*) FILTER (WHERE https_only = true) as https_pass,
+                   COUNT(*) FILTER (WHERE minimum_tls_version = 'TLS1_2') as tls_pass,
+                   COUNT(*) FILTER (WHERE customer_managed_keys = true) as cmk_pass,
+                   COUNT(*) FILTER (WHERE default_network_action = 'Deny') as network_pass,
+                   COUNT(*) FILTER (WHERE shared_key_access = false) as shared_key_pass,
+                   COUNT(*) FILTER (WHERE infrastructure_encryption = true) as infra_enc_pass,
+                   COUNT(*) FILTER (WHERE allow_cross_tenant_replication = false) as cross_tenant_pass,
+                   COUNT(*) FILTER (WHERE key_rotation_stale = false) as rotation_pass,
+                   COUNT(*) FILTER (WHERE private_endpoint_count > 0) as private_ep_pass,
+                   COUNT(*) FILTER (WHERE sas_policy_enabled = true) as sas_policy_pass,
+                   COUNT(*) FILTER (WHERE bypass_settings = 'AzureServices') as bypass_pass
+            FROM azure_storage_accounts
+            WHERE discovery_run_id = %s{tenant_filter}
+        """, params)
+        sa_row = dict(cursor.fetchone())
+        sa_total = sa_row['total']
+
+        # KV compliance
+        cursor.execute(f"""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE soft_delete_enabled = true) as soft_delete_pass,
+                   COUNT(*) FILTER (WHERE purge_protection = true) as purge_pass,
+                   COUNT(*) FILTER (WHERE enable_rbac_authorization = true) as rbac_pass,
+                   COUNT(*) FILTER (WHERE secrets_expired = 0 AND keys_expired = 0 AND certs_expired = 0) as no_expired_pass,
+                   COUNT(*) FILTER (WHERE default_network_action = 'Deny') as network_pass,
+                   COUNT(*) FILTER (WHERE private_endpoint_count > 0) as private_ep_pass,
+                   COUNT(*) FILTER (WHERE soft_delete_retention_days >= 90) as retention_pass
+            FROM azure_key_vaults
+            WHERE discovery_run_id = %s{tenant_filter}
+        """, params)
+        kv_row = dict(cursor.fetchone())
+        kv_total = kv_row['total']
+        cursor.close()
+
+        def pct(passed, total):
+            return round(passed / total * 100) if total > 0 else 0
+
+        storage_checks = {
+            'public_blob_access': {'passed': sa_row['public_blob_pass'], 'total': sa_total, 'pct': pct(sa_row['public_blob_pass'], sa_total)},
+            'https_only': {'passed': sa_row['https_pass'], 'total': sa_total, 'pct': pct(sa_row['https_pass'], sa_total)},
+            'tls_1_2': {'passed': sa_row['tls_pass'], 'total': sa_total, 'pct': pct(sa_row['tls_pass'], sa_total)},
+            'cmk': {'passed': sa_row['cmk_pass'], 'total': sa_total, 'pct': pct(sa_row['cmk_pass'], sa_total)},
+            'network_deny': {'passed': sa_row['network_pass'], 'total': sa_total, 'pct': pct(sa_row['network_pass'], sa_total)},
+            'shared_key_disabled': {'passed': sa_row['shared_key_pass'], 'total': sa_total, 'pct': pct(sa_row['shared_key_pass'], sa_total)},
+            'infra_encryption': {'passed': sa_row['infra_enc_pass'], 'total': sa_total, 'pct': pct(sa_row['infra_enc_pass'], sa_total)},
+            'cross_tenant_disabled': {'passed': sa_row['cross_tenant_pass'], 'total': sa_total, 'pct': pct(sa_row['cross_tenant_pass'], sa_total)},
+            'key_rotation': {'passed': sa_row['rotation_pass'], 'total': sa_total, 'pct': pct(sa_row['rotation_pass'], sa_total)},
+            'private_endpoints': {'passed': sa_row['private_ep_pass'], 'total': sa_total, 'pct': pct(sa_row['private_ep_pass'], sa_total)},
+            'sas_policy': {'passed': sa_row['sas_policy_pass'], 'total': sa_total, 'pct': pct(sa_row['sas_policy_pass'], sa_total)},
+            'bypass_limited': {'passed': sa_row['bypass_pass'], 'total': sa_total, 'pct': pct(sa_row['bypass_pass'], sa_total)},
+        }
+        sa_passed = sum(c['passed'] for c in storage_checks.values())
+        sa_total_checks = sa_total * len(storage_checks)
+
+        kv_checks = {
+            'soft_delete': {'passed': kv_row['soft_delete_pass'], 'total': kv_total, 'pct': pct(kv_row['soft_delete_pass'], kv_total)},
+            'purge_protection': {'passed': kv_row['purge_pass'], 'total': kv_total, 'pct': pct(kv_row['purge_pass'], kv_total)},
+            'rbac_auth': {'passed': kv_row['rbac_pass'], 'total': kv_total, 'pct': pct(kv_row['rbac_pass'], kv_total)},
+            'no_expired_items': {'passed': kv_row['no_expired_pass'], 'total': kv_total, 'pct': pct(kv_row['no_expired_pass'], kv_total)},
+            'network_deny': {'passed': kv_row['network_pass'], 'total': kv_total, 'pct': pct(kv_row['network_pass'], kv_total)},
+            'private_endpoints': {'passed': kv_row['private_ep_pass'], 'total': kv_total, 'pct': pct(kv_row['private_ep_pass'], kv_total)},
+            'retention_90d': {'passed': kv_row['retention_pass'], 'total': kv_total, 'pct': pct(kv_row['retention_pass'], kv_total)},
+        }
+        kv_passed = sum(c['passed'] for c in kv_checks.values())
+        kv_total_checks = kv_total * len(kv_checks)
+
+        return jsonify({
+            'storage': {
+                'total_resources': sa_total,
+                'total_checks': sa_total_checks,
+                'passed': sa_passed,
+                'failed': sa_total_checks - sa_passed,
+                'score': pct(sa_passed, sa_total_checks),
+                'checks': storage_checks,
+            },
+            'key_vault': {
+                'total_resources': kv_total,
+                'total_checks': kv_total_checks,
+                'passed': kv_passed,
+                'failed': kv_total_checks - kv_passed,
+                'score': pct(kv_passed, kv_total_checks),
+                'checks': kv_checks,
+            },
         })
     finally:
         db.close()
