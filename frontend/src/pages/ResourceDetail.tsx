@@ -16,7 +16,7 @@ interface ResourceData {
   sku: string;
   risk_level: string;
   risk_score: number;
-  risk_reasons: string[];
+  risk_reasons?: string[];
   tags: Record<string, string>;
   // Storage account fields
   kind?: string;
@@ -403,9 +403,9 @@ function OverviewTab({ resource }: { resource: ResourceData }) {
             <div className="text-[10px] text-gray-500">{resource.risk_score} / 200 points</div>
           </div>
         </div>
-        {resource.risk_reasons.length > 0 ? (
+        {(resource.risk_reasons || []).length > 0 ? (
           <ul className="space-y-1.5">
-            {resource.risk_reasons.map((reason, i) => (
+            {(resource.risk_reasons || []).map((reason, i) => (
               <li key={i} className="flex items-start gap-1.5 text-xs text-gray-700">
                 <span className="text-red-400 mt-0.5 flex-shrink-0">●</span>
                 {reason}

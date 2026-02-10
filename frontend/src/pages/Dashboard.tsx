@@ -7,6 +7,7 @@ import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
 import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress, RiskTrendChart, RoleUsageChart, AnomalyAlerts, RiskVelocityChart, SOARActivity, ServiceAccountGovernance, PlatformHealth, CustomizePanel } from '../components/dashboard';
 import ExpiryTracker from '../components/dashboard/ExpiryTracker';
+import ResourceOverview from '../components/dashboard/ResourceOverview';
 import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
 import { useToast } from '../components/ToastProvider';
@@ -445,6 +446,7 @@ export default function Dashboard() {
               sa_governance: () => <ServiceAccountGovernance />,
               platform_health: () => <PlatformHealth />,
               expiry_tracker: () => <ExpiryTracker />,
+              resource_overview: () => <ResourceOverview />,
               risk_heat_map: () => <RiskHeatMap categories={categoryCards} />,
               risk_donut_chart: () => (
                 <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick}

@@ -123,7 +123,7 @@ export default function Resources() {
   const [stats, setStats] = useState<ResourceStats | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [typeFilter, setTypeFilter] = useState<string>(searchParams.get('type') || '');
+  const [typeFilter, setTypeFilter] = useState<string>(searchParams.get('resource_type') || searchParams.get('type') || '');
   const [riskFilter, setRiskFilter] = useState<string>(searchParams.get('risk') || '');
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [sortField, setSortField] = useState<SortField>('risk_score');
@@ -182,7 +182,7 @@ export default function Resources() {
   // Update URL params
   useEffect(() => {
     const p = new URLSearchParams();
-    if (typeFilter) p.set('type', typeFilter);
+    if (typeFilter) p.set('resource_type', typeFilter);
     if (riskFilter) p.set('risk', riskFilter);
     if (search) p.set('search', search);
     setSearchParams(p, { replace: true });
