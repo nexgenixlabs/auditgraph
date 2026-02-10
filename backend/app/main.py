@@ -1,9 +1,13 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 from datetime import datetime
 import atexit
+import re
+import time
 
-from app.api.auth import auth_middleware, require_role
+from app.metrics import MetricsCollector
+
+from app.api.auth import auth_middleware, require_role, require_superadmin
 from app.api.handlers import (
     get_stats,
     get_identities,
@@ -62,6 +66,8 @@ from app.api.handlers import (
     delete_user_handler,
     get_compliance_frameworks_list,
     toggle_compliance_framework_handler,
+    get_compliance_gap_analysis,
+    get_compliance_trends_handler,
     export_data,
     get_saved_views_list,
     create_saved_view_handler,
@@ -85,6 +91,66 @@ from app.api.handlers import (
     remove_group_members_handler,
     get_group_comparison_handler,
     get_identity_groups_handler,
+    query_identities,
+    get_query_fields,
+    get_anomalies_list,
+    get_anomaly_stats_handler,
+    get_anomaly_detail,
+    resolve_anomaly_handler,
+    get_identity_anomalies_handler,
+    get_dashboard_anomalies,
+    get_trends_velocity,
+    get_identity_risk_history,
+    get_batch_risk_history,
+    get_api_keys_list,
+    create_api_key_handler,
+    update_api_key_handler,
+    delete_api_key_handler,
+    get_soar_playbooks_list,
+    create_soar_playbook_handler,
+    update_soar_playbook_handler,
+    delete_soar_playbook_handler,
+    test_soar_playbook_handler,
+    get_soar_actions_list,
+    get_soar_action_stats_handler,
+    execute_soar_action_handler,
+    get_dashboard_preferences_handler,
+    save_dashboard_preferences_handler,
+    reset_dashboard_preferences_handler,
+    get_tenants_list,
+    create_tenant_handler,
+    update_tenant_handler,
+    delete_tenant_handler,
+    get_current_tenant_handler,
+    get_cross_tenant_analytics,
+    get_cross_tenant_trends,
+    get_onboarding_status,
+    test_azure_connection,
+    simulate_risk,
+    get_resources,
+    get_resource_stats,
+    get_resource_detail,
+    get_resource_access,
+    get_tenant_by_slug_public,
+    provision_tenant_handler,
+    get_user_tenants_handler,
+    sso_status,
+    saml_metadata,
+    saml_login,
+    saml_acs,
+    saml_token_exchange,
+    saml_slo,
+    get_sso_settings,
+    save_sso_settings,
+    parse_sso_metadata,
+    get_sa_governance_stats,
+    get_sa_governance_list,
+    post_sa_attestation,
+    get_sa_governance_settings,
+    save_sa_governance_settings,
+    health_check,
+    prometheus_metrics,
+    get_system_health,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -95,17 +161,37 @@ def create_app():
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
 
+    # Phase 68: Request timing middleware
+    @app.before_request
+    def _start_timer():
+        g._request_start = time.time()
+
+    @app.after_request
+    def _record_metrics(response):
+        start = getattr(g, '_request_start', None)
+        if start and request.path.startswith('/api/'):
+            duration_ms = (time.time() - start) * 1000
+            path = re.sub(r'/[0-9a-f-]{8,}', '/:id', request.path)
+            path = re.sub(r'/\d+', '/:id', path)
+            MetricsCollector.get().record_request(
+                request.method, path, response.status_code, duration_ms)
+        return response
+
     # -----------------------
-    # Health
+    # Health & Monitoring (Phase 68)
     # -----------------------
     @app.get("/api/health")
     @app.get("/health")
     def health():
-        return jsonify({
-            "service": "AuditGraph API",
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        return health_check()
+
+    @app.get("/api/metrics")
+    def metrics():
+        return prometheus_metrics()
+
+    @app.get("/api/system/health")
+    def system_health():
+        return get_system_health()
 
     # -----------------------
     # Authentication (Phase 31)
@@ -154,6 +240,215 @@ def create_app():
         return delete_user_handler(user_id)
 
     # -----------------------
+    # API Key Management (Phase 42 - Admin only)
+    # -----------------------
+    @app.get("/api/api-keys")
+    @require_role('admin')
+    def api_keys_list():
+        return get_api_keys_list()
+
+    @app.post("/api/api-keys")
+    @require_role('admin')
+    def api_keys_create():
+        return create_api_key_handler()
+
+    @app.put("/api/api-keys/<int:key_id>")
+    @require_role('admin')
+    def api_keys_update(key_id):
+        return update_api_key_handler(key_id)
+
+    @app.delete("/api/api-keys/<int:key_id>")
+    @require_role('admin')
+    def api_keys_delete(key_id):
+        return delete_api_key_handler(key_id)
+
+    # -----------------------
+    # SOAR Integration (Phase 43)
+    # -----------------------
+    @app.get("/api/soar/playbooks")
+    def soar_playbooks_list():
+        return get_soar_playbooks_list()
+
+    @app.post("/api/soar/playbooks")
+    @require_role('admin')
+    def soar_playbooks_create():
+        return create_soar_playbook_handler()
+
+    @app.put("/api/soar/playbooks/<int:playbook_id>")
+    @require_role('admin')
+    def soar_playbooks_update(playbook_id):
+        return update_soar_playbook_handler(playbook_id)
+
+    @app.delete("/api/soar/playbooks/<int:playbook_id>")
+    @require_role('admin')
+    def soar_playbooks_delete(playbook_id):
+        return delete_soar_playbook_handler(playbook_id)
+
+    @app.post("/api/soar/playbooks/<int:playbook_id>/test")
+    @require_role('admin')
+    def soar_playbooks_test(playbook_id):
+        return test_soar_playbook_handler(playbook_id)
+
+    @app.get("/api/soar/actions")
+    def soar_actions_list():
+        return get_soar_actions_list()
+
+    @app.get("/api/soar/actions/stats")
+    def soar_actions_stats():
+        return get_soar_action_stats_handler()
+
+    @app.post("/api/soar/execute")
+    @require_role('admin')
+    def soar_execute():
+        return execute_soar_action_handler()
+
+    # -----------------------
+    # Dashboard Preferences (Phase 44)
+    # -----------------------
+    @app.get("/api/dashboard/preferences")
+    def dashboard_preferences_get():
+        return get_dashboard_preferences_handler()
+
+    @app.put("/api/dashboard/preferences")
+    def dashboard_preferences_save():
+        return save_dashboard_preferences_handler()
+
+    @app.delete("/api/dashboard/preferences")
+    def dashboard_preferences_reset():
+        return reset_dashboard_preferences_handler()
+
+    # -----------------------
+    # Tenant Management (Phase 45)
+    # -----------------------
+    @app.get("/api/tenants")
+    @require_superadmin()
+    def tenants_list():
+        return get_tenants_list()
+
+    @app.post("/api/tenants")
+    @require_superadmin()
+    def tenants_create():
+        return create_tenant_handler()
+
+    @app.put("/api/tenants/<int:tenant_id>")
+    @require_superadmin()
+    def tenants_update(tenant_id):
+        return update_tenant_handler(tenant_id)
+
+    @app.delete("/api/tenants/<int:tenant_id>")
+    @require_superadmin()
+    def tenants_delete(tenant_id):
+        return delete_tenant_handler(tenant_id)
+
+    @app.get("/api/tenant")
+    def tenant_current():
+        return get_current_tenant_handler()
+
+    # Phase 53: SaaS Platform
+    @app.get("/api/tenants/by-slug/<slug>")
+    def tenant_by_slug(slug):
+        return get_tenant_by_slug_public(slug)
+
+    @app.post("/api/tenants/<int:tenant_id>/provision")
+    @require_superadmin()
+    def tenants_provision(tenant_id):
+        return provision_tenant_handler(tenant_id)
+
+    @app.get("/api/auth/tenants")
+    def auth_tenants():
+        return get_user_tenants_handler()
+
+    # Phase 54: SSO/SAML
+    @app.get("/api/auth/sso-status")
+    def sso_status_route():
+        return sso_status()
+
+    @app.get("/api/auth/saml/metadata")
+    def saml_metadata_route():
+        return saml_metadata()
+
+    @app.get("/api/auth/saml/login")
+    def saml_login_route():
+        return saml_login()
+
+    @app.post("/api/auth/saml/acs")
+    def saml_acs_route():
+        return saml_acs()
+
+    @app.post("/api/auth/saml/token")
+    def saml_token_route():
+        return saml_token_exchange()
+
+    @app.get("/api/auth/saml/slo")
+    def saml_slo_route():
+        return saml_slo()
+
+    @app.get("/api/settings/sso")
+    @require_role('admin')
+    def sso_settings_get():
+        return get_sso_settings()
+
+    @app.post("/api/settings/sso")
+    @require_role('admin')
+    def sso_settings_save():
+        return save_sso_settings()
+
+    @app.post("/api/settings/sso/parse-metadata")
+    @require_role('admin')
+    def sso_parse_metadata_route():
+        return parse_sso_metadata()
+
+    # -----------------------
+    # Service Account Governance (Phase 63)
+    # -----------------------
+    @app.get("/api/service-accounts/stats")
+    def sa_gov_stats_route():
+        return get_sa_governance_stats()
+
+    @app.get("/api/service-accounts/governance")
+    def sa_gov_list_route():
+        return get_sa_governance_list()
+
+    @app.post("/api/service-accounts/<identity_id>/attest")
+    @require_role('auditor', 'admin')
+    def sa_gov_attest_route(identity_id):
+        return post_sa_attestation(identity_id)
+
+    @app.get("/api/settings/sa-governance")
+    def sa_gov_settings_get_route():
+        return get_sa_governance_settings()
+
+    @app.post("/api/settings/sa-governance")
+    @require_role('admin')
+    def sa_gov_settings_save_route():
+        return save_sa_governance_settings()
+
+    # -----------------------
+    # Cross-Tenant Analytics (Phase 47 - Superadmin only)
+    # -----------------------
+    @app.get("/api/analytics/tenants")
+    @require_superadmin()
+    def analytics_tenants():
+        return get_cross_tenant_analytics()
+
+    @app.get("/api/analytics/tenants/trends")
+    @require_superadmin()
+    def analytics_tenants_trends():
+        return get_cross_tenant_trends()
+
+    # -----------------------
+    # Onboarding Wizard (Phase 48)
+    # -----------------------
+    @app.get("/api/onboarding/status")
+    def onboarding_status():
+        return get_onboarding_status()
+
+    @app.post("/api/onboarding/test-connection")
+    @require_role('admin')
+    def onboarding_test_connection():
+        return test_azure_connection()
+
+    # -----------------------
     # Summary endpoints
     # -----------------------
     @app.get("/api/summary")
@@ -200,6 +495,16 @@ def create_app():
     def compliance_frameworks_toggle(framework_id):
         return toggle_compliance_framework_handler(framework_id)
 
+    @app.get("/api/compliance/gap-analysis")
+    @require_role('viewer', 'auditor', 'admin')
+    def compliance_gap_analysis():
+        return get_compliance_gap_analysis()
+
+    @app.get("/api/compliance/trends")
+    @require_role('viewer', 'auditor', 'admin')
+    def compliance_trends():
+        return get_compliance_trends_handler()
+
     # -----------------------
     # Overview insights (tier distribution, action items)
     # -----------------------
@@ -226,6 +531,33 @@ def create_app():
         return get_identity_details(identity_id)
 
     # -----------------------
+    # Advanced Query Builder (Phase 39)
+    # -----------------------
+    @app.post("/api/identities/query")
+    def identities_query():
+        return query_identities()
+
+    @app.get("/api/identities/query/fields")
+    def identities_query_fields():
+        return get_query_fields()
+
+    @app.post("/api/identities/risk-history/batch")
+    def batch_risk_hist():
+        return get_batch_risk_history()
+
+    @app.get("/api/identities/<identity_id>/anomalies")
+    def identity_anomalies(identity_id):
+        return get_identity_anomalies_handler(identity_id)
+
+    # -----------------------
+    # Risk Simulation (Phase 49)
+    # -----------------------
+    @app.post("/api/identities/<identity_id>/simulate")
+    @require_role('auditor', 'admin')
+    def identity_simulate(identity_id):
+        return simulate_risk(identity_id)
+
+    # -----------------------
     # Identity Access Graph (trust, scope, exposure, visualization)
     # -----------------------
     @app.get("/api/identities/<identity_id>/graph-data")
@@ -238,6 +570,10 @@ def create_app():
     @app.get("/api/identities/<identity_id>/lifecycle")
     def identity_lifecycle(identity_id):
         return get_identity_lifecycle(identity_id)
+
+    @app.get("/api/identities/<identity_id>/risk-history")
+    def identity_risk_hist(identity_id):
+        return get_identity_risk_history(identity_id)
 
     # -----------------------
     # Identity PIM data (eligible roles, activations, overuse)
@@ -252,6 +588,29 @@ def create_app():
     @app.get("/api/dashboard/conditional-access")
     def dashboard_ca():
         return get_dashboard_ca_summary()
+
+    @app.get("/api/dashboard/anomalies")
+    def dashboard_anomalies():
+        return get_dashboard_anomalies()
+
+    # -----------------------
+    # Anomaly Detection (Phase 40)
+    # -----------------------
+    @app.get("/api/anomalies")
+    def anomalies_list():
+        return get_anomalies_list()
+
+    @app.get("/api/anomalies/stats")
+    def anomalies_stats():
+        return get_anomaly_stats_handler()
+
+    @app.get("/api/anomalies/<int:anomaly_id>")
+    def anomaly_detail(anomaly_id):
+        return get_anomaly_detail(anomaly_id)
+
+    @app.patch("/api/anomalies/<int:anomaly_id>")
+    def anomaly_resolve(anomaly_id):
+        return resolve_anomaly_handler(anomaly_id)
 
     # -----------------------
     # Discovery Runs
@@ -345,6 +704,10 @@ def create_app():
     @app.get("/api/trends")
     def trends():
         return get_trends()
+
+    @app.get("/api/trends/velocity")
+    def trends_vel():
+        return get_trends_velocity()
 
     # -----------------------
     # Settings (Phase 15 - Admin only for writes)
@@ -530,6 +893,29 @@ def create_app():
     @app.get("/api/identities/<identity_id>/groups")
     def identity_groups(identity_id):
         return get_identity_groups_handler(identity_id)
+
+    # -----------------------
+    # Azure Resource Discovery (Phase 52)
+    # -----------------------
+    @app.get("/api/resources/stats")
+    @require_role('viewer', 'auditor', 'admin')
+    def resources_stats():
+        return get_resource_stats()
+
+    @app.get("/api/resources")
+    @require_role('viewer', 'auditor', 'admin')
+    def resources_list():
+        return get_resources()
+
+    @app.get("/api/resources/<path:resource_id>")
+    @require_role('viewer', 'auditor', 'admin')
+    def resources_detail(resource_id):
+        return get_resource_detail(resource_id)
+
+    @app.get("/api/resources/<path:resource_id>/access")
+    @require_role('viewer', 'auditor', 'admin')
+    def resources_access(resource_id):
+        return get_resource_access(resource_id)
 
     # -----------------------
     # Activity Log (Phase 17)

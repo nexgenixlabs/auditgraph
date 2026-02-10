@@ -38,6 +38,14 @@ import AccessReviews from './pages/AccessReviews';
 import RoleMining from './pages/RoleMining';
 import IdentityGroups from './pages/IdentityGroups';
 import Login from './pages/Login';
+import CrossTenantAnalytics from './pages/CrossTenantAnalytics';
+import OnboardingWizard from './pages/OnboardingWizard';
+import Resources from './pages/Resources';
+import ResourceDetail from './pages/ResourceDetail';
+import AdminConsole from './pages/AdminConsole';
+import SsoCallback from './pages/SsoCallback';
+import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
+import SystemHealth from './pages/SystemHealth';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -48,6 +56,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import StaleDataBanner from './components/StaleDataBanner';
 import { ToastProvider } from './components/ToastProvider';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { TenantProvider, useTenant } from './contexts/TenantContext';
 import { useTheme } from './hooks/useTheme';
 
 // ============================================================
@@ -290,8 +299,11 @@ function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode;
 
 function AppContent() {
   const { user, loading } = useAuth();
+  const { loading: tenantLoading, error: tenantError } = useTenant();
+  const location = useLocation();
   const [searchOpen, setSearchOpen] = useState(false);
   const { dark, toggle: toggleTheme } = useTheme();
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -304,6 +316,47 @@ function AppContent() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Phase 48: Check if onboarding is needed (admin only)
+  useEffect(() => {
+    if (!user || loading || user.role !== 'admin') return;
+    fetch('/api/onboarding/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && !data.onboarding_completed && !data.azure_configured) {
+          setNeedsOnboarding(true);
+        }
+      })
+      .catch(() => {});
+  }, [user, loading]);
+
+  // Phase 53: Tenant resolution loading
+  if (tenantLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="animate-spin h-10 w-10 border-3 border-blue-600 border-t-transparent rounded-full mx-auto mb-4" />
+          <p className="text-sm text-gray-500">Resolving organization...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Phase 53: Tenant resolution error
+  if (tenantError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center max-w-md">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-red-100 text-red-600 text-2xl font-bold mb-4">!</div>
+          <h1 className="text-xl font-bold text-gray-900 mb-2">Organization Not Found</h1>
+          <p className="text-sm text-gray-500 mb-4">{tenantError}</p>
+          <p className="text-xs text-gray-400">
+            Please check the URL or contact your administrator.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -312,11 +365,24 @@ function AppContent() {
     );
   }
 
+  // Phase 48: Auto-redirect to onboarding if needed
+  if (needsOnboarding && location.pathname !== '/onboarding' && location.pathname !== '/login') {
+    return <Navigate to="/onboarding" replace />;
+  }
+
   return (
     <ToastProvider>
       <Routes>
         {/* Login route - no nav bar */}
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
+
+        {/* Phase 54: SSO callback - no nav bar, no auth required */}
+        <Route path="/sso-callback" element={<SsoCallback />} />
+
+        {/* Onboarding route - no nav bar, protected */}
+        <Route path="/onboarding" element={
+          <ProtectedRoute><OnboardingWizard /></ProtectedRoute>
+        } />
 
         {/* All other routes - with nav bar, protected */}
         <Route path="/*" element={
@@ -336,7 +402,7 @@ function AppContent() {
                         />
                         <div>
                           <h1 className="text-2xl font-bold text-gray-900">AuditGraph</h1>
-                          <p className="text-xs text-gray-500 font-medium">Map. Monitor. Secure.</p>
+                          <p className="text-xs text-gray-500 font-medium">{user?.tenant_name || 'Map. Monitor. Secure.'}</p>
                         </div>
                       </Link>
 
@@ -364,6 +430,14 @@ function AppContent() {
                 <Route path="/access-reviews" element={<ErrorBoundary><AccessReviews /></ErrorBoundary>} />
                 <Route path="/role-mining" element={<ErrorBoundary><RoleMining /></ErrorBoundary>} />
                 <Route path="/groups" element={<ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
+                <Route path="/service-accounts" element={<ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
+                <Route path="/system-health" element={
+                  <ProtectedRoute requiredRole="admin">
+                    <ErrorBoundary><SystemHealth /></ErrorBoundary>
+                  </ProtectedRoute>
+                } />
+                <Route path="/resources" element={<ErrorBoundary><Resources /></ErrorBoundary>} />
+                <Route path="/resources/detail" element={<ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
                 <Route path="/settings" element={
                   <ProtectedRoute requiredRole="admin">
                     <ErrorBoundary><Settings /></ErrorBoundary>
@@ -371,6 +445,8 @@ function AppContent() {
                 } />
                 <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
                 <Route path="/notifications" element={<ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
+                <Route path="/analytics" element={<ErrorBoundary><CrossTenantAnalytics /></ErrorBoundary>} />
+                <Route path="/admin/*" element={<ErrorBoundary><AdminConsole /></ErrorBoundary>} />
               </Routes>
             </div>
           </ProtectedRoute>
@@ -383,9 +459,11 @@ function AppContent() {
 function App() {
   return (
     <Router>
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
+      <TenantProvider>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </TenantProvider>
     </Router>
   );
 }
@@ -393,8 +471,10 @@ function App() {
 function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => void; dark: boolean; onToggleTheme: () => void }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout, isAdmin } = useAuth();
+  const { user, logout, isAdmin, isSuperAdmin, activeTenantId, activeTenantName, switchTenant } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
+  const [tenantDropdownOpen, setTenantDropdownOpen] = useState(false);
+  const [tenantsList, setTenantsList] = useState<{ id: number; name: string }[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -411,6 +491,15 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
     const interval = setInterval(fetchStats, 60000);
     return () => { mounted = false; clearInterval(interval); };
   }, []);
+
+  // Phase 46: Fetch tenant list for superadmin switcher
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    fetch('/api/tenants')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setTenantsList(d.tenants || []))
+      .catch(() => {});
+  }, [isSuperAdmin]);
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';
@@ -461,6 +550,17 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
       </Link>
 
       <Link
+        to="/resources"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/resources')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        Resources
+      </Link>
+
+      <Link
         to="/groups"
         className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
           isActive('/groups')
@@ -469,6 +569,17 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         }`}
       >
         Groups
+      </Link>
+
+      <Link
+        to="/service-accounts"
+        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+          isActive('/service-accounts')
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-700 hover:bg-gray-100'
+        }`}
+      >
+        SA Gov
       </Link>
 
       <Link
@@ -550,6 +661,45 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
         </Link>
       )}
 
+      {isAdmin && (
+        <Link
+          to="/system-health"
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+            isActive('/system-health')
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-700 hover:bg-gray-100'
+          }`}
+        >
+          Health
+        </Link>
+      )}
+
+      {isSuperAdmin && (
+        <Link
+          to="/analytics"
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+            isActive('/analytics')
+              ? 'bg-purple-600 text-white'
+              : 'text-purple-700 hover:bg-purple-50'
+          }`}
+        >
+          Analytics
+        </Link>
+      )}
+
+      {isSuperAdmin && (
+        <Link
+          to="/admin"
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+            isActive('/admin')
+              ? 'bg-gray-900 text-white'
+              : 'text-gray-900 hover:bg-gray-100 font-semibold'
+          }`}
+        >
+          Admin
+        </Link>
+      )}
+
       <Link
         to="/activity"
         className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
@@ -605,6 +755,46 @@ function NavLinks({ onSearchOpen, dark, onToggleTheme }: { onSearchOpen: () => v
           </svg>
         )}
       </button>
+
+      {/* Phase 46: Tenant Switcher (superadmin only) */}
+      {isSuperAdmin && (
+        <div className="relative ml-1">
+          <button
+            onClick={() => setTenantDropdownOpen(!tenantDropdownOpen)}
+            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700 dark:hover:bg-purple-900/50 transition"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+            </svg>
+            <span>{activeTenantName || 'All Tenants'}</span>
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {tenantDropdownOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setTenantDropdownOpen(false)} />
+              <div className="absolute right-0 mt-1 w-52 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+                <button
+                  onClick={() => { switchTenant(null); setTenantDropdownOpen(false); }}
+                  className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 transition ${!activeTenantId ? 'font-bold text-purple-700 dark:text-purple-400' : 'text-gray-700 dark:text-gray-300'}`}
+                >
+                  All Tenants (no filter)
+                </button>
+                {tenantsList.map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => { switchTenant(t.id, t.name); setTenantDropdownOpen(false); }}
+                    className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 transition ${activeTenantId === t.id ? 'font-bold text-purple-700 dark:text-purple-400' : 'text-gray-700 dark:text-gray-300'}`}
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* User menu */}
       {user && (

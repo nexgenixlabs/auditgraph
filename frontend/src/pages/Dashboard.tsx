@@ -5,10 +5,12 @@ import { CATEGORY_DISPLAY_ORDER } from '../constants/metrics';
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
 import RiskMethodology from '../components/RiskMethodology';
-import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress, RiskTrendChart, RoleUsageChart } from '../components/dashboard';
+import { RiskHeatMap, QuickActions, RiskDonutChart, PostureScore, CredentialHealth, ComplianceScorecard, ConditionalAccessCard, CloudContextBanner, RecentChanges, RemediationProgress, RiskTrendChart, RoleUsageChart, AnomalyAlerts, RiskVelocityChart, SOARActivity, ServiceAccountGovernance, PlatformHealth, CustomizePanel } from '../components/dashboard';
 import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
 import { useToast } from '../components/ToastProvider';
+import { useDashboardPreferences } from '../hooks/useDashboardPreferences';
+import { getWidgetMeta } from '../components/dashboard/widgetRegistry';
 
 interface StatsResponse {
   total_discovery_runs: number;
@@ -94,6 +96,18 @@ export default function Dashboard() {
   const [trends, setTrends] = useState<Array<{ run_id: number; date: string | null; total: number; critical: number; high: number; medium: number; low: number; dormant: number }>>([]);
   const [remediationSummary, setRemediationSummary] = useState<{ open: number; acknowledged: number; completed: number; skipped: number; total: number; completion_pct: number } | null>(null);
   const [roleUsage, setRoleUsage] = useState<{ statuses: Record<string, number>; by_risk: Record<string, number>; total: number } | null>(null);
+  const [anomalyData, setAnomalyData] = useState<{ anomalies: any[]; unresolved_count: number } | null>(null);
+  const [velocityData, setVelocityData] = useState<{
+    transitions: Array<{
+      run_id: number; date: string | null; prev_run_id: number;
+      inflow: Record<string, number>; outflow: Record<string, number>; net: Record<string, number>;
+    }>;
+    retention: Record<string, { retained: number; total: number; rate: number }>;
+  } | null>(null);
+
+  // Dashboard customization (Phase 44)
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const { widgets: widgetPrefs, saving: prefsSaving, dirty: prefsDirty, toggleWidget, moveWidget, save: savePrefs, reset: resetPrefs } = useDashboardPreferences();
 
   useEffect(() => {
     let cancelled = false;
@@ -165,6 +179,20 @@ export default function Dashboard() {
           if (ruRes.ok) roleUsageJson = await ruRes.json();
         } catch { /* ignore */ }
 
+        // Fetch anomaly alerts (non-blocking)
+        let anomalyJson = null;
+        try {
+          const anomRes = await fetch('/api/dashboard/anomalies');
+          if (anomRes.ok) anomalyJson = await anomRes.json();
+        } catch { /* ignore */ }
+
+        // Fetch risk velocity (non-blocking)
+        let velocityJson = null;
+        try {
+          const velRes = await fetch('/api/trends/velocity');
+          if (velRes.ok) velocityJson = await velRes.json();
+        } catch { /* ignore */ }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
@@ -176,6 +204,8 @@ export default function Dashboard() {
           setTrends(trendsJson);
           setRemediationSummary(remSummaryJson);
           setRoleUsage(roleUsageJson);
+          setAnomalyData(anomalyJson);
+          setVelocityData(velocityJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -313,6 +343,16 @@ export default function Dashboard() {
             </span>
           )}
           <ViewAllButton />
+          <button
+            onClick={() => setCustomizeOpen(true)}
+            className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
+            title="Customize dashboard"
+          >
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -335,204 +375,196 @@ export default function Dashboard() {
         <div className="bg-white border rounded-2xl p-6 text-red-600">{error}</div>
       ) : (
         <>
-          {/* Top Stats */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <div>
-              <StatsCard
-                title="Total Identities"
-                value={latest?.total_identities ?? 0}
-                icon="🧩"
-                color="blue"
-                trend={trendDir(latest?.total_identities ?? 0, prev?.total_identities)}
-                trendDelta={prev ? (latest?.total_identities ?? 0) - prev.total_identities : undefined}
-                trendNeutral
-                onClick={() => navigate('/identities')}
-              />
-              {trends.length >= 2 && (
-                <div className="mt-1 px-3">
-                  <Sparkline data={trendSeries('total')} color="#3b82f6" width={200} height={28} />
-                </div>
-              )}
-            </div>
-            <div>
-              <StatsCard
-                title="Critical"
-                value={latest?.critical_count ?? 0}
-                icon="🔴"
-                color="red"
-                trend={(() => {
-                  const d = trendDir(latest?.critical_count ?? 0, prev?.critical_count);
-                  return d;
-                })()}
-                trendDelta={prev ? (latest?.critical_count ?? 0) - prev.critical_count : undefined}
-                onClick={() => navigate('/identities?risk_level=critical')}
-              />
-              {trends.length >= 2 && (
-                <div className="mt-1 px-3">
-                  <Sparkline data={trendSeries('critical')} color="#ef4444" width={200} height={28} />
-                </div>
-              )}
-            </div>
-            <div>
-              <StatsCard
-                title="High"
-                value={latest?.high_count ?? 0}
-                icon="🟠"
-                color="yellow"
-                trend={trendDir(latest?.high_count ?? 0, prev?.high_count)}
-                trendDelta={prev ? (latest?.high_count ?? 0) - prev.high_count : undefined}
-                onClick={() => navigate('/identities?risk_level=high')}
-              />
-              {trends.length >= 2 && (
-                <div className="mt-1 px-3">
-                  <Sparkline data={trendSeries('high')} color="#f97316" width={200} height={28} />
-                </div>
-              )}
-            </div>
-            <div>
-              <StatsCard
-                title="Discovery Runs"
-                value={stats?.total_discovery_runs ?? 0}
-                icon="🔄"
-                color="gray"
-                onClick={() => setShowRuns(!showRuns)}
-              />
-              {trends.length >= 2 && (
-                <div className="mt-1 px-3">
-                  <Sparkline data={trendSeries('dormant')} color="#6b7280" width={200} height={28} />
-                  <div className="text-[10px] text-gray-400 mt-0.5">Dormant trend</div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Risk Trend + Role Usage Charts */}
-          {trends.length >= 2 && (
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
-              <div className="xl:col-span-2">
-                <RiskTrendChart data={trends} />
-              </div>
-              <div>
-                <RoleUsageChart
-                  statuses={roleUsage?.statuses || {}}
-                  byRisk={roleUsage?.by_risk || {}}
-                  total={roleUsage?.total || 0}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Discovery Runs Panel (toggled by clicking Discovery Runs card) */}
-          {showRuns && (
-            <div className="bg-white border rounded-xl overflow-hidden mb-6">
-              <div className="px-5 py-3 border-b bg-gray-50 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Discovery Run History</h3>
-                <button onClick={() => setShowRuns(false)} className="text-xs text-gray-400 hover:text-gray-600">Close</button>
-              </div>
-              {runs.length === 0 ? (
-                <div className="p-6 text-sm text-gray-400 text-center">No discovery runs found</div>
-              ) : (
-                <div className="divide-y max-h-64 overflow-y-auto">
-                  {runs.slice(0, 10).map((run: any, idx: number) => (
-                    <div key={run.id || idx} className="px-5 py-3 flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-3">
-                        <span className={`w-2 h-2 rounded-full ${run.status === 'completed' ? 'bg-green-500' : run.status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
-                        <span className="font-medium text-gray-900">Run #{run.id}</span>
-                        <span className="text-xs text-gray-500">
-                          {run.completed_at ? new Date(run.completed_at).toLocaleString() : run.started_at ? new Date(run.started_at).toLocaleString() : '—'}
-                        </span>
+          {/* Widget renderers — map each widget ID to its JSX */}
+          {(() => {
+            const widgetRenderers: Record<string, () => React.ReactNode | null> = {
+              stats_cards: () => (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div>
+                    <StatsCard title="Total Identities" value={latest?.total_identities ?? 0} icon="🧩" color="blue"
+                      trend={trendDir(latest?.total_identities ?? 0, prev?.total_identities)}
+                      trendDelta={prev ? (latest?.total_identities ?? 0) - prev.total_identities : undefined}
+                      trendNeutral onClick={() => navigate('/identities')} />
+                    {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('total')} color="#3b82f6" width={200} height={28} /></div>}
+                  </div>
+                  <div>
+                    <StatsCard title="Critical" value={latest?.critical_count ?? 0} icon="🔴" color="red"
+                      trend={trendDir(latest?.critical_count ?? 0, prev?.critical_count)}
+                      trendDelta={prev ? (latest?.critical_count ?? 0) - prev.critical_count : undefined}
+                      onClick={() => navigate('/identities?risk_level=critical')} />
+                    {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('critical')} color="#ef4444" width={200} height={28} /></div>}
+                  </div>
+                  <div>
+                    <StatsCard title="High" value={latest?.high_count ?? 0} icon="🟠" color="yellow"
+                      trend={trendDir(latest?.high_count ?? 0, prev?.high_count)}
+                      trendDelta={prev ? (latest?.high_count ?? 0) - prev.high_count : undefined}
+                      onClick={() => navigate('/identities?risk_level=high')} />
+                    {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('high')} color="#f97316" width={200} height={28} /></div>}
+                  </div>
+                  <div>
+                    <StatsCard title="Discovery Runs" value={stats?.total_discovery_runs ?? 0} icon="🔄" color="gray"
+                      onClick={() => setShowRuns(!showRuns)} />
+                    {trends.length >= 2 && (
+                      <div className="mt-1 px-3">
+                        <Sparkline data={trendSeries('dormant')} color="#6b7280" width={200} height={28} />
+                        <div className="text-[10px] text-gray-400 mt-0.5">Dormant trend</div>
                       </div>
-                      <div className="flex items-center gap-4 text-xs">
-                        <span className="text-gray-600">{run.total_identities ?? '—'} identities</span>
-                        {(run.critical_count ?? 0) > 0 && <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold">{run.critical_count} critical</span>}
-                        {(run.high_count ?? 0) > 0 && <span className="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 font-semibold">{run.high_count} high</span>}
-                        <span className={`px-1.5 py-0.5 rounded font-medium ${run.status === 'completed' ? 'bg-green-100 text-green-700' : run.status === 'running' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'}`}>
-                          {run.status || 'unknown'}
-                        </span>
-                      </div>
+                    )}
+                  </div>
+                </div>
+              ),
+              risk_trend_chart: () => trends.length >= 2 ? <RiskTrendChart data={trends} /> : null,
+              role_usage_chart: () => <RoleUsageChart statuses={roleUsage?.statuses || {}} byRisk={roleUsage?.by_risk || {}} total={roleUsage?.total || 0} />,
+              risk_velocity_chart: () => velocityData && velocityData.transitions.length > 0 ? (
+                <RiskVelocityChart transitions={velocityData.transitions} retention={velocityData.retention} />
+              ) : null,
+              cloud_context_banner: () => summary?.monitored_resources ? (
+                <CloudContextBanner monitoredResources={summary.monitored_resources} />
+              ) : null,
+              posture_score: () => posture ? (
+                <PostureScore score={posture.posture_score} previousScore={posture.previous_posture_score} />
+              ) : null,
+              credential_health: () => posture ? (
+                <CredentialHealth expired={posture.credential_health.expired} expiringSoon={posture.credential_health.expiring_soon}
+                  healthy={posture.credential_health.healthy} noCredentials={posture.credential_health.no_credentials} />
+              ) : null,
+              quick_actions: () => (
+                <QuickActions criticalCount={latest?.critical_count ?? 0} expiringCount={posture?.expiring_credentials_count ?? 0} dormantCount={posture?.dormant_count ?? 0} />
+              ),
+              recent_changes: () => (
+                <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
+                  newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
+                  permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
+                  credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
+              ),
+              anomaly_alerts: () => (
+                <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
+              ),
+              soar_activity: () => <SOARActivity />,
+              sa_governance: () => <ServiceAccountGovernance />,
+              platform_health: () => <PlatformHealth />,
+              risk_heat_map: () => <RiskHeatMap categories={categoryCards} />,
+              risk_donut_chart: () => (
+                <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick}
+                  cloudSources={summary?.monitored_resources ? Object.entries(summary.monitored_resources).filter(([, v]) => (v as any)?.subscriptions > 0 || (v as any)?.accounts > 0 || (v as any)?.projects > 0).map(([k]) => k) : undefined} />
+              ),
+              compliance_scorecard: () => <ComplianceScorecard data={compliance} loading={loading} />,
+              conditional_access: () => <ConditionalAccessCard data={caData} loading={loading} />,
+              remediation_progress: () => remediationSummary ? <RemediationProgress {...remediationSummary} /> : null,
+            };
+
+            // Pack visible widgets into rows using colSpan metadata
+            const visibleWidgets = widgetPrefs.filter(w => w.visible);
+            const rows: Array<Array<{ id: string; colSpan: number }>> = [];
+            let currentRow: Array<{ id: string; colSpan: number }> = [];
+            let currentSpan = 0;
+
+            for (const w of visibleWidgets) {
+              const meta = getWidgetMeta(w.id);
+              const colSpan = meta?.colSpan ?? 1;
+
+              if (colSpan === 3 || currentSpan + colSpan > 3) {
+                if (currentRow.length > 0) {
+                  rows.push(currentRow);
+                  currentRow = [];
+                  currentSpan = 0;
+                }
+              }
+
+              if (colSpan === 3) {
+                rows.push([{ id: w.id, colSpan: 3 }]);
+              } else {
+                currentRow.push({ id: w.id, colSpan });
+                currentSpan += colSpan;
+                if (currentSpan >= 3) {
+                  rows.push(currentRow);
+                  currentRow = [];
+                  currentSpan = 0;
+                }
+              }
+            }
+            if (currentRow.length > 0) rows.push(currentRow);
+
+            return (
+              <>
+                {rows.map((row, rowIdx) => {
+                  // Full-width widget
+                  if (row.length === 1 && row[0].colSpan === 3) {
+                    const renderer = widgetRenderers[row[0].id];
+                    const content = renderer?.();
+                    if (!content) return null;
+                    return <div key={rowIdx} className="mb-6">{content}</div>;
+                  }
+
+                  // Multi-widget row
+                  return (
+                    <div key={rowIdx} className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                      {row.map(({ id, colSpan }) => {
+                        const renderer = widgetRenderers[id];
+                        const content = renderer?.();
+                        if (!content) return null;
+                        return (
+                          <div key={id} className={colSpan === 2 ? 'md:col-span-2' : ''}>
+                            {content}
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+                  );
+                })}
 
-          {/* Cloud Context Banner */}
-          {summary?.monitored_resources && (
-            <CloudContextBanner monitoredResources={summary.monitored_resources} />
-          )}
-
-          {/* Posture Score + Credential Health + Quick Actions + Recent Changes */}
-          <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 mb-6">
-            {posture ? (
-              <>
-                <PostureScore
-                  score={posture.posture_score}
-                  previousScore={posture.previous_posture_score}
-                />
-                <CredentialHealth
-                  expired={posture.credential_health.expired}
-                  expiringSoon={posture.credential_health.expiring_soon}
-                  healthy={posture.credential_health.healthy}
-                  noCredentials={posture.credential_health.no_credentials}
-                />
+                {/* Discovery Runs Panel (toggled, not part of widget system) */}
+                {showRuns && (
+                  <div className="bg-white border rounded-xl overflow-hidden mb-6">
+                    <div className="px-5 py-3 border-b bg-gray-50 flex items-center justify-between">
+                      <h3 className="text-sm font-semibold text-gray-900">Discovery Run History</h3>
+                      <button onClick={() => setShowRuns(false)} className="text-xs text-gray-400 hover:text-gray-600">Close</button>
+                    </div>
+                    {runs.length === 0 ? (
+                      <div className="p-6 text-sm text-gray-400 text-center">No discovery runs found</div>
+                    ) : (
+                      <div className="divide-y max-h-64 overflow-y-auto">
+                        {runs.slice(0, 10).map((run: any, idx: number) => (
+                          <div key={run.id || idx} className="px-5 py-3 flex items-center justify-between text-sm">
+                            <div className="flex items-center gap-3">
+                              <span className={`w-2 h-2 rounded-full ${run.status === 'completed' ? 'bg-green-500' : run.status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
+                              <span className="font-medium text-gray-900">Run #{run.id}</span>
+                              <span className="text-xs text-gray-500">
+                                {run.completed_at ? new Date(run.completed_at).toLocaleString() : run.started_at ? new Date(run.started_at).toLocaleString() : '—'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-4 text-xs">
+                              <span className="text-gray-600">{run.total_identities ?? '—'} identities</span>
+                              {(run.critical_count ?? 0) > 0 && <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold">{run.critical_count} critical</span>}
+                              {(run.high_count ?? 0) > 0 && <span className="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 font-semibold">{run.high_count} high</span>}
+                              <span className={`px-1.5 py-0.5 rounded font-medium ${run.status === 'completed' ? 'bg-green-100 text-green-700' : run.status === 'running' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'}`}>
+                                {run.status || 'unknown'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </>
-            ) : (
-              <>
-                <div className="bg-white border rounded-xl p-5 text-sm text-gray-400 col-span-2">
-                  Posture data unavailable
-                </div>
-              </>
-            )}
-            <QuickActions
-              criticalCount={latest?.critical_count ?? 0}
-              expiringCount={posture?.expiring_credentials_count ?? 0}
-              dormantCount={posture?.dormant_count ?? 0}
-            />
-            <RecentChanges
-              hasData={driftData?.has_drift_data ?? false}
-              currentRunId={driftData?.current_run_id}
-              previousRunId={driftData?.previous_run_id}
-              newIdentities={driftData?.new_identities_count ?? 0}
-              removedIdentities={driftData?.removed_identities_count ?? 0}
-              permissionChanges={driftData?.permission_changes_count ?? 0}
-              riskChanges={driftData?.risk_changes_count ?? 0}
-              credentialChanges={driftData?.credential_changes_count ?? 0}
-              totalChanges={driftData?.total_changes ?? 0}
-              createdAt={driftData?.created_at}
-            />
-          </div>
-
-          {/* Heat Map + Donut Chart Row */}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
-            <div className="xl:col-span-2">
-              <RiskHeatMap categories={categoryCards} />
-            </div>
-            <div>
-              <RiskDonutChart
-                counts={riskCounts}
-                onSegmentClick={handleSegmentClick}
-                cloudSources={summary?.monitored_resources ? Object.entries(summary.monitored_resources).filter(([, v]) => (v as any)?.subscriptions > 0 || (v as any)?.accounts > 0 || (v as any)?.projects > 0).map(([k]) => k) : undefined}
-              />
-            </div>
-          </div>
-
-          {/* Compliance Scorecard + Conditional Access + Remediation Progress */}
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-            <div className="lg:col-span-2">
-              <ComplianceScorecard data={compliance} loading={loading} />
-            </div>
-            <div>
-              <ConditionalAccessCard data={caData} loading={loading} />
-            </div>
-            <div>
-              {remediationSummary && (
-                <RemediationProgress {...remediationSummary} />
-              )}
-            </div>
-          </div>
+            );
+          })()}
         </>
       )}
+
+      {/* Customize Panel */}
+      <CustomizePanel
+        open={customizeOpen}
+        onClose={() => setCustomizeOpen(false)}
+        widgets={widgetPrefs}
+        toggleWidget={toggleWidget}
+        moveWidget={moveWidget}
+        save={savePrefs}
+        reset={resetPrefs}
+        saving={prefsSaving}
+        dirty={prefsDirty}
+      />
     </div>
   );
 }

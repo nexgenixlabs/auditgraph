@@ -23,16 +23,20 @@ PUBLIC_PATHS = {
     '/api/auth/refresh',
     '/api/health',
     '/health',
+    '/api/metrics',
 }
 
 
 def generate_access_token(user: dict) -> str:
-    """Generate a JWT access token containing user_id, username, role."""
+    """Generate a JWT access token containing user_id, username, role, tenant."""
     payload = {
         'sub': str(user['id']),
         'username': user['username'],
         'role': user['role'],
         'display_name': user['display_name'],
+        'tenant_id': user.get('tenant_id'),
+        'tenant_name': user.get('tenant_name'),
+        'is_superadmin': user.get('is_superadmin', False),
         'iat': datetime.now(timezone.utc),
         'exp': datetime.now(timezone.utc) + ACCESS_TOKEN_EXPIRY,
         'type': 'access',
@@ -65,9 +69,56 @@ def hash_refresh_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
+def _authenticate_api_key(raw_key: str):
+    """Validate an API key and set g.current_user. Returns None on success, error tuple on failure."""
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    db = Database()
+    try:
+        row = db.get_api_key_by_hash(key_hash)
+        if not row:
+            return jsonify({'error': 'Invalid API key'}), 401
+        if not row['enabled']:
+            return jsonify({'error': 'API key is disabled'}), 401
+        if row.get('expires_at') and datetime.now(timezone.utc) > row['expires_at']:
+            return jsonify({'error': 'API key has expired'}), 401
+
+        db.increment_api_key_usage(row['id'])
+
+        # Look up creator's tenant info
+        creator_tenant_id = None
+        creator_tenant_name = None
+        if row['created_by']:
+            creator = db.get_user_by_id(row['created_by'])
+            if creator:
+                creator_tenant_id = creator.get('tenant_id')
+                creator_tenant_name = creator.get('tenant_name')
+
+        g.current_user = {
+            'id': row['created_by'] or 0,
+            'username': f'api-key:{row["key_prefix"]}',
+            'role': row['role'],
+            'display_name': f'API Key: {row["name"]}',
+            'api_key_id': row['id'],
+            'tenant_id': creator_tenant_id,
+            'tenant_name': creator_tenant_name,
+            'is_superadmin': False,
+        }
+    finally:
+        db.close()
+    return None
+
+
 def auth_middleware():
     """Flask before_request hook. Sets g.current_user or returns 401."""
     if request.path in PUBLIC_PATHS:
+        return None
+
+    # Phase 53: Public tenant lookup by slug (no auth required)
+    if request.path.startswith('/api/tenants/by-slug/'):
+        return None
+
+    # Phase 54: SAML SSO public endpoints
+    if request.path.startswith('/api/auth/saml/') or request.path == '/api/auth/sso-status':
         return None
 
     if not request.path.startswith('/api/'):
@@ -76,25 +127,51 @@ def auth_middleware():
     if request.method == 'OPTIONS':
         return None
 
+    # Phase 42: Check for API key auth before JWT
+    api_key = request.headers.get('X-API-Key', '')
     auth_header = request.headers.get('Authorization', '')
-    if not auth_header.startswith('Bearer '):
-        return jsonify({'error': 'Missing or invalid Authorization header'}), 401
 
-    token = auth_header[7:]
-    try:
-        payload = verify_access_token(token)
-        if payload.get('type') != 'access':
-            return jsonify({'error': 'Invalid token type'}), 401
-        g.current_user = {
-            'id': int(payload['sub']),
-            'username': payload['username'],
-            'role': payload['role'],
-            'display_name': payload['display_name'],
-        }
-    except jwt.ExpiredSignatureError:
-        return jsonify({'error': 'Token expired'}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({'error': 'Invalid token'}), 401
+    # Also detect API key in Bearer header (ag_ prefix)
+    if not api_key and auth_header.startswith('Bearer ag_'):
+        api_key = auth_header[7:]
+
+    if api_key:
+        result = _authenticate_api_key(api_key)
+        if result is not None:
+            return result
+        # Fall through to X-Tenant-Id override below
+    else:
+        # Standard JWT auth
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Missing or invalid Authorization header'}), 401
+
+        token = auth_header[7:]
+        try:
+            payload = verify_access_token(token)
+            if payload.get('type') != 'access':
+                return jsonify({'error': 'Invalid token type'}), 401
+            g.current_user = {
+                'id': int(payload['sub']),
+                'username': payload['username'],
+                'role': payload['role'],
+                'display_name': payload['display_name'],
+                'tenant_id': payload.get('tenant_id'),
+                'tenant_name': payload.get('tenant_name'),
+                'is_superadmin': payload.get('is_superadmin', False),
+            }
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+    # Phase 46: Superadmin tenant override via X-Tenant-Id header
+    override_tid = request.headers.get('X-Tenant-Id')
+    if override_tid and g.current_user.get('is_superadmin'):
+        try:
+            g.current_user['tenant_id'] = int(override_tid)
+            g.current_user['tenant_id_override'] = True
+        except (ValueError, TypeError):
+            pass
 
     return None
 
@@ -112,3 +189,24 @@ def require_role(*allowed_roles):
             return f(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def require_superadmin():
+    """Decorator for handlers that require superadmin access."""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            user = getattr(g, 'current_user', None)
+            if not user:
+                return jsonify({'error': 'Authentication required'}), 401
+            if not user.get('is_superadmin'):
+                return jsonify({'error': 'Superadmin access required'}), 403
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def get_tenant_id():
+    """Get tenant_id from the current authenticated user context."""
+    user = getattr(g, 'current_user', None)
+    return user.get('tenant_id') if user else None
