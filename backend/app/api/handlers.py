@@ -48,10 +48,16 @@ def _log(db, action_type, description, metadata=None):
 def _latest_run_query(cursor, tenant_id=None):
     """Get latest completed discovery run ID, optionally scoped by tenant."""
     if tenant_id:
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (tenant_id,))
+        cursor.execute("SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (tenant_id,))
     else:
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
-    return cursor.fetchone()[0]
+        cursor.execute("SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed'")
+    row = cursor.fetchone()
+    if not row:
+        return None
+    # Support both RealDictCursor (dict) and regular cursor (tuple)
+    if isinstance(row, dict):
+        return row.get('run_id')
+    return row[0]
 
 
 def _parse_risk_reasons(value):
@@ -6819,7 +6825,7 @@ def get_resources():
             """)
             params.append(run_id)
             if tenant_id:
-                parts[-1] += " AND tenant_id = %s"
+                parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
                 params.append(tenant_id)
 
         if resource_type != 'storage_account':
@@ -6842,7 +6848,7 @@ def get_resources():
             """)
             params.append(run_id)
             if tenant_id:
-                parts[-1] += " AND tenant_id = %s"
+                parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
                 params.append(tenant_id)
 
         if not parts:
@@ -6926,7 +6932,7 @@ def get_resource_stats():
         tenant_filter = ""
         params = [run_id]
         if tenant_id:
-            tenant_filter = " AND tenant_id = %s"
+            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
 
         # Storage account counts
@@ -6990,7 +6996,7 @@ def get_resource_detail(resource_id):
         tenant_filter = ""
         params = [run_id, resource_id]
         if tenant_id:
-            tenant_filter = " AND tenant_id = %s"
+            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
 
         # Try storage account first
