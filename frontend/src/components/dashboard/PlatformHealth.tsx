@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 
 interface HealthData {
   status: string;
@@ -20,7 +19,6 @@ function formatUptime(seconds: number): string {
 }
 
 export default function PlatformHealth() {
-  const navigate = useNavigate();
   const [data, setData] = useState<HealthData | null>(null);
 
   useEffect(() => {
@@ -68,12 +66,7 @@ export default function PlatformHealth() {
     <div className="bg-white border rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
         <div className="text-sm font-semibold text-gray-900">Platform Health</div>
-        <button
-          onClick={() => navigate('/system-health')}
-          className="text-xs text-blue-600 hover:underline"
-        >
-          View Details
-        </button>
+        <span className="text-xs text-gray-400">Live</span>
       </div>
       <div className="grid grid-cols-2 gap-3">
         {items.map(item => (

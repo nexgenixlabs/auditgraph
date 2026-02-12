@@ -46,7 +46,6 @@ import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
-import SystemHealth from './pages/SystemHealth';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -437,11 +436,6 @@ function AppContent() {
                   <Route path="/service-accounts" element={<ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
                   <Route path="/spns" element={<ErrorBoundary><SPNDashboard /></ErrorBoundary>} />
                   <Route path="/app-registrations" element={<ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
-                  <Route path="/system-health" element={
-                    <ProtectedRoute requiredRole="admin">
-                      <ErrorBoundary><SystemHealth /></ErrorBoundary>
-                    </ProtectedRoute>
-                  } />
                   <Route path="/resources" element={<ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={<ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
                   <Route path="/settings" element={
