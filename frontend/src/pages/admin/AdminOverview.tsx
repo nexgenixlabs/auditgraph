@@ -43,7 +43,10 @@ export default function AdminOverview() {
 
   useEffect(() => {
     fetch('/api/analytics/tenants')
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error('Forbidden');
+        return r.json();
+      })
       .then(setData)
       .catch(() => {})
       .finally(() => setLoading(false));

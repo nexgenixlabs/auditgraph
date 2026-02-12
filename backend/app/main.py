@@ -451,15 +451,15 @@ def create_app():
         return save_sa_governance_settings()
 
     # -----------------------
-    # Cross-Tenant Analytics (Phase 47 - superadmin/poweradmin/reader)
+    # Cross-Tenant Analytics (Phase 47 - all portal roles, used by Overview)
     # -----------------------
     @app.get("/api/analytics/tenants")
-    @require_portal_role('superadmin', 'poweradmin', 'reader')
+    @require_portal_access()
     def analytics_tenants():
         return get_cross_tenant_analytics()
 
     @app.get("/api/analytics/tenants/trends")
-    @require_portal_role('superadmin', 'poweradmin', 'reader')
+    @require_portal_access()
     def analytics_tenants_trends():
         return get_cross_tenant_trends()
 

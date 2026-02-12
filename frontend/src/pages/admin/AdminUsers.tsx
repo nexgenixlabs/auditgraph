@@ -45,6 +45,7 @@ export default function AdminUsers() {
     display_name: '',
     portal_role: 'reader' as PortalRole,
     enabled: true,
+    new_password: '',
   });
 
   const fetchUsers = useCallback(async () => {
@@ -98,15 +99,19 @@ export default function AdminUsers() {
     if (!showEdit) return;
     setError(null);
     try {
+      const payload: Record<string, unknown> = {
+        display_name: editForm.display_name,
+        portal_role: editForm.portal_role,
+        is_superadmin: editForm.portal_role === 'superadmin',
+        enabled: editForm.enabled,
+      };
+      if (editForm.new_password) {
+        payload.password = editForm.new_password;
+      }
       const res = await fetch(`/api/users/${showEdit.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          display_name: editForm.display_name,
-          portal_role: editForm.portal_role,
-          is_superadmin: editForm.portal_role === 'superadmin',
-          enabled: editForm.enabled,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -245,6 +250,7 @@ export default function AdminUsers() {
                           display_name: u.display_name,
                           portal_role: u.portal_role,
                           enabled: u.enabled,
+                          new_password: '',
                         });
                       }}
                       className="text-xs text-blue-600 hover:text-blue-800"
@@ -386,6 +392,20 @@ export default function AdminUsers() {
                   className="rounded border-gray-300"
                 />
                 <label htmlFor="edit-enabled" className="text-sm text-gray-700">Account enabled</label>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reset Password</label>
+                <input
+                  type="password"
+                  value={editForm.new_password}
+                  onChange={e => setEditForm(f => ({ ...f, new_password: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Leave blank to keep current password"
+                  minLength={8}
+                />
+                {editForm.new_password && editForm.new_password.length < 8 && (
+                  <p className="text-xs text-red-500 mt-1">Password must be at least 8 characters</p>
+                )}
               </div>
               <div className="flex justify-end gap-3 pt-2">
                 <button

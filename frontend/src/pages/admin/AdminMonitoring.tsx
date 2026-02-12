@@ -35,9 +35,9 @@ export default function AdminMonitoring() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/analytics/tenants').then(r => r.json()),
-      fetch('/api/analytics/tenants/trends').then(r => r.json()).catch(() => ({ tenants: [] })),
-      fetch('/api/activity?limit=20&type=auth_login').then(r => r.json()).catch(() => ({ activities: [] })),
+      fetch('/api/analytics/tenants').then(r => r.ok ? r.json() : { tenants: [] }),
+      fetch('/api/analytics/tenants/trends').then(r => r.ok ? r.json() : { tenants: [] }).catch(() => ({ tenants: [] })),
+      fetch('/api/activity?limit=20&type=auth_login').then(r => r.ok ? r.json() : { activities: [] }).catch(() => ({ activities: [] })),
     ]).then(([analytics, trendsData, activityData]) => {
       setMetrics(analytics.tenants || []);
       setTrends(trendsData.tenants || []);
