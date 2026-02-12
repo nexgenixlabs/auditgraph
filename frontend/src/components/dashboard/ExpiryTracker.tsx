@@ -15,8 +15,8 @@ function MiniCard({ label, total, expired, expiringSoon }: { label: string; tota
 
   return (
     <div className={`border rounded-lg p-3 ${color}`}>
-      <div className="text-lg font-bold text-gray-800 dark:text-gray-200">{total}</div>
-      <div className="text-[10px] font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wider">{label}</div>
+      <div className="text-lg font-bold text-gray-800 dark:text-slate-200">{total}</div>
+      <div className="text-[10px] font-medium text-gray-600 dark:text-slate-400 uppercase tracking-wider">{label}</div>
       <div className="flex gap-2 mt-1.5 text-[10px]">
         {expired > 0 && <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded font-semibold">{expired} expired</span>}
         {expiringSoon > 0 && <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded font-semibold">{expiringSoon} expiring</span>}
@@ -40,8 +40,8 @@ export default function ExpiryTracker() {
 
   if (loading) {
     return (
-      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <div className="animate-pulse h-24 bg-gray-100 dark:bg-gray-800 rounded" />
+      <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-4">
+        <div className="animate-pulse h-24 bg-gray-100 dark:bg-slate-800 rounded" />
       </div>
     );
   }
@@ -52,10 +52,10 @@ export default function ExpiryTracker() {
   const totalExpiring = (data.secrets?.expiring_30d || 0) + (data.keys?.expiring_30d || 0) + (data.certs?.expiring_30d || 0);
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+    <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-4">
       <div className="flex items-center justify-between mb-3">
         <div>
-          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Key Vault Expiry Tracker</h3>
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200">Key Vault Expiry Tracker</h3>
           <p className="text-[10px] text-gray-500">Secrets, Keys & Certificates lifecycle</p>
         </div>
         {(totalExpired > 0 || totalExpiring > 0) && (
@@ -85,7 +85,7 @@ export default function ExpiryTracker() {
               return (
                 <div key={i} className="flex items-center gap-2 text-[11px]">
                   <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isExpired ? 'bg-red-500' : days <= 7 ? 'bg-orange-500' : days <= 30 ? 'bg-yellow-500' : 'bg-green-500'}`} />
-                  <span className="text-gray-600 dark:text-gray-400 truncate flex-1">{item.vault} / {item.item}</span>
+                  <span className="text-gray-600 dark:text-slate-400 truncate flex-1">{item.vault} / {item.item}</span>
                   <span className={`text-[10px] font-medium ${isExpired ? 'text-red-600' : 'text-gray-500'}`}>
                     {isExpired ? `${Math.abs(days)}d ago` : `${days}d`}
                   </span>

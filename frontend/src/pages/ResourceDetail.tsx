@@ -437,16 +437,16 @@ function SecurityTab({ resource }: { resource: ResourceData }) {
     return (
       <div className="space-y-4">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Transport & Access</h3>
+          <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200 mb-2">Transport & Access</h3>
             <CheckItem label="HTTPS-Only Transfer" pass={resource.https_only === true} detail={resource.https_only ? 'Enabled' : 'HTTP traffic allowed'} />
             <CheckItem label="TLS Version" pass={resource.minimum_tls_version === 'TLS1_2'} detail={`Current: ${resource.minimum_tls_version || 'Unknown'}`} />
             <CheckItem label="Public Blob Access Disabled" pass={resource.public_blob_access === false} detail={resource.public_blob_access ? 'Public access enabled — containers may be exposed' : 'Disabled'} />
             <CheckItem label="Shared Key Access Disabled" pass={resource.shared_key_access === false} detail={resource.shared_key_access ? 'Enabled — consider Azure AD auth only' : 'Disabled, Azure AD auth required'} />
             <CheckItem label="Cross-Tenant Replication" pass={resource.allow_cross_tenant_replication === false} detail={resource.allow_cross_tenant_replication ? 'Enabled' : 'Disabled'} />
           </div>
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Encryption & Keys</h3>
+          <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200 mb-2">Encryption & Keys</h3>
             <CheckItem label="Customer-Managed Keys" pass={resource.customer_managed_keys === true} detail={resource.customer_managed_keys ? `Key Vault: ${resource.key_vault_uri || 'configured'}` : 'Using Microsoft-managed keys'} />
             <CheckItem label="Infrastructure Encryption" pass={resource.infrastructure_encryption === true} detail={resource.infrastructure_encryption ? 'Double encryption enabled' : 'Single layer encryption'} />
             <CheckItem label="Storage Key Rotation" pass={resource.key_rotation_stale === false} detail={keyRotationDetail(resource)} />
@@ -464,14 +464,14 @@ function SecurityTab({ resource }: { resource: ResourceData }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Vault Security</h3>
+        <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200 mb-2">Vault Security</h3>
           <CheckItem label="Soft Delete" pass={resource.soft_delete_enabled === true} detail={resource.soft_delete_enabled ? `Enabled (${resource.soft_delete_retention_days || 90} day retention)` : 'Disabled — deleted secrets are permanently lost'} />
           <CheckItem label="Purge Protection" pass={resource.purge_protection === true} detail={resource.purge_protection ? 'Enabled' : 'Disabled — soft-deleted items can be purged immediately'} />
           <CheckItem label="RBAC Authorization" pass={resource.enable_rbac_authorization === true} detail={resource.enable_rbac_authorization ? 'Azure RBAC for data plane' : `Access Policies mode (${resource.access_policy_count || 0} policies)`} />
         </div>
-        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Secrets, Keys & Certificates</h3>
+        <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200 mb-2">Secrets, Keys & Certificates</h3>
           <VaultItemRow label="Secrets" total={resource.secrets_total} expired={resource.secrets_expired} expiring={resource.secrets_expiring_soon} />
           <VaultItemRow label="Keys" total={resource.keys_total} expired={resource.keys_expired} expiring={resource.keys_expiring_soon} />
           <VaultItemRow label="Certificates" total={resource.certs_total} expired={resource.certs_expired} expiring={resource.certs_expiring_soon} />
@@ -518,7 +518,7 @@ function KeyRotationBars({ resource }: { resource: ResourceData }) {
   ];
 
   return (
-    <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700">
+    <div className="mt-3 pt-3 border-t border-gray-100 dark:border-slate-700">
       <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">Key Age (days)</div>
       {keys.map(k => {
         const ageDays = k.date ? Math.floor((Date.now() - new Date(k.date).getTime()) / 86400000) : null;
@@ -527,9 +527,9 @@ function KeyRotationBars({ resource }: { resource: ResourceData }) {
         return (
           <div key={k.label} className="flex items-center gap-2 mb-1.5">
             <span className="text-[10px] text-gray-500 w-10">{k.label}</span>
-            <div className="flex-1 h-3 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden relative">
+            <div className="flex-1 h-3 bg-gray-100 dark:bg-slate-700 rounded-full overflow-hidden relative">
               <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-              <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gray-400 dark:bg-gray-500" title="90-day threshold" />
+              <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gray-400 dark:bg-slate-500" title="90-day threshold" />
             </div>
             <span className={`text-[10px] font-medium w-14 text-right ${ageDays !== null && ageDays > 90 ? 'text-red-600' : 'text-gray-600'}`}>
               {ageDays !== null ? `${ageDays}d` : 'N/A'}
@@ -689,13 +689,13 @@ function VaultItemInventory({ resource }: { resource: ResourceData }) {
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Secrets & Keys Inventory</h3>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700">
+        <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200">Secrets & Keys Inventory</h3>
         <p className="text-[10px] text-gray-500 mt-0.5">{items.length} items sorted by expiry</p>
       </div>
       <table className="min-w-full text-left text-xs">
-        <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 uppercase tracking-wider font-medium">
+        <thead className="bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 uppercase tracking-wider font-medium">
           <tr>
             <th className="px-4 py-2">Name</th>
             <th className="px-4 py-2">Type</th>
@@ -705,12 +705,12 @@ function VaultItemInventory({ resource }: { resource: ResourceData }) {
             <th className="px-4 py-2">Detail</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+        <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
           {items.slice(0, 50).map((item, i) => {
             const isExpired = item.expires_on && new Date(item.expires_on).getTime() < now;
             return (
               <tr key={`${item.type}-${item.name}-${i}`} className={isExpired ? 'bg-red-50/40 dark:bg-red-900/10' : ''}>
-                <td className="px-4 py-2 font-medium text-gray-800 dark:text-gray-200">{item.name}</td>
+                <td className="px-4 py-2 font-medium text-gray-800 dark:text-slate-200">{item.name}</td>
                 <td className="px-4 py-2">
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeColors[item.type] || 'bg-gray-100 text-gray-600'}`}>{item.type}</span>
                 </td>
@@ -823,7 +823,7 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
   const total = rbacAccess.length + policyAccess.length;
   if (total === 0) {
     return (
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-6 text-center">
+      <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg p-6 text-center">
         <p className="text-gray-500 text-sm">No identities found with access to this resource.</p>
         <p className="text-xs text-gray-400 mt-1">Identities with inherited access through parent scopes may not be shown.</p>
       </div>
@@ -873,12 +873,12 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
 
       {/* RBAC Access table */}
       {rbacAccess.length > 0 && (
-        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">RBAC Access</h3>
+        <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200">RBAC Access</h3>
           </div>
           <table className="min-w-full text-left text-xs">
-            <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 uppercase tracking-wider font-medium">
+            <thead className="bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 uppercase tracking-wider font-medium">
               <tr>
                 <th className="px-4 py-2">Identity</th>
                 <th className="px-4 py-2">Category</th>
@@ -889,7 +889,7 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                 <th className="px-4 py-2">Flags</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+            <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
               {rbacAccess.map((id, i) => (
                 <tr key={`rbac-${id.id}-${i}`} className={id.over_privileged ? 'bg-red-50/40 dark:bg-red-900/10' : 'hover:bg-blue-50/40'}>
                   <td className="px-4 py-2">
@@ -900,17 +900,17 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                     )}
                   </td>
                   <td className="px-4 py-2">
-                    <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-[10px] font-medium">
+                    <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300 text-[10px] font-medium">
                       {(id.identity_category || '').replace(/_/g, ' ')}
                     </span>
                   </td>
-                  <td className="px-4 py-2 text-gray-700 dark:text-gray-300">{id.role_name || '—'}</td>
+                  <td className="px-4 py-2 text-gray-700 dark:text-slate-300">{id.role_name || '—'}</td>
                   <td className="px-4 py-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${SOURCE_BADGE[id.access_source || 'inherited'] || 'bg-gray-100 text-gray-600'}`}>
                       {id.access_source_label || id.access_source || '—'}
                     </span>
                   </td>
-                  <td className="px-4 py-2 text-gray-600 dark:text-gray-400 text-[10px] truncate max-w-[180px]" title={id.scope}>{id.scope_type || '—'}</td>
+                  <td className="px-4 py-2 text-gray-600 dark:text-slate-400 text-[10px] truncate max-w-[180px]" title={id.scope}>{id.scope_type || '—'}</td>
                   <td className="px-4 py-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(id.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
                       {id.risk_level}
@@ -930,12 +930,12 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
 
       {/* Access Policy table (KV only) */}
       {isKeyVault && policyAccess.length > 0 && (
-        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Access Policy Principals</h3>
+        <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700">
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200">Access Policy Principals</h3>
           </div>
           <table className="min-w-full text-left text-xs">
-            <thead className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 uppercase tracking-wider font-medium">
+            <thead className="bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 uppercase tracking-wider font-medium">
               <tr>
                 <th className="px-4 py-2">Identity</th>
                 <th className="px-4 py-2">Category</th>
@@ -943,18 +943,18 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                 <th className="px-4 py-2">Risk</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+            <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
               {policyAccess.map((id, i) => (
                 <tr key={`pol-${id.id || i}`} className="hover:bg-purple-50/40">
                   <td className="px-4 py-2">
                     {id.id ? (
                       <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
                     ) : (
-                      <span className="text-gray-600 dark:text-gray-400">{id.display_name}</span>
+                      <span className="text-gray-600 dark:text-slate-400">{id.display_name}</span>
                     )}
                   </td>
                   <td className="px-4 py-2">
-                    <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-[10px] font-medium">
+                    <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300 text-[10px] font-medium">
                       {(id.identity_category || '').replace(/_/g, ' ')}
                     </span>
                   </td>

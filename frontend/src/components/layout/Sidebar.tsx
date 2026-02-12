@@ -216,11 +216,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
           to={item.to}
           className={`flex items-center gap-2.5 ${indented ? 'pl-8 pr-3' : 'px-3'} py-1.5 rounded-md text-sm transition-colors ${
             active
-              ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium'
-              : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-white'
+              ? 'bg-blue-50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-medium'
+              : 'text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 hover:text-gray-900 dark:hover:text-white'
           }`}
         >
-          <span className={active ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}>
+          <span className={active ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-slate-500'}>
             {item.icon}
           </span>
           {item.label}
@@ -236,14 +236,14 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
       <li key={subGroup.label}>
         <button
           onClick={() => toggleSubGroup(subGroup.label)}
-          className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-md text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-white transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-md text-sm text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 hover:text-gray-900 dark:hover:text-white transition-colors"
         >
-          <span className="text-gray-400 dark:text-gray-500">
+          <span className="text-gray-400 dark:text-slate-500">
             {subGroup.icon}
           </span>
           {subGroup.label}
           <svg
-            className={`w-3.5 h-3.5 ml-auto text-gray-400 dark:text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
+            className={`w-3.5 h-3.5 ml-auto text-gray-400 dark:text-slate-500 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -261,7 +261,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
   };
 
   return (
-    <aside className="fixed left-0 top-14 bottom-0 w-60 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 overflow-y-auto z-30">
+    <aside className="fixed left-0 top-14 bottom-0 w-60 bg-white dark:bg-slate-950 border-r border-gray-200 dark:border-slate-700 overflow-y-auto z-30">
       <nav className="py-4 px-3 space-y-5">
         {navGroups.map(group => {
           if (group.adminOnly && !isAdmin) return null;
@@ -269,7 +269,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
 
           return (
             <div key={group.label}>
-              <h3 className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+              <h3 className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-slate-500">
                 {group.label}
               </h3>
               <ul className="space-y-0.5">

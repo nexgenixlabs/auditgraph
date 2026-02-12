@@ -27,12 +27,12 @@ export default function ServiceAccountGovernance() {
 
   if (loading) {
     return (
-      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+      <div className="bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-5">
         <div className="text-sm font-semibold text-gray-900 dark:text-white mb-3">SA Governance</div>
         <div className="animate-pulse space-y-3">
-          <div className="h-2.5 rounded-full bg-gray-200 dark:bg-gray-700" />
+          <div className="h-2.5 rounded-full bg-gray-200 dark:bg-slate-700" />
           <div className="grid grid-cols-2 gap-2">
-            {[0,1,2,3].map(i => <div key={i} className="h-14 rounded-lg bg-gray-100 dark:bg-gray-700" />)}
+            {[0,1,2,3].map(i => <div key={i} className="h-14 rounded-lg bg-gray-100 dark:bg-slate-700" />)}
           </div>
         </div>
       </div>
@@ -41,7 +41,7 @@ export default function ServiceAccountGovernance() {
 
   if (!stats || stats.total === 0) {
     return (
-      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+      <div className="bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-5">
         <div className="text-sm font-semibold text-gray-900 dark:text-white mb-2">SA Governance</div>
         <p className="text-xs text-gray-400">No service accounts discovered</p>
       </div>
@@ -56,7 +56,7 @@ export default function ServiceAccountGovernance() {
   ];
 
   return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+    <div className="bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
         <div className="text-sm font-semibold text-gray-900 dark:text-white">SA Governance</div>
         <button onClick={() => navigate('/service-accounts')}
@@ -90,18 +90,18 @@ export default function ServiceAccountGovernance() {
                   className={`${seg.bgColor} rounded-lg p-2 text-left hover:opacity-80 transition`}>
             <div className="flex items-center gap-1.5">
               <div className={`w-2 h-2 rounded-full ${seg.color}`} />
-              <span className="text-[10px] text-gray-500 dark:text-gray-400">{seg.label}</span>
+              <span className="text-[10px] text-gray-500 dark:text-slate-400">{seg.label}</span>
             </div>
             <div className={`text-base font-bold ${seg.textColor} mt-0.5`}>{seg.count}</div>
           </button>
         ))}
         <button onClick={() => navigate('/service-accounts?filter=dormant')}
-                className="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-2 text-left hover:opacity-80 transition">
+                className="bg-gray-50 dark:bg-slate-700/50 rounded-lg p-2 text-left hover:opacity-80 transition">
           <div className="flex items-center gap-1.5">
             <div className="w-2 h-2 rounded-full bg-gray-400" />
-            <span className="text-[10px] text-gray-500 dark:text-gray-400">Dormant</span>
+            <span className="text-[10px] text-gray-500 dark:text-slate-400">Dormant</span>
           </div>
-          <div className="text-base font-bold text-gray-600 dark:text-gray-300 mt-0.5">{stats.dormant}</div>
+          <div className="text-base font-bold text-gray-600 dark:text-slate-300 mt-0.5">{stats.dormant}</div>
         </button>
       </div>
     </div>

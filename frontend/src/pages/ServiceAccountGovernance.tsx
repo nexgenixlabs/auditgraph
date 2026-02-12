@@ -202,7 +202,7 @@ export default function ServiceAccountGovernance() {
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Service Account Governance</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+        <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
           Governance policies, attestation tracking, and compliance status for non-human identities
         </p>
       </div>
@@ -210,22 +210,22 @@ export default function ServiceAccountGovernance() {
       {/* Summary Cards */}
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-            <div className="text-xs text-gray-500 dark:text-gray-400 font-medium">Total SAs</div>
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 p-4">
+            <div className="text-xs text-gray-500 dark:text-slate-400 font-medium">Total SAs</div>
             <div className="text-2xl font-bold text-gray-900 dark:text-white mt-1">{stats.total}</div>
             <div className="text-[10px] text-gray-400 mt-1">{stats.compliance_rate}% compliant</div>
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-green-200 dark:border-green-800 p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-green-200 dark:border-green-800 p-4">
             <div className="text-xs text-green-600 dark:text-green-400 font-medium">Compliant</div>
             <div className="text-2xl font-bold text-green-700 dark:text-green-300 mt-1">{stats.compliant}</div>
             <div className="text-[10px] text-gray-400 mt-1">All checks pass</div>
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-yellow-200 dark:border-yellow-800 p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-yellow-200 dark:border-yellow-800 p-4">
             <div className="text-xs text-yellow-600 dark:text-yellow-400 font-medium">Needs Attention</div>
             <div className="text-2xl font-bold text-yellow-700 dark:text-yellow-300 mt-1">{stats.needs_attention}</div>
             <div className="text-[10px] text-gray-400 mt-1">Minor issues</div>
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-red-200 dark:border-red-800 p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-red-200 dark:border-red-800 p-4">
             <div className="text-xs text-red-600 dark:text-red-400 font-medium">Non-Compliant</div>
             <div className="text-2xl font-bold text-red-700 dark:text-red-300 mt-1">{stats.non_compliant}</div>
             <div className="text-[10px] text-gray-400 mt-1">Critical issues</div>
@@ -236,19 +236,19 @@ export default function ServiceAccountGovernance() {
       {/* Detail stats row */}
       {stats && stats.total > 0 && (
         <div className="flex flex-wrap gap-3 text-xs">
-          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
             Unowned: <strong>{stats.unowned}</strong>
           </span>
-          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
             Dormant: <strong>{stats.dormant}</strong>
           </span>
-          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
             Cred Expired: <strong>{stats.credential_expired}</strong>
           </span>
-          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
             Cred Expiring: <strong>{stats.credential_expiring}</strong>
           </span>
-          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+          <span className="px-2.5 py-1 rounded-full bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
             Attestation Overdue: <strong>{stats.attestation_overdue}</strong>
           </span>
         </div>
@@ -264,7 +264,7 @@ export default function ServiceAccountGovernance() {
               className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
                 activeFilter === f.key
                   ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200'
+                  : 'bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400 hover:bg-gray-200'
               }`}
             >
               {f.label}
@@ -276,12 +276,12 @@ export default function ServiceAccountGovernance() {
           placeholder="Search by name..."
           value={search}
           onChange={e => { setSearch(e.target.value); setPage(0); }}
-          className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white w-48"
+          className="px-3 py-1.5 border border-gray-300 dark:border-slate-600 rounded-lg text-xs bg-white dark:bg-slate-700 text-gray-900 dark:text-white w-48"
         />
       </div>
 
       {/* Table */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+      <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 overflow-hidden">
         {loading ? (
           <div className="p-12 text-center text-sm text-gray-400">Loading...</div>
         ) : items.length === 0 ? (
@@ -292,38 +292,38 @@ export default function ServiceAccountGovernance() {
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="bg-gray-50 dark:bg-gray-900/50 border-b border-gray-200 dark:border-gray-700">
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400 cursor-pointer hover:text-blue-600"
+                <tr className="bg-gray-50 dark:bg-slate-900/50 border-b border-gray-200 dark:border-slate-700">
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400 cursor-pointer hover:text-blue-600"
                       onClick={() => handleSort('display_name')}>
                     Name{sortArrow('display_name')}
                   </th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400">Category</th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400">Governance</th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400 cursor-pointer hover:text-blue-600"
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400">Category</th>
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400">Governance</th>
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400 cursor-pointer hover:text-blue-600"
                       onClick={() => handleSort('owner_count')}>
                     Owner{sortArrow('owner_count')}
                   </th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400 cursor-pointer hover:text-blue-600"
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400 cursor-pointer hover:text-blue-600"
                       onClick={() => handleSort('credential_risk')}>
                     Credentials{sortArrow('credential_risk')}
                   </th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400">Attestation</th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400 cursor-pointer hover:text-blue-600"
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400">Attestation</th>
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400 cursor-pointer hover:text-blue-600"
                       onClick={() => handleSort('risk_score')}>
                     Risk{sortArrow('risk_score')}
                   </th>
-                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400 cursor-pointer hover:text-blue-600"
+                  <th className="text-left px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400 cursor-pointer hover:text-blue-600"
                       onClick={() => handleSort('last_sign_in')}>
                     Last Active{sortArrow('last_sign_in')}
                   </th>
                   {canAttest && (
-                    <th className="text-center px-3 py-2.5 font-semibold text-gray-600 dark:text-gray-400">Action</th>
+                    <th className="text-center px-3 py-2.5 font-semibold text-gray-600 dark:text-slate-400">Action</th>
                   )}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
+              <tbody className="divide-y divide-gray-100 dark:divide-slate-700/50">
                 {items.map(item => (
-                  <tr key={item.identity_id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition">
+                  <tr key={item.identity_id} className="hover:bg-gray-50 dark:hover:bg-slate-700/30 transition">
                     <td className="px-3 py-2.5">
                       <Link to={`/identities/${item.identity_id}`}
                             className="text-blue-600 hover:underline font-medium truncate block max-w-[200px]"
@@ -332,7 +332,7 @@ export default function ServiceAccountGovernance() {
                       </Link>
                     </td>
                     <td className="px-3 py-2.5">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-400">
                         {CATEGORY_LABELS[item.identity_category] || item.identity_category}
                       </span>
                     </td>
@@ -349,7 +349,7 @@ export default function ServiceAccountGovernance() {
                     </td>
                     <td className="px-3 py-2.5">
                       {item.owner_count > 0 ? (
-                        <span className="text-gray-700 dark:text-gray-300">{item.owner_display_name || `${item.owner_count} owner(s)`}</span>
+                        <span className="text-gray-700 dark:text-slate-300">{item.owner_display_name || `${item.owner_count} owner(s)`}</span>
                       ) : (
                         <span className="text-red-600 font-medium">None</span>
                       )}
@@ -376,7 +376,7 @@ export default function ServiceAccountGovernance() {
                       </span>
                       <span className="text-[9px] text-gray-400 ml-1">{item.risk_score}</span>
                     </td>
-                    <td className="px-3 py-2.5 text-gray-500 dark:text-gray-400">
+                    <td className="px-3 py-2.5 text-gray-500 dark:text-slate-400">
                       {fmtDate(item.last_sign_in)}
                     </td>
                     {canAttest && (
@@ -398,16 +398,16 @@ export default function ServiceAccountGovernance() {
 
         {/* Pagination */}
         {totalPages > 1 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-slate-700">
             <span className="text-xs text-gray-500">{total} total</span>
             <div className="flex gap-1">
               <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
-                      className="px-2.5 py-1 rounded text-xs bg-gray-100 dark:bg-gray-700 disabled:opacity-40">
+                      className="px-2.5 py-1 rounded text-xs bg-gray-100 dark:bg-slate-700 disabled:opacity-40">
                 Prev
               </button>
               <span className="px-2.5 py-1 text-xs text-gray-500">{page + 1}/{totalPages}</span>
               <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
-                      className="px-2.5 py-1 rounded text-xs bg-gray-100 dark:bg-gray-700 disabled:opacity-40">
+                      className="px-2.5 py-1 rounded text-xs bg-gray-100 dark:bg-slate-700 disabled:opacity-40">
                 Next
               </button>
             </div>
@@ -418,7 +418,7 @@ export default function ServiceAccountGovernance() {
       {/* Attestation Modal */}
       {attestTarget && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setAttestTarget(null)}>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-xl w-full max-w-md mx-4 p-6 space-y-4"
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 shadow-xl w-full max-w-md mx-4 p-6 space-y-4"
                onClick={e => e.stopPropagation()}>
             <div>
               <h3 className="text-sm font-bold text-gray-900 dark:text-white">Attest Service Account</h3>
@@ -426,9 +426,9 @@ export default function ServiceAccountGovernance() {
             </div>
 
             <div className="space-y-2">
-              <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">Decision</label>
+              <label className="block text-xs font-medium text-gray-700 dark:text-slate-300">Decision</label>
               {['approved', 'needs_review', 'decommission_requested'].map(opt => (
-                <label key={opt} className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
+                <label key={opt} className="flex items-center gap-2 text-xs text-gray-700 dark:text-slate-300 cursor-pointer">
                   <input type="radio" name="att_status" value={opt}
                          checked={attestStatus === opt}
                          onChange={() => setAttestStatus(opt)}
@@ -441,19 +441,19 @@ export default function ServiceAccountGovernance() {
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Justification</label>
+              <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1">Justification</label>
               <textarea
                 value={attestJustification}
                 onChange={e => setAttestJustification(e.target.value)}
                 rows={3}
                 placeholder="Why is this service account still needed?"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-xs bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
               />
             </div>
 
             <div className="flex justify-end gap-2">
               <button onClick={() => setAttestTarget(null)}
-                      className="px-4 py-2 rounded-lg text-xs text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">
+                      className="px-4 py-2 rounded-lg text-xs text-gray-600 hover:bg-gray-100 dark:hover:bg-slate-700">
                 Cancel
               </button>
               <button onClick={handleAttest}

@@ -47,16 +47,16 @@ export default function ResourceOverview() {
 
   if (loading) {
     return (
-      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <div className="animate-pulse h-32 bg-gray-100 dark:bg-gray-800 rounded" />
+      <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-4">
+        <div className="animate-pulse h-32 bg-gray-100 dark:bg-slate-800 rounded" />
       </div>
     );
   }
 
   if (!stats || stats.total === 0) {
     return (
-      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Azure Resources</h3>
+      <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-4">
+        <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200 mb-2">Azure Resources</h3>
         <p className="text-xs text-gray-500">No resources discovered yet. Run a discovery to populate.</p>
       </div>
     );
@@ -75,13 +75,13 @@ export default function ResourceOverview() {
     .filter(e => e.count > 0);
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+    <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-4">
       <div className="flex items-center justify-between mb-3">
         <div>
-          <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Azure Resources</h3>
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200">Azure Resources</h3>
           <p className="text-[10px] text-gray-500">Storage Accounts & Key Vaults</p>
         </div>
-        <span className="text-2xl font-bold text-gray-800 dark:text-gray-200">{stats.total}</span>
+        <span className="text-2xl font-bold text-gray-800 dark:text-slate-200">{stats.total}</span>
       </div>
 
       {/* Resource type split */}
@@ -111,7 +111,7 @@ export default function ResourceOverview() {
       {riskEntries.length > 0 && (
         <div className="mb-3">
           <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">Risk Distribution</div>
-          <div className="flex h-3 rounded-full overflow-hidden bg-gray-100 dark:bg-gray-700">
+          <div className="flex h-3 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-700">
             {riskEntries.map(e => (
               <div
                 key={e.level}

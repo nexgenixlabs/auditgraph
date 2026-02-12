@@ -158,14 +158,14 @@ export default function Login() {
   // Tenant picker view (after successful portal login for superadmins)
   if (showTenantPicker) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-lg px-4">
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
               AG
             </div>
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Select Organization</h1>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Choose which organization to access</p>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Choose which organization to access</p>
           </div>
 
           <div className="space-y-2">
@@ -173,7 +173,7 @@ export default function Login() {
               <button
                 key={t.id}
                 onClick={() => handleTenantSelect(t)}
-                className="w-full flex items-center justify-between p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl hover:border-blue-400 hover:shadow-sm transition group"
+                className="w-full flex items-center justify-between p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl hover:border-blue-400 hover:shadow-sm transition group"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex items-center justify-center text-sm font-bold">
@@ -213,17 +213,17 @@ export default function Login() {
   // Forced password change form
   if (forcePasswordChange) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-md px-4">
           <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
               AG
             </div>
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Set New Password</h1>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Your administrator requires you to set a new password</p>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Your administrator requires you to set a new password</p>
           </div>
 
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm p-8 space-y-5">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 shadow-sm p-8 space-y-5">
             {error && (
               <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
                 {error}
@@ -232,26 +232,26 @@ export default function Login() {
 
             <form onSubmit={handlePasswordChange} className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">New Password</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">New Password</label>
                 <input
                   type="password"
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}
                   autoFocus
                   autoComplete="new-password"
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder="Minimum 12 characters"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Confirm Password</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">Confirm Password</label>
                 <input
                   type="password"
                   value={confirmPassword}
                   onChange={e => setConfirmPassword(e.target.value)}
                   autoComplete="new-password"
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder="Re-enter your new password"
                 />
                 {newPassword && confirmPassword && newPassword !== confirmPassword && (
@@ -283,7 +283,7 @@ export default function Login() {
 
   // Login form
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
@@ -294,7 +294,7 @@ export default function Login() {
           {resolvedTenant ? (
             <div className="mt-2">
               <p className="text-sm text-gray-500">
-                Sign in to <span className="font-semibold text-gray-700 dark:text-gray-300">{resolvedTenant.name}</span>
+                Sign in to <span className="font-semibold text-gray-700 dark:text-slate-300">{resolvedTenant.name}</span>
               </p>
               <span className={`inline-block mt-1 px-2 py-0.5 rounded text-[10px] font-semibold ${
                 resolvedTenant.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
@@ -307,7 +307,7 @@ export default function Login() {
           )}
         </div>
 
-        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm p-8 space-y-5">
+        <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 shadow-sm p-8 space-y-5">
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
               {error}
@@ -332,9 +332,9 @@ export default function Login() {
               </button>
               {!ssoForced && (
                 <div className="flex items-center gap-3 text-xs text-gray-400">
-                  <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+                  <div className="flex-1 h-px bg-gray-200 dark:bg-slate-700" />
                   <span>or sign in with credentials</span>
-                  <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+                  <div className="flex-1 h-px bg-gray-200 dark:bg-slate-700" />
                 </div>
               )}
               {ssoForced && (
@@ -349,26 +349,26 @@ export default function Login() {
           {!ssoForced && (
             <form onSubmit={handleSubmit} className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Username</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">Username</label>
                 <input
                   type="text"
                   value={username}
                   onChange={e => setUsername(e.target.value)}
                   autoFocus={!ssoEnabled}
                   autoComplete="username"
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder="Enter your username"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">Password</label>
                 <input
                   type="password"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   autoComplete="current-password"
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder="Enter your password"
                 />
               </div>

@@ -11,7 +11,7 @@ interface TopBarProps {
 const ROLE_COLORS: Record<string, string> = {
   admin: 'bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300',
   reader: 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
-  compliance: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
+  compliance: 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300',
 };
 
 const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) => {
@@ -53,7 +53,7 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
   const isActive = (path: string) => location.pathname.startsWith(path);
 
   return (
-    <header className="fixed top-0 left-0 right-0 h-14 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 z-40 flex items-center px-4">
+    <header className="fixed top-0 left-0 right-0 h-14 bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-700 z-40 flex items-center px-4">
       {/* Left: Logo & Brand */}
       <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition mr-6">
         <img
@@ -63,7 +63,7 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
         />
         <div className="leading-tight">
           <span className="text-base font-bold text-gray-900 dark:text-white">AuditGraph</span>
-          <p className="text-[10px] text-gray-400 dark:text-gray-500 font-medium">
+          <p className="text-[10px] text-gray-400 dark:text-slate-500 font-medium">
             {user?.tenant_name || 'Map. Monitor. Secure.'}
           </p>
         </div>
@@ -73,13 +73,13 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
       <div className="flex-1 flex justify-center">
         <button
           onClick={onSearchOpen}
-          className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm text-gray-400 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition border border-gray-200 dark:border-gray-600 w-64"
+          className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm text-gray-400 bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:hover:bg-slate-700 transition border border-gray-200 dark:border-slate-600 w-64"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
           <span className="text-xs">Search identities...</span>
-          <span className="ml-auto text-[10px] text-gray-300 dark:text-gray-500">{isMac ? '\u2318' : 'Ctrl+'}K</span>
+          <span className="ml-auto text-[10px] text-gray-300 dark:text-slate-500">{isMac ? '\u2318' : 'Ctrl+'}K</span>
         </button>
       </div>
 
@@ -89,7 +89,7 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
         {onToggleTheme && (
           <button
             onClick={onToggleTheme}
-            className="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+            className="p-2 rounded-lg text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 transition"
             title={dark ? 'Light mode' : 'Dark mode'}
           >
             {dark ? (
@@ -108,7 +108,7 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
         <button
           onClick={() => navigate('/notifications')}
           className={`p-2 rounded-lg transition relative ${
-            isActive('/notifications') ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+            isActive('/notifications') ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'
           }`}
           title="Notifications"
         >
@@ -140,10 +140,10 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
             {tenantDropdownOpen && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setTenantDropdownOpen(false)} />
-                <div className="absolute right-0 mt-1 w-52 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg z-50 py-1">
+                <div className="absolute right-0 mt-1 w-52 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-600 rounded-lg shadow-lg z-50 py-1">
                   <button
                     onClick={() => { switchTenant(null); setTenantDropdownOpen(false); }}
-                    className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 transition ${!activeTenantId ? 'font-bold text-purple-700 dark:text-purple-300' : 'text-gray-700 dark:text-gray-300'}`}
+                    className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-slate-700 transition ${!activeTenantId ? 'font-bold text-purple-700 dark:text-purple-300' : 'text-gray-700 dark:text-slate-300'}`}
                   >
                     All Tenants (no filter)
                   </button>
@@ -151,7 +151,7 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
                     <button
                       key={t.id}
                       onClick={() => { switchTenant(t.id, t.name); setTenantDropdownOpen(false); }}
-                      className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 transition ${activeTenantId === t.id ? 'font-bold text-purple-700 dark:text-purple-300' : 'text-gray-700 dark:text-gray-300'}`}
+                      className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-slate-700 transition ${activeTenantId === t.id ? 'font-bold text-purple-700 dark:text-purple-300' : 'text-gray-700 dark:text-slate-300'}`}
                     >
                       {t.name}
                     </button>
@@ -164,8 +164,8 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
 
         {/* User menu */}
         {user && (
-          <div className="flex items-center gap-2 ml-1 pl-2 border-l border-gray-200 dark:border-gray-700">
-            <span className="text-xs text-gray-500 dark:text-gray-400">
+          <div className="flex items-center gap-2 ml-1 pl-2 border-l border-gray-200 dark:border-slate-700">
+            <span className="text-xs text-gray-500 dark:text-slate-400">
               {user.display_name}
               <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${ROLE_COLORS[user.role] || ROLE_COLORS.compliance}`}>
                 {user.role}
@@ -173,7 +173,7 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
             </span>
             <button
               onClick={() => { logout(); navigate('/login'); }}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-gray-100 dark:hover:bg-slate-800 transition"
               title="Sign out"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

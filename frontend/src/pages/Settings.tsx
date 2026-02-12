@@ -133,6 +133,11 @@ interface SettingsData {
   azure_tenant_id: string;
   azure_client_id: string;
   azure_client_secret: string;
+  aws_access_key_id: string;
+  aws_secret_access_key: string;
+  aws_region: string;
+  gcp_project_id: string;
+  gcp_service_account_json: string;
   timezone: string;
   theme: string;
 }
@@ -1163,7 +1168,7 @@ export default function Settings() {
   }
 
   async function handleManualCleanup() {
-    if (!confirm('Run data cleanup now? This will permanently delete records older than the configured retention periods.')) return;
+    if (!window.confirm('Run data cleanup now? This will permanently delete records older than the configured retention periods.')) return;
     setCleanupRunning(true);
     setCleanupResult(null);
     try {
@@ -1554,14 +1559,67 @@ export default function Settings() {
 
                 {/* AWS */}
                 {cloudConfig?.cloud_providers?.aws?.enabled ? (
-                  <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
-                    <div className="flex items-center gap-2 mb-1">
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-orange-700">AWS</span>
                       <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-orange-50 text-orange-600 border border-orange-200">
                         {cloudConfig.cloud_providers.aws.plan || 'enabled'}
                       </span>
+                      {settings?.aws_access_key_id && (
+                        <>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-50 text-orange-600">IAM Access Key</span>
+                          <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                            Configured
+                          </span>
+                        </>
+                      )}
                     </div>
-                    <p className="text-xs text-orange-600">AWS credential configuration coming soon.</p>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Access Key ID</label>
+                      <input
+                        type="text"
+                        value={settings?.aws_access_key_id || ''}
+                        onChange={e => update('aws_access_key_id' as keyof SettingsData, e.target.value)}
+                        placeholder="AKIAIOSFODNN7EXAMPLE"
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Secret Access Key</label>
+                      <input
+                        type="password"
+                        value={settings?.aws_secret_access_key || ''}
+                        onChange={e => update('aws_secret_access_key' as keyof SettingsData, e.target.value)}
+                        placeholder="Enter secret access key"
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">Secret is masked after saving. Clear and re-enter to change.</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Default Region</label>
+                      <select
+                        value={settings?.aws_region || 'us-east-1'}
+                        onChange={e => update('aws_region' as keyof SettingsData, e.target.value)}
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      >
+                        <option value="us-east-1">US East (N. Virginia)</option>
+                        <option value="us-east-2">US East (Ohio)</option>
+                        <option value="us-west-1">US West (N. California)</option>
+                        <option value="us-west-2">US West (Oregon)</option>
+                        <option value="eu-west-1">EU (Ireland)</option>
+                        <option value="eu-west-2">EU (London)</option>
+                        <option value="eu-central-1">EU (Frankfurt)</option>
+                        <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                        <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
+                        <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
+                      </select>
+                    </div>
+
+                    <p className="text-xs text-gray-400">
+                      Credentials are saved with the global &quot;Save Settings&quot; button below.
+                    </p>
                   </div>
                 ) : cloudConfig ? (
                   <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
@@ -1572,14 +1630,48 @@ export default function Settings() {
 
                 {/* GCP */}
                 {cloudConfig?.cloud_providers?.gcp?.enabled ? (
-                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                    <div className="flex items-center gap-2 mb-1">
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-red-600">GCP</span>
                       <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-red-50 text-red-500 border border-red-200">
                         {cloudConfig.cloud_providers.gcp.plan || 'enabled'}
                       </span>
+                      {settings?.gcp_project_id && (
+                        <>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600">Service Account</span>
+                          <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                            Configured
+                          </span>
+                        </>
+                      )}
                     </div>
-                    <p className="text-xs text-red-500">GCP credential configuration coming soon.</p>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
+                      <input
+                        type="text"
+                        value={settings?.gcp_project_id || ''}
+                        onChange={e => update('gcp_project_id' as keyof SettingsData, e.target.value)}
+                        placeholder="my-project-123456"
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Service Account JSON Key</label>
+                      <textarea
+                        value={settings?.gcp_service_account_json || ''}
+                        onChange={e => update('gcp_service_account_json' as keyof SettingsData, e.target.value)}
+                        placeholder='{"type": "service_account", "project_id": "...", ...}'
+                        rows={4}
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">Paste the full JSON key file contents. Stored encrypted.</p>
+                    </div>
+
+                    <p className="text-xs text-gray-400">
+                      Credentials are saved with the global &quot;Save Settings&quot; button below.
+                    </p>
                   </div>
                 ) : cloudConfig ? (
                   <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
