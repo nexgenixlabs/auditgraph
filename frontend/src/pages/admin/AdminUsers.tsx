@@ -11,6 +11,8 @@ interface PortalUser {
   portal_role: PortalRole;
   enabled: boolean;
   is_superadmin: boolean;
+  email: string | null;
+  phone: string | null;
   created_at: string;
   last_login_at: string | null;
 }
@@ -35,16 +37,20 @@ export default function AdminUsers() {
     username: '',
     display_name: '',
     password: '',
+    email: '',
+    phone: '',
     portal_role: 'reader' as PortalRole,
   });
   const [createLoading, setCreateLoading] = useState(false);
 
-  // Edit user modal
-  const [showEdit, setShowEdit] = useState<PortalUser | null>(null);
+  // Profile panel (right side)
+  const [selectedUser, setSelectedUser] = useState<PortalUser | null>(null);
   const [editForm, setEditForm] = useState({
     display_name: '',
     portal_role: 'reader' as PortalRole,
     enabled: true,
+    email: '',
+    phone: '',
     new_password: '',
   });
 
@@ -75,6 +81,8 @@ export default function AdminUsers() {
           username: createForm.username,
           display_name: createForm.display_name,
           password: createForm.password,
+          email: createForm.email || null,
+          phone: createForm.phone || null,
           role: 'admin',
           portal_role: createForm.portal_role,
           is_superadmin: createForm.portal_role === 'superadmin',
@@ -86,7 +94,7 @@ export default function AdminUsers() {
       }
       setSuccess('Portal user created successfully');
       setShowCreate(false);
-      setCreateForm({ username: '', display_name: '', password: '', portal_role: 'reader' });
+      setCreateForm({ username: '', display_name: '', password: '', email: '', phone: '', portal_role: 'reader' });
       fetchUsers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create user');
@@ -95,8 +103,8 @@ export default function AdminUsers() {
     }
   }
 
-  async function handleEdit() {
-    if (!showEdit) return;
+  async function handleSaveProfile() {
+    if (!selectedUser) return;
     setError(null);
     try {
       const payload: Record<string, unknown> = {
@@ -104,11 +112,13 @@ export default function AdminUsers() {
         portal_role: editForm.portal_role,
         is_superadmin: editForm.portal_role === 'superadmin',
         enabled: editForm.enabled,
+        email: editForm.email || null,
+        phone: editForm.phone || null,
       };
       if (editForm.new_password) {
         payload.password = editForm.new_password;
       }
-      const res = await fetch(`/api/users/${showEdit.id}`, {
+      const res = await fetch(`/api/users/${selectedUser.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -118,7 +128,7 @@ export default function AdminUsers() {
         throw new Error(data.error || 'Failed to update user');
       }
       setSuccess('User updated successfully');
-      setShowEdit(null);
+      setSelectedUser(null);
       fetchUsers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to update user');
@@ -138,10 +148,23 @@ export default function AdminUsers() {
         throw new Error(data.error || 'Failed to remove portal access');
       }
       setSuccess('Portal access removed');
+      if (selectedUser?.id === userId) setSelectedUser(null);
       fetchUsers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to remove access');
     }
+  }
+
+  function openProfile(u: PortalUser) {
+    setSelectedUser(u);
+    setEditForm({
+      display_name: u.display_name,
+      portal_role: u.portal_role,
+      enabled: u.enabled,
+      email: u.email || '',
+      phone: u.phone || '',
+      new_password: '',
+    });
   }
 
   // Clear messages after 3s
@@ -192,85 +215,211 @@ export default function AdminUsers() {
           </div>
           <div className="flex items-start gap-3">
             <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 mt-0.5">billing</span>
-            <div className="text-xs text-gray-600">Read-only tenant list and billing page only</div>
+            <div className="text-xs text-gray-600">Read-only billing page only</div>
           </div>
           <div className="flex items-start gap-3">
             <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 mt-0.5">reader</span>
-            <div className="text-xs text-gray-600">Read-only overview, tenant list, and monitoring only</div>
+            <div className="text-xs text-gray-600">Read-only overview and monitoring only</div>
           </div>
         </div>
       </div>
 
-      {/* Users Table */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 border-b border-gray-200">
-            <tr>
-              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">User</th>
-              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Portal Role</th>
-              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Status</th>
-              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Last Login</th>
-              <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {users.length === 0 ? (
+      {/* Main content: table + profile panel */}
+      <div className="flex gap-6">
+        {/* Users Table */}
+        <div className={`bg-white rounded-xl border border-gray-200 overflow-hidden ${selectedUser ? 'flex-1' : 'w-full'}`}>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <td colSpan={5} className="text-center py-8 text-gray-400">No portal users found</td>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">User</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Portal Role</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Status</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Last Login</th>
+                <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Actions</th>
               </tr>
-            ) : users.map(u => (
-              <tr key={u.id} className="hover:bg-gray-50">
-                <td className="px-4 py-3">
-                  <div className="font-medium text-gray-900">{u.display_name}</div>
-                  <div className="text-xs text-gray-500">{u.username}</div>
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    ROLE_BADGE_COLORS[u.portal_role] || ROLE_BADGE_COLORS.reader
-                  }`}>
-                    {u.portal_role}
-                  </span>
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    u.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-                  }`}>
-                    {u.enabled ? 'Active' : 'Disabled'}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-xs text-gray-500">
-                  {u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : 'Never'}
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      onClick={() => {
-                        setShowEdit(u);
-                        setEditForm({
-                          display_name: u.display_name,
-                          portal_role: u.portal_role,
-                          enabled: u.enabled,
-                          new_password: '',
-                        });
-                      }}
-                      className="text-xs text-blue-600 hover:text-blue-800"
-                    >
-                      Edit
-                    </button>
-                    {u.id !== currentUser?.id && (
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {users.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="text-center py-8 text-gray-400">No portal users found</td>
+                </tr>
+              ) : users.map(u => (
+                <tr
+                  key={u.id}
+                  className={`hover:bg-gray-50 cursor-pointer ${selectedUser?.id === u.id ? 'bg-blue-50' : ''}`}
+                  onClick={() => openProfile(u)}
+                >
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-gray-900">{u.display_name}</div>
+                    <div className="text-xs text-gray-500">{u.username}</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                      ROLE_BADGE_COLORS[u.portal_role] || ROLE_BADGE_COLORS.reader
+                    }`}>
+                      {u.portal_role}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                      u.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
+                    }`}>
+                      {u.enabled ? 'Active' : 'Disabled'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-gray-500">
+                    {u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : 'Never'}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-2" onClick={e => e.stopPropagation()}>
                       <button
-                        onClick={() => handleRemovePortalAccess(u.id)}
-                        className="text-xs text-red-600 hover:text-red-800"
+                        onClick={() => openProfile(u)}
+                        className="text-xs text-blue-600 hover:text-blue-800"
                       >
-                        Remove Access
+                        Profile
                       </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                      {u.id !== currentUser?.id && (
+                        <button
+                          onClick={() => handleRemovePortalAccess(u.id)}
+                          className="text-xs text-red-600 hover:text-red-800"
+                        >
+                          Remove Access
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Profile Side Panel */}
+        {selectedUser && (
+          <div className="w-96 bg-white rounded-xl border border-gray-200 p-6 flex-shrink-0 self-start">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-sm font-bold text-gray-900">User Profile</h3>
+              <button onClick={() => setSelectedUser(null)} className="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+
+            {/* User avatar + name */}
+            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-gray-100">
+              <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm font-bold">
+                {selectedUser.display_name.substring(0, 2).toUpperCase()}
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-gray-900">{selectedUser.display_name}</div>
+                <div className="text-xs text-gray-500">{selectedUser.username}</div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Display Name</label>
+                <input
+                  type="text"
+                  value={editForm.display_name}
+                  onChange={e => setEditForm(f => ({ ...f, display_name: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={editForm.email}
+                  onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="user@company.com"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Phone</label>
+                <input
+                  type="tel"
+                  value={editForm.phone}
+                  onChange={e => setEditForm(f => ({ ...f, phone: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="+1 (555) 000-0000"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Portal Role</label>
+                <select
+                  value={editForm.portal_role}
+                  onChange={e => setEditForm(f => ({ ...f, portal_role: e.target.value as PortalRole }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  disabled={selectedUser.id === currentUser?.id}
+                >
+                  <option value="reader">Reader</option>
+                  <option value="billing">Billing</option>
+                  <option value="poweradmin">Power Admin</option>
+                  <option value="superadmin">Superadmin</option>
+                </select>
+                {selectedUser.id === currentUser?.id && (
+                  <p className="text-[10px] text-gray-400 mt-1">Cannot change your own role</p>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="profile-enabled"
+                  checked={editForm.enabled}
+                  onChange={e => setEditForm(f => ({ ...f, enabled: e.target.checked }))}
+                  disabled={selectedUser.id === currentUser?.id}
+                  className="rounded border-gray-300"
+                />
+                <label htmlFor="profile-enabled" className="text-sm text-gray-700">Account enabled</label>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Reset Password</label>
+                <input
+                  type="password"
+                  value={editForm.new_password}
+                  onChange={e => setEditForm(f => ({ ...f, new_password: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Leave blank to keep current"
+                  minLength={8}
+                />
+                {editForm.new_password && editForm.new_password.length < 8 && (
+                  <p className="text-[10px] text-red-500 mt-1">Min 8 characters</p>
+                )}
+              </div>
+
+              {/* Metadata */}
+              <div className="pt-3 border-t border-gray-100 space-y-1.5">
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-400">Created</span>
+                  <span className="text-gray-600">{new Date(selectedUser.created_at).toLocaleDateString()}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-400">Last Login</span>
+                  <span className="text-gray-600">{selectedUser.last_login_at ? new Date(selectedUser.last_login_at).toLocaleDateString() : 'Never'}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={handleSaveProfile}
+                  className="flex-1 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
+                >
+                  Save Changes
+                </button>
+                <button
+                  onClick={() => setSelectedUser(null)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Create User Modal */}
@@ -301,6 +450,28 @@ export default function AdminUsers() {
                   required
                 />
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={createForm.email}
+                    onChange={e => setCreateForm(f => ({ ...f, email: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="user@company.com"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+                  <input
+                    type="tel"
+                    value={createForm.phone}
+                    onChange={e => setCreateForm(f => ({ ...f, phone: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="+1 (555) 000-0000"
+                  />
+                </div>
+              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
                 <input
@@ -320,8 +491,8 @@ export default function AdminUsers() {
                   onChange={e => setCreateForm(f => ({ ...f, portal_role: e.target.value as PortalRole }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
-                  <option value="reader">Reader — read-only overview, tenants, and monitoring</option>
-                  <option value="billing">Billing — read-only tenants and billing page</option>
+                  <option value="reader">Reader — read-only overview and monitoring</option>
+                  <option value="billing">Billing — read-only billing page</option>
                   <option value="poweradmin">Power Admin — create/edit/provision tenants, view billing</option>
                   <option value="superadmin">Superadmin — full platform access</option>
                 </select>
@@ -345,84 +516,6 @@ export default function AdminUsers() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {/* Edit User Modal */}
-      {showEdit && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowEdit(null)}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 mb-4">Edit Portal User</h2>
-            <p className="text-sm text-gray-500 mb-4">{showEdit.username}</p>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
-                <input
-                  type="text"
-                  value={editForm.display_name}
-                  onChange={e => setEditForm(f => ({ ...f, display_name: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Portal Role</label>
-                <select
-                  value={editForm.portal_role}
-                  onChange={e => setEditForm(f => ({ ...f, portal_role: e.target.value as PortalRole }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  disabled={showEdit.id === currentUser?.id}
-                >
-                  <option value="reader">Reader</option>
-                  <option value="billing">Billing</option>
-                  <option value="poweradmin">Power Admin</option>
-                  <option value="superadmin">Superadmin</option>
-                </select>
-                {showEdit.id === currentUser?.id && (
-                  <p className="text-xs text-gray-400 mt-1">Cannot change your own portal role</p>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="edit-enabled"
-                  checked={editForm.enabled}
-                  onChange={e => setEditForm(f => ({ ...f, enabled: e.target.checked }))}
-                  disabled={showEdit.id === currentUser?.id}
-                  className="rounded border-gray-300"
-                />
-                <label htmlFor="edit-enabled" className="text-sm text-gray-700">Account enabled</label>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Reset Password</label>
-                <input
-                  type="password"
-                  value={editForm.new_password}
-                  onChange={e => setEditForm(f => ({ ...f, new_password: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Leave blank to keep current password"
-                  minLength={8}
-                />
-                {editForm.new_password && editForm.new_password.length < 8 && (
-                  <p className="text-xs text-red-500 mt-1">Password must be at least 8 characters</p>
-                )}
-              </div>
-              <div className="flex justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowEdit(null)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleEdit}
-                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
-                >
-                  Save Changes
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       )}

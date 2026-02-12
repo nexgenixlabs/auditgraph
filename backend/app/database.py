@@ -3004,15 +3004,15 @@ class Database:
         self._ensure_tenants_table()
         Database._users_ensured = True
 
-    def create_user(self, username, password_hash, display_name, role='viewer', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None):
+    def create_user(self, username, password_hash, display_name, role='viewer', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None, email=None, phone=None):
         """Create a new user. Returns user dict (without password_hash)."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role
-        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role))
+            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone
+        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3098,6 +3098,7 @@ class Database:
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
                    u.tenant_id, u.is_superadmin, u.portal_role,
+                   u.email, u.phone,
                    t.name AS tenant_name
             FROM users u
             LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -3113,9 +3114,9 @@ class Database:
         return rows
 
     def update_user(self, user_id, **kwargs):
-        """Update user fields. Allowed: display_name, role, enabled, password_hash, tenant_id, is_superadmin, portal_role."""
+        """Update user fields. Allowed: display_name, role, enabled, password_hash, tenant_id, is_superadmin, portal_role, email, phone."""
         self._ensure_users_table()
-        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'tenant_id', 'is_superadmin', 'portal_role'}
+        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'tenant_id', 'is_superadmin', 'portal_role', 'email', 'phone'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_user_by_id(user_id)
@@ -3130,7 +3131,7 @@ class Database:
         cursor.execute(f"""
             UPDATE users SET {', '.join(set_parts)}
             WHERE id = %s
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -5521,6 +5522,9 @@ class Database:
             )
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug)")
+        # Phase 77: Add license columns
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_activated_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_expires_at TIMESTAMPTZ")
         self.conn.commit()
 
         # 2. Create default tenant if none exist
@@ -5545,6 +5549,9 @@ class Database:
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT false")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS portal_role VARCHAR(20)")
+        # Phase 77: Add email/phone to users
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50)")
         self.conn.commit()
 
         if default_tenant_id:
@@ -5600,7 +5607,7 @@ class Database:
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for row in rows:
-            for ts in ('created_at', 'updated_at'):
+            for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
                 if row.get(ts):
                     row[ts] = row[ts].isoformat()
         return rows
@@ -5615,7 +5622,7 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at'):
+        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
@@ -5682,9 +5689,9 @@ class Database:
         return row
 
     def update_tenant(self, tenant_id, **kwargs):
-        """Update tenant fields. Allowed: name, plan, enabled, settings."""
+        """Update tenant fields. Allowed: name, plan, enabled, settings, license_activated_at, license_expires_at."""
         self._ensure_tenants_table()
-        allowed = {'name', 'plan', 'enabled', 'settings'}
+        allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_tenant_by_id(tenant_id)
@@ -5706,7 +5713,7 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at'):
+        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result

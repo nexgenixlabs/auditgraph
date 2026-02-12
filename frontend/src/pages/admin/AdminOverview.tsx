@@ -64,12 +64,10 @@ export default function AdminOverview() {
         <p className="text-sm text-gray-500 mt-0.5">Cross-tenant health and activity summary</p>
       </div>
 
-      {/* Global stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Global stats — 2 cards only per v3.0 spec */}
+      <div className="grid grid-cols-2 gap-4">
         <StatCard label="Total Tenants" value={g.total_tenants} color="blue" />
         <StatCard label="Active Tenants" value={g.active_tenants} color="green" />
-        <StatCard label="Total Identities" value={g.total_identities} color="purple" />
-        <StatCard label="Critical Findings" value={g.total_critical} color="red" subtitle={`${g.total_high} high`} />
       </div>
 
       {/* Tenant health grid */}
@@ -94,6 +92,7 @@ export default function AdminOverview() {
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
                       t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
                       t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
+                      t.plan === 'trial' ? 'bg-amber-100 text-amber-700' :
                       'bg-gray-100 text-gray-600'
                     }`}>{t.plan}</span>
                     {!t.enabled && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">Disabled</span>}
@@ -126,18 +125,15 @@ export default function AdminOverview() {
   );
 }
 
-function StatCard({ label, value, color, subtitle }: { label: string; value: number; color: string; subtitle?: string }) {
+function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   const colorMap: Record<string, string> = {
     blue: 'bg-blue-50 border-blue-200 text-blue-700',
     green: 'bg-green-50 border-green-200 text-green-700',
-    purple: 'bg-purple-50 border-purple-200 text-purple-700',
-    red: 'bg-red-50 border-red-200 text-red-700',
   };
   return (
     <div className={`border rounded-lg p-4 ${colorMap[color] || colorMap.blue}`}>
       <div className="text-3xl font-bold">{value}</div>
       <div className="text-xs font-medium opacity-80">{label}</div>
-      {subtitle && <div className="text-[10px] opacity-60 mt-0.5">{subtitle}</div>}
     </div>
   );
 }

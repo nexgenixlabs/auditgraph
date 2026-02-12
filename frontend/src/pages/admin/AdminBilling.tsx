@@ -11,6 +11,8 @@ interface TenantBilling {
   plan: string;
   enabled: boolean;
   user_count: number;
+  license_activated_at: string | null;
+  license_expires_at: string | null;
   settings?: Record<string, unknown>;
 }
 
@@ -33,13 +35,28 @@ function getTenantMrr(t: TenantBilling): number {
   return calculateMonthlyTotal(getTenantConfig(t));
 }
 
+function formatDate(iso: string | null): string {
+  if (!iso) return '\u2014';
+  return new Date(iso).toLocaleDateString();
+}
+
+function licenseLabel(t: TenantBilling): { text: string; color: string } {
+  if (!t.license_activated_at) return { text: 'Not Activated', color: 'text-gray-400' };
+  if (t.license_expires_at) {
+    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
+    if (days < 0) return { text: 'Expired', color: 'text-red-600' };
+    if (days < 30) return { text: `${days}d left`, color: 'text-yellow-600' };
+  }
+  return { text: 'Active', color: 'text-green-600' };
+}
+
 export default function AdminBilling() {
   const [tenants, setTenants] = useState<TenantBilling[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetch('/api/tenants')
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : { tenants: [] })
       .then(d => setTenants(d.tenants || []))
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -156,6 +173,31 @@ export default function AdminBilling() {
         </div>
       </div>
 
+      {/* Active Users by Tenant */}
+      <div className="bg-white border border-gray-200 rounded-lg p-6">
+        <h3 className="text-sm font-semibold text-gray-800 mb-4">Active Users by Tenant</h3>
+        <div className="space-y-2">
+          {[...tenants].sort((a, b) => b.user_count - a.user_count).map(t => {
+            const maxUsers = Math.max(...tenants.map(t2 => t2.user_count), 1);
+            const pct = Math.round((t.user_count / maxUsers) * 100);
+            const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
+            return (
+              <div key={t.id} className="flex items-center gap-3">
+                <div className="w-32 text-xs font-medium text-gray-700 truncate">{t.name}</div>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${planCfg.bg} ${planCfg.color}`}>{planCfg.label}</span>
+                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 rounded-full transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="text-xs font-bold text-gray-800 w-8 text-right">{t.user_count}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Revenue breakdowns */}
       <div className="grid grid-cols-2 gap-4">
         {/* Revenue by Cloud */}
@@ -210,7 +252,7 @@ export default function AdminBilling() {
         </div>
       </div>
 
-      {/* Tenant billing table */}
+      {/* Organization Licenses table */}
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-200">
           <h3 className="text-sm font-semibold text-gray-800">Organization Licenses</h3>
@@ -223,6 +265,9 @@ export default function AdminBilling() {
               <th className="px-4 py-2.5">Clouds</th>
               <th className="px-4 py-2.5">Add-ons</th>
               <th className="px-4 py-2.5">Users</th>
+              <th className="px-4 py-2.5">License Status</th>
+              <th className="px-4 py-2.5">Activated</th>
+              <th className="px-4 py-2.5">Expires</th>
               <th className="px-4 py-2.5">Status</th>
               <th className="px-4 py-2.5 text-right">MRR</th>
             </tr>
@@ -235,6 +280,7 @@ export default function AdminBilling() {
               const addonCount = Object.values(cfg.addons).filter(Boolean).length;
               const mrr = getTenantMrr(t);
               const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
+              const ls = licenseLabel(t);
               return (
                 <tr key={t.id} className="hover:bg-gray-50/60">
                   <td className="px-4 py-2.5 font-medium text-gray-900">{t.name}</td>
@@ -259,6 +305,11 @@ export default function AdminBilling() {
                     )}
                   </td>
                   <td className="px-4 py-2.5 text-gray-700">{t.user_count}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-[10px] font-semibold ${ls.color}`}>{ls.text}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
+                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_expires_at)}</td>
                   <td className="px-4 py-2.5">
                     <span className={`text-[10px] font-semibold ${t.enabled ? 'text-green-600' : 'text-red-500'}`}>
                       {t.enabled ? 'Active' : 'Disabled'}

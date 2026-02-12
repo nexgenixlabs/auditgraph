@@ -15,6 +15,8 @@ interface Tenant {
   enabled: boolean;
   user_count: number;
   created_at: string;
+  license_activated_at: string | null;
+  license_expires_at: string | null;
   settings?: Record<string, unknown>;
 }
 
@@ -34,6 +36,21 @@ const DEFAULT_CLOUD_CONFIG: CloudConfig = {
     extended_retention: false,
   },
 };
+
+function formatDate(iso: string | null): string {
+  if (!iso) return '\u2014';
+  return new Date(iso).toLocaleDateString();
+}
+
+function licenseStatus(t: Tenant): { label: string; color: string } {
+  if (!t.license_activated_at) return { label: 'Not Activated', color: 'text-gray-400' };
+  if (t.license_expires_at) {
+    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
+    if (days < 0) return { label: 'Expired', color: 'text-red-600' };
+    if (days < 30) return { label: `${days}d left`, color: 'text-yellow-600' };
+  }
+  return { label: 'Active', color: 'text-green-600' };
+}
 
 export default function AdminTenants() {
   const { switchTenant, user } = useAuth();
@@ -122,10 +139,15 @@ export default function AdminTenants() {
 
   async function changePlan(t: Tenant, plan: string) {
     try {
+      // Auto-set license_activated_at when activating a paid plan
+      const payload: Record<string, unknown> = { plan };
+      if ((plan === 'pro' || plan === 'enterprise' || plan === 'trial') && !t.license_activated_at) {
+        payload.license_activated_at = new Date().toISOString();
+      }
       await fetch(`/api/tenants/${t.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan }),
+        body: JSON.stringify(payload),
       });
       fetchTenants();
     } catch { /* ignore */ }
@@ -186,7 +208,6 @@ export default function AdminTenants() {
     setConfigSaving(true);
     setError(null);
     try {
-      // Merge into existing settings to preserve provisioned flag etc.
       const existingSettings = (showConfigure.settings || {}) as Record<string, unknown>;
       const mergedSettings = {
         ...existingSettings,
@@ -612,6 +633,7 @@ export default function AdminTenants() {
               <th className="px-4 py-2.5">Clouds</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5">License</th>
               <th className="px-4 py-2.5">Provisioned</th>
               <th className="px-4 py-2.5">Created</th>
               <th className="px-4 py-2.5">Actions</th>
@@ -622,8 +644,8 @@ export default function AdminTenants() {
               const settings = (t.settings || {}) as Record<string, unknown>;
               const cp = (settings.cloud_providers || {}) as Record<string, { enabled: boolean; plan: string | null }>;
               const enabledClouds = Object.entries(cp).filter(([, v]) => v.enabled).map(([k]) => k);
-              // Default: show Azure if no config
               const cloudsToShow = enabledClouds.length > 0 ? enabledClouds : ['azure'];
+              const ls = licenseStatus(t);
               return (
                 <tr key={t.id} className="hover:bg-gray-50/60">
                   <td className="px-4 py-2.5 font-medium text-gray-900">{t.name}</td>
@@ -658,6 +680,14 @@ export default function AdminTenants() {
                     )}
                   </td>
                   <td className="px-4 py-2.5">
+                    <div>
+                      <span className={`text-[10px] font-semibold ${ls.color}`}>{ls.label}</span>
+                      {t.license_expires_at && (
+                        <div className="text-[9px] text-gray-400">{formatDate(t.license_expires_at)}</div>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5">
                     {isProvisioned(t) ? (
                       <span className="text-[10px] text-green-600 font-semibold">Yes</span>
                     ) : canWrite ? (
@@ -666,7 +696,7 @@ export default function AdminTenants() {
                       <span className="text-[10px] text-gray-400 font-semibold">No</span>
                     )}
                   </td>
-                  <td className="px-4 py-2.5 text-gray-500">{t.created_at ? new Date(t.created_at).toLocaleDateString() : '\u2014'}</td>
+                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.created_at)}</td>
                   <td className="px-4 py-2.5">
                     {isReadOnly ? (
                       <span className="text-[10px] text-gray-400 font-medium">Read-only</span>
@@ -686,9 +716,11 @@ export default function AdminTenants() {
                         >
                           Edit
                         </button>
-                        <button onClick={() => handleViewAs(t)} className="text-[10px] text-blue-600 hover:underline font-medium" title={`Switch context to ${t.name}`}>
-                          View As
-                        </button>
+                        {canWrite && (
+                          <button onClick={() => handleViewAs(t)} className="text-[10px] text-blue-600 hover:underline font-medium" title={`Switch context to ${t.name}`}>
+                            View As
+                          </button>
+                        )}
                         {isSuperadmin && t.slug !== 'default' && (
                           <button
                             onClick={() => setShowDeleteConfirm(t)}

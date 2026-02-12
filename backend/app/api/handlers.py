@@ -4568,8 +4568,11 @@ def create_user_handler():
             if 'portal_role' in data and (data['portal_role'] is None or data['portal_role'] in VALID_PORTAL_ROLES):
                 portal_role_val = data['portal_role']
 
+        email_val = str(data.get('email', '')).strip() or None
+        phone_val = str(data.get('phone', '')).strip() or None
         user = db.create_user(username, hashed, display_name, role, created_by, tenant_id=tenant_id,
-                              is_superadmin=is_superadmin_flag, portal_role=portal_role_val)
+                              is_superadmin=is_superadmin_flag, portal_role=portal_role_val,
+                              email=email_val, phone=phone_val)
 
         try:
             _log(db,'user_created', f'User "{username}" created with role "{role}"',
@@ -4644,6 +4647,12 @@ def update_user_handler(user_id):
                 errors.append('Only superadmins can change superadmin status')
             else:
                 updates['is_superadmin'] = bool(data['is_superadmin'])
+
+        # Phase 77: email/phone
+        if 'email' in data:
+            updates['email'] = str(data['email']).strip() if data['email'] else None
+        if 'phone' in data:
+            updates['phone'] = str(data['phone']).strip() if data['phone'] else None
 
         # Phase 70: portal_role (superadmin only)
         if 'portal_role' in data:
@@ -6582,8 +6591,8 @@ def create_tenant_handler():
         return jsonify({'error': 'slug must be alphanumeric (hyphens and underscores allowed)'}), 400
     if len(slug) > 100:
         return jsonify({'error': 'slug must be 100 characters or less'}), 400
-    if plan not in ('free', 'pro', 'enterprise'):
-        return jsonify({'error': 'plan must be free, pro, or enterprise'}), 400
+    if plan not in ('free', 'trial', 'pro', 'enterprise'):
+        return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
 
     db = _db()
     try:
@@ -6620,13 +6629,17 @@ def update_tenant_handler(tenant_id):
             updates['name'] = name
         if 'plan' in data:
             plan = str(data['plan']).strip().lower()
-            if plan not in ('free', 'pro', 'enterprise'):
-                return jsonify({'error': 'plan must be free, pro, or enterprise'}), 400
+            if plan not in ('free', 'trial', 'pro', 'enterprise'):
+                return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
             updates['plan'] = plan
         if 'enabled' in data:
             updates['enabled'] = bool(data['enabled'])
         if 'settings' in data and isinstance(data['settings'], dict):
             updates['settings'] = data['settings']
+        if 'license_activated_at' in data:
+            updates['license_activated_at'] = data['license_activated_at']
+        if 'license_expires_at' in data:
+            updates['license_expires_at'] = data['license_expires_at']
 
         if not updates:
             return jsonify({'tenant': existing, 'message': 'No changes'})
