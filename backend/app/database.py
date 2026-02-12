@@ -3091,7 +3091,7 @@ class Database:
         return rows
 
     def get_portal_users(self):
-        """Get all users with portal_role set (support or superadmin)."""
+        """Get all users with portal_role set (superadmin, poweradmin, billing, or reader)."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
@@ -5553,6 +5553,8 @@ class Database:
             cursor.execute("UPDATE users SET is_superadmin = true, portal_role = 'superadmin' WHERE id = 1 AND is_superadmin = false")
             # Backfill portal_role for existing superadmins
             cursor.execute("UPDATE users SET portal_role = 'superadmin' WHERE is_superadmin = true AND portal_role IS NULL")
+            # Phase 76: Migrate support → poweradmin
+            cursor.execute("UPDATE users SET portal_role = 'poweradmin' WHERE portal_role = 'support'")
             self.conn.commit()
 
         # 4. Add tenant_id to discovery_runs

@@ -8,7 +8,7 @@ interface User {
   tenant_id?: number;
   tenant_name?: string;
   is_superadmin?: boolean;
-  portal_role?: 'superadmin' | 'support' | null;
+  portal_role?: 'superadmin' | 'poweradmin' | 'billing' | 'reader' | null;
 }
 
 interface AuthContextValue {

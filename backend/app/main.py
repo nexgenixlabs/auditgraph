@@ -7,7 +7,7 @@ import time
 
 from app.metrics import MetricsCollector
 
-from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access
+from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access, require_portal_role
 from app.api.handlers import (
     get_stats,
     get_identities,
@@ -341,12 +341,12 @@ def create_app():
         return get_tenants_list()
 
     @app.post("/api/tenants")
-    @require_portal_access()
+    @require_portal_role('superadmin', 'poweradmin')
     def tenants_create():
         return create_tenant_handler()
 
     @app.put("/api/tenants/<int:tenant_id>")
-    @require_portal_access()
+    @require_portal_role('superadmin', 'poweradmin')
     def tenants_update(tenant_id):
         return update_tenant_handler(tenant_id)
 
@@ -369,7 +369,7 @@ def create_app():
         return get_tenant_by_slug_public(slug)
 
     @app.post("/api/tenants/<int:tenant_id>/provision")
-    @require_superadmin()
+    @require_portal_role('superadmin', 'poweradmin')
     def tenants_provision(tenant_id):
         return provision_tenant_handler(tenant_id)
 
@@ -451,15 +451,15 @@ def create_app():
         return save_sa_governance_settings()
 
     # -----------------------
-    # Cross-Tenant Analytics (Phase 47 - Superadmin only)
+    # Cross-Tenant Analytics (Phase 47 - superadmin/poweradmin/reader)
     # -----------------------
     @app.get("/api/analytics/tenants")
-    @require_superadmin()
+    @require_portal_role('superadmin', 'poweradmin', 'reader')
     def analytics_tenants():
         return get_cross_tenant_analytics()
 
     @app.get("/api/analytics/tenants/trends")
-    @require_superadmin()
+    @require_portal_role('superadmin', 'poweradmin', 'reader')
     def analytics_tenants_trends():
         return get_cross_tenant_trends()
 

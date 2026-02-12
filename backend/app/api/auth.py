@@ -18,6 +18,9 @@ JWT_ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRY = timedelta(hours=24)
 REFRESH_TOKEN_EXPIRY = timedelta(days=7)
 
+# Phase 76: Valid portal roles for admin console access
+VALID_PORTAL_ROLES = ('superadmin', 'poweradmin', 'billing', 'reader')
+
 PUBLIC_PATHS = {
     '/api/auth/login',
     '/api/auth/refresh',
@@ -209,8 +212,8 @@ def require_superadmin():
 
 
 def require_portal_access():
-    """Decorator for handlers that require portal access (support or superadmin).
-    Also accepts is_superadmin=True as fallback for JWTs issued before portal_role was added."""
+    """Decorator for handlers that require any portal access.
+    Accepts all VALID_PORTAL_ROLES plus is_superadmin=True as fallback."""
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
@@ -218,9 +221,26 @@ def require_portal_access():
             if not user:
                 return jsonify({'error': 'Authentication required'}), 401
             portal_role = user.get('portal_role')
-            if portal_role not in ('superadmin', 'support') and not user.get('is_superadmin'):
+            if portal_role not in VALID_PORTAL_ROLES and not user.get('is_superadmin'):
                 return jsonify({'error': 'Portal access required'}), 403
             return f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def require_portal_role(*allowed_roles):
+    """Decorator for handlers that require specific portal roles.
+    Falls back to is_superadmin for backward compat."""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            user = getattr(g, 'current_user', None)
+            if not user:
+                return jsonify({'error': 'Authentication required'}), 401
+            portal_role = user.get('portal_role')
+            if portal_role in allowed_roles or user.get('is_superadmin'):
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Insufficient portal permissions'}), 403
         return wrapper
     return decorator
 

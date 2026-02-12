@@ -1,17 +1,26 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 
+type PortalRole = 'superadmin' | 'poweradmin' | 'billing' | 'reader';
+
 interface PortalUser {
   id: number;
   username: string;
   display_name: string;
   role: string;
-  portal_role: 'superadmin' | 'support';
+  portal_role: PortalRole;
   enabled: boolean;
   is_superadmin: boolean;
   created_at: string;
   last_login_at: string | null;
 }
+
+const ROLE_BADGE_COLORS: Record<PortalRole, string> = {
+  superadmin: 'bg-purple-100 text-purple-700',
+  poweradmin: 'bg-blue-100 text-blue-700',
+  billing: 'bg-green-100 text-green-700',
+  reader: 'bg-gray-100 text-gray-600',
+};
 
 export default function AdminUsers() {
   const { user: currentUser } = useAuth();
@@ -26,7 +35,7 @@ export default function AdminUsers() {
     username: '',
     display_name: '',
     password: '',
-    portal_role: 'support' as 'support' | 'superadmin',
+    portal_role: 'reader' as PortalRole,
   });
   const [createLoading, setCreateLoading] = useState(false);
 
@@ -34,7 +43,7 @@ export default function AdminUsers() {
   const [showEdit, setShowEdit] = useState<PortalUser | null>(null);
   const [editForm, setEditForm] = useState({
     display_name: '',
-    portal_role: 'support' as 'support' | 'superadmin',
+    portal_role: 'reader' as PortalRole,
     enabled: true,
   });
 
@@ -76,7 +85,7 @@ export default function AdminUsers() {
       }
       setSuccess('Portal user created successfully');
       setShowCreate(false);
-      setCreateForm({ username: '', display_name: '', password: '', portal_role: 'support' });
+      setCreateForm({ username: '', display_name: '', password: '', portal_role: 'reader' });
       fetchUsers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create user');
@@ -147,7 +156,7 @@ export default function AdminUsers() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Portal Users</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage admin portal staff — superadmins and support team members</p>
+          <p className="text-sm text-gray-500 mt-1">Manage admin portal staff across all portal roles</p>
         </div>
         <button
           onClick={() => setShowCreate(true)}
@@ -173,8 +182,16 @@ export default function AdminUsers() {
             <div className="text-xs text-gray-600">Full platform access — tenant management, billing, user management, delete operations</div>
           </div>
           <div className="flex items-start gap-3">
-            <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 mt-0.5">support</span>
-            <div className="text-xs text-gray-600">Limited access — can add/edit tenants and subscriptions, cannot see billing or delete tenants</div>
+            <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 mt-0.5">poweradmin</span>
+            <div className="text-xs text-gray-600">Create/edit/provision tenants, view billing & monitoring. Cannot delete tenants or manage portal users</div>
+          </div>
+          <div className="flex items-start gap-3">
+            <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 mt-0.5">billing</span>
+            <div className="text-xs text-gray-600">Read-only tenant list and billing page only</div>
+          </div>
+          <div className="flex items-start gap-3">
+            <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 mt-0.5">reader</span>
+            <div className="text-xs text-gray-600">Read-only overview, tenant list, and monitoring only</div>
           </div>
         </div>
       </div>
@@ -204,9 +221,7 @@ export default function AdminUsers() {
                 </td>
                 <td className="px-4 py-3">
                   <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    u.portal_role === 'superadmin'
-                      ? 'bg-purple-100 text-purple-700'
-                      : 'bg-blue-100 text-blue-700'
+                    ROLE_BADGE_COLORS[u.portal_role] || ROLE_BADGE_COLORS.reader
                   }`}>
                     {u.portal_role}
                   </span>
@@ -296,10 +311,12 @@ export default function AdminUsers() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Portal Role</label>
                 <select
                   value={createForm.portal_role}
-                  onChange={e => setCreateForm(f => ({ ...f, portal_role: e.target.value as 'support' | 'superadmin' }))}
+                  onChange={e => setCreateForm(f => ({ ...f, portal_role: e.target.value as PortalRole }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
-                  <option value="support">Support — can manage tenants, cannot see billing or delete</option>
+                  <option value="reader">Reader — read-only overview, tenants, and monitoring</option>
+                  <option value="billing">Billing — read-only tenants and billing page</option>
+                  <option value="poweradmin">Power Admin — create/edit/provision tenants, view billing</option>
                   <option value="superadmin">Superadmin — full platform access</option>
                 </select>
               </div>
@@ -346,11 +363,13 @@ export default function AdminUsers() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Portal Role</label>
                 <select
                   value={editForm.portal_role}
-                  onChange={e => setEditForm(f => ({ ...f, portal_role: e.target.value as 'support' | 'superadmin' }))}
+                  onChange={e => setEditForm(f => ({ ...f, portal_role: e.target.value as PortalRole }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   disabled={showEdit.id === currentUser?.id}
                 >
-                  <option value="support">Support</option>
+                  <option value="reader">Reader</option>
+                  <option value="billing">Billing</option>
+                  <option value="poweradmin">Power Admin</option>
                   <option value="superadmin">Superadmin</option>
                 </select>
                 {showEdit.id === currentUser?.id && (

@@ -37,7 +37,10 @@ const DEFAULT_CLOUD_CONFIG: CloudConfig = {
 
 export default function AdminTenants() {
   const { switchTenant, user } = useAuth();
-  const isSuperadmin = user?.portal_role === 'superadmin';
+  const portalRole = user?.portal_role;
+  const isSuperadmin = portalRole === 'superadmin';
+  const canWrite = portalRole === 'superadmin' || portalRole === 'poweradmin';
+  const isReadOnly = !canWrite;
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -261,9 +264,11 @@ export default function AdminTenants() {
           <h2 className="text-xl font-bold text-gray-900">Tenant Management</h2>
           <p className="text-sm text-gray-500 mt-0.5">{tenants.length} organizations</p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
-          Create Tenant
-        </button>
+        {canWrite && (
+          <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
+            Create Tenant
+          </button>
+        )}
       </div>
 
       {/* Status messages */}
@@ -624,7 +629,7 @@ export default function AdminTenants() {
                   <td className="px-4 py-2.5 font-medium text-gray-900">{t.name}</td>
                   <td className="px-4 py-2.5 text-gray-600 font-mono">{t.slug}</td>
                   <td className="px-4 py-2.5">
-                    <select value={t.plan} onChange={e => changePlan(t, e.target.value)} className="text-xs border border-gray-200 rounded px-1.5 py-0.5">
+                    <select value={t.plan} onChange={e => changePlan(t, e.target.value)} disabled={isReadOnly} className={`text-xs border border-gray-200 rounded px-1.5 py-0.5 ${isReadOnly ? 'opacity-60 cursor-not-allowed' : ''}`}>
                       {Object.entries(ACCOUNT_TIER_LABELS).map(([key, meta]) => (
                         <option key={key} value={key}>{meta.label}</option>
                       ))}
@@ -642,47 +647,59 @@ export default function AdminTenants() {
                   </td>
                   <td className="px-4 py-2.5 text-gray-700">{t.user_count}</td>
                   <td className="px-4 py-2.5">
-                    <button onClick={() => toggleEnabled(t)} className={`px-2 py-0.5 rounded text-[10px] font-semibold transition ${t.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}>
-                      {t.enabled ? 'Active' : 'Disabled'}
-                    </button>
+                    {canWrite ? (
+                      <button onClick={() => toggleEnabled(t)} className={`px-2 py-0.5 rounded text-[10px] font-semibold transition ${t.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}>
+                        {t.enabled ? 'Active' : 'Disabled'}
+                      </button>
+                    ) : (
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${t.enabled ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                        {t.enabled ? 'Active' : 'Disabled'}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5">
                     {isProvisioned(t) ? (
                       <span className="text-[10px] text-green-600 font-semibold">Yes</span>
-                    ) : (
+                    ) : canWrite ? (
                       <button onClick={() => setShowProvision(t.id)} className="text-[10px] text-blue-600 hover:underline font-semibold">Provision</button>
+                    ) : (
+                      <span className="text-[10px] text-gray-400 font-semibold">No</span>
                     )}
                   </td>
                   <td className="px-4 py-2.5 text-gray-500">{t.created_at ? new Date(t.created_at).toLocaleDateString() : '\u2014'}</td>
                   <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => openConfigure(t)}
-                        className="text-[10px] text-indigo-600 hover:text-indigo-700 hover:underline font-medium"
-                        title="Configure cloud providers & add-ons"
-                      >
-                        Configure
-                      </button>
-                      <button
-                        onClick={() => { setShowEdit(t); setEditForm({ name: t.name }); }}
-                        className="text-[10px] text-gray-600 hover:text-blue-600 hover:underline font-medium"
-                        title="Edit organization"
-                      >
-                        Edit
-                      </button>
-                      <button onClick={() => handleViewAs(t)} className="text-[10px] text-blue-600 hover:underline font-medium" title={`Switch context to ${t.name}`}>
-                        View As
-                      </button>
-                      {isSuperadmin && t.slug !== 'default' && (
+                    {isReadOnly ? (
+                      <span className="text-[10px] text-gray-400 font-medium">Read-only</span>
+                    ) : (
+                      <div className="flex items-center gap-2">
                         <button
-                          onClick={() => setShowDeleteConfirm(t)}
-                          className="text-[10px] text-red-500 hover:text-red-700 hover:underline font-medium"
-                          title="Delete organization"
+                          onClick={() => openConfigure(t)}
+                          className="text-[10px] text-indigo-600 hover:text-indigo-700 hover:underline font-medium"
+                          title="Configure cloud providers & add-ons"
                         >
-                          Delete
+                          Configure
                         </button>
-                      )}
-                    </div>
+                        <button
+                          onClick={() => { setShowEdit(t); setEditForm({ name: t.name }); }}
+                          className="text-[10px] text-gray-600 hover:text-blue-600 hover:underline font-medium"
+                          title="Edit organization"
+                        >
+                          Edit
+                        </button>
+                        <button onClick={() => handleViewAs(t)} className="text-[10px] text-blue-600 hover:underline font-medium" title={`Switch context to ${t.name}`}>
+                          View As
+                        </button>
+                        {isSuperadmin && t.slug !== 'default' && (
+                          <button
+                            onClick={() => setShowDeleteConfirm(t)}
+                            className="text-[10px] text-red-500 hover:text-red-700 hover:underline font-medium"
+                            title="Delete organization"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </td>
                 </tr>
               );

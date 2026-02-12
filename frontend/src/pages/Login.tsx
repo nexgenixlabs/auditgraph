@@ -51,7 +51,7 @@ export default function Login() {
       if (isPortal) {
         // Portal mode: users with portal access go straight to admin console
         const portalRole = userData?.portal_role;
-        if (portalRole === 'superadmin' || portalRole === 'support') {
+        if (portalRole && ['superadmin', 'poweradmin', 'billing', 'reader'].includes(portalRole)) {
           navigate('/admin');
           return;
         }

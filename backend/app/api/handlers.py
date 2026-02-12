@@ -15,7 +15,7 @@ import json
 from psycopg2.extras import RealDictCursor
 from app.database import Database
 from app.engines.drift_detector import DriftDetector
-from app.api.auth import generate_access_token, generate_refresh_token, hash_refresh_token
+from app.api.auth import generate_access_token, generate_refresh_token, hash_refresh_token, VALID_PORTAL_ROLES
 
 load_dotenv(".env.local")
 load_dotenv()
@@ -4565,7 +4565,7 @@ def create_user_handler():
         if current_user and current_user.get('is_superadmin'):
             if 'is_superadmin' in data:
                 is_superadmin_flag = bool(data['is_superadmin'])
-            if 'portal_role' in data and data['portal_role'] in (None, 'support', 'superadmin'):
+            if 'portal_role' in data and (data['portal_role'] is None or data['portal_role'] in VALID_PORTAL_ROLES):
                 portal_role_val = data['portal_role']
 
         user = db.create_user(username, hashed, display_name, role, created_by, tenant_id=tenant_id,
@@ -4651,8 +4651,8 @@ def update_user_handler(user_id):
                 errors.append('Only superadmins can change portal_role')
             else:
                 pr = data['portal_role']
-                if pr not in (None, 'support', 'superadmin'):
-                    errors.append('portal_role must be null, "support", or "superadmin"')
+                if pr is not None and pr not in VALID_PORTAL_ROLES:
+                    errors.append(f'portal_role must be null or one of: {", ".join(VALID_PORTAL_ROLES)}')
                 else:
                     updates['portal_role'] = pr
 
