@@ -75,8 +75,8 @@ const CRED_STYLES: Record<string, string> = {
 type SortField = 'display_name' | 'risk_score' | 'owner_count' | 'activity_status' | 'credential_risk' | 'last_sign_in';
 
 export default function ServiceAccountGovernance() {
-  const { isAdmin, isAuditor } = useAuth();
-  const canAttest = isAdmin || isAuditor;
+  const { isAdmin, isReader } = useAuth();
+  const canAttest = isAdmin || isReader;
 
   const [stats, setStats] = useState<SAGovStats | null>(null);
   const [items, setItems] = useState<SAGovItem[]>([]);

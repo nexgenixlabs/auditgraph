@@ -6726,7 +6726,7 @@ def get_tenant_config():
         # Superadmin without tenant context — default Azure-only
         return jsonify({
             'cloud_providers': {
-                'azure': {'enabled': True, 'plan': 'starter'},
+                'azure': {'enabled': True, 'plan': 'pro'},
                 'aws': {'enabled': False, 'plan': None},
                 'gcp': {'enabled': False, 'plan': None},
             },

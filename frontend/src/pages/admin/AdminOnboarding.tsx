@@ -2,6 +2,12 @@ import React, { useState } from 'react';
 
 const STEPS = ['Organization', 'Admin User', 'Review', 'Complete'];
 
+const RESERVED_SLUGS = new Set([
+  'admin', 'api', 'www', 'app', 'portal', 'login', 'auth', 'sso',
+  'status', 'docs', 'help', 'support', 'billing', 'dashboard', 'health',
+  'metrics', 'system', 'internal', 'test', 'staging', 'dev', 'prod',
+]);
+
 interface TenantForm {
   name: string;
   slug: string;
@@ -23,39 +29,40 @@ export default function AdminOnboarding() {
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
 
-  async function handleCreateTenant() {
+  const slugError = tenantForm.slug && RESERVED_SLUGS.has(tenantForm.slug)
+    ? `"${tenantForm.slug}" is a reserved slug`
+    : null;
+
+  function handleNextFromOrg() {
+    if (slugError || !tenantForm.name || !tenantForm.slug) return;
+    setStep(1);
+  }
+
+  async function handleCreateAndProvision() {
+    if (slugError) return;
     setError(null);
     setProcessing(true);
     try {
-      const res = await fetch('/api/tenants', {
+      // Step 1: Create tenant
+      const createRes = await fetch('/api/tenants', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(tenantForm),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create tenant');
-      setCreatedTenantId(data.tenant.id);
-      setCreatedTenantSlug(data.tenant.slug);
-      setStep(1);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed');
-    } finally {
-      setProcessing(false);
-    }
-  }
+      const createData = await createRes.json();
+      if (!createRes.ok) throw new Error(createData.error || 'Failed to create tenant');
+      const tenantId = createData.tenant.id;
+      setCreatedTenantId(tenantId);
+      setCreatedTenantSlug(createData.tenant.slug);
 
-  async function handleProvision() {
-    if (!createdTenantId) return;
-    setError(null);
-    setProcessing(true);
-    try {
-      const res = await fetch(`/api/tenants/${createdTenantId}/provision`, {
+      // Step 2: Provision admin user
+      const provRes = await fetch(`/api/tenants/${tenantId}/provision`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(adminForm),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to provision');
+      const provData = await provRes.json();
+      if (!provRes.ok) throw new Error(provData.error || 'Failed to provision');
       setStep(3); // Complete
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed');
@@ -83,7 +90,7 @@ export default function AdminOnboarding() {
                 i === step ? 'border-blue-600 text-blue-600' :
                 'border-gray-300 text-gray-400'
               }`}>
-                {i < step ? '✓' : i + 1}
+                {i < step ? '\u2713' : i + 1}
               </div>
               <span className="text-xs font-medium">{s}</span>
             </div>
@@ -95,7 +102,7 @@ export default function AdminOnboarding() {
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
           {error}
-          <button onClick={() => setError(null)} className="ml-2 text-red-500">×</button>
+          <button onClick={() => setError(null)} className="ml-2 text-red-500">\u00d7</button>
         </div>
       )}
 
@@ -111,14 +118,15 @@ export default function AdminOnboarding() {
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">URL Slug</label>
               <div className="flex items-center gap-1">
-                <input value={tenantForm.slug} onChange={e => setTenantForm(p => ({ ...p, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, '') }))} className="w-48 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono" placeholder="acme" />
+                <input value={tenantForm.slug} onChange={e => setTenantForm(p => ({ ...p, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, '') }))} className={`w-48 px-3 py-2 border rounded-lg text-sm font-mono ${slugError ? 'border-red-400' : 'border-gray-300'}`} placeholder="acme" />
                 <span className="text-sm text-gray-500">.auditgraph.ai</span>
               </div>
+              {slugError && <p className="text-xs text-red-600 mt-1">{slugError}</p>}
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Plan</label>
               <div className="flex gap-3">
-                {['free', 'pro', 'enterprise'].map(p => (
+                {['free', 'trial', 'pro', 'enterprise'].map(p => (
                   <label key={p} className={`flex items-center gap-2 px-4 py-2.5 border rounded-lg cursor-pointer transition ${
                     tenantForm.plan === p ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
                   }`}>
@@ -128,8 +136,8 @@ export default function AdminOnboarding() {
                 ))}
               </div>
             </div>
-            <button onClick={handleCreateTenant} disabled={!tenantForm.name || !tenantForm.slug || processing} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
-              {processing ? 'Creating...' : 'Create Organization'}
+            <button onClick={handleNextFromOrg} disabled={!tenantForm.name || !tenantForm.slug || !!slugError} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
+              Next
             </button>
           </div>
         </div>
@@ -149,11 +157,11 @@ export default function AdminOnboarding() {
               <input value={adminForm.admin_display_name} onChange={e => setAdminForm(p => ({ ...p, admin_display_name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="John Admin" />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Password (min 8 characters)</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Password (min 12 characters)</label>
               <input type="password" value={adminForm.admin_password} onChange={e => setAdminForm(p => ({ ...p, admin_password: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Secure password" />
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(2)} disabled={!adminForm.admin_username || !adminForm.admin_display_name || adminForm.admin_password.length < 8} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
+              <button onClick={() => setStep(2)} disabled={!adminForm.admin_username || !adminForm.admin_display_name || adminForm.admin_password.length < 12} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
                 Review
               </button>
               <button onClick={() => setStep(0)} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Back</button>
@@ -189,8 +197,8 @@ export default function AdminOnboarding() {
             </div>
           </div>
           <div className="flex gap-2">
-            <button onClick={handleProvision} disabled={processing} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 transition">
-              {processing ? 'Provisioning...' : 'Confirm & Provision'}
+            <button onClick={handleCreateAndProvision} disabled={processing} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 transition">
+              {processing ? 'Creating...' : 'Create Organization'}
             </button>
             <button onClick={() => setStep(1)} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Back</button>
           </div>
@@ -200,11 +208,12 @@ export default function AdminOnboarding() {
       {/* Step 3: Complete */}
       {step === 3 && (
         <div className="bg-white border border-green-200 rounded-lg p-6 text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 text-green-600 text-2xl mb-4">✓</div>
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 text-green-600 text-2xl mb-4">{'\u2713'}</div>
           <h3 className="text-lg font-bold text-gray-900 mb-2">Organization Provisioned!</h3>
-          <p className="text-sm text-gray-600 mb-4">
+          <p className="text-sm text-gray-600 mb-1">
             <strong>{tenantForm.name}</strong> is ready. Share the credentials below with the client.
           </p>
+          <p className="text-xs text-amber-600 mb-4">The admin user will be prompted to change their password on first login.</p>
           <div className="bg-gray-50 rounded-lg p-4 text-left max-w-sm mx-auto space-y-2 mb-4">
             <div className="flex justify-between text-sm">
               <span className="text-gray-500">Portal URL:</span>
@@ -228,9 +237,12 @@ export default function AdminOnboarding() {
           >
             Copy Credentials
           </button>
-          <div className="mt-4">
-            <button onClick={() => { setStep(0); setCreatedTenantId(null); setCreatedTenantSlug(''); }} className="text-sm text-blue-600 hover:underline">
-              Onboard Another Client
+          <div className="mt-4 flex items-center justify-center gap-4">
+            <a href="/admin" className="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
+              Go to Tenants
+            </a>
+            <button onClick={() => { setStep(0); setCreatedTenantId(null); setCreatedTenantSlug(''); }} className="text-sm text-gray-500 hover:text-gray-700 hover:underline">
+              Onboard Another
             </button>
           </div>
         </div>

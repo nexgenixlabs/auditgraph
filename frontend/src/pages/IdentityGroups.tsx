@@ -57,7 +57,7 @@ const COLOR_PRESETS = ['#3B82F6', '#6366F1', '#8B5CF6', '#EC4899', '#F59E0B', '#
 
 export default function IdentityGroups() {
   const { user } = useAuth();
-  const canEdit = user?.role === 'admin' || user?.role === 'auditor';
+  const canEdit = user?.role === 'admin' || user?.role === 'reader';
 
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(true);

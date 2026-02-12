@@ -4,11 +4,12 @@ interface User {
   id: number;
   username: string;
   display_name: string;
-  role: 'admin' | 'auditor' | 'viewer';
+  role: 'admin' | 'reader' | 'compliance';
   tenant_id?: number;
   tenant_name?: string;
   is_superadmin?: boolean;
   portal_role?: 'superadmin' | 'poweradmin' | 'billing' | 'reader' | null;
+  force_password_change?: boolean;
 }
 
 interface AuthContextValue {
@@ -19,7 +20,7 @@ interface AuthContextValue {
   loginWithSsoCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
-  isAuditor: boolean;
+  isReader: boolean;
   isSuperAdmin: boolean;
   activeTenantId: number | null;
   activeTenantName: string | null;
@@ -222,7 +223,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loginWithSsoCode,
     logout,
     isAdmin: user?.role === 'admin',
-    isAuditor: user?.role === 'auditor' || user?.role === 'admin',
+    isReader: user?.role === 'reader' || user?.role === 'admin',
     isSuperAdmin: user?.is_superadmin === true,
     activeTenantId,
     activeTenantName,

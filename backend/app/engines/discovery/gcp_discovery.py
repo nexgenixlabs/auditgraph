@@ -17,7 +17,38 @@ Required IAM permissions:
 
 import os
 from .base import BaseDiscoveryEngine
-from .models import DiscoveryResult
+from .models import DiscoveryResult, CloudIdentity, CloudRole, CloudCredential
+
+
+# GCP privileged predefined roles
+GCP_PRIVILEGED_ROLES = {
+    'roles/owner',
+    'roles/editor',
+    'roles/iam.securityAdmin',
+    'roles/iam.serviceAccountAdmin',
+    'roles/iam.serviceAccountKeyAdmin',
+    'roles/iam.organizationRoleAdmin',
+    'roles/resourcemanager.organizationAdmin',
+    'roles/resourcemanager.projectIamAdmin',
+    'roles/cloudkms.admin',
+    'roles/secretmanager.admin',
+    'roles/compute.admin',
+    'roles/storage.admin',
+}
+
+# GCP dangerous permissions
+GCP_DANGEROUS_PERMISSIONS = {
+    'iam.serviceAccountKeys.create',
+    'iam.serviceAccounts.actAs',
+    'iam.serviceAccounts.getAccessToken',
+    'iam.serviceAccounts.signBlob',
+    'iam.serviceAccounts.implicitDelegation',
+    'resourcemanager.projects.setIamPolicy',
+    'resourcemanager.organizations.setIamPolicy',
+    'cloudkms.cryptoKeys.setIamPolicy',
+    'storage.buckets.setIamPolicy',
+    'compute.instances.setServiceAccount',
+}
 
 
 class GCPDiscoveryEngine(BaseDiscoveryEngine):
@@ -53,3 +84,29 @@ class GCPDiscoveryEngine(BaseDiscoveryEngine):
             "Configure GOOGLE_APPLICATION_CREDENTIALS and GCP_PROJECT_ID "
             "environment variables and install google-cloud-iam to enable."
         )
+
+    def _normalize_service_account(self, sa_data: dict) -> CloudIdentity:
+        """Convert GCP service account data to normalized CloudIdentity."""
+        return CloudIdentity(
+            provider='gcp',
+            identity_type='service_account',
+            display_name=sa_data.get('displayName', ''),
+            external_id=sa_data.get('email', ''),
+        )
+
+    def _normalize_iam_member(self, member: str, role: str) -> CloudIdentity:
+        """Convert GCP IAM binding member to normalized CloudIdentity."""
+        # member format: user:email, serviceAccount:email, group:email
+        parts = member.split(':', 1)
+        member_type = parts[0] if len(parts) > 1 else 'unknown'
+        member_id = parts[1] if len(parts) > 1 else member
+        return CloudIdentity(
+            provider='gcp',
+            identity_type=member_type,
+            display_name=member_id,
+            external_id=member,
+        )
+
+    def _is_privileged_role(self, role: str) -> bool:
+        """Check if a GCP role is considered privileged."""
+        return role in GCP_PRIVILEGED_ROLES

@@ -406,7 +406,7 @@ function AppContent() {
           <ProtectedRoute>
             <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
               {/* Top Bar */}
-              <TopBar onSearchOpen={() => setSearchOpen(true)} dark={dark} onToggleTheme={toggleTheme} />
+              <TopBar dark={dark} onToggleTheme={toggleTheme} onSearchOpen={() => setSearchOpen(true)} />
 
               {/* Left Sidebar */}
               <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} />

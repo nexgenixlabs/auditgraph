@@ -102,7 +102,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
         // Default to Azure visible on error
         setCloudConfig({
           cloud_providers: {
-            azure: { enabled: true, plan: 'starter' },
+            azure: { enabled: true, plan: 'pro' },
             aws: { enabled: false, plan: null },
             gcp: { enabled: false, plan: null },
           },
@@ -216,8 +216,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
           to={item.to}
           className={`flex items-center gap-2.5 ${indented ? 'pl-8 pr-3' : 'px-3'} py-1.5 rounded-md text-sm transition-colors ${
             active
-              ? 'bg-blue-50 text-blue-700 font-medium dark:bg-blue-900/30 dark:text-blue-400'
-              : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+              ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium'
+              : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-white'
           }`}
         >
           <span className={active ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}>
@@ -236,14 +236,14 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
       <li key={subGroup.label}>
         <button
           onClick={() => toggleSubGroup(subGroup.label)}
-          className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-md text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200 transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-md text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-white transition-colors"
         >
           <span className="text-gray-400 dark:text-gray-500">
             {subGroup.icon}
           </span>
           {subGroup.label}
           <svg
-            className={`w-3.5 h-3.5 ml-auto text-gray-400 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
+            className={`w-3.5 h-3.5 ml-auto text-gray-400 dark:text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -277,17 +277,6 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
                   isSubGroup(item) ? renderSubGroup(item) : renderNavItem(item)
                 )}
               </ul>
-              {group.label === 'Identities' && isAdmin && (
-                <Link
-                  to="/"
-                  className="flex items-center gap-1.5 px-3 mt-1.5 text-[11px] text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                  </svg>
-                  Add Cloud Provider
-                </Link>
-              )}
             </div>
           );
         })}

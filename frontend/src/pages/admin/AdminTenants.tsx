@@ -28,7 +28,7 @@ interface ProvisionForm {
 
 const DEFAULT_CLOUD_CONFIG: CloudConfig = {
   cloud_providers: {
-    azure: { enabled: true, plan: 'starter' },
+    azure: { enabled: true, plan: 'pro' },
     aws: { enabled: false, plan: null },
     gcp: { enabled: false, plan: null },
   },
@@ -66,6 +66,9 @@ export default function AdminTenants() {
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
   const [showEdit, setShowEdit] = useState<Tenant | null>(null);
   const [editForm, setEditForm] = useState({ name: '' });
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
   const [createForm, setCreateForm] = useState({ name: '', slug: '', plan: 'pro' });
   const [provisionForm, setProvisionForm] = useState<ProvisionForm>({ admin_username: '', admin_display_name: '', admin_password: '' });
   const [error, setError] = useState<string | null>(null);
@@ -153,10 +156,8 @@ export default function AdminTenants() {
     } catch { /* ignore */ }
   }
 
-  function handleViewAs(t: Tenant) {
-    switchTenant(t.id, t.name);
-    window.location.href = '/';
-  }
+  // Phase 78: View As disabled — coming soon
+  // function handleViewAs(t: Tenant) { switchTenant(t.id, t.name); window.location.href = '/'; }
 
   async function handleDelete() {
     if (!showDeleteConfirm) return;
@@ -192,6 +193,66 @@ export default function AdminTenants() {
       fetchTenants();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to update tenant');
+    }
+  }
+
+  function handleLogoSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 500 * 1024) {
+      setError('Logo must be under 500KB');
+      return;
+    }
+    if (!['image/png', 'image/jpeg', 'image/svg+xml'].includes(file.type)) {
+      setError('Logo must be PNG, JPEG, or SVG');
+      return;
+    }
+    setLogoFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setLogoPreview(reader.result as string);
+    reader.readAsDataURL(file);
+  }
+
+  async function handleLogoUpload(tenantId: number) {
+    if (!logoFile) return;
+    setUploadingLogo(true);
+    try {
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string>((resolve) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(logoFile);
+      });
+      const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ logo: dataUrl }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to upload logo');
+      }
+      setSuccess('Logo uploaded');
+      setLogoFile(null);
+      setLogoPreview(null);
+      fetchTenants();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to upload logo');
+    } finally {
+      setUploadingLogo(false);
+    }
+  }
+
+  async function handleLogoDelete(tenantId: number) {
+    try {
+      const res = await fetch(`/api/tenants/${tenantId}/logo`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to delete logo');
+      }
+      setSuccess('Logo removed');
+      fetchTenants();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete logo');
     }
   }
 
@@ -241,7 +302,7 @@ export default function AdminTenants() {
           ...prev.cloud_providers,
           [provider]: {
             enabled: newEnabled,
-            plan: newEnabled ? (current.plan || 'starter') : null,
+            plan: newEnabled ? (current.plan || 'pro') : null,
           },
         },
       };
@@ -408,6 +469,43 @@ export default function AdminTenants() {
                 className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-gray-50 text-gray-500 cursor-not-allowed"
               />
             </div>
+            {/* Logo upload */}
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Organization Logo</label>
+              <div className="flex items-center gap-3 flex-wrap">
+                {!!(logoPreview || (showEdit.settings as Record<string, unknown> | undefined)?.logo_url) && (
+                  <img
+                    src={logoPreview || String((showEdit.settings as Record<string, unknown>)?.logo_url || '')}
+                    alt="Logo"
+                    className="w-10 h-10 rounded-lg object-cover border border-gray-200"
+                  />
+                )}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/svg+xml"
+                  onChange={handleLogoSelect}
+                  className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                />
+                {!!logoFile && (
+                  <button
+                    onClick={() => handleLogoUpload(showEdit.id)}
+                    disabled={uploadingLogo}
+                    className="px-3 py-1 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 disabled:opacity-40"
+                  >
+                    {uploadingLogo ? 'Uploading...' : 'Upload'}
+                  </button>
+                )}
+                {!logoFile && !!(showEdit.settings as Record<string, unknown> | undefined)?.logo_url && (
+                  <button
+                    onClick={() => handleLogoDelete(showEdit.id)}
+                    className="px-3 py-1 bg-red-50 text-red-600 text-xs rounded-lg hover:bg-red-100"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1">PNG, JPEG, or SVG. Max 500KB.</p>
+            </div>
             <div className="col-span-2 flex gap-2">
               <button
                 onClick={handleEdit}
@@ -416,7 +514,7 @@ export default function AdminTenants() {
               >
                 Save Changes
               </button>
-              <button onClick={() => setShowEdit(null)} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Cancel</button>
+              <button onClick={() => { setShowEdit(null); setLogoFile(null); setLogoPreview(null); }} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Cancel</button>
             </div>
           </div>
         </div>
@@ -461,25 +559,34 @@ export default function AdminTenants() {
                         </button>
                       </div>
                       {cfg.enabled && (
-                        <div className="mt-3 flex gap-3">
-                          {PLAN_TIERS.map(tier => (
-                            <label
-                              key={tier}
-                              className={`flex-1 flex items-center justify-between px-3 py-2 border rounded-lg cursor-pointer transition ${cfg.plan === tier ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="radio"
-                                  name={`plan-${key}`}
-                                  checked={cfg.plan === tier}
-                                  onChange={() => setCloudPlan(key, tier)}
-                                  className="w-3.5 h-3.5 text-blue-600"
-                                />
-                                <span className="text-xs font-semibold text-gray-700 capitalize">{tier}</span>
-                              </div>
-                              <span className={`text-xs font-bold ${cfg.plan === tier ? 'text-blue-700' : 'text-gray-500'}`}>${pricing[tier]}/mo</span>
-                            </label>
-                          ))}
+                        <div className="mt-3">
+                          {PLAN_TIERS.length === 1 ? (
+                            <div className="flex items-center justify-between px-3 py-2 border border-blue-400 bg-blue-50 rounded-lg">
+                              <span className="text-xs font-semibold text-gray-700 capitalize">{PLAN_TIERS[0]}</span>
+                              <span className="text-xs font-bold text-blue-700">${pricing[PLAN_TIERS[0]]}/mo</span>
+                            </div>
+                          ) : (
+                            <div className="flex gap-3">
+                              {PLAN_TIERS.map(tier => (
+                                <label
+                                  key={tier}
+                                  className={`flex-1 flex items-center justify-between px-3 py-2 border rounded-lg cursor-pointer transition ${cfg.plan === tier ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <input
+                                      type="radio"
+                                      name={`plan-${key}`}
+                                      checked={cfg.plan === tier}
+                                      onChange={() => setCloudPlan(key, tier)}
+                                      className="w-3.5 h-3.5 text-blue-600"
+                                    />
+                                    <span className="text-xs font-semibold text-gray-700 capitalize">{tier}</span>
+                                  </div>
+                                  <span className={`text-xs font-bold ${cfg.plan === tier ? 'text-blue-700' : 'text-gray-500'}`}>${pricing[tier]}/mo</span>
+                                </label>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -633,8 +740,8 @@ export default function AdminTenants() {
               <th className="px-4 py-2.5">Clouds</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">Status</th>
-              <th className="px-4 py-2.5">License</th>
-              <th className="px-4 py-2.5">Provisioned</th>
+              <th className="px-4 py-2.5">License Activated</th>
+              <th className="px-4 py-2.5">License Expiry</th>
               <th className="px-4 py-2.5">Created</th>
               <th className="px-4 py-2.5">Actions</th>
             </tr>
@@ -679,6 +786,7 @@ export default function AdminTenants() {
                       </span>
                     )}
                   </td>
+                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
                   <td className="px-4 py-2.5">
                     <div>
                       <span className={`text-[10px] font-semibold ${ls.color}`}>{ls.label}</span>
@@ -686,15 +794,6 @@ export default function AdminTenants() {
                         <div className="text-[9px] text-gray-400">{formatDate(t.license_expires_at)}</div>
                       )}
                     </div>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    {isProvisioned(t) ? (
-                      <span className="text-[10px] text-green-600 font-semibold">Yes</span>
-                    ) : canWrite ? (
-                      <button onClick={() => setShowProvision(t.id)} className="text-[10px] text-blue-600 hover:underline font-semibold">Provision</button>
-                    ) : (
-                      <span className="text-[10px] text-gray-400 font-semibold">No</span>
-                    )}
                   </td>
                   <td className="px-4 py-2.5 text-gray-500">{formatDate(t.created_at)}</td>
                   <td className="px-4 py-2.5">
@@ -710,17 +809,12 @@ export default function AdminTenants() {
                           Configure
                         </button>
                         <button
-                          onClick={() => { setShowEdit(t); setEditForm({ name: t.name }); }}
-                          className="text-[10px] text-gray-600 hover:text-blue-600 hover:underline font-medium"
-                          title="Edit organization"
+                          disabled
+                          className="text-[10px] text-gray-400 font-medium cursor-not-allowed"
+                          title="Coming soon"
                         >
-                          Edit
+                          View As
                         </button>
-                        {canWrite && (
-                          <button onClick={() => handleViewAs(t)} className="text-[10px] text-blue-600 hover:underline font-medium" title={`Switch context to ${t.name}`}>
-                            View As
-                          </button>
-                        )}
                         {isSuperadmin && t.slug !== 'default' && (
                           <button
                             onClick={() => setShowDeleteConfirm(t)}

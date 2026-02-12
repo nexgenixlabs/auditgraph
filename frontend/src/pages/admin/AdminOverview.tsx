@@ -9,19 +9,14 @@ interface TenantMetric {
   user_count: number;
   total_runs: number;
   last_discovery: string | null;
-  total_identities: number;
-  critical_count: number;
-  high_count: number;
-  risk_score: number;
+  license_activated_at: string | null;
+  license_expires_at: string | null;
+  clouds_enabled: string[];
 }
 
 interface GlobalMetrics {
   total_tenants: number;
   active_tenants: number;
-  total_identities: number;
-  total_critical: number;
-  total_high: number;
-  avg_risk_score: number;
 }
 
 interface AnalyticsData {
@@ -35,6 +30,19 @@ function freshnessLabel(lastDiscovery: string | null): { text: string; color: st
   if (hours < 24) return { text: `${Math.round(hours)}h ago`, color: 'text-green-600' };
   if (hours < 72) return { text: `${Math.round(hours / 24)}d ago`, color: 'text-yellow-600' };
   return { text: `${Math.round(hours / 24)}d ago`, color: 'text-red-600' };
+}
+
+function licenseLabel(expiresAt: string | null): { text: string; color: string } {
+  if (!expiresAt) return { text: '-', color: 'text-gray-400' };
+  const days = (new Date(expiresAt).getTime() - Date.now()) / 86400000;
+  if (days < 0) return { text: 'Expired', color: 'text-red-600' };
+  if (days < 30) return { text: `${Math.round(days)}d left`, color: 'text-yellow-600' };
+  return { text: `${Math.round(days)}d left`, color: 'text-green-600' };
+}
+
+function formatDate(d: string | null): string {
+  if (!d) return '-';
+  return new Date(d).toLocaleDateString();
 }
 
 export default function AdminOverview() {
@@ -70,56 +78,78 @@ export default function AdminOverview() {
         <StatCard label="Active Tenants" value={g.active_tenants} color="green" />
       </div>
 
-      {/* Tenant health grid */}
-      <div>
-        <h3 className="text-sm font-semibold text-gray-800 mb-3">Tenant Health</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {tenants.map(t => {
-            const fresh = freshnessLabel(t.last_discovery);
-            return (
-              <div key={t.id} className={`border rounded-lg p-4 ${t.enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-200 opacity-60'}`}>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold">
-                      {t.name.substring(0, 2).toUpperCase()}
+      {/* Tenant health table */}
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-800">Tenant Health</h3>
+        </div>
+        <table className="min-w-full text-left text-xs">
+          <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase tracking-wider font-medium">
+            <tr>
+              <th className="px-4 py-2.5">Tenant</th>
+              <th className="px-4 py-2.5">Users</th>
+              <th className="px-4 py-2.5">License Model</th>
+              <th className="px-4 py-2.5">Cloud Providers</th>
+              <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5">Last Scan</th>
+              <th className="px-4 py-2.5">License Activated</th>
+              <th className="px-4 py-2.5">License Expiry</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {tenants.map(t => {
+              const fresh = freshnessLabel(t.last_discovery);
+              const lic = licenseLabel(t.license_expires_at);
+              return (
+                <tr key={t.id} className={`hover:bg-gray-50 ${!t.enabled ? 'opacity-60' : ''}`}>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">
+                        {t.name.substring(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">{t.name}</div>
+                        <div className="text-[10px] text-gray-500">{t.slug}</div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="text-sm font-semibold text-gray-900">{t.name}</div>
-                      <div className="text-[10px] text-gray-500">{t.slug}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                  </td>
+                  <td className="px-4 py-2.5 text-sm font-bold text-gray-800">{t.user_count}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold capitalize ${
                       t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
                       t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
                       t.plan === 'trial' ? 'bg-amber-100 text-amber-700' :
                       'bg-gray-100 text-gray-600'
                     }`}>{t.plan}</span>
-                    {!t.enabled && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">Disabled</span>}
-                  </div>
-                </div>
-                <div className="grid grid-cols-4 gap-2 text-center">
-                  <div>
-                    <div className="text-lg font-bold text-gray-800">{t.total_identities}</div>
-                    <div className="text-[10px] text-gray-400">Identities</div>
-                  </div>
-                  <div>
-                    <div className="text-lg font-bold text-gray-800">{t.user_count}</div>
-                    <div className="text-[10px] text-gray-400">Users</div>
-                  </div>
-                  <div>
-                    <div className={`text-lg font-bold ${t.critical_count > 0 ? 'text-red-600' : 'text-gray-800'}`}>{t.critical_count}</div>
-                    <div className="text-[10px] text-gray-400">Critical</div>
-                  </div>
-                  <div>
-                    <div className={`text-lg font-bold ${fresh.color}`}>{fresh.text}</div>
-                    <div className="text-[10px] text-gray-400">Last Scan</div>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-0.5 flex-wrap">
+                      {(t.clouds_enabled || []).length > 0 ? (t.clouds_enabled || []).map(c => (
+                        <span key={c} className={`px-1 py-0.5 rounded text-[9px] font-bold ${
+                          c === 'azure' ? 'bg-blue-100 text-blue-700' :
+                          c === 'aws' ? 'bg-orange-100 text-orange-700' :
+                          'bg-red-100 text-red-600'
+                        }`}>{c.toUpperCase()}</span>
+                      )) : <span className="text-[10px] text-gray-400">&mdash;</span>}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                      t.enabled ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                    }`}>{t.enabled ? 'Active' : 'Disabled'}</span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-xs font-semibold ${fresh.color}`}>{fresh.text}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-xs font-semibold ${lic.color}`}>{lic.text}</span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

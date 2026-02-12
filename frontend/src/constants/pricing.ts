@@ -1,8 +1,8 @@
 // ── Cloud Provider Pricing (per-cloud sub-tiers within Pro) ──────────────────
 export const CLOUD_PRICING: Record<string, Record<string, number>> = {
-  azure: { starter: 199, growth: 799, enterprise: 1499 },
-  aws:   { starter: 249, growth: 849, enterprise: 1549 },
-  gcp:   { starter: 229, growth: 829, enterprise: 1529 },
+  azure: { pro: 199 },
+  aws:   { pro: 249 },
+  gcp:   { pro: 229 },
 };
 
 // ── Paid Add-Ons (only purchasable extras beyond base Pro features) ──────────
@@ -31,7 +31,7 @@ export const CLOUD_LABELS: Record<string, { label: string; color: string; bg: st
 };
 
 // Per-cloud sub-tiers (within Pro plan)
-export const PLAN_TIERS = ['starter', 'growth', 'enterprise'] as const;
+export const PLAN_TIERS = ['pro'] as const;
 
 // Overall account tiers
 export const ACCOUNT_TIERS = ['free', 'trial', 'pro', 'enterprise'] as const;
@@ -87,3 +87,11 @@ export function calculateAddonTotal(cfg: CloudConfig): number {
   }
   return total;
 }
+
+// Phase 78: Tier limits for free/trial enforcement
+export const TIER_LIMITS: Record<string, { max_identities: number | null; trial_days?: number; blocked_features: string[] }> = {
+  free: { max_identities: 50, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules'] },
+  trial: { max_identities: 500, trial_days: 14, blocked_features: [] },
+  pro: { max_identities: null, blocked_features: [] },
+  enterprise: { max_identities: null, blocked_features: [] },
+};

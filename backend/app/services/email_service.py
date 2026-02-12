@@ -38,6 +38,30 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+def get_email_service():
+    """Factory: select email service provider based on DB setting.
+
+    Returns an EmailService (Microsoft Graph) or SendGridEmailService
+    depending on the 'email_provider' setting. Defaults to Graph.
+    """
+    try:
+        from app.database import Database
+        db = Database()
+        provider = db.get_setting('email_provider', 'graph')
+        db.close()
+    except Exception:
+        provider = 'graph'
+
+    if provider == 'sendgrid':
+        try:
+            from app.services.sendgrid_service import SendGridEmailService
+            return SendGridEmailService()
+        except ImportError:
+            logger.warning("sendgrid package not installed, falling back to Graph")
+
+    return EmailService()
+
+
 class EmailService:
     """Email service for AuditGraph notifications using Microsoft Graph API"""
 

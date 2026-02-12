@@ -22,7 +22,37 @@ Required IAM permissions:
 
 import os
 from .base import BaseDiscoveryEngine
-from .models import DiscoveryResult
+from .models import DiscoveryResult, CloudIdentity, CloudRole, CloudCredential
+
+
+# AWS privileged managed policy ARNs
+AWS_PRIVILEGED_POLICIES = {
+    'arn:aws:iam::aws:policy/AdministratorAccess',
+    'arn:aws:iam::aws:policy/IAMFullAccess',
+    'arn:aws:iam::aws:policy/PowerUserAccess',
+    'arn:aws:iam::aws:policy/SecurityAudit',
+    'arn:aws:iam::aws:policy/AmazonS3FullAccess',
+    'arn:aws:iam::aws:policy/AmazonEC2FullAccess',
+    'arn:aws:iam::aws:policy/AWSLambda_FullAccess',
+    'arn:aws:iam::aws:policy/AmazonRDSFullAccess',
+}
+
+# AWS dangerous inline policy actions
+AWS_DANGEROUS_ACTIONS = {
+    '*',
+    'iam:*',
+    'iam:CreateUser',
+    'iam:AttachUserPolicy',
+    'iam:AttachRolePolicy',
+    'iam:PutUserPolicy',
+    'iam:PutRolePolicy',
+    'iam:CreateAccessKey',
+    'iam:PassRole',
+    'sts:AssumeRole',
+    'organizations:*',
+    'kms:*',
+    'secretsmanager:GetSecretValue',
+}
 
 
 class AWSDiscoveryEngine(BaseDiscoveryEngine):
@@ -59,3 +89,26 @@ class AWSDiscoveryEngine(BaseDiscoveryEngine):
             "Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY "
             "environment variables and install boto3 to enable."
         )
+
+    def _normalize_iam_user(self, user_data: dict) -> CloudIdentity:
+        """Convert AWS IAM user data to normalized CloudIdentity."""
+        # Placeholder for future implementation
+        return CloudIdentity(
+            provider='aws',
+            identity_type='iam_user',
+            display_name=user_data.get('UserName', ''),
+            external_id=user_data.get('Arn', ''),
+        )
+
+    def _normalize_iam_role(self, role_data: dict) -> CloudIdentity:
+        """Convert AWS IAM role data to normalized CloudIdentity."""
+        return CloudIdentity(
+            provider='aws',
+            identity_type='iam_role',
+            display_name=role_data.get('RoleName', ''),
+            external_id=role_data.get('Arn', ''),
+        )
+
+    def _is_privileged_policy(self, policy_arn: str) -> bool:
+        """Check if an AWS policy ARN is considered privileged."""
+        return policy_arn in AWS_PRIVILEGED_POLICIES

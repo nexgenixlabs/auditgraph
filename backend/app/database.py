@@ -5659,7 +5659,7 @@ class Database:
             return None
         settings = tenant.get('settings') or {}
         cloud_providers = settings.get('cloud_providers', {
-            'azure': {'enabled': True, 'plan': 'starter'},
+            'azure': {'enabled': True, 'plan': 'pro'},
             'aws': {'enabled': False, 'plan': None},
             'gcp': {'enabled': False, 'plan': None},
         })
@@ -5669,7 +5669,7 @@ class Database:
                 default_enabled = provider == 'azure'
                 cloud_providers[provider] = {
                     'enabled': default_enabled,
-                    'plan': 'starter' if default_enabled else None,
+                    'plan': 'pro' if default_enabled else None,
                 }
         addons = settings.get('addons', {
             'extended_retention': False,

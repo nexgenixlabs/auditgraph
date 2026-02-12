@@ -22,7 +22,7 @@ function getTenantConfig(t: TenantBilling): CloudConfig {
   const settings = (t.settings || {}) as Record<string, unknown>;
   return {
     cloud_providers: (settings.cloud_providers || {
-      azure: { enabled: true, plan: 'starter' },
+      azure: { enabled: true, plan: 'pro' },
       aws: { enabled: false, plan: null },
       gcp: { enabled: false, plan: null },
     }) as CloudConfig['cloud_providers'],

@@ -59,8 +59,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Phase 78: Scan mode definitions
+SCAN_MODES = {
+    'quick': {
+        'label': 'Quick Scan',
+        'description': 'Identities only — fastest, lightweight check',
+        'skip_roles': True,
+        'skip_credentials': True,
+        'skip_pim': True,
+        'skip_ca': True,
+        'skip_resources': True,
+    },
+    'standard': {
+        'label': 'Standard Scan',
+        'description': 'Identities + roles + credentials — recommended for daily runs',
+        'skip_roles': False,
+        'skip_credentials': False,
+        'skip_pim': True,
+        'skip_ca': True,
+        'skip_resources': True,
+    },
+    'deep': {
+        'label': 'Deep Audit',
+        'description': 'Full audit — identities, roles, credentials, PIM, CA, resources',
+        'skip_roles': False,
+        'skip_credentials': False,
+        'skip_pim': False,
+        'skip_ca': False,
+        'skip_resources': False,
+    },
+}
 
-def run_scheduled_discovery():
+
+def run_scheduled_discovery(scan_mode: str = 'deep'):
     """
     Runs the discovery process.
     Called by the scheduler.
@@ -825,13 +856,13 @@ def get_next_report_time():
     return None
 
 
-def trigger_manual_discovery():
+def trigger_manual_discovery(scan_mode: str = 'deep'):
     """
     Trigger discovery immediately (manual override).
     Used by API endpoint or admin panel.
     """
-    logger.info("🔄 MANUAL DISCOVERY TRIGGERED")
-    run_scheduled_discovery()
+    logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED (mode={scan_mode})")
+    run_scheduled_discovery(scan_mode=scan_mode)
 
 
 # For testing the scheduler in isolation

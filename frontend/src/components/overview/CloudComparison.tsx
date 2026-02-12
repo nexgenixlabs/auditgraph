@@ -124,7 +124,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
       .then(cfg => setCloudConfig({ cloud_providers: cfg.cloud_providers, addons: cfg.addons }))
       .catch(() => {
         setCloudConfig({
-          cloud_providers: { azure: { enabled: true, plan: 'starter' }, aws: { enabled: false, plan: null }, gcp: { enabled: false, plan: null } },
+          cloud_providers: { azure: { enabled: true, plan: 'pro' }, aws: { enabled: false, plan: null }, gcp: { enabled: false, plan: null } },
           addons: {},
         });
       });
@@ -396,17 +396,30 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
                   return (
                     <div
                       key={cloud}
-                      className={`flex items-start gap-3 p-4 border-2 border-dashed rounded-xl ${cloudBorderColors[cloud]}`}
+                      className={`flex items-start gap-3 p-4 border-2 border-dashed rounded-xl opacity-60 cursor-not-allowed ${cloudBorderColors[cloud]}`}
                     >
                       <div className="shrink-0 mt-0.5 opacity-50">{cloudIcons[cloud]}</div>
                       <div className="flex-1 min-w-0">
-                        <span className={`text-sm font-bold ${cloudTextColors[cloud]}`}>{meta?.label}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-sm font-bold ${cloudTextColors[cloud]}`}>{meta?.label}</span>
+                          <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                          </svg>
+                        </div>
                         <p className="text-xs text-gray-500 mt-1">{meta?.description}</p>
-                        <p className="text-xs text-gray-400 mt-1.5">Contact your AuditGraph administrator to enable this provider.</p>
                       </div>
                     </div>
                   );
                 })}
+
+                {/* Contact support warning */}
+                <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                  <p className="text-xs text-amber-800">
+                    To add a new cloud provider, please contact AuditGraph support at{' '}
+                    <span className="font-bold">support@nexgenixlabs.com</span>.
+                    Our team will enable the cloud for your account and assist with setup.
+                  </p>
+                </div>
               </div>
             )}
 

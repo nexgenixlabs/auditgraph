@@ -278,14 +278,6 @@ export default function AdminUsers() {
                       >
                         Profile
                       </button>
-                      {u.id !== currentUser?.id && (
-                        <button
-                          onClick={() => handleRemovePortalAccess(u.id)}
-                          className="text-xs text-red-600 hover:text-red-800"
-                        >
-                          Remove Access
-                        </button>
-                      )}
                     </div>
                   </td>
                 </tr>

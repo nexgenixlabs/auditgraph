@@ -126,12 +126,15 @@ interface SettingsData {
   notify_permission_changes: string;
   notify_risk_changes: string;
   notify_credential_changes: string;
+  notify_weekly_digest: string;
   report_schedule_enabled: string;
   report_schedule_frequency: string;
   report_email_to: string;
   azure_tenant_id: string;
   azure_client_id: string;
   azure_client_secret: string;
+  timezone: string;
+  theme: string;
 }
 
 interface StatusData {
@@ -203,12 +206,9 @@ export default function Settings() {
     }
   }
 
-  // Phase 45: Tenant management state
+  // Phase 45: Tenant info
   const [currentTenant, setCurrentTenant] = useState<any>(null);
   const [tenants, setTenants] = useState<any[]>([]);
-  const [tenantModal, setTenantModal] = useState<{ mode: 'create' | 'edit'; tenant?: any } | null>(null);
-  const [tenantForm, setTenantForm] = useState({ name: '', slug: '', plan: 'free' });
-  const [tenantSaving, setTenantSaving] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -242,60 +242,14 @@ export default function Settings() {
     loadTenant();
   }, []);
 
-  const loadTenants = useCallback(async () => {
+  // Load tenants list for superadmin user modal
+  useEffect(() => {
     if (!isSuperAdmin) return;
-    try {
-      const res = await fetch('/api/tenants');
-      if (res.ok) {
-        const data = await res.json();
-        setTenants(data.tenants || []);
-      }
-    } catch { /* ignore */ }
+    fetch('/api/tenants')
+      .then(r => r.ok ? r.json() : { tenants: [] })
+      .then(d => setTenants(d.tenants || []))
+      .catch(() => {});
   }, [isSuperAdmin]);
-
-  useEffect(() => { loadTenants(); }, [loadTenants]);
-
-  const handleTenantSave = useCallback(async () => {
-    setTenantSaving(true);
-    try {
-      const isEdit = tenantModal?.mode === 'edit';
-      const url = isEdit ? `/api/tenants/${tenantModal?.tenant?.id}` : '/api/tenants';
-      const method = isEdit ? 'PUT' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(tenantForm),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || 'Failed to save tenant');
-        return;
-      }
-      setTenantModal(null);
-      setSuccess(isEdit ? 'Tenant updated' : 'Tenant created');
-      loadTenants();
-    } catch (e: any) {
-      setError(e?.message || 'Failed to save tenant');
-    } finally {
-      setTenantSaving(false);
-    }
-  }, [tenantModal, tenantForm, loadTenants]);
-
-  const handleTenantDelete = useCallback(async (id: number, name: string) => {
-    if (!window.confirm(`Delete tenant "${name}"? This cannot be undone.`)) return;
-    try {
-      const res = await fetch(`/api/tenants/${id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || 'Failed to delete tenant');
-        return;
-      }
-      setSuccess('Tenant deleted');
-      loadTenants();
-    } catch (e: any) {
-      setError(e?.message || 'Failed to delete tenant');
-    }
-  }, [loadTenants]);
 
   async function handleSave() {
     if (!settings) return;
@@ -1377,27 +1331,111 @@ export default function Settings() {
       {settings && (
         <>
           {/* Section 1: Organization */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-5">
             <div className="text-lg font-semibold text-gray-900">Organization</div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Organization Name
-              </label>
-              <input
-                type="text"
-                value={settings.org_name}
-                onChange={e => update('org_name', e.target.value)}
-                placeholder="e.g., Acme Corp"
-                className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              />
-              <p className="text-xs text-gray-400 mt-1">
-                Appears on PDF report cover pages and email notifications
-              </p>
+
+            <div className="grid grid-cols-2 gap-6">
+              {/* Left: Logo upload */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Organization Logo</label>
+                <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-gray-400 transition">
+                  {currentTenant?.settings?.logo_url ? (
+                    <img src={String(currentTenant.settings.logo_url)} alt="Logo" className="w-16 h-16 mx-auto mb-2 rounded-lg object-cover" />
+                  ) : (
+                    <svg className="w-12 h-12 mx-auto text-gray-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                  )}
+                  <p className="text-xs text-gray-500">Drag & drop or click to upload</p>
+                  <p className="text-[10px] text-gray-400 mt-1">PNG, SVG, or JPG — max 2MB</p>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/svg+xml"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      if (file.size > 2 * 1024 * 1024) { setError('Logo must be under 2MB'); return; }
+                      const reader = new FileReader();
+                      reader.onload = async () => {
+                        try {
+                          const tid = currentTenant?.id;
+                          if (!tid) { setError('No tenant context'); return; }
+                          const res = await fetch(`/api/tenants/${tid}/logo`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ logo: reader.result }),
+                          });
+                          if (!res.ok) throw new Error('Upload failed');
+                          setSuccess('Logo uploaded');
+                        } catch { setError('Failed to upload logo'); }
+                      };
+                      reader.readAsDataURL(file);
+                    }}
+                    className="hidden"
+                    id="logo-upload"
+                  />
+                  <label htmlFor="logo-upload" className="mt-2 inline-block px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-200 cursor-pointer transition">
+                    Choose File
+                  </label>
+                </div>
+              </div>
+
+              {/* Right: Org Name + Timezone + Theme */}
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Organization Name</label>
+                  <input
+                    type="text"
+                    value={settings.org_name}
+                    onChange={e => update('org_name', e.target.value)}
+                    placeholder="e.g., Acme Corp"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">Appears on PDF reports and email notifications</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+                  <select
+                    value={settings.timezone || 'UTC'}
+                    onChange={e => update('timezone' as keyof SettingsData, e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="UTC">UTC</option>
+                    <option value="America/New_York">Eastern (ET)</option>
+                    <option value="America/Chicago">Central (CT)</option>
+                    <option value="America/Denver">Mountain (MT)</option>
+                    <option value="America/Los_Angeles">Pacific (PT)</option>
+                    <option value="Europe/London">London (GMT)</option>
+                    <option value="Europe/Berlin">Berlin (CET)</option>
+                    <option value="Asia/Tokyo">Tokyo (JST)</option>
+                    <option value="Asia/Kolkata">India (IST)</option>
+                    <option value="Australia/Sydney">Sydney (AEST)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Theme</label>
+                  <div className="flex gap-2">
+                    {(['light', 'dark', 'system'] as const).map(t => (
+                      <button
+                        key={t}
+                        onClick={() => update('theme' as keyof SettingsData, t)}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium border transition capitalize ${
+                          settings.theme === t
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Tenant info */}
             {currentTenant && (
-              <div className="flex items-center gap-3 pt-2 border-t">
+              <div className="flex items-center gap-3 pt-3 border-t">
                 <span className="text-xs text-gray-500">Tenant:</span>
                 <span className="text-sm font-medium text-gray-800">{currentTenant.name}</span>
                 <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500">{currentTenant.slug}</span>
@@ -1408,138 +1446,7 @@ export default function Settings() {
                 }`}>{currentTenant.plan}</span>
               </div>
             )}
-
-            {/* Superadmin: Tenant Management */}
-            {isSuperAdmin && tenants.length > 0 && (
-              <div className="pt-3 border-t space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold text-gray-700">All Tenants</div>
-                  <button
-                    onClick={() => {
-                      setTenantForm({ name: '', slug: '', plan: 'free' });
-                      setTenantModal({ mode: 'create' });
-                    }}
-                    className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                  >
-                    + Add Tenant
-                  </button>
-                </div>
-                <div className="border rounded-lg overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wider">
-                        <th className="px-4 py-2">Name</th>
-                        <th className="px-4 py-2">Slug</th>
-                        <th className="px-4 py-2">Plan</th>
-                        <th className="px-4 py-2">Users</th>
-                        <th className="px-4 py-2">Status</th>
-                        <th className="px-4 py-2 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                      {tenants.map(t => (
-                        <tr key={t.id} className="hover:bg-gray-50">
-                          <td className="px-4 py-2 font-medium text-gray-900">{t.name}</td>
-                          <td className="px-4 py-2 text-gray-500 font-mono text-xs">{t.slug}</td>
-                          <td className="px-4 py-2">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                              t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
-                              t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
-                              'bg-gray-100 text-gray-600'
-                            }`}>{t.plan}</span>
-                          </td>
-                          <td className="px-4 py-2 text-gray-500">{t.user_count ?? 0}</td>
-                          <td className="px-4 py-2">
-                            <span className={`w-2 h-2 rounded-full inline-block ${t.enabled ? 'bg-green-500' : 'bg-red-400'}`} />
-                          </td>
-                          <td className="px-4 py-2 text-right">
-                            <button
-                              onClick={() => {
-                                setTenantForm({ name: t.name, slug: t.slug, plan: t.plan });
-                                setTenantModal({ mode: 'edit', tenant: t });
-                              }}
-                              className="text-xs text-blue-600 hover:text-blue-800 mr-3"
-                            >Edit</button>
-                            {t.slug !== 'default' && (
-                              <button
-                                onClick={() => handleTenantDelete(t.id, t.name)}
-                                className="text-xs text-red-500 hover:text-red-700"
-                              >Delete</button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
           </div>
-
-          {/* Tenant Create/Edit Modal */}
-          {tenantModal && (
-            <>
-              <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setTenantModal(null)} />
-              <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                <div className="bg-white rounded-xl shadow-2xl border w-full max-w-md p-6 space-y-4">
-                  <h3 className="text-lg font-semibold text-gray-900">
-                    {tenantModal.mode === 'edit' ? 'Edit Tenant' : 'Create Tenant'}
-                  </h3>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-                    <input
-                      type="text"
-                      value={tenantForm.name}
-                      onChange={e => setTenantForm(f => ({ ...f, name: e.target.value }))}
-                      placeholder="Organization name"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Slug</label>
-                    <input
-                      type="text"
-                      value={tenantForm.slug}
-                      onChange={e => setTenantForm(f => ({ ...f, slug: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') }))}
-                      placeholder="url-safe-slug"
-                      disabled={tenantModal.mode === 'edit'}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
-                    />
-                    <p className="text-[10px] text-gray-400 mt-0.5">Lowercase, alphanumeric, hyphens and underscores only</p>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Plan</label>
-                    <select
-                      value={tenantForm.plan}
-                      onChange={e => setTenantForm(f => ({ ...f, plan: e.target.value }))}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    >
-                      <option value="free">Free</option>
-                      <option value="pro">Pro</option>
-                      <option value="enterprise">Enterprise</option>
-                    </select>
-                  </div>
-                  <div className="flex items-center justify-end gap-3 pt-2">
-                    <button
-                      onClick={() => setTenantModal(null)}
-                      className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition"
-                    >Cancel</button>
-                    <button
-                      onClick={handleTenantSave}
-                      disabled={tenantSaving || !tenantForm.name || !tenantForm.slug}
-                      className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition ${
-                        tenantSaving || !tenantForm.name || !tenantForm.slug
-                          ? 'bg-gray-400 cursor-not-allowed'
-                          : 'bg-blue-600 hover:bg-blue-700'
-                      }`}
-                    >
-                      {tenantSaving ? 'Saving...' : tenantModal.mode === 'edit' ? 'Update' : 'Create'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
 
           {/* Section 2: Cloud Connections */}
           <div ref={cloudSectionRef} id="cloud-connections" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
@@ -1695,6 +1602,9 @@ export default function Settings() {
                 <span className="text-gray-600">
                   Azure: {status?.azure_configured ? 'Connected' : 'Not configured'}
                 </span>
+                {status?.azure_configured && (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-600">Service Principal</span>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full ${status?.scheduler_running ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
@@ -1707,6 +1617,18 @@ export default function Settings() {
                   Next run: {new Date(status.next_run).toLocaleString()}
                 </span>
               )}
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch('/api/runs/trigger', { method: 'POST' });
+                    if (res.ok) setSuccess('Scan triggered successfully');
+                    else setError('Failed to trigger scan');
+                  } catch { setError('Failed to trigger scan'); }
+                }}
+                className="ml-auto px-3 py-1.5 text-xs font-medium text-blue-600 border border-blue-300 rounded-lg hover:bg-blue-50 transition"
+              >
+                Scan Now
+              </button>
             </div>
 
             {/* Interval selector */}
@@ -1763,21 +1685,24 @@ export default function Settings() {
 
             {settings.email_enabled === 'true' && (
               <>
-                {/* Recipient */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Notification Recipient
-                  </label>
-                  <input
-                    type="email"
-                    value={settings.email_to}
-                    onChange={e => update('email_to', e.target.value)}
-                    placeholder="alerts@yourcompany.com"
-                    className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">
-                    Email address to receive change notifications. Leave empty to use the default.
-                  </p>
+                {/* Recipient + Sender */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Alert Recipients</label>
+                    <input
+                      type="email"
+                      value={settings.email_to}
+                      onChange={e => update('email_to', e.target.value)}
+                      placeholder="alerts@yourcompany.com"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Sender</label>
+                    <div className="px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-500 bg-gray-50">
+                      auditgraphalerts@nexgenixlabs.com
+                    </div>
+                  </div>
                 </div>
 
                 {/* Test email button */}
@@ -1808,28 +1733,34 @@ export default function Settings() {
                   )}
                 </div>
 
-                {/* Change type toggles */}
+                {/* Notification toggles — 6 switches */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Notify on these change types
-                  </label>
-                  <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-3">Notification Types</label>
+                  <div className="space-y-3">
                     {([
-                      { key: 'notify_new_identities' as const, label: 'New identities added', color: 'text-green-600' },
-                      { key: 'notify_removed_identities' as const, label: 'Identities removed', color: 'text-red-600' },
-                      { key: 'notify_permission_changes' as const, label: 'Permission / role changes', color: 'text-orange-600' },
-                      { key: 'notify_risk_changes' as const, label: 'Risk level escalations', color: 'text-purple-600' },
-                      { key: 'notify_credential_changes' as const, label: 'Credential status changes', color: 'text-yellow-700' },
+                      { key: 'notify_credential_changes' as const, label: 'Secret / credential expiry', description: 'Alert when secrets or certificates are expiring or expired' },
+                      { key: 'notify_permission_changes' as const, label: 'Drift detection', description: 'Notify when permission or role changes are detected' },
+                      { key: 'notify_risk_changes' as const, label: 'Critical risk alerts', description: 'Immediate alerts for critical and high risk escalations' },
+                      { key: 'notify_new_identities' as const, label: 'Scan failure alerts', description: 'Alert when a discovery scan fails or encounters errors' },
+                      { key: 'notify_removed_identities' as const, label: 'Discovery completion', description: 'Summary notification after each successful scan' },
+                      { key: 'notify_weekly_digest' as const, label: 'Weekly risk digest', description: 'Weekly summary of risk posture and key changes' },
                     ]).map(item => (
-                      <label key={item.key} className="flex items-center gap-3 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={settings[item.key] === 'true'}
-                          onChange={() => toggleBool(item.key)}
-                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <span className="text-sm text-gray-700">{item.label}</span>
-                      </label>
+                      <div key={item.key} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0">
+                        <div>
+                          <div className="text-sm font-medium text-gray-800">{item.label}</div>
+                          <div className="text-xs text-gray-400">{item.description}</div>
+                        </div>
+                        <button
+                          onClick={() => toggleBool(item.key)}
+                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors shrink-0 ${
+                            settings[item.key] === 'true' ? 'bg-blue-500' : 'bg-gray-300'
+                          }`}
+                        >
+                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                            settings[item.key] === 'true' ? 'translate-x-4' : 'translate-x-0.5'
+                          }`} />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -2278,9 +2209,6 @@ export default function Settings() {
                           {isSuperAdmin && u.tenant_name && (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">{u.tenant_name}</span>
                           )}
-                          {u.is_superadmin && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700">SUPER</span>
-                          )}
                         </div>
                         <div className="text-xs text-gray-500">
                           @{u.username}
@@ -2336,7 +2264,7 @@ export default function Settings() {
             )}
 
             <p className="text-xs text-gray-400">
-              Roles: Admin (full access), Auditor (read + remediation), Viewer (read-only). The last admin cannot be deleted or demoted.
+              Roles: Admin (full access), Reader (read-only), Compliance (reports + compliance config). The last admin cannot be deleted or demoted.
             </p>
           </div>
 

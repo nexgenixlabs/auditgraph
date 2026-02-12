@@ -142,6 +142,77 @@ def is_microsoft_system_spn(identity) -> bool:
     return False
 
 
+# ====================================================================
+# Phase 78: Cloud-Agnostic Adapter Models
+# ====================================================================
+
+@dataclass
+class CloudCredential:
+    """Normalized credential across cloud providers."""
+    provider: str  # azure, aws, gcp
+    credential_type: str  # secret, certificate, access_key, service_account_key
+    display_name: str = ''
+    expiry: Optional[datetime] = None
+    status: str = 'unknown'  # active, expired, expiring_soon, unknown
+    created_at: Optional[datetime] = None
+
+    def to_dict(self) -> Dict:
+        return {
+            'provider': self.provider,
+            'credential_type': self.credential_type,
+            'display_name': self.display_name,
+            'expiry': self.expiry.isoformat() if self.expiry else None,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+@dataclass
+class CloudRole:
+    """Normalized role assignment across cloud providers."""
+    provider: str  # azure, aws, gcp
+    role_name: str
+    scope: str = ''
+    is_privileged: bool = False
+    source: str = ''  # direct, inherited, group
+
+    def to_dict(self) -> Dict:
+        return {
+            'provider': self.provider,
+            'role_name': self.role_name,
+            'scope': self.scope,
+            'is_privileged': self.is_privileged,
+            'source': self.source,
+        }
+
+
+@dataclass
+class CloudIdentity:
+    """Normalized identity across cloud providers."""
+    provider: str  # azure, aws, gcp
+    identity_type: str  # service_principal, iam_user, iam_role, service_account, etc.
+    display_name: str
+    external_id: str = ''  # provider-specific ID (object_id, ARN, email)
+    risk_score: int = 0
+    risk_level: str = 'info'
+    credentials: List['CloudCredential'] = field(default_factory=list)
+    roles: List['CloudRole'] = field(default_factory=list)
+    metadata: Dict = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {
+            'provider': self.provider,
+            'identity_type': self.identity_type,
+            'display_name': self.display_name,
+            'external_id': self.external_id,
+            'risk_score': self.risk_score,
+            'risk_level': self.risk_level,
+            'credentials': [c.to_dict() for c in self.credentials],
+            'roles': [r.to_dict() for r in self.roles],
+            'metadata': self.metadata,
+        }
+
+
 class IdentityType(Enum):
     """Types of identities in Azure"""
     SERVICE_PRINCIPAL = "service_principal"

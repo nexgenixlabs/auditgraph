@@ -41,6 +41,7 @@ def generate_access_token(user: dict) -> str:
         'tenant_name': user.get('tenant_name'),
         'is_superadmin': user.get('is_superadmin', False),
         'portal_role': user.get('portal_role'),
+        'force_password_change': user.get('force_password_change', False),
         'iat': datetime.now(timezone.utc),
         'exp': datetime.now(timezone.utc) + ACCESS_TOKEN_EXPIRY,
         'type': 'access',
