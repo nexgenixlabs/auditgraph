@@ -105,7 +105,7 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline';
 
 interface RemediationItem {
   id: number;
@@ -378,6 +378,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
     { id: 'lifecycle' as TabId, label: 'Lifecycle', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'simulate' as TabId, label: 'What If', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+    { id: 'timeline' as TabId, label: 'Timeline', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
   return (
@@ -701,6 +702,7 @@ export default function IdentityDetail() {
     remediation: remediationData?.summary?.total ?? 0,
     lifecycle: lifecycleData?.total_events ?? 0,
     simulate: 0,
+    timeline: 0,
   };
 
   return (
@@ -2439,6 +2441,8 @@ export default function IdentityDetail() {
                   <DataSource label="AuditGraph Risk Simulation" apiSource="What-if analysis engine (no changes applied)" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
+
+              {activeTab === 'timeline' && <TimelineTab identityId={id!} />}
             </div>
           </div>
         </>
@@ -2650,7 +2654,7 @@ function RemediationCard({
                   </button>
                   {(remediation.category === 'governance') && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); if (confirm('This will simulate disabling the identity. Continue?')) onExecute('disable_identity'); }}
+                      onClick={(e) => { e.stopPropagation(); if (window.confirm('This will simulate disabling the identity. Continue?')) onExecute('disable_identity'); }}
                       disabled={executing}
                       className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
                     >
@@ -2659,7 +2663,7 @@ function RemediationCard({
                   )}
                   {(remediation.category === 'credential_hygiene') && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); if (confirm('This will simulate credential rotation. Continue?')) onExecute('rotate_credential'); }}
+                      onClick={(e) => { e.stopPropagation(); if (window.confirm('This will simulate credential rotation. Continue?')) onExecute('rotate_credential'); }}
                       disabled={executing}
                       className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-orange-600 hover:bg-orange-700 text-white disabled:opacity-50"
                     >
@@ -2668,7 +2672,7 @@ function RemediationCard({
                   )}
                   {(remediation.category === 'access_control') && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); if (confirm('This will simulate role removal. Continue?')) onExecute('remove_role'); }}
+                      onClick={(e) => { e.stopPropagation(); if (window.confirm('This will simulate role removal. Continue?')) onExecute('remove_role'); }}
                       disabled={executing}
                       className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
                     >
@@ -2694,6 +2698,183 @@ function RemediationCard({
           {/* Matched reason */}
           <div className="text-[10px] text-gray-400 italic">
             Matched: {remediation.matched_reason}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══ Phase 80: Timeline Tab Component ═══ */
+
+const EVENT_COLORS: Record<string, { dot: string; bg: string }> = {
+  anomaly: { dot: 'bg-red-500', bg: 'bg-red-50 border-red-200' },
+  drift: { dot: 'bg-blue-500', bg: 'bg-blue-50 border-blue-200' },
+  risk_change: { dot: 'bg-gray-400', bg: 'bg-gray-50 border-gray-200' },
+  pim_activation: { dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200' },
+  soar_action: { dot: 'bg-purple-500', bg: 'bg-purple-50 border-purple-200' },
+  remediation: { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200' },
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  anomaly: 'Anomaly',
+  drift: 'Drift',
+  risk_change: 'Risk Change',
+  pim_activation: 'PIM Activation',
+  soar_action: 'SOAR Action',
+  remediation: 'Remediation',
+};
+
+function TimelineTab({ identityId }: { identityId: string }) {
+  const [events, setEvents] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
+  const [filters, setFilters] = useState<Set<string>>(new Set());
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+
+  useEffect(() => {
+    setLoading(true);
+    const params = new URLSearchParams({ limit: '100' });
+    if (filters.size > 0) params.set('event_types', Array.from(filters).join(','));
+    if (fromDate) params.set('from', fromDate);
+    if (toDate) params.set('to', toDate);
+    fetch(`/api/identities/${encodeURIComponent(identityId)}/timeline?${params}`)
+      .then(r => r.ok ? r.json() : { events: [], total: 0 })
+      .then(d => { setEvents(d.events || []); setTotal(d.total || 0); })
+      .catch(() => { setEvents([]); setTotal(0); })
+      .finally(() => setLoading(false));
+  }, [identityId, filters, fromDate, toDate]);
+
+  function toggleFilter(type: string) {
+    setFilters(prev => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type); else next.add(type);
+      return next;
+    });
+  }
+
+  function exportCSV() {
+    const header = 'Timestamp,Event Type,Severity,Title,Description\n';
+    const rows = events.map(e =>
+      `"${e.timestamp || ''}","${e.event_type}","${e.severity}","${(e.title || '').replace(/"/g, '""')}","${(e.description || '').replace(/"/g, '""')}"`
+    ).join('\n');
+    const blob = new Blob([header + rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `timeline-${identityId}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function relativeTime(ts: string) {
+    const diff = Date.now() - new Date(ts).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  }
+
+  if (loading) {
+    return <div className="animate-pulse space-y-3">{[1,2,3,4].map(i => <div key={i} className="h-16 bg-gray-100 rounded-lg" />)}</div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-bold text-gray-900">Identity Timeline</h3>
+          <p className="text-xs text-gray-500">{total} events recorded</p>
+        </div>
+        <button onClick={exportCSV} disabled={events.length === 0}
+          className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition disabled:opacity-50">
+          Export CSV
+        </button>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-2">
+        {Object.entries(EVENT_LABELS).map(([key, label]) => {
+          const colors = EVENT_COLORS[key];
+          const active = filters.size === 0 || filters.has(key);
+          return (
+            <button key={key} onClick={() => toggleFilter(key)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition ${
+                active ? 'border-gray-300 bg-white text-gray-800' : 'border-gray-200 bg-gray-50 text-gray-400'
+              }`}>
+              <span className={`w-2 h-2 rounded-full ${colors?.dot || 'bg-gray-400'}`} />
+              {label}
+            </button>
+          );
+        })}
+        <div className="flex items-center gap-1 ml-auto">
+          <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)}
+            className="px-2 py-1 border border-gray-300 rounded text-[10px] text-gray-600" />
+          <span className="text-[10px] text-gray-400">to</span>
+          <input type="date" value={toDate} onChange={e => setToDate(e.target.value)}
+            className="px-2 py-1 border border-gray-300 rounded text-[10px] text-gray-600" />
+        </div>
+      </div>
+
+      {/* Timeline */}
+      {events.length === 0 ? (
+        <div className="bg-gray-50 border rounded-xl p-8 text-center">
+          <div className="text-sm text-gray-500 font-medium">No events recorded for this identity</div>
+          <div className="text-xs text-gray-400 mt-1">Events will appear here as they are detected</div>
+        </div>
+      ) : (
+        <div className="relative">
+          {/* Vertical line */}
+          <div className="absolute left-[84px] top-0 bottom-0 w-px bg-gray-200" />
+
+          <div className="space-y-2">
+            {events.map((event, idx) => {
+              const colors = EVENT_COLORS[event.event_type] || EVENT_COLORS.risk_change;
+              return (
+                <div key={idx} className="flex items-start gap-3 group">
+                  {/* Timestamp column */}
+                  <div className="w-[72px] flex-shrink-0 text-right pt-1">
+                    <div className="text-[10px] text-gray-500 font-mono">
+                      {event.timestamp ? new Date(event.timestamp).toLocaleDateString() : '—'}
+                    </div>
+                    <div className="text-[9px] text-gray-400">
+                      {event.timestamp ? relativeTime(event.timestamp) : ''}
+                    </div>
+                  </div>
+
+                  {/* Dot */}
+                  <div className="relative flex-shrink-0 mt-2">
+                    <div className={`w-3 h-3 rounded-full border-2 border-white shadow ${colors.dot}`} />
+                  </div>
+
+                  {/* Event card */}
+                  <div className={`flex-1 rounded-lg border px-3 py-2 ${colors.bg}`}>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-[10px] font-bold uppercase text-gray-500">
+                        {EVENT_LABELS[event.event_type] || event.event_type}
+                      </span>
+                      {event.severity && (
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                          event.severity === 'critical' ? 'bg-red-100 text-red-700' :
+                          event.severity === 'high' ? 'bg-orange-100 text-orange-700' :
+                          event.severity === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                          'bg-gray-100 text-gray-600'
+                        }`}>
+                          {event.severity}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs font-medium text-gray-900">{event.title}</div>
+                    {event.description && (
+                      <div className="text-[11px] text-gray-600 mt-0.5 line-clamp-2">{event.description}</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

@@ -6074,3 +6074,82 @@ class Database:
             'row_counts': row_counts,
             'oldest_records': oldest,
         }
+
+    # ──────────────────────────────────────────────────────────
+    # Phase 79: AI Security Copilot
+    # ──────────────────────────────────────────────────────────
+
+    _copilot_ensured = False
+
+    def _ensure_copilot_tables(self):
+        if Database._copilot_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS copilot_conversations (
+                id SERIAL PRIMARY KEY,
+                user_id INT,
+                tenant_id INT,
+                title TEXT,
+                messages JSONB DEFAULT '[]'::jsonb,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        self.conn.commit()
+        cursor.close()
+        Database._copilot_ensured = True
+
+    def create_copilot_conversation(self, user_id, tenant_id, title, messages=None):
+        self._ensure_copilot_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO copilot_conversations (user_id, tenant_id, title, messages)
+            VALUES (%s, %s, %s, %s) RETURNING id, title, messages, created_at, updated_at
+        """, (user_id, tenant_id, title, json.dumps(messages or [])))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        return row
+
+    def get_copilot_conversation(self, conv_id, user_id):
+        self._ensure_copilot_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, user_id, tenant_id, title, messages, created_at, updated_at
+            FROM copilot_conversations WHERE id = %s AND user_id = %s
+        """, (conv_id, user_id))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def update_copilot_conversation(self, conv_id, user_id, messages, title=None):
+        self._ensure_copilot_tables()
+        cursor = self.conn.cursor()
+        if title:
+            cursor.execute("""
+                UPDATE copilot_conversations SET messages = %s, title = %s, updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+            """, (json.dumps(messages), title, conv_id, user_id))
+        else:
+            cursor.execute("""
+                UPDATE copilot_conversations SET messages = %s, updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+            """, (json.dumps(messages), conv_id, user_id))
+        self.conn.commit()
+        cursor.close()
+
+    def list_copilot_conversations(self, user_id, limit=20, offset=0):
+        self._ensure_copilot_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, title, created_at, updated_at,
+                   jsonb_array_length(messages) as message_count
+            FROM copilot_conversations
+            WHERE user_id = %s
+            ORDER BY updated_at DESC
+            LIMIT %s OFFSET %s
+        """, (user_id, limit, offset))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows

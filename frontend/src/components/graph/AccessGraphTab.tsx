@@ -3,7 +3,9 @@ import { ReactFlow, Controls, Background, MiniMap } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { nodeTypes } from './nodes';
 
-type ViewMode = 'executive' | 'technical';
+import AttackPathView from './AttackPathView';
+
+type ViewMode = 'executive' | 'technical' | 'attack_paths';
 
 interface GraphDataResponse {
   identity_id: string;
@@ -339,6 +341,8 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('technical');
+  const [attackPaths, setAttackPaths] = useState<any>(null);
+  const [attackPathsLoading, setAttackPathsLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -354,6 +358,16 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [identityId]);
+
+  useEffect(() => {
+    if (viewMode !== 'attack_paths' || attackPaths) return;
+    setAttackPathsLoading(true);
+    fetch(`/api/identities/${encodeURIComponent(identityId)}/attack-paths`)
+      .then(r => r.ok ? r.json() : { paths: [], summary: { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' } })
+      .then(d => setAttackPaths(d))
+      .catch(() => setAttackPaths({ paths: [], summary: { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' } }))
+      .finally(() => setAttackPathsLoading(false));
+  }, [viewMode, identityId, attackPaths]);
 
   const nodes = useMemo(() => {
     if (!data) return [];
@@ -406,34 +420,60 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
           >
             Access Tree
           </button>
+          <button
+            onClick={() => setViewMode('attack_paths')}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${
+              viewMode === 'attack_paths' ? 'bg-white text-red-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            Attack Paths
+          </button>
         </div>
         <span className="text-[10px] text-gray-500">
-          {viewMode === 'executive' ? 'Simplified blast radius for risk communication' : 'Full hierarchy: Subscriptions, Resource Groups, Resources & Roles'}
+          {viewMode === 'executive' ? 'Simplified blast radius for risk communication' :
+           viewMode === 'attack_paths' ? 'Privilege escalation chains and lateral movement risks' :
+           'Full hierarchy: Subscriptions, Resource Groups, Resources & Roles'}
         </span>
       </div>
 
-      {/* Graph Canvas */}
-      <div className="border rounded-xl overflow-hidden bg-gray-50" style={{ height: viewMode === 'technical' ? 600 : 450 }}>
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.3 }}
-          minZoom={0.3}
-          maxZoom={2}
-          proOptions={{ hideAttribution: true }}
-          defaultEdgeOptions={{
-            type: 'smoothstep',
-            style: { stroke: '#94a3b8', strokeWidth: 1.5 },
-            labelStyle: { fontSize: 10, fill: '#64748b' },
-          }}
-        >
-          <Controls position="bottom-right" showInteractive={false} />
-          <Background gap={20} size={1} color="#e2e8f0" />
-          {viewMode === 'technical' && <MiniMap pannable zoomable nodeStrokeWidth={3} />}
-        </ReactFlow>
-      </div>
+      {/* Attack Paths View */}
+      {viewMode === 'attack_paths' ? (
+        attackPathsLoading ? (
+          <div className="h-[400px] flex items-center justify-center bg-gray-50 rounded-xl border">
+            <div className="animate-spin h-8 w-8 border-2 border-red-600 border-t-transparent rounded-full" />
+          </div>
+        ) : (
+          <AttackPathView
+            paths={attackPaths?.paths || []}
+            summary={attackPaths?.summary || { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' }}
+          />
+        )
+      ) : (
+        <>
+          {/* Graph Canvas */}
+          <div className="border rounded-xl overflow-hidden bg-gray-50" style={{ height: viewMode === 'technical' ? 600 : 450 }}>
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              fitView
+              fitViewOptions={{ padding: 0.3 }}
+              minZoom={0.3}
+              maxZoom={2}
+              proOptions={{ hideAttribution: true }}
+              defaultEdgeOptions={{
+                type: 'smoothstep',
+                style: { stroke: '#94a3b8', strokeWidth: 1.5 },
+                labelStyle: { fontSize: 10, fill: '#64748b' },
+              }}
+            >
+              <Controls position="bottom-right" showInteractive={false} />
+              <Background gap={20} size={1} color="#e2e8f0" />
+              {viewMode === 'technical' && <MiniMap pannable zoomable nodeStrokeWidth={3} />}
+            </ReactFlow>
+          </div>
+        </>
+      )}
 
       {/* Detail Panels */}
       <CollapsiblePanel title="Trust Relationships" count={trustCount} defaultOpen={trustCount > 0}>

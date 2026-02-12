@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { generateReport } from '../utils/pdfGenerator';
+import { generateReport, generateExecutiveReport } from '../utils/pdfGenerator';
 import { useToast } from '../components/ToastProvider';
+
+type ReportType = 'full' | 'executive';
 
 export default function Reports() {
   const { addToast } = useToast();
@@ -9,6 +11,7 @@ export default function Reports() {
   const [clientName, setClientName] = useState('');
   const [lastGenerated, setLastGenerated] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<any>(null);
+  const [reportType, setReportType] = useState<ReportType>('full');
 
   async function handleGenerate() {
     setLoading(true);
@@ -18,7 +21,11 @@ export default function Reports() {
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       setPreviewData(data);
-      generateReport(data, clientName || undefined);
+      if (reportType === 'executive') {
+        generateExecutiveReport(data, clientName || undefined);
+      } else {
+        generateReport(data, clientName || undefined);
+      }
       setLastGenerated(new Date().toLocaleString());
       addToast('Report generated successfully', 'success');
     } catch (e: any) {
@@ -40,9 +47,36 @@ export default function Reports() {
         </p>
       </div>
 
+      {/* Report Type Selector */}
+      <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1 w-fit">
+        <button
+          onClick={() => setReportType('full')}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+            reportType === 'full' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          }`}
+        >
+          Full Audit Report
+        </button>
+        <button
+          onClick={() => setReportType('executive')}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+            reportType === 'executive' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          }`}
+        >
+          Executive Summary
+        </button>
+      </div>
+
       {/* Report Configuration */}
       <div className="bg-white rounded-xl border shadow-sm p-6 space-y-6">
-        <div className="text-lg font-semibold text-gray-900">Generate Security Report</div>
+        <div className="text-lg font-semibold text-gray-900">
+          {reportType === 'executive' ? 'Executive Posture Report' : 'Generate Security Report'}
+        </div>
+        {reportType === 'executive' && (
+          <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3 text-xs text-indigo-700">
+            One-page landscape PDF for board presentations with posture score, key metrics, and trend summary.
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Client name input */}

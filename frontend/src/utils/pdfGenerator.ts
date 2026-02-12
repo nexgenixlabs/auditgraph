@@ -531,3 +531,161 @@ function addFooter(doc: jsPDF, pageNum: number): void {
   doc.text(`Page ${pageNum}`, pageWidth - 35, pageHeight - 10);
   doc.text('CONFIDENTIAL', pageWidth / 2, pageHeight - 10, { align: 'center' });
 }
+
+
+// ── Phase 82: Executive Posture Report (1-page landscape) ─────────
+
+export function generateExecutiveReport(data: ReportData, clientName?: string): void {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth(); // 297
+  const pageHeight = doc.internal.pageSize.getHeight(); // 210
+  const margin = 15;
+
+  // Compute posture score
+  const total = data.stats.total_identities || 1;
+  const crit = data.stats.critical || 0;
+  const high = data.stats.high || 0;
+  const critPct = (crit / total) * 100;
+  const highPct = (high / total) * 100;
+  const postureScore = Math.max(0, Math.round(100 - critPct * 3 - highPct * 1.5));
+
+  const scoreColor: RGB = postureScore >= 80 ? GREEN : postureScore >= 60 ? [202, 138, 4] : RED;
+
+  // Credential health
+  const credTotal = (data.credential_health.expired + data.credential_health.expiring_soon + data.credential_health.healthy + data.credential_health.unknown) || 1;
+  const credHealthPct = Math.round((data.credential_health.healthy / credTotal) * 100);
+
+  // Days since last scan
+  const daysSinceScan = data.collected_at
+    ? Math.max(0, Math.floor((Date.now() - new Date(data.collected_at).getTime()) / 86400000))
+    : -1;
+
+  // ── Header ──────────────────────────────────────────────────
+  fill(doc, BLUE);
+  doc.rect(0, 0, pageWidth, 20, 'F');
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(255, 255, 255);
+  doc.text(clientName || 'Security Posture Report', margin, 13);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Generated: ${new Date().toLocaleDateString()}`, pageWidth - margin, 13, { align: 'right' });
+
+  const topY = 30;
+
+  // ── Left Column (40%): Posture Score Circle ─────────────────
+  const leftWidth = (pageWidth - margin * 2) * 0.38;
+  const circleCx = margin + leftWidth / 2;
+  const circleCy = topY + 50;
+  const circleR = 35;
+
+  // Background circle
+  doc.setDrawColor(229, 231, 235);
+  doc.setLineWidth(6);
+  doc.circle(circleCx, circleCy, circleR);
+
+  // Score arc (colored)
+  doc.setDrawColor(scoreColor[0], scoreColor[1], scoreColor[2]);
+  doc.setLineWidth(6);
+  // Draw partial arc by overlaying — simplified to full circle with score text
+  doc.circle(circleCx, circleCy, circleR);
+
+  // Score number
+  doc.setFontSize(36);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, scoreColor);
+  doc.text(`${postureScore}`, circleCx, circleCy + 5, { align: 'center' });
+
+  // Score label
+  doc.setFontSize(9);
+  txt(doc, GRAY);
+  doc.setFont('helvetica', 'normal');
+  doc.text('POSTURE SCORE', circleCx, circleCy + 16, { align: 'center' });
+
+  // Score description
+  const scoreLabel = postureScore >= 80 ? 'Good' : postureScore >= 60 ? 'Needs Attention' : 'Critical';
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, scoreColor);
+  doc.text(scoreLabel, circleCx, circleCy + 25, { align: 'center' });
+
+  // Trend arrow
+  if (data.previous_run) {
+    const prevTotal = data.previous_run.total_identities || 1;
+    const prevCritPct = ((data.previous_run.critical || 0) / prevTotal) * 100;
+    const prevHighPct = ((data.previous_run.high || 0) / prevTotal) * 100;
+    const prevScore = Math.max(0, Math.round(100 - prevCritPct * 3 - prevHighPct * 1.5));
+    const delta = postureScore - prevScore;
+    if (delta !== 0) {
+      doc.setFontSize(8);
+      txt(doc, delta > 0 ? GREEN : RED);
+      doc.text(`${delta > 0 ? '+' : ''}${delta} from previous scan`, circleCx, circleCy + 33, { align: 'center' });
+    }
+  }
+
+  // ── Right Column (60%): 2x3 Metric Grid ─────────────────────
+  const rightX = margin + leftWidth + 10;
+  const rightWidth = pageWidth - margin - rightX;
+  const boxW = (rightWidth - 10) / 3;
+  const boxH = 32;
+
+  const metrics: { label: string; value: string; color: RGB }[] = [
+    { label: 'Total Identities', value: `${data.stats.total_identities}`, color: DARK },
+    { label: 'Critical / High Risk', value: `${crit + high}`, color: crit + high > 0 ? RED : GREEN },
+    { label: 'Credential Health', value: `${credHealthPct}%`, color: credHealthPct >= 80 ? GREEN : credHealthPct >= 60 ? [202, 138, 4] : RED },
+    { label: 'CA Coverage', value: data.conditional_access ? `${Math.round((data.conditional_access.covered / (data.conditional_access.total || 1)) * 100)}%` : 'N/A', color: BLUE },
+    { label: 'Active Anomalies', value: 'N/A', color: GRAY },
+    { label: 'Days Since Scan', value: daysSinceScan >= 0 ? `${daysSinceScan}` : 'N/A', color: daysSinceScan <= 1 ? GREEN : daysSinceScan <= 7 ? [202, 138, 4] : RED },
+  ];
+
+  metrics.forEach((m, idx) => {
+    const col = idx % 3;
+    const row = Math.floor(idx / 3);
+    const bx = rightX + col * (boxW + 5);
+    const by = topY + row * (boxH + 8);
+
+    // Box background
+    doc.setFillColor(248, 250, 252);
+    doc.roundedRect(bx, by, boxW, boxH, 3, 3, 'F');
+
+    // Value
+    doc.setFontSize(18);
+    doc.setFont('helvetica', 'bold');
+    txt(doc, m.color);
+    doc.text(m.value, bx + boxW / 2, by + 15, { align: 'center' });
+
+    // Label
+    doc.setFontSize(7);
+    doc.setFont('helvetica', 'normal');
+    txt(doc, GRAY);
+    doc.text(m.label, bx + boxW / 2, by + 24, { align: 'center' });
+  });
+
+  // ── Bottom Strip: Executive Summary ─────────────────────────
+  const summaryY = topY + 90;
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(margin, summaryY, pageWidth - margin * 2, 30, 3, 3, 'F');
+
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('EXECUTIVE SUMMARY', margin + 6, summaryY + 8);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  txt(doc, GRAY);
+  const summaryText = [
+    `Your organization manages ${data.stats.total_identities} identities across cloud providers.`,
+    crit > 0 ? `${crit} critical risk identities require immediate attention.` : 'No critical risk identities detected.',
+    `Credential health is at ${credHealthPct}%. ${data.credential_health.expired > 0 ? data.credential_health.expired + ' credentials have expired.' : 'All credentials are current.'}`,
+  ].join(' ');
+  const splitSummary = doc.splitTextToSize(summaryText, pageWidth - margin * 2 - 12);
+  doc.text(splitSummary, margin + 6, summaryY + 15);
+
+  // ── Footer ──────────────────────────────────────────────────
+  doc.setFontSize(7);
+  txt(doc, GRAY);
+  doc.text(`Generated by AuditGraph | Confidential | ${new Date().toLocaleDateString()}`, pageWidth / 2, pageHeight - 8, { align: 'center' });
+
+  doc.save(`executive-posture-report-${new Date().toISOString().split('T')[0]}.pdf`);
+}

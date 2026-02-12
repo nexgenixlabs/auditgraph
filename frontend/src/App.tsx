@@ -58,6 +58,7 @@ import StaleDataBanner from './components/StaleDataBanner';
 import { ToastProvider } from './components/ToastProvider';
 import Sidebar from './components/layout/Sidebar';
 import TopBar from './components/layout/TopBar';
+import CopilotPanel from './components/CopilotPanel';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { TenantProvider, useTenant } from './contexts/TenantContext';
 import { useTheme } from './hooks/useTheme';
@@ -314,6 +315,7 @@ function AppContent() {
   const { loading: tenantLoading, error: tenantError } = useTenant();
   const location = useLocation();
   const [searchOpen, setSearchOpen] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(false);
   const { dark, toggle: toggleTheme } = useTheme();
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
 
@@ -406,13 +408,16 @@ function AppContent() {
           <ProtectedRoute>
             <div className="min-h-screen bg-gray-50 dark:bg-slate-950">
               {/* Top Bar */}
-              <TopBar dark={dark} onToggleTheme={toggleTheme} onSearchOpen={() => setSearchOpen(true)} />
+              <TopBar dark={dark} onToggleTheme={toggleTheme} onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
               {/* Left Sidebar */}
               <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} />
 
               {/* Global Search Modal */}
               <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
+
+              {/* AI Security Copilot Panel (Phase 79) */}
+              <CopilotPanel open={copilotOpen} onClose={() => setCopilotOpen(false)} />
 
               {/* Page Content */}
               <main className="pl-60 pt-14 min-h-screen w-full overflow-x-hidden">

@@ -3139,6 +3139,9 @@ export default function Settings() {
             </div>
           </div>
 
+          {/* Section 13: Integrations (Phase 83) */}
+          <IntegrationsSection />
+
           {/* Save button */}
           <div className="flex items-center gap-4">
             <button
@@ -3904,6 +3907,211 @@ export default function Settings() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ═══ Phase 83: Integrations Section ═══ */
+
+const INTEGRATION_EVENTS = [
+  { key: 'critical_risk', label: 'Critical Risk Detected' },
+  { key: 'anomaly_detected', label: 'Anomaly Detected' },
+  { key: 'drift_detected', label: 'Drift Detected' },
+  { key: 'scan_complete', label: 'Scan Complete' },
+  { key: 'scan_failed', label: 'Scan Failed' },
+  { key: 'credential_expiring', label: 'Credential Expiring' },
+];
+
+function IntegrationsSection() {
+  const [slackUrl, setSlackUrl] = useState('');
+  const [teamsUrl, setTeamsUrl] = useState('');
+  const [slackEvents, setSlackEvents] = useState<string[]>([]);
+  const [teamsEvents, setTeamsEvents] = useState<string[]>([]);
+  const [slackConfigured, setSlackConfigured] = useState(false);
+  const [teamsConfigured, setTeamsConfigured] = useState(false);
+  const [showSlackUrl, setShowSlackUrl] = useState(false);
+  const [showTeamsUrl, setShowTeamsUrl] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testResult, setTestResult] = useState<{ platform: string; success: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState('');
+
+  useEffect(() => {
+    fetch('/api/settings/integrations')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) {
+          setSlackConfigured(d.slack?.configured || false);
+          setTeamsConfigured(d.teams?.configured || false);
+          setSlackEvents(d.slack?.events || []);
+          setTeamsEvents(d.teams?.events || []);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleSave(platform: 'slack' | 'teams') {
+    setSaving(true);
+    try {
+      const body: any = {};
+      if (platform === 'slack') {
+        if (slackUrl) body.slack_webhook_url = slackUrl;
+        body.slack_events = slackEvents;
+      } else {
+        if (teamsUrl) body.teams_webhook_url = teamsUrl;
+        body.teams_events = teamsEvents;
+      }
+      const res = await fetch('/api/settings/integrations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        if (platform === 'slack' && slackUrl) setSlackConfigured(true);
+        if (platform === 'teams' && teamsUrl) setTeamsConfigured(true);
+      }
+    } catch { /* ignore */ }
+    setSaving(false);
+  }
+
+  async function handleTest(platform: 'slack' | 'teams') {
+    const url = platform === 'slack' ? slackUrl : teamsUrl;
+    if (!url) {
+      setTestResult({ platform, success: false, message: 'Enter a webhook URL first' });
+      return;
+    }
+    setTesting(platform);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/settings/integrations/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform, webhook_url: url }),
+      });
+      const data = await res.json();
+      setTestResult({ platform, success: data.success, message: data.message });
+    } catch (e: any) {
+      setTestResult({ platform, success: false, message: e?.message || 'Test failed' });
+    }
+    setTesting('');
+  }
+
+  function toggleEvent(platform: 'slack' | 'teams', eventKey: string) {
+    if (platform === 'slack') {
+      setSlackEvents(prev => prev.includes(eventKey) ? prev.filter(e => e !== eventKey) : [...prev, eventKey]);
+    } else {
+      setTeamsEvents(prev => prev.includes(eventKey) ? prev.filter(e => e !== eventKey) : [...prev, eventKey]);
+    }
+  }
+
+  function renderCard(platform: 'slack' | 'teams') {
+    const isSlack = platform === 'slack';
+    const url = isSlack ? slackUrl : teamsUrl;
+    const setUrl = isSlack ? setSlackUrl : setTeamsUrl;
+    const configured = isSlack ? slackConfigured : teamsConfigured;
+    const showUrl = isSlack ? showSlackUrl : showTeamsUrl;
+    const setShowUrl = isSlack ? setShowSlackUrl : setShowTeamsUrl;
+    const events = isSlack ? slackEvents : teamsEvents;
+    const brandColor = isSlack ? 'purple' : 'blue';
+
+    return (
+      <div className="border rounded-xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className={`w-8 h-8 rounded-lg bg-${brandColor}-100 flex items-center justify-center`}>
+              <span className={`text-${brandColor}-700 text-sm font-bold`}>{isSlack ? 'S' : 'T'}</span>
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-gray-900">{isSlack ? 'Slack' : 'Microsoft Teams'}</div>
+              <div className={`text-[10px] ${configured ? 'text-green-600' : 'text-gray-400'}`}>
+                {configured ? 'Connected' : 'Not configured'}
+              </div>
+            </div>
+          </div>
+          {configured && (
+            <span className="w-2 h-2 rounded-full bg-green-500" />
+          )}
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Webhook URL</label>
+          <div className="relative">
+            <input
+              type={showUrl ? 'text' : 'password'}
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              placeholder={`${isSlack ? 'https://hooks.slack.com/services/...' : 'https://outlook.office.com/webhook/...'}`}
+              className="w-full px-3 py-2 pr-16 border border-gray-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <button
+              onClick={() => setShowUrl(!showUrl)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-gray-600"
+            >
+              {showUrl ? 'Hide' : 'Show'}
+            </button>
+          </div>
+        </div>
+
+        {/* Event toggles */}
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-2">Event Notifications</label>
+          <div className="grid grid-cols-2 gap-1.5">
+            {INTEGRATION_EVENTS.map(ev => (
+              <label key={ev.key} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
+                <input
+                  type="checkbox"
+                  checked={events.includes(ev.key)}
+                  onChange={() => toggleEvent(platform, ev.key)}
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-[11px] text-gray-700">{ev.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Test result */}
+        {testResult && testResult.platform === platform && (
+          <div className={`rounded-lg px-3 py-2 text-xs ${testResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+            {testResult.message}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => handleTest(platform)}
+            disabled={testing === platform}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition disabled:opacity-50"
+          >
+            {testing === platform ? 'Testing...' : 'Test Connection'}
+          </button>
+          <button
+            onClick={() => handleSave(platform)}
+            disabled={saving}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+      <div className="flex items-center gap-3">
+        <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+        </svg>
+        <div>
+          <div className="text-lg font-semibold text-gray-900">Integrations</div>
+          <p className="text-xs text-gray-500">Push security notifications to Slack and Microsoft Teams</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {renderCard('slack')}
+        {renderCard('teams')}
+      </div>
     </div>
   );
 }

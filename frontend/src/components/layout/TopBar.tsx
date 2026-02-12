@@ -6,6 +6,7 @@ interface TopBarProps {
   dark?: boolean;
   onToggleTheme?: () => void;
   onSearchOpen: () => void;
+  onCopilotOpen?: () => void;
 }
 
 const ROLE_COLORS: Record<string, string> = {
@@ -14,7 +15,7 @@ const ROLE_COLORS: Record<string, string> = {
   compliance: 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300',
 };
 
-const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) => {
+const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen, onCopilotOpen }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout, isSuperAdmin, activeTenantId, activeTenantName, switchTenant } = useAuth();
@@ -101,6 +102,19 @@ const TopBar: React.FC<TopBarProps> = ({ dark, onToggleTheme, onSearchOpen }) =>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
               </svg>
             )}
+          </button>
+        )}
+
+        {/* Copilot button */}
+        {onCopilotOpen && (
+          <button
+            onClick={onCopilotOpen}
+            className="p-2 rounded-lg text-gray-500 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 hover:text-indigo-600 dark:hover:text-indigo-400 transition"
+            title="Security Copilot"
+          >
+            <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
           </button>
         )}
 

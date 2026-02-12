@@ -124,6 +124,7 @@ from app.api.handlers import (
     get_current_tenant_handler,
     get_cross_tenant_analytics,
     get_cross_tenant_trends,
+    get_login_sessions,
     get_onboarding_status,
     test_azure_connection,
     simulate_risk,
@@ -169,6 +170,14 @@ from app.api.handlers import (
     upload_tenant_logo,
     delete_tenant_logo,
     get_scan_modes,
+    copilot_chat,
+    copilot_conversations_list,
+    copilot_suggestions,
+    get_identity_timeline,
+    get_identity_attack_paths,
+    get_integration_settings,
+    save_integration_settings,
+    test_integration_webhook,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -465,6 +474,11 @@ def create_app():
     @require_portal_access()
     def analytics_tenants_trends():
         return get_cross_tenant_trends()
+
+    @app.get("/api/analytics/login-sessions")
+    @require_portal_access()
+    def analytics_login_sessions():
+        return get_login_sessions()
 
     # -----------------------
     # Onboarding Wizard (Phase 48)
@@ -1057,6 +1071,53 @@ def create_app():
     @app.get("/api/scan-modes")
     def scan_modes():
         return get_scan_modes()
+
+    # -----------------------
+    # Phase 79: AI Security Copilot
+    # -----------------------
+    @app.post("/api/copilot/chat")
+    def copilot_chat_route():
+        return copilot_chat()
+
+    @app.get("/api/copilot/conversations")
+    def copilot_conversations_route():
+        return copilot_conversations_list()
+
+    @app.get("/api/copilot/suggestions")
+    def copilot_suggestions_route():
+        return copilot_suggestions()
+
+    # -----------------------
+    # Phase 80: Identity Timeline
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/timeline")
+    def identity_timeline(identity_id):
+        return get_identity_timeline(identity_id)
+
+    # -----------------------
+    # Phase 81: Attack Path Analysis
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/attack-paths")
+    def identity_attack_paths(identity_id):
+        return get_identity_attack_paths(identity_id)
+
+    # -----------------------
+    # Phase 83: Slack/Teams Integrations
+    # -----------------------
+    @app.get("/api/settings/integrations")
+    @require_role('admin')
+    def integrations_get():
+        return get_integration_settings()
+
+    @app.post("/api/settings/integrations")
+    @require_role('admin')
+    def integrations_save():
+        return save_integration_settings()
+
+    @app.post("/api/settings/integrations/test")
+    @require_role('admin')
+    def integrations_test():
+        return test_integration_webhook()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

@@ -949,7 +949,8 @@ def save_app_settings():
         return jsonify({"error": "Expected JSON object"}), 400
 
     VALID_KEYS = {
-        'org_name', 'discovery_interval_hours', 'email_enabled', 'email_to',
+        'org_name', 'theme', 'timezone',
+        'discovery_interval_hours', 'email_enabled', 'email_to',
         'notify_new_identities', 'notify_removed_identities',
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
         'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
@@ -997,6 +998,11 @@ def save_app_settings():
                 errors.append("report_schedule_frequency must be weekly or monthly")
                 continue
 
+        if key == 'theme':
+            if value not in ('light', 'dark', 'system'):
+                errors.append("theme must be light, dark, or system")
+                continue
+
         if key in ('email_to', 'report_email_to') and value:
             if '@' not in value:
                 errors.append(f"{key} must be a valid email address")
@@ -1021,6 +1027,13 @@ def save_app_settings():
     try:
         tid = _tenant_id()
         db.save_settings(updates, tenant_id=tid)
+
+        # Sync org_name to tenant name so it propagates to JWT, TopBar, admin tables
+        if 'org_name' in updates and tid:
+            new_name = updates['org_name'].strip()
+            if new_name:
+                db.update_tenant(tid, name=new_name)
+
         settings = db.get_settings(tenant_id=tid)
         _log(db,'settings_updated', f'Settings updated: {", ".join(updates.keys())}', {
             'updated_keys': list(updates.keys()),
@@ -1192,6 +1205,10 @@ def get_activity():
             filter_tid = tid
 
         entries = db.get_activity_log(limit=limit, offset=offset, action_type=action_type, tenant_id=filter_tid)
+
+        # Exclude admin portal events from client-facing activity log
+        if filter_tid is not None:
+            entries = [e for e in entries if e.get('action_type') not in ('admin_login', 'admin_logout')]
 
         for entry in entries:
             entry['created_at'] = entry['created_at'].isoformat() if entry.get('created_at') else None
@@ -4320,6 +4337,7 @@ def auth_login():
     username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
     tenant_slug = str(data.get('tenant_slug', '')).strip() or None  # Phase 53
+    portal = str(data.get('portal', 'client')).strip()  # 'admin' or 'client'
 
     if not username or not password:
         return jsonify({'error': 'Username and password are required'}), 400
@@ -4361,8 +4379,12 @@ def auth_login():
         db.update_last_login(user['id'])
 
         try:
-            db.log_activity('auth_login', f'User "{username}" logged in',
-                            {'user_id': user['id'], 'role': user['role'], 'ip': request.remote_addr},
+            action_type = 'admin_login' if portal == 'admin' else 'auth_login'
+            db.log_activity(action_type, f'User "{username}" logged in ({portal} portal)',
+                            {'user_id': user['id'], 'role': user['role'], 'ip': request.remote_addr,
+                             'user_agent': request.headers.get('User-Agent', '')[:200],
+                             'tenant_name': user.get('tenant_name', ''),
+                             'portal': portal},
                             user_id=user['id'], tenant_id=user.get('tenant_id'))
         except Exception:
             pass
@@ -4444,6 +4466,7 @@ def auth_logout():
     """POST /api/auth/logout — revoke refresh token."""
     data = request.get_json(silent=True) or {}
     raw_refresh = data.get('refresh_token', '')
+    portal = str(data.get('portal', 'client')).strip()
 
     db = _db()
     try:
@@ -4453,8 +4476,9 @@ def auth_logout():
         user = getattr(g, 'current_user', None)
         if user:
             try:
-                _log(db,'auth_logout', f'User "{user["username"]}" logged out',
-                                {'user_id': user['id']})
+                action_type = 'admin_logout' if portal == 'admin' else 'auth_logout'
+                _log(db, action_type, f'User "{user["username"]}" logged out ({portal} portal)',
+                                {'user_id': user['id'], 'portal': portal})
             except Exception:
                 pass
 
@@ -6899,6 +6923,113 @@ def get_cross_tenant_trends():
             })
 
         return jsonify({'trends': trends})
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_login_sessions():
+    """GET /api/analytics/login-sessions — paired login/logout events for governance.
+    ?portal=admin|client — filter by portal context (default: all)
+    """
+    db = _db()
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        limit = min(limit, 200)
+        portal_filter = request.args.get('portal', '')  # 'admin', 'client', or '' (all)
+
+        # Determine which action types to include based on portal filter
+        if portal_filter == 'admin':
+            login_types = ('admin_login',)
+            logout_types = ('admin_logout',)
+        elif portal_filter == 'client':
+            login_types = ('auth_login',)
+            logout_types = ('auth_logout',)
+        else:
+            login_types = ('auth_login', 'admin_login')
+            logout_types = ('auth_logout', 'admin_logout')
+
+        all_types = login_types + logout_types
+
+        # Fetch recent login + logout events with user details
+        cursor.execute("""
+            SELECT a.id, a.action_type, a.description, a.metadata, a.created_at,
+                   a.user_id, a.tenant_id,
+                   u.username, u.display_name, u.role,
+                   t.name AS tenant_name
+            FROM activity_log a
+            LEFT JOIN users u ON u.id = a.user_id
+            LEFT JOIN tenants t ON t.id = a.tenant_id
+            WHERE a.action_type = ANY(%s)
+            ORDER BY a.created_at DESC
+            LIMIT %s
+        """, [list(all_types), limit * 3])  # fetch extra to pair logouts with logins
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        # Serialize timestamps
+        for row in rows:
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+
+        # Build sessions: for each login, find the next logout by the same user
+        logins = [r for r in rows if r['action_type'] in login_types]
+        logouts = [r for r in rows if r['action_type'] in logout_types]
+
+        # Index logouts by user_id (list, most recent first — already sorted desc)
+        logout_map: dict = {}
+        for lo in logouts:
+            uid = lo.get('user_id')
+            if uid not in logout_map:
+                logout_map[uid] = []
+            logout_map[uid].append(lo)
+
+        sessions = []
+        for login in logins[:limit]:
+            uid = login.get('user_id')
+            meta = login.get('metadata') or {}
+            login_time = login['created_at']
+
+            # Find matching logout: first logout by same user AFTER this login
+            logout_time = None
+            duration_min = None
+            if uid in logout_map:
+                for lo in reversed(logout_map[uid]):  # oldest first
+                    if lo['created_at'] and login_time and lo['created_at'] > login_time:
+                        logout_time = lo['created_at']
+                        # Calculate duration
+                        from datetime import datetime as _dt
+                        try:
+                            lt = _dt.fromisoformat(login_time.replace('Z', '+00:00'))
+                            lot = _dt.fromisoformat(logout_time.replace('Z', '+00:00'))
+                            duration_min = round((lot - lt).total_seconds() / 60, 1)
+                        except Exception:
+                            pass
+                        # Remove this logout so it isn't reused
+                        logout_map[uid].remove(lo)
+                        break
+
+            session_portal = 'admin' if login['action_type'] == 'admin_login' else 'client'
+            sessions.append({
+                'user_id': uid,
+                'username': login.get('username') or '',
+                'display_name': login.get('display_name') or login.get('username') or '',
+                'role': login.get('role') or meta.get('role', ''),
+                'tenant_name': login.get('tenant_name') or meta.get('tenant_name', ''),
+                'tenant_id': login.get('tenant_id'),
+                'login_at': login_time,
+                'logout_at': logout_time,
+                'duration_minutes': duration_min,
+                'ip_address': meta.get('ip', ''),
+                'user_agent': meta.get('user_agent', ''),
+                'status': 'ended' if logout_time else 'active',
+                'portal': session_portal,
+            })
+
+        return jsonify({
+            'sessions': sessions,
+            'count': len(sessions),
+        })
     finally:
         cursor.close()
         db.close()
@@ -10040,6 +10171,532 @@ def _check_tier_limits(db, tenant_id):
             }
 
     return True, None
+
+
+# ── Phase 79: AI Security Copilot ──────────────────────────────
+
+def copilot_chat():
+    """POST /api/copilot/chat — send a message to the AI copilot."""
+    data = request.get_json(silent=True) or {}
+    message = data.get('message', '').strip()
+    conversation_id = data.get('conversation_id')
+
+    if not message:
+        return jsonify({'error': 'Message is required'}), 400
+
+    db = _db()
+    try:
+        api_key = db.get_setting('copilot_api_key', '')
+        if not api_key:
+            return jsonify({
+                'error': 'not_configured',
+                'response': 'Configure your Anthropic API key in Settings to use the Security Copilot.',
+                'conversation_id': None,
+                'suggestions': [],
+            })
+
+        user_id = _current_user_id()
+        tenant_id = _tenant_id()
+
+        # Load or create conversation
+        conv = None
+        messages_history = []
+        if conversation_id:
+            conv = db.get_copilot_conversation(conversation_id, user_id)
+            if conv:
+                messages_history = conv.get('messages', [])
+
+        from app.services.copilot_service import CopilotService
+        service = CopilotService(api_key)
+
+        try:
+            response_text = service.ask(message, messages_history, db)
+        except Exception as e:
+            return jsonify({'error': f'AI service error: {str(e)}'}), 502
+
+        # Save conversation
+        messages_history.append({'role': 'user', 'content': message})
+        messages_history.append({'role': 'assistant', 'content': response_text})
+
+        if conv:
+            db.update_copilot_conversation(conversation_id, user_id, messages_history)
+        else:
+            title = message[:60] + ('...' if len(message) > 60 else '')
+            conv = db.create_copilot_conversation(user_id, tenant_id, title, messages_history)
+            conversation_id = conv['id']
+
+        suggestions = service.get_suggestions(db)
+
+        return jsonify({
+            'response': response_text,
+            'conversation_id': conversation_id,
+            'suggestions': suggestions,
+        })
+    finally:
+        db.close()
+
+
+def copilot_conversations_list():
+    """GET /api/copilot/conversations — list user's conversations."""
+    db = _db()
+    try:
+        user_id = _current_user_id()
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        convs = db.list_copilot_conversations(user_id, limit, offset)
+        return jsonify({'conversations': convs})
+    finally:
+        db.close()
+
+
+def copilot_suggestions():
+    """GET /api/copilot/suggestions — contextual quick-ask chips."""
+    db = _db()
+    try:
+        api_key = db.get_setting('copilot_api_key', '')
+        if not api_key:
+            return jsonify({'suggestions': [], 'configured': False})
+
+        from app.services.copilot_service import CopilotService
+        service = CopilotService(api_key)
+        suggestions = service.get_suggestions(db)
+        return jsonify({'suggestions': suggestions, 'configured': True})
+    finally:
+        db.close()
+
+
+# ── Phase 80: Identity Timeline / Forensic View ───────────────
+
+def get_identity_timeline(identity_id):
+    """GET /api/identities/<id>/timeline — aggregated chronological event feed."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        tid = _tenant_id()
+
+        # Resolve identity DB id
+        if tid:
+            cursor.execute("""
+                SELECT i.id FROM identities i
+                JOIN discovery_runs r ON i.discovery_run_id = r.id
+                WHERE i.identity_id = %s AND r.tenant_id = %s
+                ORDER BY i.discovery_run_id DESC LIMIT 1
+            """, (identity_id, tid))
+        else:
+            cursor.execute("""
+                SELECT id FROM identities
+                WHERE identity_id = %s ORDER BY discovery_run_id DESC LIMIT 1
+            """, (identity_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return jsonify({'events': [], 'total': 0})
+        db_id = row[0]
+
+        # Parse filters
+        event_types = request.args.get('event_types', '')
+        event_types = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
+        from_date = request.args.get('from')
+        to_date = request.args.get('to')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        events = []
+
+        # 1. Anomalies
+        if not event_types or 'anomaly' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT created_at, severity, title, description, type, details
+                    FROM anomalies WHERE identity_id = %s ORDER BY created_at DESC LIMIT 50
+                """, (identity_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'anomaly',
+                        'severity': r[1],
+                        'title': r[2],
+                        'description': r[3],
+                        'metadata': {'anomaly_type': r[4], 'details': r[5]},
+                    })
+            except Exception:
+                db.conn.rollback()
+
+        # 2. Risk score changes
+        if not event_types or 'risk_change' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT recorded_at, risk_score, risk_level
+                    FROM risk_scores WHERE identity_id = %s ORDER BY recorded_at DESC LIMIT 50
+                """, (identity_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'risk_change',
+                        'severity': r[2] if r[2] in ('critical', 'high') else 'info',
+                        'title': f'Risk score: {r[1]}',
+                        'description': f'Risk level changed to {r[2]}',
+                        'metadata': {'risk_score': r[1], 'risk_level': r[2]},
+                    })
+            except Exception:
+                db.conn.rollback()
+
+        # 3. PIM activations
+        if not event_types or 'pim_activation' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT activated_at, role_name, status, justification
+                    FROM pim_activations WHERE identity_db_id = %s ORDER BY activated_at DESC LIMIT 50
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'pim_activation',
+                        'severity': 'medium',
+                        'title': f'PIM activation: {r[1]}',
+                        'description': f'Status: {r[2]}. Justification: {r[3] or "N/A"}',
+                        'metadata': {'role_name': r[1], 'status': r[2]},
+                    })
+            except Exception:
+                db.conn.rollback()
+
+        # 4. SOAR actions
+        if not event_types or 'soar_action' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT executed_at, action_type, status, result
+                    FROM soar_actions WHERE identity_id = %s ORDER BY executed_at DESC LIMIT 50
+                """, (identity_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'soar_action',
+                        'severity': 'info',
+                        'title': f'SOAR action: {r[1]}',
+                        'description': f'Status: {r[2]}',
+                        'metadata': {'action_type': r[1], 'status': r[2], 'result': r[3]},
+                    })
+            except Exception:
+                db.conn.rollback()
+
+        # 5. Remediation actions
+        if not event_types or 'remediation' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT created_at, action_type, status, notes
+                    FROM remediation_actions WHERE identity_id = %s ORDER BY created_at DESC LIMIT 50
+                """, (identity_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'remediation',
+                        'severity': 'info',
+                        'title': f'Remediation: {r[1]}',
+                        'description': f'Status: {r[2]}. {r[3] or ""}',
+                        'metadata': {'action_type': r[1], 'status': r[2]},
+                    })
+            except Exception:
+                db.conn.rollback()
+
+        cursor.close()
+
+        # Apply date filters
+        if from_date:
+            events = [e for e in events if e['timestamp'] and e['timestamp'] >= from_date]
+        if to_date:
+            events = [e for e in events if e['timestamp'] and e['timestamp'] <= to_date]
+
+        # Sort by timestamp DESC
+        events.sort(key=lambda e: e['timestamp'] or '', reverse=True)
+        total = len(events)
+        events = events[offset:offset + limit]
+
+        return jsonify({'events': events, 'total': total})
+    finally:
+        db.close()
+
+
+# ── Phase 81: Attack Path Analysis ─────────────────────────────
+
+DANGEROUS_PERMISSIONS = {
+    'RoleManagement.ReadWrite.All', 'Application.ReadWrite.All',
+    'AppRoleAssignment.ReadWrite.All', 'Directory.ReadWrite.All',
+    'GroupMember.ReadWrite.All', 'ServicePrincipalEndpoint.ReadWrite.All',
+}
+
+DANGEROUS_ROLES = {
+    'Global Administrator', 'Privileged Role Administrator',
+    'Application Administrator', 'Cloud Application Administrator',
+    'User Administrator', 'Exchange Administrator',
+}
+
+def get_identity_attack_paths(identity_id):
+    """GET /api/identities/<id>/attack-paths — compute privilege escalation chains."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        tid = _tenant_id()
+
+        # Resolve identity
+        if tid:
+            cursor.execute("""
+                SELECT i.id, i.display_name, i.risk_level, i.risk_score,
+                       i.identity_category, i.object_id, i.app_id
+                FROM identities i
+                JOIN discovery_runs r ON i.discovery_run_id = r.id
+                WHERE i.identity_id = %s AND r.tenant_id = %s
+                ORDER BY i.discovery_run_id DESC LIMIT 1
+            """, (identity_id, tid))
+        else:
+            cursor.execute("""
+                SELECT id, display_name, risk_level, risk_score,
+                       identity_category, object_id, app_id
+                FROM identities
+                WHERE identity_id = %s ORDER BY discovery_run_id DESC LIMIT 1
+            """, (identity_id,))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'paths': [], 'summary': {'total_paths': 0, 'critical_paths': 0, 'max_blast_radius': 'none'}})
+
+        db_id, display_name = ident[0], ident[1]
+        paths = []
+
+        # 1. Direct escalation: dangerous Graph API permissions
+        try:
+            cursor.execute("""
+                SELECT permission_name, permission_type
+                FROM graph_api_permissions
+                WHERE identity_id = %s AND permission_name = ANY(%s)
+            """, (identity_id, list(DANGEROUS_PERMISSIONS)))
+            dangerous_perms = cursor.fetchall()
+            for p in dangerous_perms:
+                paths.append({
+                    'type': 'direct_escalation',
+                    'risk_level': 'critical',
+                    'steps': [
+                        {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
+                        {'node_type': 'permission', 'node_id': p[0], 'node_label': p[0], 'description': f'{p[1]} permission grants write access'},
+                        {'node_type': 'target', 'node_id': 'tenant', 'node_label': 'Tenant-Wide Control', 'description': 'Can escalate to full tenant admin'},
+                    ],
+                    'impact': f'Direct privilege escalation via {p[0]}',
+                    'narrative': f'This identity holds the {p[0]} ({p[1]}) permission, which allows direct escalation to tenant-wide administrative control without any intermediate steps.',
+                })
+        except Exception:
+            db.conn.rollback()
+
+        # 2. Dangerous Entra roles
+        try:
+            cursor.execute("""
+                SELECT role_name, scope
+                FROM entra_role_assignments
+                WHERE identity_id = %s AND role_name = ANY(%s)
+            """, (identity_id, list(DANGEROUS_ROLES)))
+            dangerous_roles = cursor.fetchall()
+            for r in dangerous_roles:
+                paths.append({
+                    'type': 'direct_escalation',
+                    'risk_level': 'critical',
+                    'steps': [
+                        {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
+                        {'node_type': 'role', 'node_id': r[0], 'node_label': r[0], 'description': f'Entra directory role at scope: {r[1] or "/"}'},
+                        {'node_type': 'target', 'node_id': 'directory', 'node_label': 'Full Directory Control', 'description': 'Administrative control over all directory objects'},
+                    ],
+                    'impact': f'{r[0]} grants full directory control',
+                    'narrative': f'The {r[0]} role provides administrative authority over the entire Entra ID directory. A compromised identity with this role can create, modify, or delete any directory object.',
+                })
+        except Exception:
+            db.conn.rollback()
+
+        # 3. Ownership chain: identity owns SPNs with privileged roles
+        try:
+            cursor.execute("""
+                SELECT DISTINCT o.identity_id as owned_id, i2.display_name as owned_name
+                FROM sp_ownership o
+                JOIN identities i2 ON i2.identity_id = o.identity_id AND i2.discovery_run_id = (
+                    SELECT MAX(discovery_run_id) FROM identities WHERE identity_id = o.identity_id
+                )
+                WHERE o.owner_object_id = %s
+            """, (ident[5] or ident[6],))  # object_id or app_id
+            owned_spns = cursor.fetchall()
+            for owned in owned_spns:
+                cursor.execute("""
+                    SELECT role_name FROM entra_role_assignments
+                    WHERE identity_id = %s AND role_name = ANY(%s)
+                """, (owned[0], list(DANGEROUS_ROLES)))
+                priv_roles = cursor.fetchall()
+                if priv_roles:
+                    paths.append({
+                        'type': 'ownership_chain',
+                        'risk_level': 'high',
+                        'steps': [
+                            {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity (owner)'},
+                            {'node_type': 'owned_spn', 'node_id': owned[0], 'node_label': owned[1], 'description': 'Owned service principal'},
+                            {'node_type': 'role', 'node_id': priv_roles[0][0], 'node_label': priv_roles[0][0], 'description': 'Privileged role on owned SPN'},
+                            {'node_type': 'target', 'node_id': 'directory', 'node_label': 'Directory Control', 'description': 'Escalate via owned SPN credentials'},
+                        ],
+                        'impact': f'Ownership of {owned[1]} provides indirect {priv_roles[0][0]} access',
+                        'narrative': f'This identity owns {owned[1]}, which holds the {priv_roles[0][0]} role. An attacker could create new credentials on the owned SPN and use them to exercise its privileged role.',
+                    })
+        except Exception:
+            db.conn.rollback()
+
+        # 4. PIM abuse: eligible for dangerous roles
+        try:
+            cursor.execute("""
+                SELECT role_name FROM pim_eligible_assignments
+                WHERE identity_db_id = %s AND role_name = ANY(%s)
+            """, (db_id, list(DANGEROUS_ROLES)))
+            pim_roles = cursor.fetchall()
+            for pr in pim_roles:
+                paths.append({
+                    'type': 'pim_abuse',
+                    'risk_level': 'high',
+                    'steps': [
+                        {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
+                        {'node_type': 'pim', 'node_id': pr[0], 'node_label': f'PIM: {pr[0]}', 'description': 'Eligible for privileged role via PIM'},
+                        {'node_type': 'target', 'node_id': 'activated_role', 'node_label': pr[0], 'description': 'Activated role grants administrative control'},
+                    ],
+                    'impact': f'Can activate {pr[0]} via PIM',
+                    'narrative': f'This identity is eligible to activate {pr[0]} through Privileged Identity Management. While PIM requires justification, a compromised identity could activate this role and gain administrative control.',
+                })
+        except Exception:
+            db.conn.rollback()
+
+        # 5. Lateral movement: subscription-level Contributor/Owner
+        try:
+            cursor.execute("""
+                SELECT role_name, scope
+                FROM role_assignments
+                WHERE identity_id = %s
+                  AND role_name IN ('Owner', 'Contributor')
+                  AND (scope ~ '^/subscriptions/[^/]+$' OR scope = '/')
+            """, (identity_id,))
+            sub_roles = cursor.fetchall()
+            for sr in sub_roles:
+                paths.append({
+                    'type': 'lateral_movement',
+                    'risk_level': 'medium',
+                    'steps': [
+                        {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
+                        {'node_type': 'role', 'node_id': sr[0], 'node_label': f'{sr[0]} at {sr[1][:40]}', 'description': f'Subscription-level {sr[0]}'},
+                        {'node_type': 'target', 'node_id': sr[1], 'node_label': 'All Subscription Resources', 'description': 'Can modify/delete any resource in subscription'},
+                    ],
+                    'impact': f'{sr[0]} on subscription grants full resource control',
+                    'narrative': f'The {sr[0]} role at subscription scope ({sr[1][:50]}) allows modification or deletion of any resource within the subscription, enabling lateral movement to sensitive workloads.',
+                })
+        except Exception:
+            db.conn.rollback()
+
+        cursor.close()
+
+        # Deduplicate and sort by severity
+        severity_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        paths.sort(key=lambda p: severity_order.get(p['risk_level'], 99))
+        critical_count = sum(1 for p in paths if p['risk_level'] == 'critical')
+
+        max_blast = 'critical' if critical_count > 0 else ('high' if any(p['risk_level'] == 'high' for p in paths) else 'none')
+
+        return jsonify({
+            'paths': paths,
+            'summary': {
+                'total_paths': len(paths),
+                'critical_paths': critical_count,
+                'max_blast_radius': max_blast,
+            },
+        })
+    finally:
+        db.close()
+
+
+# ── Phase 83: Slack/Teams Integrations Settings ────────────────
+
+def get_integration_settings():
+    """GET /api/settings/integrations — return webhook URLs (masked) + event config."""
+    db = _db()
+    try:
+        slack_url = db.get_setting('slack_webhook_url', '')
+        teams_url = db.get_setting('teams_webhook_url', '')
+        slack_events = db.get_setting('slack_events', '[]')
+        teams_events = db.get_setting('teams_events', '[]')
+
+        def mask_url(url):
+            if not url or len(url) < 20:
+                return ''
+            return url[:15] + '...' + url[-6:]
+
+        return jsonify({
+            'slack': {
+                'configured': bool(slack_url),
+                'webhook_url_masked': mask_url(slack_url),
+                'events': json.loads(slack_events) if slack_events else [],
+            },
+            'teams': {
+                'configured': bool(teams_url),
+                'webhook_url_masked': mask_url(teams_url),
+                'events': json.loads(teams_events) if teams_events else [],
+            },
+        })
+    finally:
+        db.close()
+
+
+def save_integration_settings():
+    """POST /api/settings/integrations — save webhook URLs + event config."""
+    data = request.get_json(silent=True) or {}
+    db = _db()
+    try:
+        if 'slack_webhook_url' in data:
+            db.save_setting('slack_webhook_url', data['slack_webhook_url'])
+        if 'teams_webhook_url' in data:
+            db.save_setting('teams_webhook_url', data['teams_webhook_url'])
+        if 'slack_events' in data:
+            db.save_setting('slack_events', json.dumps(data['slack_events']))
+        if 'teams_events' in data:
+            db.save_setting('teams_events', json.dumps(data['teams_events']))
+
+        _log(db, 'integrations_updated', 'Integration settings updated')
+        return jsonify({'success': True})
+    finally:
+        db.close()
+
+
+def test_integration_webhook():
+    """POST /api/settings/integrations/test — send test message to verify webhook."""
+    data = request.get_json(silent=True) or {}
+    platform = data.get('platform')
+    webhook_url = data.get('webhook_url')
+
+    if not platform or not webhook_url:
+        return jsonify({'error': 'platform and webhook_url required'}), 400
+
+    from app.services.notification_dispatcher import NotificationDispatcher
+    dispatcher = NotificationDispatcher()
+
+    try:
+        if platform == 'slack':
+            success = dispatcher.send_slack(webhook_url, {
+                'event_type': 'test',
+                'title': 'AuditGraph Test Notification',
+                'description': 'This is a test message from AuditGraph. If you see this, your Slack integration is working correctly.',
+                'severity': 'info',
+            })
+        elif platform == 'teams':
+            success = dispatcher.send_teams(webhook_url, {
+                'event_type': 'test',
+                'title': 'AuditGraph Test Notification',
+                'description': 'This is a test message from AuditGraph. If you see this, your Teams integration is working correctly.',
+                'severity': 'info',
+            })
+        else:
+            return jsonify({'error': 'Invalid platform. Use slack or teams.'}), 400
+
+        if success:
+            return jsonify({'success': True, 'message': f'Test message sent to {platform}'})
+        else:
+            return jsonify({'success': False, 'message': f'Failed to send to {platform}. Check the webhook URL.'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 def check_feature_gate(feature_name):

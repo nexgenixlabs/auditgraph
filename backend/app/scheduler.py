@@ -152,9 +152,23 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
         # Check for identity changes and send email notification
         _send_change_notification_if_needed()
 
+        # Phase 83: Dispatch scan_complete notification
+        _dispatch_notification('scan_complete', {
+            'title': 'Discovery Scan Complete',
+            'description': 'Scheduled discovery run completed successfully.',
+            'severity': 'info',
+        })
+
     except Exception as e:
         logger.error(f"❌ SCHEDULED DISCOVERY FAILED: {str(e)}")
         logger.exception(e)
+
+        # Phase 83: Dispatch scan_failed notification
+        _dispatch_notification('scan_failed', {
+            'title': 'Discovery Scan Failed',
+            'description': f'Scheduled discovery run failed: {str(e)[:200]}',
+            'severity': 'critical',
+        })
 
 
 def _send_change_notification_if_needed():
@@ -250,6 +264,14 @@ def _send_change_notification_if_needed():
         else:
             logger.info("No changes detected - no email notification needed")
 
+        # Phase 83: Dispatch drift notification
+        if total_changes > 0:
+            _dispatch_notification('drift_detected', {
+                'title': f'{total_changes} Changes Detected in Discovery',
+                'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
+                'severity': 'high' if new_count + removed_count > 0 else 'medium',
+            })
+
         # Phase 43: SOAR evaluation for drift and change events
         _evaluate_soar_triggers_for_changes(changes, db)
 
@@ -270,6 +292,18 @@ def _send_change_notification_if_needed():
     except Exception as e:
         logger.error(f"Error during change detection/notification: {e}")
         logger.exception(e)
+
+
+def _dispatch_notification(event_type: str, event_data: dict):
+    """Phase 83: Dispatch notification to Slack/Teams if configured."""
+    try:
+        from app.services.notification_dispatcher import NotificationDispatcher
+        db = Database()
+        dispatcher = NotificationDispatcher()
+        dispatcher.dispatch(event_type, event_data, db)
+        db.close()
+    except Exception as e:
+        logger.warning(f"Failed to dispatch {event_type} notification: {e}")
 
 
 def _save_compliance_snapshot(run_id: int, db: Database):
@@ -475,6 +509,14 @@ def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Databa
             _generate_anomaly_notifications(current_run_id, anomalies, db)
             # Phase 43: SOAR evaluation for anomalies
             _evaluate_soar_triggers('anomaly', anomalies, db)
+            # Phase 83: Dispatch anomaly notifications for critical/high
+            critical_anomalies = [a for a in anomalies if a.get('severity') in ('critical', 'high')]
+            if critical_anomalies:
+                _dispatch_notification('anomaly_detected', {
+                    'title': f'{len(critical_anomalies)} Critical/High Anomalies Detected',
+                    'description': f'Run #{current_run_id}: {", ".join(a["title"] for a in critical_anomalies[:3])}',
+                    'severity': critical_anomalies[0].get('severity', 'high'),
+                })
         else:
             logger.info(f"Anomaly detection: no anomalies found for run #{current_run_id}")
 
