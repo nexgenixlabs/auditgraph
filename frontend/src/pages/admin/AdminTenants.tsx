@@ -1,9 +1,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  CLOUD_PRICING, ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
-  CLOUD_LABELS, PLAN_TIERS, ACCOUNT_TIER_LABELS,
+  PRIMARY_CLOUD_PRICE, ADDON_CLOUD_PRICE,
+  ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
+  CLOUD_LABELS, ACCOUNT_TIER_LABELS,
   ANNUAL_DISCOUNT, calculateMonthlyTotal, calculateCloudBaseTotal, calculateAddonTotal,
+  getEnabledClouds, getCloudPrice,
   type CloudConfig,
 } from '../../constants/pricing';
 
@@ -541,57 +543,40 @@ export default function AdminTenants() {
             <div className="mb-6">
               <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Cloud Providers</h4>
               <div className="space-y-3">
-                {Object.entries(CLOUD_LABELS).map(([key, meta]) => {
-                  const cfg = configForm.cloud_providers[key] || { enabled: false, plan: null };
-                  const pricing = CLOUD_PRICING[key];
-                  return (
-                    <div key={key} className={`border-2 rounded-xl p-4 transition ${cfg.enabled ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200 bg-gray-50/30'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <span className={`px-2 py-0.5 rounded text-xs font-bold ${meta.bg} ${meta.color}`}>{meta.label}</span>
-                          <span className="text-xs text-gray-500">{meta.description}</span>
+                {(() => {
+                  const enabledKeys = getEnabledClouds(configForm);
+                  return Object.entries(CLOUD_LABELS).map(([key, meta]) => {
+                    const cfg = configForm.cloud_providers[key] || { enabled: false, plan: null };
+                    const isPrimary = enabledKeys[0] === key;
+                    const price = cfg.enabled ? (isPrimary ? PRIMARY_CLOUD_PRICE : ADDON_CLOUD_PRICE) : 0;
+                    return (
+                      <div key={key} className={`border-2 rounded-xl p-4 transition ${cfg.enabled ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200 bg-gray-50/30'}`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className={`px-2 py-0.5 rounded text-xs font-bold ${meta.bg} ${meta.color}`}>{meta.label}</span>
+                            <span className="text-xs text-gray-500">{meta.description}</span>
+                          </div>
+                          <button
+                            onClick={() => toggleCloudProvider(key)}
+                            className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${cfg.enabled ? 'bg-blue-500' : 'bg-gray-300'}`}
+                          >
+                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${cfg.enabled ? 'translate-x-5' : ''}`} />
+                          </button>
                         </div>
-                        <button
-                          onClick={() => toggleCloudProvider(key)}
-                          className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${cfg.enabled ? 'bg-blue-500' : 'bg-gray-300'}`}
-                        >
-                          <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${cfg.enabled ? 'translate-x-5' : ''}`} />
-                        </button>
-                      </div>
-                      {cfg.enabled && (
-                        <div className="mt-3">
-                          {PLAN_TIERS.length === 1 ? (
+                        {cfg.enabled && (
+                          <div className="mt-3">
                             <div className="flex items-center justify-between px-3 py-2 border border-blue-400 bg-blue-50 rounded-lg">
-                              <span className="text-xs font-semibold text-gray-700 capitalize">{PLAN_TIERS[0]}</span>
-                              <span className="text-xs font-bold text-blue-700">${pricing[PLAN_TIERS[0]]}/mo</span>
+                              <span className={`text-xs font-semibold ${isPrimary ? 'text-blue-700' : 'text-gray-600'}`}>
+                                {isPrimary ? 'Primary Cloud' : 'Add-on Cloud'}
+                              </span>
+                              <span className="text-xs font-bold text-blue-700">${price}/mo <span className="text-[10px] font-normal text-gray-400">excl. tax</span></span>
                             </div>
-                          ) : (
-                            <div className="flex gap-3">
-                              {PLAN_TIERS.map(tier => (
-                                <label
-                                  key={tier}
-                                  className={`flex-1 flex items-center justify-between px-3 py-2 border rounded-lg cursor-pointer transition ${cfg.plan === tier ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <input
-                                      type="radio"
-                                      name={`plan-${key}`}
-                                      checked={cfg.plan === tier}
-                                      onChange={() => setCloudPlan(key, tier)}
-                                      className="w-3.5 h-3.5 text-blue-600"
-                                    />
-                                    <span className="text-xs font-semibold text-gray-700 capitalize">{tier}</span>
-                                  </div>
-                                  <span className={`text-xs font-bold ${cfg.plan === tier ? 'text-blue-700' : 'text-gray-500'}`}>${pricing[tier]}/mo</span>
-                                </label>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </div>
 
@@ -681,16 +666,19 @@ export default function AdminTenants() {
           <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
             {/* Line items */}
             <div className="space-y-1.5 mb-3">
-              {Object.entries(configForm.cloud_providers).map(([key, pCfg]) => {
-                if (!pCfg.enabled || !pCfg.plan) return null;
-                const price = CLOUD_PRICING[key]?.[pCfg.plan] ?? 0;
-                return (
-                  <div key={key} className="flex items-center justify-between text-xs">
-                    <span className="text-slate-300">{CLOUD_LABELS[key]?.label} ({pCfg.plan})</span>
-                    <span className="text-white font-semibold">${price.toLocaleString()}/mo</span>
-                  </div>
-                );
-              })}
+              {(() => {
+                const enabled = getEnabledClouds(configForm);
+                return enabled.map((key, idx) => {
+                  const isPrimary = idx === 0;
+                  const price = isPrimary ? PRIMARY_CLOUD_PRICE : ADDON_CLOUD_PRICE;
+                  return (
+                    <div key={key} className="flex items-center justify-between text-xs">
+                      <span className="text-slate-300">{CLOUD_LABELS[key]?.label} ({isPrimary ? 'Primary' : 'Add-on'})</span>
+                      <span className="text-white font-semibold">${price.toLocaleString()}/mo</span>
+                    </div>
+                  );
+                });
+              })()}
               {Object.entries(configForm.addons).map(([key, enabled]) => {
                 if (!enabled) return null;
                 const addon = ADDON_PRICING[key];
@@ -707,7 +695,10 @@ export default function AdminTenants() {
             <div className="border-t border-slate-700 pt-3 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-bold text-white">Total Monthly</span>
-                <span className="text-xl font-extrabold text-white">${monthlyTotal.toLocaleString()}/mo</span>
+                <div className="text-right">
+                  <span className="text-xl font-extrabold text-white">${monthlyTotal.toLocaleString()}/mo</span>
+                  <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
+                </div>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-slate-400">Annual (15% discount)</span>

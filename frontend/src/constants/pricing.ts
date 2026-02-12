@@ -1,8 +1,14 @@
-// ── Cloud Provider Pricing (per-cloud sub-tiers within Pro) ──────────────────
+// ── Cloud Pricing — Primary / Add-on Model ───────────────────────────────────
+// The first cloud a tenant signs up with is "primary" at $799/mo.
+// Additional clouds are add-ons at $699/mo each. All features included.
+export const PRIMARY_CLOUD_PRICE = 799;
+export const ADDON_CLOUD_PRICE = 699;
+
+// Legacy per-cloud map kept for backwards compatibility in config panels
 export const CLOUD_PRICING: Record<string, Record<string, number>> = {
-  azure: { pro: 199 },
-  aws:   { pro: 249 },
-  gcp:   { pro: 229 },
+  azure: { pro: PRIMARY_CLOUD_PRICE },
+  aws:   { pro: PRIMARY_CLOUD_PRICE },
+  gcp:   { pro: PRIMARY_CLOUD_PRICE },
 };
 
 // ── Paid Add-Ons (only purchasable extras beyond base Pro features) ──────────
@@ -53,13 +59,23 @@ export interface CloudConfig {
   addons: Record<string, boolean>;
 }
 
+/** Returns ordered list of enabled cloud keys (first = primary) */
+export function getEnabledClouds(cfg: CloudConfig): string[] {
+  return ['azure', 'aws', 'gcp'].filter(k => cfg.cloud_providers[k]?.enabled);
+}
+
+/** Price for a given cloud based on its position (primary vs add-on) */
+export function getCloudPrice(cfg: CloudConfig, cloudKey: string): number {
+  const enabled = getEnabledClouds(cfg);
+  if (!enabled.includes(cloudKey)) return 0;
+  return enabled[0] === cloudKey ? PRIMARY_CLOUD_PRICE : ADDON_CLOUD_PRICE;
+}
+
 export function calculateMonthlyTotal(cfg: CloudConfig): number {
+  const enabledCount = getEnabledClouds(cfg).length;
   let total = 0;
-  for (const [provider, pCfg] of Object.entries(cfg.cloud_providers)) {
-    if (pCfg.enabled && pCfg.plan && CLOUD_PRICING[provider]) {
-      total += CLOUD_PRICING[provider][pCfg.plan] ?? 0;
-    }
-  }
+  if (enabledCount > 0) total += PRIMARY_CLOUD_PRICE;
+  if (enabledCount > 1) total += (enabledCount - 1) * ADDON_CLOUD_PRICE;
   for (const [addon, enabled] of Object.entries(cfg.addons)) {
     if (enabled && ADDON_PRICING[addon]) {
       total += ADDON_PRICING[addon].price;
@@ -69,13 +85,9 @@ export function calculateMonthlyTotal(cfg: CloudConfig): number {
 }
 
 export function calculateCloudBaseTotal(cfg: CloudConfig): number {
-  let total = 0;
-  for (const [provider, pCfg] of Object.entries(cfg.cloud_providers)) {
-    if (pCfg.enabled && pCfg.plan && CLOUD_PRICING[provider]) {
-      total += CLOUD_PRICING[provider][pCfg.plan] ?? 0;
-    }
-  }
-  return total;
+  const enabledCount = getEnabledClouds(cfg).length;
+  if (enabledCount === 0) return 0;
+  return PRIMARY_CLOUD_PRICE + (enabledCount - 1) * ADDON_CLOUD_PRICE;
 }
 
 export function calculateAddonTotal(cfg: CloudConfig): number {

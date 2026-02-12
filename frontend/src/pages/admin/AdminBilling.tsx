@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  CLOUD_PRICING, ADDON_PRICING, CLOUD_LABELS, ANNUAL_DISCOUNT,
-  ACCOUNT_TIER_LABELS, calculateMonthlyTotal, type CloudConfig,
+  ADDON_PRICING, CLOUD_LABELS, ANNUAL_DISCOUNT,
+  ACCOUNT_TIER_LABELS, calculateMonthlyTotal, getEnabledClouds, getCloudPrice,
+  type CloudConfig,
 } from '../../constants/pricing';
 
 interface TenantBilling {
@@ -72,16 +73,15 @@ export default function AdminBilling() {
   const totalMrr = useMemo(() => tenants.reduce((sum, t) => sum + getTenantMrr(t), 0), [tenants]);
   const projectedArr = totalMrr * 12 * (1 - ANNUAL_DISCOUNT);
 
-  // Revenue by cloud provider
+  // Revenue by cloud provider (primary/addon model)
   const revenueByCloud = useMemo(() => {
     const result: Record<string, number> = { azure: 0, aws: 0, gcp: 0 };
     for (const t of tenants) {
       if (!t.enabled) continue;
       const cfg = getTenantConfig(t);
-      for (const [provider, pCfg] of Object.entries(cfg.cloud_providers)) {
-        if (pCfg.enabled && pCfg.plan && CLOUD_PRICING[provider]) {
-          result[provider] = (result[provider] || 0) + (CLOUD_PRICING[provider][pCfg.plan] ?? 0);
-        }
+      const enabled = getEnabledClouds(cfg);
+      for (const provider of enabled) {
+        result[provider] = (result[provider] || 0) + getCloudPrice(cfg, provider);
       }
     }
     return result;
@@ -137,11 +137,11 @@ export default function AdminBilling() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="text-2xl font-bold text-green-700">${totalMrr.toLocaleString()}</div>
-          <div className="text-xs text-gray-500 mt-1">Total MRR</div>
+          <div className="text-xs text-gray-500 mt-1">Total MRR <span className="text-[10px] text-gray-400">excl. tax</span></div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="text-2xl font-bold text-blue-700">${Math.round(projectedArr).toLocaleString()}</div>
-          <div className="text-xs text-gray-500 mt-1">Projected ARR</div>
+          <div className="text-xs text-gray-500 mt-1">Projected ARR <span className="text-[10px] text-gray-400">excl. tax</span></div>
         </div>
       </div>
 
@@ -321,6 +321,11 @@ export default function AdminBilling() {
             })}
           </tbody>
         </table>
+      </div>
+
+      {/* Tax disclaimer */}
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-xs text-gray-500">
+        All prices are in USD and exclude applicable taxes (GST, VAT, Sales Tax, etc.). Taxes will be calculated based on the customer&apos;s billing address and applied to the invoice.
       </div>
     </div>
   );
