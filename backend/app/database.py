@@ -5546,6 +5546,8 @@ class Database:
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_expires_at TIMESTAMPTZ")
         # Phase 78: Add logo_url column
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS logo_url TEXT")
+        # Subscription term: 0=monthly, 1/3/5 = year commitments
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_term INTEGER NOT NULL DEFAULT 0")
         # Phase 78: Migrate growth→pro plan + API key role renames
         cursor.execute("UPDATE tenants SET plan = 'pro' WHERE plan = 'growth'")
         cursor.execute("UPDATE api_keys SET role = 'reader' WHERE role = 'auditor'")
@@ -5714,9 +5716,9 @@ class Database:
         return row
 
     def update_tenant(self, tenant_id, **kwargs):
-        """Update tenant fields. Allowed: name, plan, enabled, settings, license_activated_at, license_expires_at."""
+        """Update tenant fields. Allowed: name, plan, enabled, settings, license_activated_at, license_expires_at, subscription_term."""
         self._ensure_tenants_table()
-        allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at'}
+        allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at', 'subscription_term'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_tenant_by_id(tenant_id)

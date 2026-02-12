@@ -4,7 +4,8 @@ import {
   PRIMARY_CLOUD_PRICE, ADDON_CLOUD_PRICE,
   ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
   CLOUD_LABELS, ACCOUNT_TIER_LABELS,
-  ANNUAL_DISCOUNT, calculateMonthlyTotal, calculateCloudBaseTotal, calculateAddonTotal,
+  SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
+  calculateMonthlyTotal, calculateCloudBaseTotal, calculateAddonTotal, calculateDiscountedMonthly,
   getEnabledClouds, getCloudPrice,
   type CloudConfig,
 } from '../../constants/pricing';
@@ -19,6 +20,7 @@ interface Tenant {
   created_at: string;
   license_activated_at: string | null;
   license_expires_at: string | null;
+  subscription_term: number;
   settings?: Record<string, unknown>;
 }
 
@@ -77,6 +79,7 @@ export default function AdminTenants() {
   const [success, setSuccess] = useState<string | null>(null);
   const [showConfigure, setShowConfigure] = useState<Tenant | null>(null);
   const [configForm, setConfigForm] = useState<CloudConfig>(DEFAULT_CLOUD_CONFIG);
+  const [configTerm, setConfigTerm] = useState(0);
   const [configSaving, setConfigSaving] = useState(false);
 
   const fetchTenants = useCallback(() => {
@@ -263,6 +266,7 @@ export default function AdminTenants() {
     const cp = (settings.cloud_providers || DEFAULT_CLOUD_CONFIG.cloud_providers) as CloudConfig['cloud_providers'];
     const addons = (settings.addons || DEFAULT_CLOUD_CONFIG.addons) as CloudConfig['addons'];
     setConfigForm({ cloud_providers: { ...DEFAULT_CLOUD_CONFIG.cloud_providers, ...cp }, addons: { ...DEFAULT_CLOUD_CONFIG.addons, ...addons } });
+    setConfigTerm(t.subscription_term || 0);
     setShowConfigure(t);
   }
 
@@ -277,10 +281,15 @@ export default function AdminTenants() {
         cloud_providers: configForm.cloud_providers,
         addons: configForm.addons,
       };
+      const payload: Record<string, unknown> = { settings: mergedSettings, subscription_term: configTerm };
+      // Auto-set license_activated_at if switching to a term commitment and not already set
+      if (configTerm > 0 && !showConfigure.license_activated_at) {
+        payload.license_activated_at = new Date().toISOString();
+      }
       const res = await fetch(`/api/tenants/${showConfigure.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: mergedSettings }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
@@ -336,8 +345,9 @@ export default function AdminTenants() {
   const monthlyTotal = calculateMonthlyTotal(configForm);
   const cloudBase = calculateCloudBaseTotal(configForm);
   const addonBase = calculateAddonTotal(configForm);
-  const annualTotal = monthlyTotal * 12 * (1 - ANNUAL_DISCOUNT);
-  const annualSavings = monthlyTotal * 12 * ANNUAL_DISCOUNT;
+  const termDiscount = getTermDiscount(configTerm);
+  const discountedMonthly = calculateDiscountedMonthly(configForm, configTerm);
+  const termSavingsMonthly = monthlyTotal - discountedMonthly;
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading tenants...</div>;
 
@@ -662,6 +672,31 @@ export default function AdminTenants() {
             </div>
           </div>
 
+          {/* Subscription Term */}
+          <div className="px-6 pb-2">
+            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Subscription Term</h4>
+            <div className="flex gap-2">
+              {SUBSCRIPTION_TERMS.map(t => (
+                <button
+                  key={t.value}
+                  onClick={() => setConfigTerm(t.value)}
+                  className={`flex-1 px-3 py-2.5 border-2 rounded-lg text-center transition ${
+                    configTerm === t.value
+                      ? 'border-blue-500 bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <div className={`text-xs font-semibold ${configTerm === t.value ? 'text-blue-700' : 'text-gray-700'}`}>{t.label}</div>
+                  {t.discount > 0 ? (
+                    <div className="text-[10px] font-semibold text-green-600 mt-0.5">{t.discount * 100}% off</div>
+                  ) : (
+                    <div className="text-[10px] text-gray-400 mt-0.5">No discount</div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Dark Billing Summary Card */}
           <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
             {/* Line items */}
@@ -693,20 +728,28 @@ export default function AdminTenants() {
             </div>
 
             <div className="border-t border-slate-700 pt-3 space-y-2">
+              {termDiscount > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">Base Monthly</span>
+                  <span className="text-xs text-slate-400 line-through">${monthlyTotal.toLocaleString()}/mo</span>
+                </div>
+              )}
               <div className="flex items-center justify-between">
-                <span className="text-sm font-bold text-white">Total Monthly</span>
+                <div>
+                  <span className="text-sm font-bold text-white">Effective Monthly</span>
+                  {termDiscount > 0 && <span className="ml-2 text-[10px] font-semibold text-green-400">{getTermLabel(configTerm)} — {termDiscount * 100}% off</span>}
+                </div>
                 <div className="text-right">
-                  <span className="text-xl font-extrabold text-white">${monthlyTotal.toLocaleString()}/mo</span>
+                  <span className="text-xl font-extrabold text-white">${discountedMonthly.toLocaleString()}/mo</span>
                   <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
                 </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400">Annual (15% discount)</span>
-                <div className="text-right">
-                  <span className="text-sm font-bold text-cyan-400">${Math.round(annualTotal).toLocaleString()}/yr</span>
-                  <span className="text-[10px] text-green-400 ml-2">Save ${Math.round(annualSavings).toLocaleString()}</span>
+              {termDiscount > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">You save</span>
+                  <span className="text-xs font-semibold text-green-400">${termSavingsMonthly.toLocaleString()}/mo (${(termSavingsMonthly * 12).toLocaleString()}/yr)</span>
                 </div>
-              </div>
+              )}
             </div>
 
             <button
@@ -728,6 +771,7 @@ export default function AdminTenants() {
               <th className="px-4 py-2.5">Name</th>
               <th className="px-4 py-2.5">Slug</th>
               <th className="px-4 py-2.5">Plan</th>
+              <th className="px-4 py-2.5">Term</th>
               <th className="px-4 py-2.5">Clouds</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">Status</th>
@@ -754,6 +798,11 @@ export default function AdminTenants() {
                         <option key={key} value={key}>{meta.label}</option>
                       ))}
                     </select>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                      t.subscription_term > 0 ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-500'
+                    }`}>{getTermLabel(t.subscription_term || 0)}</span>
                   </td>
                   <td className="px-4 py-2.5">
                     <div className="flex gap-1 flex-wrap">

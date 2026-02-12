@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { SUBSCRIPTION_TERMS } from '../../constants/pricing';
 
 const STEPS = ['Organization', 'Admin User', 'Review', 'Complete'];
 
@@ -12,6 +13,7 @@ interface TenantForm {
   name: string;
   slug: string;
   plan: string;
+  subscription_term: number;
 }
 
 interface AdminForm {
@@ -22,7 +24,7 @@ interface AdminForm {
 
 export default function AdminOnboarding() {
   const [step, setStep] = useState(0);
-  const [tenantForm, setTenantForm] = useState<TenantForm>({ name: '', slug: '', plan: 'pro' });
+  const [tenantForm, setTenantForm] = useState<TenantForm>({ name: '', slug: '', plan: 'pro', subscription_term: 1 });
   const [adminForm, setAdminForm] = useState<AdminForm>({ admin_username: '', admin_display_name: '', admin_password: '' });
   const [createdTenantId, setCreatedTenantId] = useState<number | null>(null);
   const [createdTenantSlug, setCreatedTenantSlug] = useState('');
@@ -136,6 +138,24 @@ export default function AdminOnboarding() {
                 ))}
               </div>
             </div>
+            {(tenantForm.plan === 'pro' || tenantForm.plan === 'enterprise') && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Subscription Term</label>
+                <div className="flex gap-3">
+                  {SUBSCRIPTION_TERMS.map(t => (
+                    <label key={t.value} className={`flex items-center justify-between px-4 py-2.5 border rounded-lg cursor-pointer transition ${
+                      tenantForm.subscription_term === t.value ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                    }`}>
+                      <input type="radio" name="term" value={t.value} checked={tenantForm.subscription_term === t.value} onChange={() => setTenantForm(prev => ({ ...prev, subscription_term: t.value }))} className="sr-only" />
+                      <div>
+                        <span className={`text-sm font-medium ${tenantForm.subscription_term === t.value ? 'text-blue-700' : 'text-gray-700'}`}>{t.label}</span>
+                        {t.discount > 0 && <span className="ml-1.5 text-[10px] font-semibold text-green-600">{t.discount * 100}% off</span>}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <button onClick={handleNextFromOrg} disabled={!tenantForm.name || !tenantForm.slug || !!slugError} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
               Next
             </button>
@@ -186,6 +206,15 @@ export default function AdminOnboarding() {
             <div className="flex justify-between py-2 border-b border-gray-100">
               <span className="text-sm text-gray-500">Plan</span>
               <span className="text-sm font-medium text-gray-800 capitalize">{tenantForm.plan}</span>
+            </div>
+            <div className="flex justify-between py-2 border-b border-gray-100">
+              <span className="text-sm text-gray-500">Term</span>
+              <span className="text-sm font-medium text-gray-800">
+                {SUBSCRIPTION_TERMS.find(t => t.value === tenantForm.subscription_term)?.label || 'Monthly'}
+                {(SUBSCRIPTION_TERMS.find(t => t.value === tenantForm.subscription_term)?.discount || 0) > 0 && (
+                  <span className="ml-1.5 text-xs text-green-600">({(SUBSCRIPTION_TERMS.find(t => t.value === tenantForm.subscription_term)?.discount || 0) * 100}% discount)</span>
+                )}
+              </span>
             </div>
             <div className="flex justify-between py-2 border-b border-gray-100">
               <span className="text-sm text-gray-500">Admin Username</span>

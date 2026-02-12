@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  ADDON_PRICING, CLOUD_LABELS, ANNUAL_DISCOUNT,
+  ADDON_PRICING, CLOUD_LABELS,
   ACCOUNT_TIER_LABELS, calculateMonthlyTotal, getEnabledClouds, getCloudPrice,
+  getTermDiscount, getTermLabel, SUBSCRIPTION_TERMS,
   type CloudConfig,
 } from '../../constants/pricing';
 
@@ -14,6 +15,7 @@ interface TenantBilling {
   user_count: number;
   license_activated_at: string | null;
   license_expires_at: string | null;
+  subscription_term: number;
   settings?: Record<string, unknown>;
 }
 
@@ -33,7 +35,9 @@ function getTenantConfig(t: TenantBilling): CloudConfig {
 
 function getTenantMrr(t: TenantBilling): number {
   if (!t.enabled) return 0;
-  return calculateMonthlyTotal(getTenantConfig(t));
+  const base = calculateMonthlyTotal(getTenantConfig(t));
+  const discount = getTermDiscount(t.subscription_term || 0);
+  return Math.round(base * (1 - discount));
 }
 
 function formatDate(iso: string | null): string {
@@ -71,7 +75,7 @@ export default function AdminBilling() {
   const totalUsers = tenants.reduce((sum, t) => sum + t.user_count, 0);
 
   const totalMrr = useMemo(() => tenants.reduce((sum, t) => sum + getTenantMrr(t), 0), [tenants]);
-  const projectedArr = totalMrr * 12 * (1 - ANNUAL_DISCOUNT);
+  const projectedArr = totalMrr * 12;
 
   // Revenue by cloud provider (primary/addon model)
   const revenueByCloud = useMemo(() => {
@@ -262,6 +266,7 @@ export default function AdminBilling() {
             <tr>
               <th className="px-4 py-2.5">Organization</th>
               <th className="px-4 py-2.5">Plan</th>
+              <th className="px-4 py-2.5">Term</th>
               <th className="px-4 py-2.5">Clouds</th>
               <th className="px-4 py-2.5">Add-ons</th>
               <th className="px-4 py-2.5">Users</th>
@@ -286,6 +291,14 @@ export default function AdminBilling() {
                   <td className="px-4 py-2.5 font-medium text-gray-900">{t.name}</td>
                   <td className="px-4 py-2.5">
                     <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${planCfg.bg} ${planCfg.color}`}>{planCfg.label}</span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-[10px] font-semibold ${(t.subscription_term || 0) > 0 ? 'text-blue-600' : 'text-gray-400'}`}>
+                      {getTermLabel(t.subscription_term || 0)}
+                      {getTermDiscount(t.subscription_term || 0) > 0 && (
+                        <span className="ml-1 text-green-600">({getTermDiscount(t.subscription_term || 0) * 100}%)</span>
+                      )}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5">
                     <div className="flex gap-1 flex-wrap">

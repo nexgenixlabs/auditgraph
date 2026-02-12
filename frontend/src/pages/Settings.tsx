@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { getTermLabel, getTermDiscount, ACCOUNT_TIER_LABELS } from '../constants/pricing';
 
 interface CloudProviderConfig {
   enabled: boolean;
@@ -1438,17 +1439,53 @@ export default function Settings() {
               </div>
             </div>
 
-            {/* Tenant info */}
+            {/* Subscription Info */}
             {currentTenant && (
-              <div className="flex items-center gap-3 pt-3 border-t">
-                <span className="text-xs text-gray-500">Tenant:</span>
-                <span className="text-sm font-medium text-gray-800">{currentTenant.name}</span>
-                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500">{currentTenant.slug}</span>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                  currentTenant.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
-                  currentTenant.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
-                  'bg-gray-100 text-gray-600'
-                }`}>{currentTenant.plan}</span>
+              <div className="pt-3 border-t space-y-3">
+                <div className="text-sm font-semibold text-gray-800">Subscription</div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Plan</div>
+                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                      (ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).bg
+                    } ${(ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).color}`}>
+                      {(ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).label}
+                    </span>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Term</div>
+                    <div className="text-sm font-semibold text-gray-800">
+                      {getTermLabel(currentTenant.subscription_term || 0)}
+                      {getTermDiscount(currentTenant.subscription_term || 0) > 0 && (
+                        <span className="ml-1 text-[10px] text-green-600 font-semibold">{getTermDiscount(currentTenant.subscription_term || 0) * 100}% off</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Activated</div>
+                    <div className="text-sm font-semibold text-gray-800">
+                      {currentTenant.license_activated_at
+                        ? new Date(currentTenant.license_activated_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                        : '\u2014'}
+                    </div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Expires</div>
+                    <div className={`text-sm font-semibold ${
+                      currentTenant.license_expires_at
+                        ? (new Date(currentTenant.license_expires_at).getTime() - Date.now()) / 86400000 < 30
+                          ? 'text-yellow-600'
+                          : (new Date(currentTenant.license_expires_at).getTime() - Date.now()) < 0
+                            ? 'text-red-600'
+                            : 'text-gray-800'
+                        : 'text-gray-400'
+                    }`}>
+                      {currentTenant.license_expires_at
+                        ? new Date(currentTenant.license_expires_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                        : currentTenant.subscription_term === 0 ? 'Monthly (no expiry)' : '\u2014'}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
           </div>

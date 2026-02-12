@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { getTermLabel } from '../../constants/pricing';
 
 interface TenantMetric {
   id: number;
@@ -11,6 +12,7 @@ interface TenantMetric {
   last_discovery: string | null;
   license_activated_at: string | null;
   license_expires_at: string | null;
+  subscription_term: number;
   clouds_enabled: string[];
 }
 
@@ -86,6 +88,7 @@ export default function AdminOverview() {
               <th className="px-4 py-2.5">Tenant</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">License Model</th>
+              <th className="px-4 py-2.5">Term</th>
               <th className="px-4 py-2.5">Cloud Providers</th>
               <th className="px-4 py-2.5">Status</th>
               <th className="px-4 py-2.5">Last Scan</th>
@@ -116,6 +119,7 @@ export default function AdminOverview() {
                       'bg-gray-100 text-gray-600'
                     }`}>{t.plan}</span>
                   </td>
+                  <td className="px-4 py-2.5 text-xs text-gray-600">{getTermLabel(t.subscription_term || 0)}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-1 flex-wrap">
                       {(t.clouds_enabled || []).length > 0 ? (t.clouds_enabled || []).map(c => (

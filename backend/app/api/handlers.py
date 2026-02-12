@@ -6624,6 +6624,18 @@ def create_tenant_handler():
             return jsonify({'error': f'Tenant slug "{slug}" already exists'}), 409
 
         tenant = db.create_tenant(name, slug, plan)
+
+        # Set subscription term + auto-compute dates if provided
+        term = int(data.get('subscription_term', 0))
+        if term in (1, 3, 5):
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            db.update_tenant(tenant['id'],
+                             subscription_term=term,
+                             license_activated_at=now.isoformat(),
+                             license_expires_at=now.replace(year=now.year + term).isoformat())
+            tenant = db.get_tenant_by_id(tenant['id'])
+
         try:
             _log(db,'tenant_created',
                 f'Tenant "{name}" created (slug: {slug}, plan: {plan})',
@@ -6663,6 +6675,21 @@ def update_tenant_handler(tenant_id):
             updates['license_activated_at'] = data['license_activated_at']
         if 'license_expires_at' in data:
             updates['license_expires_at'] = data['license_expires_at']
+        if 'subscription_term' in data:
+            term = int(data['subscription_term'])
+            if term not in (0, 1, 3, 5):
+                return jsonify({'error': 'subscription_term must be 0 (monthly), 1, 3, or 5 years'}), 400
+            updates['subscription_term'] = term
+            # Auto-compute expiry from activation date + term
+            if term > 0:
+                activated = data.get('license_activated_at') or existing.get('license_activated_at')
+                if activated:
+                    from datetime import datetime, timezone
+                    act_dt = datetime.fromisoformat(str(activated).replace('Z', '+00:00')) if isinstance(activated, str) else activated
+                    updates['license_expires_at'] = act_dt.replace(year=act_dt.year + term).isoformat()
+            elif term == 0:
+                # Monthly — no fixed expiry
+                updates['license_expires_at'] = None
 
         if not updates:
             return jsonify({'tenant': existing, 'message': 'No changes'})
@@ -6778,7 +6805,7 @@ def get_cross_tenant_analytics():
             )
             SELECT
                 t.id, t.name, t.slug, t.plan, t.enabled,
-                t.settings, t.license_activated_at, t.license_expires_at,
+                t.settings, t.license_activated_at, t.license_expires_at, t.subscription_term,
                 COALESCE(uc.user_count, 0) AS user_count,
                 COALESCE(rc.total_runs, 0) AS total_runs,
                 lr.completed_at AS last_discovery,

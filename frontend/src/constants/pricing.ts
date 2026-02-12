@@ -28,6 +28,34 @@ export const COMING_SOON_FEATURES: Record<string, { label: string; description: 
   terraform_export: { label: 'Terraform/Bicep Export & Bot', description: 'Export infrastructure as Terraform/Bicep with bot integration' },
 };
 
+// ── Subscription Terms & Discounts ───────────────────────────────────────────
+// Monthly = no discount. Longer commitments get progressive discounts.
+export const SUBSCRIPTION_TERMS = [
+  { value: 0,  label: 'Monthly',  discount: 0,    shortLabel: 'Monthly' },
+  { value: 1,  label: '1 Year',   discount: 0.10, shortLabel: '1yr' },
+  { value: 3,  label: '3 Years',  discount: 0.20, shortLabel: '3yr' },
+  { value: 5,  label: '5 Years',  discount: 0.30, shortLabel: '5yr' },
+] as const;
+
+export type SubscriptionTermValue = 0 | 1 | 3 | 5;
+
+export function getTermDiscount(term: number): number {
+  const t = SUBSCRIPTION_TERMS.find(s => s.value === term);
+  return t ? t.discount : 0;
+}
+
+export function getTermLabel(term: number): string {
+  const t = SUBSCRIPTION_TERMS.find(s => s.value === term);
+  return t ? t.label : 'Monthly';
+}
+
+/** Effective monthly price after term discount */
+export function calculateDiscountedMonthly(cfg: CloudConfig, term: number): number {
+  const base = calculateMonthlyTotal(cfg);
+  return Math.round(base * (1 - getTermDiscount(term)));
+}
+
+// Legacy — kept for backward compat but no longer used in new code
 export const ANNUAL_DISCOUNT = 0.15;
 
 export const CLOUD_LABELS: Record<string, { label: string; color: string; bg: string; description: string }> = {
