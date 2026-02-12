@@ -61,7 +61,7 @@ function AdminLogin() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">AG</div>
+          <img src="/auditgraph-logo.png" alt="AuditGraph" className="w-16 h-16 rounded-2xl mb-4 mx-auto" />
           <h1 className="text-2xl font-bold text-white">AuditGraph</h1>
           <p className="text-sm text-gray-400 mt-1">Admin Portal</p>
         </div>
@@ -170,7 +170,7 @@ export default function AdminConsole() {
       {/* Admin Top Bar */}
       <div className="h-14 bg-gray-900 border-b border-gray-700 flex items-center justify-between px-5 flex-shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center text-xs font-bold">AG</div>
+          <img src="/auditgraph-logo.png" alt="AuditGraph" className="w-8 h-8 rounded-lg" />
           <div>
             <span className="text-sm font-semibold text-white">AuditGraph</span>
             <span className="text-xs text-gray-400 ml-2">Admin Portal</span>
