@@ -6778,6 +6778,7 @@ def get_cross_tenant_analytics():
             )
             SELECT
                 t.id, t.name, t.slug, t.plan, t.enabled,
+                t.settings, t.license_activated_at, t.license_expires_at,
                 COALESCE(uc.user_count, 0) AS user_count,
                 COALESCE(rc.total_runs, 0) AS total_runs,
                 lr.completed_at AS last_discovery,
@@ -6796,7 +6797,7 @@ def get_cross_tenant_analytics():
         """)
         rows = [dict(r) for r in cursor.fetchall()]
 
-        # Compute risk score per tenant + serialize timestamps
+        # Compute risk score per tenant + serialize timestamps + extract clouds
         for row in rows:
             c = row.get('critical_count') or 0
             h = row.get('high_count') or 0
@@ -6804,6 +6805,13 @@ def get_cross_tenant_analytics():
             row['risk_score'] = max(0, min(100, 100 - (c * 15 + h * 5 + m * 1)))
             if row.get('last_discovery'):
                 row['last_discovery'] = row['last_discovery'].isoformat()
+            for ts in ('license_activated_at', 'license_expires_at'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+            # Extract enabled clouds from tenant settings JSON
+            settings = row.pop('settings', None) or {}
+            cp = settings.get('cloud_providers', {})
+            row['clouds_enabled'] = [k for k in ('azure', 'aws', 'gcp') if cp.get(k, {}).get('enabled')]
 
         # Global aggregates
         total_tenants = len(rows)

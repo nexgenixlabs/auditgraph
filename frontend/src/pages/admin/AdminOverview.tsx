@@ -24,25 +24,22 @@ interface AnalyticsData {
   tenants: TenantMetric[];
 }
 
-function freshnessLabel(lastDiscovery: string | null): { text: string; color: string } {
-  if (!lastDiscovery) return { text: 'Never', color: 'text-gray-400' };
-  const hours = (Date.now() - new Date(lastDiscovery).getTime()) / 3600000;
-  if (hours < 24) return { text: `${Math.round(hours)}h ago`, color: 'text-green-600' };
-  if (hours < 72) return { text: `${Math.round(hours / 24)}d ago`, color: 'text-yellow-600' };
-  return { text: `${Math.round(hours / 24)}d ago`, color: 'text-red-600' };
-}
-
-function licenseLabel(expiresAt: string | null): { text: string; color: string } {
-  if (!expiresAt) return { text: '-', color: 'text-gray-400' };
-  const days = (new Date(expiresAt).getTime() - Date.now()) / 86400000;
-  if (days < 0) return { text: 'Expired', color: 'text-red-600' };
-  if (days < 30) return { text: `${Math.round(days)}d left`, color: 'text-yellow-600' };
-  return { text: `${Math.round(days)}d left`, color: 'text-green-600' };
-}
-
-function formatDate(d: string | null): string {
+function fmtDate(d: string | null): string {
   if (!d) return '-';
-  return new Date(d).toLocaleDateString();
+  return new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function fmtDateTime(d: string | null): string {
+  if (!d) return 'Never';
+  return new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function expiryColor(expiresAt: string | null): string {
+  if (!expiresAt) return 'text-gray-400';
+  const days = (new Date(expiresAt).getTime() - Date.now()) / 86400000;
+  if (days < 0) return 'text-red-600';
+  if (days < 30) return 'text-yellow-600';
+  return 'text-gray-600';
 }
 
 export default function AdminOverview() {
@@ -97,10 +94,7 @@ export default function AdminOverview() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {tenants.map(t => {
-              const fresh = freshnessLabel(t.last_discovery);
-              const lic = licenseLabel(t.license_expires_at);
-              return (
+            {tenants.map(t => (
                 <tr key={t.id} className={`hover:bg-gray-50 ${!t.enabled ? 'opacity-60' : ''}`}>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
@@ -123,9 +117,9 @@ export default function AdminOverview() {
                     }`}>{t.plan}</span>
                   </td>
                   <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-0.5 flex-wrap">
+                    <div className="flex items-center gap-1 flex-wrap">
                       {(t.clouds_enabled || []).length > 0 ? (t.clouds_enabled || []).map(c => (
-                        <span key={c} className={`px-1 py-0.5 rounded text-[9px] font-bold ${
+                        <span key={c} className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
                           c === 'azure' ? 'bg-blue-100 text-blue-700' :
                           c === 'aws' ? 'bg-orange-100 text-orange-700' :
                           'bg-red-100 text-red-600'
@@ -138,16 +132,13 @@ export default function AdminOverview() {
                       t.enabled ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
                     }`}>{t.enabled ? 'Active' : 'Disabled'}</span>
                   </td>
+                  <td className="px-4 py-2.5 text-xs text-gray-600">{fmtDateTime(t.last_discovery)}</td>
+                  <td className="px-4 py-2.5 text-xs text-gray-600">{fmtDate(t.license_activated_at)}</td>
                   <td className="px-4 py-2.5">
-                    <span className={`text-xs font-semibold ${fresh.color}`}>{fresh.text}</span>
-                  </td>
-                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-xs font-semibold ${lic.color}`}>{lic.text}</span>
+                    <span className={`text-xs ${expiryColor(t.license_expires_at)}`}>{fmtDate(t.license_expires_at)}</span>
                   </td>
                 </tr>
-              );
-            })}
+              ))}
           </tbody>
         </table>
       </div>
