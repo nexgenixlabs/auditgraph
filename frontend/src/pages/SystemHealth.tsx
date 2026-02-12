@@ -324,7 +324,10 @@ export default function SystemHealth() {
       {/* Database Tables */}
       {detail?.database?.tables && detail.database.tables.length > 0 && (
         <div className="bg-white border rounded-xl p-5">
-          <h2 className="text-sm font-semibold text-gray-900 mb-4">Database Tables (by size)</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-gray-900">Database Tables (by size)</h2>
+            <a href="/settings" className="text-xs text-blue-600 hover:underline">Retention Settings</a>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>

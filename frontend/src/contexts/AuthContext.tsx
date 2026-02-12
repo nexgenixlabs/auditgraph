@@ -8,12 +8,14 @@ interface User {
   tenant_id?: number;
   tenant_name?: string;
   is_superadmin?: boolean;
+  portal_role?: 'superadmin' | 'support' | null;
 }
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  login: (username: string, password: string, tenantSlug?: string) => Promise<void>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  login: (username: string, password: string, tenantSlug?: string) => Promise<any>;
   loginWithSsoCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
@@ -171,6 +173,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('access_token', data.access_token);
     localStorage.setItem('refresh_token', data.refresh_token);
     setUser(data.user);
+    return data.user;
   }, []);
 
   // Phase 54: SSO code-to-token exchange

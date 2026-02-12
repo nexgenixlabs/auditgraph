@@ -138,6 +138,14 @@ interface RemediationAction {
   status: RemediationStatus;
   notes: string | null;
   updated_at: string | null;
+  execution_status?: string | null;
+  execution_log?: {
+    action_type?: string;
+    result?: string;
+    detail?: string;
+    simulated?: boolean;
+  } | null;
+  executed_at?: string | null;
 }
 
 type RemediationActionsMap = Record<number, RemediationAction>;
@@ -616,6 +624,46 @@ export default function IdentityDetail() {
     }
     finally {
       setActionLoading(null);
+    }
+  };
+
+  const [executeLoading, setExecuteLoading] = useState<number | null>(null);
+
+  const handleRemediationExecute = async (playbookId: number, actionType: string) => {
+    if (!id) return;
+    setExecuteLoading(playbookId);
+    try {
+      const res = await fetch(`/api/identities/${encodeURIComponent(id)}/remediation-execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playbook_id: playbookId, action_type: actionType }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        const act = result.action;
+        setRemediationActions(prev => ({
+          ...prev,
+          [playbookId]: {
+            status: act.status || 'completed',
+            notes: act.notes,
+            updated_at: act.updated_at,
+            execution_status: act.execution_status,
+            execution_log: act.execution_log,
+            executed_at: act.executed_at,
+          },
+        }));
+        const execLog = result.execution_log || {};
+        addToast(
+          `${execLog.simulated ? 'Simulated' : 'Executed'}: ${actionType.replace(/_/g, ' ')}`,
+          execLog.result === 'error' ? 'error' : 'success'
+        );
+      } else {
+        addToast('Remediation execution failed', 'error');
+      }
+    } catch {
+      addToast('Remediation execution failed', 'error');
+    } finally {
+      setExecuteLoading(null);
     }
   };
 
@@ -1885,7 +1933,9 @@ export default function IdentityDetail() {
                             index={idx}
                             action={remediationActions[rem.id]}
                             onAction={(status, notes) => handleRemediationAction(rem.id, status, notes)}
+                            onExecute={(actionType) => handleRemediationExecute(rem.id, actionType)}
                             loading={actionLoading === rem.id}
+                            executing={executeLoading === rem.id}
                           />
                         ))}
                       </div>
@@ -2418,13 +2468,17 @@ function RemediationCard({
   index,
   action,
   onAction,
+  onExecute,
   loading,
+  executing,
 }: {
   remediation: RemediationItem;
   index: number;
   action?: RemediationAction;
   onAction: (status: RemediationStatus, notes?: string) => void;
+  onExecute: (actionType: string) => void;
   loading: boolean;
+  executing: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -2539,6 +2593,36 @@ function RemediationCard({
             </div>
           )}
 
+          {/* Execution result */}
+          {action?.execution_status && (
+            <div className={`border rounded-lg p-3 ${
+              action.execution_status === 'success' ? 'bg-green-50 border-green-200' :
+              action.execution_status === 'simulated' ? 'bg-amber-50 border-amber-200' :
+              'bg-red-50 border-red-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                  action.execution_status === 'success' ? 'bg-green-200 text-green-800' :
+                  action.execution_status === 'simulated' ? 'bg-amber-200 text-amber-800' :
+                  'bg-red-200 text-red-800'
+                }`}>
+                  {action.execution_status}
+                </span>
+                {action.execution_log?.action_type && (
+                  <span className="text-[10px] text-gray-500">{action.execution_log.action_type.replace(/_/g, ' ')}</span>
+                )}
+                {action.executed_at && (
+                  <span className="text-[10px] text-gray-400 ml-auto">
+                    {new Date(action.executed_at).toLocaleString()}
+                  </span>
+                )}
+              </div>
+              {action.execution_log?.detail && (
+                <p className="text-xs text-gray-600 mt-1">{action.execution_log.detail}</p>
+              )}
+            </div>
+          )}
+
           {/* Action buttons */}
           <div className="border-t pt-3">
             <div className="flex items-center gap-2 flex-wrap">
@@ -2552,6 +2636,48 @@ function RemediationCard({
                   {loading ? 'Updating...' : btn.label}
                 </button>
               ))}
+
+              {/* Execute dropdown */}
+              {currentStatus !== 'completed' && currentStatus !== 'skipped' && !action?.execution_status && (
+                <>
+                  <span className="text-gray-300 mx-1">|</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onExecute('flag_for_review'); }}
+                    disabled={executing}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-50"
+                  >
+                    {executing ? 'Executing...' : 'Flag for Review'}
+                  </button>
+                  {(remediation.category === 'governance') && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); if (confirm('This will simulate disabling the identity. Continue?')) onExecute('disable_identity'); }}
+                      disabled={executing}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                    >
+                      {executing ? 'Executing...' : 'Disable Identity'}
+                    </button>
+                  )}
+                  {(remediation.category === 'credential_hygiene') && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); if (confirm('This will simulate credential rotation. Continue?')) onExecute('rotate_credential'); }}
+                      disabled={executing}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-orange-600 hover:bg-orange-700 text-white disabled:opacity-50"
+                    >
+                      {executing ? 'Executing...' : 'Rotate Credential'}
+                    </button>
+                  )}
+                  {(remediation.category === 'access_control') && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); if (confirm('This will simulate role removal. Continue?')) onExecute('remove_role'); }}
+                      disabled={executing}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                    >
+                      {executing ? 'Executing...' : 'Remove Role'}
+                    </button>
+                  )}
+                </>
+              )}
+
               {action?.updated_at && (
                 <span className="text-[10px] text-gray-400 ml-auto">
                   Updated {new Date(action.updated_at).toLocaleString()}

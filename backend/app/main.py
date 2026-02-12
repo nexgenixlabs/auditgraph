@@ -7,7 +7,7 @@ import time
 
 from app.metrics import MetricsCollector
 
-from app.api.auth import auth_middleware, require_role, require_superadmin
+from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access
 from app.api.handlers import (
     get_stats,
     get_identities,
@@ -153,6 +153,19 @@ from app.api.handlers import (
     health_check,
     prometheus_metrics,
     get_system_health,
+    get_portal_users_list,
+    get_spn_stats,
+    get_spn_list,
+    get_spn_detail,
+    get_storage_stats,
+    run_manual_cleanup,
+    execute_remediation,
+    get_remediation_queue_handler,
+    batch_auto_remediate,
+    get_app_reg_stats,
+    get_app_reg_list,
+    get_app_reg_detail,
+    get_tenant_config,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -320,20 +333,20 @@ def create_app():
         return reset_dashboard_preferences_handler()
 
     # -----------------------
-    # Tenant Management (Phase 45)
+    # Tenant Management (Phase 45, updated Phase 70: support role access)
     # -----------------------
     @app.get("/api/tenants")
-    @require_superadmin()
+    @require_portal_access()
     def tenants_list():
         return get_tenants_list()
 
     @app.post("/api/tenants")
-    @require_superadmin()
+    @require_portal_access()
     def tenants_create():
         return create_tenant_handler()
 
     @app.put("/api/tenants/<int:tenant_id>")
-    @require_superadmin()
+    @require_portal_access()
     def tenants_update(tenant_id):
         return update_tenant_handler(tenant_id)
 
@@ -345,6 +358,10 @@ def create_app():
     @app.get("/api/tenant")
     def tenant_current():
         return get_current_tenant_handler()
+
+    @app.get("/api/tenant/config")
+    def tenant_config():
+        return get_tenant_config()
 
     # Phase 53: SaaS Platform
     @app.get("/api/tenants/by-slug/<slug>")
@@ -359,6 +376,14 @@ def create_app():
     @app.get("/api/auth/tenants")
     def auth_tenants():
         return get_user_tenants_handler()
+
+    # -----------------------
+    # Portal Users (Phase 70 - Superadmin only)
+    # -----------------------
+    @app.get("/api/portal-users")
+    @require_superadmin()
+    def portal_users_list():
+        return get_portal_users_list()
 
     # Phase 54: SSO/SAML
     @app.get("/api/auth/sso-status")
@@ -958,6 +983,56 @@ def create_app():
     @app.delete("/api/notifications/<int:notification_id>")
     def notifications_delete(notification_id):
         return delete_notification_handler(notification_id)
+
+    # -----------------------
+    # SPN Dashboard (Phase 71)
+    # -----------------------
+    @app.get("/api/spns/stats")
+    def spn_stats():
+        return get_spn_stats()
+
+    @app.get("/api/spns")
+    def spn_list():
+        return get_spn_list()
+
+    @app.get("/api/spns/<path:identity_id>")
+    def spn_detail(identity_id):
+        return get_spn_detail(identity_id)
+
+    # Phase 74: App Registration Audit
+    @app.get("/api/app-registrations/stats")
+    def app_reg_stats():
+        return get_app_reg_stats()
+
+    @app.get("/api/app-registrations")
+    def app_reg_list():
+        return get_app_reg_list()
+
+    @app.get("/api/app-registrations/<app_id>")
+    def app_reg_detail(app_id):
+        return get_app_reg_detail(app_id)
+
+    # Phase 72: Data Retention
+    @app.get("/api/system/storage")
+    def system_storage():
+        return get_storage_stats()
+
+    @app.post("/api/system/cleanup")
+    def system_cleanup():
+        return run_manual_cleanup()
+
+    # Phase 58: Compliance Auto-Remediation
+    @app.post("/api/identities/<path:identity_id>/remediation-execute")
+    def remediation_execute(identity_id):
+        return execute_remediation(identity_id)
+
+    @app.get("/api/remediation/queue")
+    def remediation_queue():
+        return get_remediation_queue_handler()
+
+    @app.post("/api/remediation/auto-execute")
+    def remediation_auto_execute():
+        return batch_auto_remediate()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

@@ -1961,6 +1961,17 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_remediation_actions_identity ON remediation_actions(identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_remediation_actions_status ON remediation_actions(status)")
+        # Phase 58: execution tracking columns
+        for col, typedef in [
+            ('execution_status', "VARCHAR(20) DEFAULT NULL"),
+            ('execution_log', "JSONB DEFAULT NULL"),
+            ('executed_at', "TIMESTAMPTZ DEFAULT NULL"),
+            ('executed_by', "INTEGER DEFAULT NULL"),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE remediation_actions ADD COLUMN IF NOT EXISTS {col} {typedef}")
+            except Exception:
+                self.conn.rollback()
         self.conn.commit()
         cursor.close()
 
@@ -2082,7 +2093,8 @@ class Database:
         self._ensure_remediation_actions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT playbook_id, status, notes, updated_at
+            SELECT playbook_id, status, notes, updated_at,
+                   execution_status, execution_log, executed_at
             FROM remediation_actions
             WHERE identity_id = %s
         """, (identity_id,))
@@ -2094,6 +2106,9 @@ class Database:
                 'status': row['status'],
                 'notes': row['notes'],
                 'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None,
+                'execution_status': row.get('execution_status'),
+                'execution_log': row.get('execution_log'),
+                'executed_at': row['executed_at'].isoformat() if row.get('executed_at') else None,
             }
         return result
 
@@ -2125,6 +2140,77 @@ class Database:
             'total': total,
             'completion_pct': completion_pct,
         }
+
+    # ── Phase 58: Compliance Auto-Remediation ──────────────────────────
+
+    def execute_remediation_action(self, identity_id: str, playbook_id: int,
+                                    execution_status: str, execution_log: dict,
+                                    user_id: int = None) -> dict:
+        """Record a remediation execution (simulated or real)."""
+        self._ensure_remediation_actions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO remediation_actions
+                (identity_id, playbook_id, status, execution_status, execution_log, executed_at, executed_by, updated_at)
+            VALUES (%s, %s, 'completed', %s, %s, NOW(), %s, NOW())
+            ON CONFLICT (identity_id, playbook_id) DO UPDATE SET
+                status = 'completed',
+                execution_status = EXCLUDED.execution_status,
+                execution_log = EXCLUDED.execution_log,
+                executed_at = NOW(),
+                executed_by = EXCLUDED.executed_by,
+                updated_at = NOW()
+            RETURNING *
+        """, (identity_id, playbook_id, execution_status, json.dumps(execution_log), user_id))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        return row
+
+    def get_remediation_queue(self, status_filter=None, impact_filter=None,
+                               category_filter=None, limit=100):
+        """Get pending remediations across all identities with playbook + identity info."""
+        self._ensure_remediation_actions_table()
+        self._ensure_remediation_playbooks()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        sql = """
+            SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
+                   i.identity_category, i.activity_status,
+                   rp.id as playbook_id, rp.title as playbook_title,
+                   rp.impact, rp.effort, rp.category, rp.priority_score,
+                   ra.status as action_status, ra.execution_status,
+                   ra.executed_at, ra.updated_at
+            FROM remediation_actions ra
+            JOIN identities i ON i.identity_id = ra.identity_id
+                AND i.discovery_run_id = (SELECT MAX(discovery_run_id) FROM identities)
+            JOIN remediation_playbooks rp ON rp.id = ra.playbook_id
+            WHERE 1=1
+        """
+        params = []
+
+        if status_filter:
+            sql += " AND ra.status = %s"
+            params.append(status_filter)
+        if impact_filter:
+            sql += " AND rp.impact = %s"
+            params.append(impact_filter)
+        if category_filter:
+            sql += " AND rp.category = %s"
+            params.append(category_filter)
+
+        sql += " ORDER BY rp.priority_score DESC, rp.impact ASC LIMIT %s"
+        params.append(limit)
+
+        cursor.execute(sql, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        for r in rows:
+            for ts in ('executed_at', 'updated_at'):
+                if r.get(ts) and hasattr(r[ts], 'isoformat'):
+                    r[ts] = r[ts].isoformat()
+        return rows
 
     def get_role_usage_stats(self):
         """Aggregate usage_status and risk_level counts across all role assignments from latest run."""
@@ -2918,15 +3004,15 @@ class Database:
         self._ensure_tenants_table()
         Database._users_ensured = True
 
-    def create_user(self, username, password_hash, display_name, role='viewer', created_by=None, tenant_id=None):
+    def create_user(self, username, password_hash, display_name, role='viewer', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None):
         """Create a new user. Returns user dict (without password_hash)."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin
-        """, (username, password_hash, display_name, role, created_by, tenant_id))
+            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role
+        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -2962,7 +3048,7 @@ class Database:
         cursor.execute("""
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
-                   u.tenant_id, u.is_superadmin,
+                   u.tenant_id, u.is_superadmin, u.portal_role,
                    t.name AS tenant_name, t.slug AS tenant_slug
             FROM users u
             LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -2985,7 +3071,7 @@ class Database:
         query = """
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
-                   u.tenant_id, u.is_superadmin,
+                   u.tenant_id, u.is_superadmin, u.portal_role,
                    t.name AS tenant_name
             FROM users u
             LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -3004,10 +3090,32 @@ class Database:
                     row[ts] = row[ts].isoformat()
         return rows
 
-    def update_user(self, user_id, **kwargs):
-        """Update user fields. Allowed: display_name, role, enabled, password_hash, tenant_id, is_superadmin."""
+    def get_portal_users(self):
+        """Get all users with portal_role set (support or superadmin)."""
         self._ensure_users_table()
-        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'tenant_id', 'is_superadmin'}
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT u.id, u.username, u.display_name, u.role, u.enabled,
+                   u.created_at, u.updated_at, u.last_login_at, u.created_by,
+                   u.tenant_id, u.is_superadmin, u.portal_role,
+                   t.name AS tenant_name
+            FROM users u
+            LEFT JOIN tenants t ON t.id = u.tenant_id
+            WHERE u.portal_role IS NOT NULL
+            ORDER BY u.portal_role DESC, u.id
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            for ts in ('created_at', 'updated_at', 'last_login_at'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+        return rows
+
+    def update_user(self, user_id, **kwargs):
+        """Update user fields. Allowed: display_name, role, enabled, password_hash, tenant_id, is_superadmin, portal_role."""
+        self._ensure_users_table()
+        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'tenant_id', 'is_superadmin', 'portal_role'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_user_by_id(user_id)
@@ -3022,7 +3130,7 @@ class Database:
         cursor.execute(f"""
             UPDATE users SET {', '.join(set_parts)}
             WHERE id = %s
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -3377,6 +3485,8 @@ class Database:
         for col, defn in [
             ('sas_policy_enabled', 'BOOLEAN'),
             ('sas_expiration_period', 'TEXT'),
+            ('diagnostic_logging_enabled', 'BOOLEAN'),
+            ('logging_destinations', 'JSONB DEFAULT \'[]\''),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE azure_storage_accounts ADD COLUMN {col} {defn}")
@@ -3606,6 +3716,164 @@ class Database:
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
             json.dumps(data.get('tags', {})), data.get('tenant_id')
+        ))
+        db_id = cursor.fetchone()[0]
+        self.conn.commit()
+        cursor.close()
+        return db_id
+
+    # ──────────────────────────────────────────────────────────
+    # App Registrations (Phase 74)
+    # ──────────────────────────────────────────────────────────
+
+    def _ensure_app_registrations_table(self):
+        """Create app_registrations table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_registrations (
+                id SERIAL PRIMARY KEY,
+                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                app_object_id TEXT NOT NULL,
+                app_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                created_datetime TIMESTAMPTZ,
+                sign_in_audience TEXT,
+                publisher_domain TEXT,
+                app_owner_organization_id TEXT,
+                is_third_party BOOLEAN DEFAULT FALSE,
+                required_permissions JSONB DEFAULT '[]',
+                permission_count INTEGER DEFAULT 0,
+                application_permission_count INTEGER DEFAULT 0,
+                delegated_permission_count INTEGER DEFAULT 0,
+                high_risk_permissions TEXT[] DEFAULT '{}',
+                secret_count INTEGER DEFAULT 0,
+                certificate_count INTEGER DEFAULT 0,
+                credential_details JSONB DEFAULT '[]',
+                next_expiry TIMESTAMPTZ,
+                has_expired_credential BOOLEAN DEFAULT FALSE,
+                has_expiring_soon BOOLEAN DEFAULT FALSE,
+                owner_count INTEGER DEFAULT 0,
+                owners JSONB DEFAULT '[]',
+                primary_owner TEXT,
+                has_service_principal BOOLEAN DEFAULT FALSE,
+                linked_spn_id INTEGER,
+                spn_last_sign_in TIMESTAMPTZ,
+                spn_activity_status TEXT,
+                redirect_uris JSONB DEFAULT '[]',
+                redirect_uri_count INTEGER DEFAULT 0,
+                has_localhost_redirect BOOLEAN DEFAULT FALSE,
+                has_http_redirect BOOLEAN DEFAULT FALSE,
+                risk_level TEXT DEFAULT 'info',
+                risk_score INTEGER DEFAULT 0,
+                risk_reasons JSONB DEFAULT '[]',
+                approval_status TEXT DEFAULT 'unknown',
+                tenant_id INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(discovery_run_id, app_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_appreg_run ON app_registrations(discovery_run_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_appreg_risk ON app_registrations(risk_level)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_appreg_appid ON app_registrations(app_id)")
+        self.conn.commit()
+        cursor.close()
+
+    def save_app_registration(self, run_id, data):
+        """Save or update an app registration (UPSERT)."""
+        self._ensure_app_registrations_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO app_registrations (
+                discovery_run_id, app_object_id, app_id, display_name,
+                created_datetime, sign_in_audience, publisher_domain,
+                app_owner_organization_id, is_third_party,
+                required_permissions, permission_count,
+                application_permission_count, delegated_permission_count,
+                high_risk_permissions,
+                secret_count, certificate_count, credential_details,
+                next_expiry, has_expired_credential, has_expiring_soon,
+                owner_count, owners, primary_owner,
+                has_service_principal, linked_spn_id,
+                spn_last_sign_in, spn_activity_status,
+                redirect_uris, redirect_uri_count,
+                has_localhost_redirect, has_http_redirect,
+                risk_level, risk_score, risk_reasons,
+                approval_status, tenant_id
+            ) VALUES (
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s
+            )
+            ON CONFLICT (discovery_run_id, app_id) DO UPDATE SET
+                app_object_id=EXCLUDED.app_object_id,
+                display_name=EXCLUDED.display_name,
+                created_datetime=EXCLUDED.created_datetime,
+                sign_in_audience=EXCLUDED.sign_in_audience,
+                publisher_domain=EXCLUDED.publisher_domain,
+                app_owner_organization_id=EXCLUDED.app_owner_organization_id,
+                is_third_party=EXCLUDED.is_third_party,
+                required_permissions=EXCLUDED.required_permissions,
+                permission_count=EXCLUDED.permission_count,
+                application_permission_count=EXCLUDED.application_permission_count,
+                delegated_permission_count=EXCLUDED.delegated_permission_count,
+                high_risk_permissions=EXCLUDED.high_risk_permissions,
+                secret_count=EXCLUDED.secret_count,
+                certificate_count=EXCLUDED.certificate_count,
+                credential_details=EXCLUDED.credential_details,
+                next_expiry=EXCLUDED.next_expiry,
+                has_expired_credential=EXCLUDED.has_expired_credential,
+                has_expiring_soon=EXCLUDED.has_expiring_soon,
+                owner_count=EXCLUDED.owner_count,
+                owners=EXCLUDED.owners,
+                primary_owner=EXCLUDED.primary_owner,
+                has_service_principal=EXCLUDED.has_service_principal,
+                linked_spn_id=EXCLUDED.linked_spn_id,
+                spn_last_sign_in=EXCLUDED.spn_last_sign_in,
+                spn_activity_status=EXCLUDED.spn_activity_status,
+                redirect_uris=EXCLUDED.redirect_uris,
+                redirect_uri_count=EXCLUDED.redirect_uri_count,
+                has_localhost_redirect=EXCLUDED.has_localhost_redirect,
+                has_http_redirect=EXCLUDED.has_http_redirect,
+                risk_level=EXCLUDED.risk_level,
+                risk_score=EXCLUDED.risk_score,
+                risk_reasons=EXCLUDED.risk_reasons,
+                approval_status=EXCLUDED.approval_status,
+                created_at=NOW()
+            RETURNING id
+        """, (
+            run_id, data.get('app_object_id'), data.get('app_id'),
+            data.get('display_name'), data.get('created_datetime'),
+            data.get('sign_in_audience'), data.get('publisher_domain'),
+            data.get('app_owner_organization_id'),
+            data.get('is_third_party', False),
+            json.dumps(data.get('required_permissions', [])),
+            data.get('permission_count', 0),
+            data.get('application_permission_count', 0),
+            data.get('delegated_permission_count', 0),
+            data.get('high_risk_permissions', []),
+            data.get('secret_count', 0),
+            data.get('certificate_count', 0),
+            json.dumps(data.get('credential_details', [])),
+            data.get('next_expiry'),
+            data.get('has_expired_credential', False),
+            data.get('has_expiring_soon', False),
+            data.get('owner_count', 0),
+            json.dumps(data.get('owners', [])),
+            data.get('primary_owner'),
+            data.get('has_service_principal', False),
+            data.get('linked_spn_id'),
+            data.get('spn_last_sign_in'),
+            data.get('spn_activity_status'),
+            json.dumps(data.get('redirect_uris', [])),
+            data.get('redirect_uri_count', 0),
+            data.get('has_localhost_redirect', False),
+            data.get('has_http_redirect', False),
+            data.get('risk_level', 'info'),
+            data.get('risk_score', 0),
+            json.dumps(data.get('risk_reasons', [])),
+            data.get('approval_status', 'unknown'),
+            data.get('tenant_id'),
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -5273,15 +5541,18 @@ class Database:
             row = cursor.fetchone()
             default_tenant_id = row[0] if row else None
 
-        # 3. Add tenant_id + is_superadmin columns to users
+        # 3. Add tenant_id + is_superadmin + portal_role columns to users
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT false")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS portal_role VARCHAR(20)")
         self.conn.commit()
 
         if default_tenant_id:
             cursor.execute("UPDATE users SET tenant_id = %s WHERE tenant_id IS NULL", (default_tenant_id,))
-            # Promote user id=1 to superadmin
-            cursor.execute("UPDATE users SET is_superadmin = true WHERE id = 1 AND is_superadmin = false")
+            # Promote user id=1 to superadmin with portal_role
+            cursor.execute("UPDATE users SET is_superadmin = true, portal_role = 'superadmin' WHERE id = 1 AND is_superadmin = false")
+            # Backfill portal_role for existing superadmins
+            cursor.execute("UPDATE users SET portal_role = 'superadmin' WHERE is_superadmin = true AND portal_role IS NULL")
             self.conn.commit()
 
         # 4. Add tenant_id to discovery_runs
@@ -5347,6 +5618,35 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
+    def get_tenant_config(self, tenant_id):
+        """Get cloud provider and add-on configuration for a tenant."""
+        tenant = self.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return None
+        settings = tenant.get('settings') or {}
+        cloud_providers = settings.get('cloud_providers', {
+            'azure': {'enabled': True, 'plan': 'starter'},
+            'aws': {'enabled': False, 'plan': None},
+            'gcp': {'enabled': False, 'plan': None},
+        })
+        # Ensure all three providers exist with defaults
+        for provider in ('azure', 'aws', 'gcp'):
+            if provider not in cloud_providers:
+                default_enabled = provider == 'azure'
+                cloud_providers[provider] = {
+                    'enabled': default_enabled,
+                    'plan': 'starter' if default_enabled else None,
+                }
+        addons = settings.get('addons', {
+            'extended_retention': False,
+        })
+        return {
+            'tenant_id': tenant_id,
+            'tenant_name': tenant.get('name'),
+            'cloud_providers': cloud_providers,
+            'addons': addons,
+        }
+
     def get_tenant_by_slug(self, slug):
         """Get a tenant by slug."""
         self._ensure_tenants_table()
@@ -5410,9 +5710,14 @@ class Database:
         return result
 
     def delete_tenant(self, tenant_id):
-        """Delete a tenant. Returns True if deleted."""
+        """Delete a tenant and all associated data. Returns True if deleted."""
         self._ensure_tenants_table()
         cursor = self.conn.cursor()
+        # Remove dependent records first (users FK has no CASCADE)
+        cursor.execute("DELETE FROM users WHERE tenant_id = %s", (tenant_id,))
+        cursor.execute("DELETE FROM discovery_runs WHERE tenant_id = %s", (tenant_id,))
+        cursor.execute("DELETE FROM settings WHERE tenant_id = %s", (tenant_id,))
+        cursor.execute("DELETE FROM activity_log WHERE tenant_id = %s", (tenant_id,))
         cursor.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
         deleted = cursor.rowcount > 0
         self.conn.commit()
@@ -5450,7 +5755,7 @@ class Database:
                                auth_provider, external_id)
             VALUES (%s, %s, %s, %s, %s, 'saml', %s)
             RETURNING id, username, display_name, role, enabled, created_at, updated_at,
-                      last_login_at, tenant_id, is_superadmin, auth_provider, external_id
+                      last_login_at, tenant_id, is_superadmin, portal_role, auth_provider, external_id
         """, (username, '!sso-managed', display_name, role, tenant_id, external_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
@@ -5605,3 +5910,131 @@ class Database:
         rows = cursor.fetchall()
         cursor.close()
         return [dict(r) for r in rows]
+
+    # ── Phase 72: Data Retention & Archival ───────────────────────────
+
+    def cleanup_old_discovery_runs(self, days=90) -> dict:
+        """Delete discovery runs and related data older than N days.
+        Returns counts of deleted rows per table."""
+        cursor = self.conn.cursor()
+        counts = {}
+
+        # Find old run IDs first
+        cursor.execute(
+            "SELECT id FROM discovery_runs WHERE started_at < NOW() - INTERVAL '%s days'",
+            (days,)
+        )
+        old_ids = [r[0] for r in cursor.fetchall()]
+        if not old_ids:
+            cursor.close()
+            return {'discovery_runs': 0, 'risk_scores': 0}
+
+        placeholders = ','.join(['%s'] * len(old_ids))
+
+        # Delete risk_scores linked to old runs
+        cursor.execute(f"DELETE FROM risk_scores WHERE run_id IN ({placeholders})", old_ids)
+        counts['risk_scores'] = cursor.rowcount
+
+        # Delete the runs themselves
+        cursor.execute(f"DELETE FROM discovery_runs WHERE id IN ({placeholders})", old_ids)
+        counts['discovery_runs'] = cursor.rowcount
+
+        self.conn.commit()
+        cursor.close()
+        return counts
+
+    def cleanup_old_drift_reports(self, days=90) -> int:
+        """Delete drift reports older than N days."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM drift_reports WHERE created_at < NOW() - INTERVAL '%s days'",
+            (days,)
+        )
+        count = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return count
+
+    def cleanup_old_activity_log(self, days=180) -> int:
+        """Delete activity log entries older than N days."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM activity_log WHERE created_at < NOW() - INTERVAL '%s days'",
+            (days,)
+        )
+        count = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return count
+
+    def cleanup_old_soar_actions(self, days=90) -> int:
+        """Delete SOAR action history older than N days."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM soar_actions WHERE executed_at < NOW() - INTERVAL '%s days'",
+                (days,)
+            )
+            count = cursor.rowcount
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            count = 0
+        cursor.close()
+        return count
+
+    def get_storage_stats(self) -> dict:
+        """Return database storage statistics."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Table sizes
+        cursor.execute("""
+            SELECT relname as table_name,
+                   pg_relation_size(oid) as size_bytes,
+                   pg_total_relation_size(oid) as total_bytes
+            FROM pg_class
+            WHERE relkind = 'r'
+              AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ORDER BY pg_relation_size(oid) DESC
+        """)
+        tables = []
+        total_size = 0
+        for row in cursor.fetchall():
+            size_mb = round(row['size_bytes'] / (1024 * 1024), 2)
+            total_mb = round(row['total_bytes'] / (1024 * 1024), 2)
+            tables.append({
+                'name': row['table_name'],
+                'size_mb': size_mb,
+                'total_mb': total_mb,
+            })
+            total_size += row['total_bytes']
+
+        # Row counts for key retention tables
+        row_counts = {}
+        for table in ['discovery_runs', 'drift_reports', 'activity_log', 'anomalies', 'soar_actions', 'notifications']:
+            try:
+                cursor.execute(f"SELECT COUNT(*) as cnt FROM {table}")
+                row_counts[table] = cursor.fetchone()['cnt']
+            except Exception:
+                self.conn.rollback()
+                row_counts[table] = 0
+
+        # Oldest records
+        oldest = {}
+        for table, col in [('discovery_runs', 'started_at'), ('drift_reports', 'created_at'),
+                           ('activity_log', 'created_at'), ('anomalies', 'created_at')]:
+            try:
+                cursor.execute(f"SELECT MIN({col}) as oldest FROM {table}")
+                val = cursor.fetchone()['oldest']
+                oldest[table] = val.isoformat() if val else None
+            except Exception:
+                self.conn.rollback()
+                oldest[table] = None
+
+        cursor.close()
+        return {
+            'tables': tables,
+            'total_size_mb': round(total_size / (1024 * 1024), 2),
+            'row_counts': row_counts,
+            'oldest_records': oldest,
+        }

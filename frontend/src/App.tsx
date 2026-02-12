@@ -44,6 +44,8 @@ import ResourceDetail from './pages/ResourceDetail';
 import AdminConsole from './pages/AdminConsole';
 import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
+import SPNDashboard from './pages/SPNDashboard';
+import AppRegistrations from './pages/AppRegistrations';
 import SystemHealth from './pages/SystemHealth';
 import {
   GlobalRiskCards,
@@ -101,6 +103,7 @@ const Overview: React.FC = () => {
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
   const [insights, setInsights] = useState<any>(null);
   const [trends, setTrends] = useState<any>(null);
+  const [resourceStats, setResourceStats] = useState<{ storage_accounts: number; key_vaults: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,11 +134,19 @@ const Overview: React.FC = () => {
           if (trendsRes.ok) trendsJson = await trendsRes.json();
         } catch { /* ignore */ }
 
+        // Fetch resource stats (non-blocking)
+        let resStats = null;
+        try {
+          const resRes = await fetch('/api/resources/stats');
+          if (resRes.ok) resStats = await resRes.json();
+        } catch { /* ignore */ }
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
           setInsights(insightsJson);
           setTrends(trendsJson);
+          setResourceStats(resStats);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load overview data');
@@ -268,7 +279,7 @@ const Overview: React.FC = () => {
       </div>
 
       {/* Section 2: Cloud Risk Comparison */}
-      <CloudComparison data={cloudData} monitoredResources={summary?.monitored_resources} onCloudClick={handleCloudClick} onRiskClick={handleRiskClick} />
+      <CloudComparison data={cloudData} monitoredResources={summary?.monitored_resources} resourceStats={resourceStats} onCloudClick={handleCloudClick} onRiskClick={handleRiskClick} />
 
       {/* Section 3: Privilege Tiers + Action Items + Dormant/Unowned */}
       <InsightsPanel data={insights} loading={loading} />
@@ -385,6 +396,11 @@ function AppContent() {
           <ProtectedRoute><OnboardingWizard /></ProtectedRoute>
         } />
 
+        {/* Admin Console - standalone layout with own login, sidebar, topbar */}
+        <Route path="/admin/*" element={
+          <ErrorBoundary><AdminConsole /></ErrorBoundary>
+        } />
+
         {/* All other routes - with sidebar + topbar, protected */}
         <Route path="/*" element={
           <ProtectedRoute>
@@ -414,6 +430,8 @@ function AppContent() {
                   <Route path="/role-mining" element={<ErrorBoundary><RoleMining /></ErrorBoundary>} />
                   <Route path="/groups" element={<ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
                   <Route path="/service-accounts" element={<ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
+                  <Route path="/spns" element={<ErrorBoundary><SPNDashboard /></ErrorBoundary>} />
+                  <Route path="/app-registrations" element={<ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
                   <Route path="/system-health" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><SystemHealth /></ErrorBoundary>
@@ -429,7 +447,6 @@ function AppContent() {
                   <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
                   <Route path="/notifications" element={<ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
                   <Route path="/analytics" element={<ErrorBoundary><CrossTenantAnalytics /></ErrorBoundary>} />
-                  <Route path="/admin/*" element={<ErrorBoundary><AdminConsole /></ErrorBoundary>} />
                 </Routes>
               </main>
             </div>

@@ -1064,6 +1064,26 @@ export default function Settings() {
   const [saGovSaving, setSaGovSaving] = useState(false);
   const [saGovMsg, setSaGovMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Phase 72: Data Retention
+  const [retention, setRetention] = useState({
+    retention_enabled: 'false',
+    retention_discovery_days: '90',
+    retention_drift_days: '90',
+    retention_activity_days: '180',
+    retention_anomalies_days: '90',
+    retention_soar_days: '90',
+    retention_notifications_days: '90',
+  });
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionMsg, setRetentionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [cleanupRunning, setCleanupRunning] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<{ total: number; deleted: Record<string, number> } | null>(null);
+  const [storageStats, setStorageStats] = useState<{
+    total_size_mb: number;
+    row_counts: Record<string, number>;
+    oldest_records: Record<string, string | null>;
+  } | null>(null);
+
   useEffect(() => {
     fetch('/api/settings/sa-governance')
       .then(r => r.ok ? r.json() : null)
@@ -1072,6 +1092,85 @@ export default function Settings() {
       })
       .catch(() => {});
   }, []);
+
+  // Load retention settings from main settings + storage stats
+  useEffect(() => {
+    fetch('/api/system/storage')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.retention) {
+          setRetention({
+            retention_enabled: data.retention.enabled ? 'true' : 'false',
+            retention_discovery_days: String(data.retention.discovery_days),
+            retention_drift_days: String(data.retention.drift_days),
+            retention_activity_days: String(data.retention.activity_days),
+            retention_anomalies_days: String(data.retention.anomalies_days),
+            retention_soar_days: String(data.retention.soar_days),
+            retention_notifications_days: String(data.retention.notifications_days),
+          });
+        }
+        if (data?.storage) {
+          setStorageStats({
+            total_size_mb: data.storage.total_size_mb,
+            row_counts: data.storage.row_counts,
+            oldest_records: data.storage.oldest_records,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleRetentionSave() {
+    setRetentionSaving(true);
+    setRetentionMsg(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(retention),
+      });
+      if (res.ok) {
+        setRetentionMsg({ type: 'success', text: 'Retention policies saved' });
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setRetentionMsg({ type: 'error', text: d.error || 'Save failed' });
+      }
+    } catch {
+      setRetentionMsg({ type: 'error', text: 'Network error' });
+    } finally {
+      setRetentionSaving(false);
+    }
+  }
+
+  async function handleManualCleanup() {
+    if (!confirm('Run data cleanup now? This will permanently delete records older than the configured retention periods.')) return;
+    setCleanupRunning(true);
+    setCleanupResult(null);
+    try {
+      const res = await fetch('/api/system/cleanup', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setCleanupResult(data);
+        // Refresh storage stats
+        fetch('/api/system/storage')
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data?.storage) {
+              setStorageStats({
+                total_size_mb: data.storage.total_size_mb,
+                row_counts: data.storage.row_counts,
+                oldest_records: data.storage.oldest_records,
+              });
+            }
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // cleanup failed
+    } finally {
+      setCleanupRunning(false);
+    }
+  }
 
   async function handleSaGovSave() {
     setSaGovSaving(true);
@@ -2618,6 +2717,160 @@ export default function Settings() {
             >
               {saGovSaving ? 'Saving...' : 'Save Governance Policy'}
             </button>
+          </div>
+
+          {/* Section 12: Data Retention (Phase 72) */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div>
+              <div className="text-lg font-semibold text-gray-900">Data Retention</div>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Configure how long historical data is kept. A daily cleanup job runs at 03:00 UTC.
+              </p>
+            </div>
+
+            {retentionMsg && (
+              <div className={`rounded-lg p-3 text-sm ${retentionMsg.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+                {retentionMsg.text}
+              </div>
+            )}
+
+            {/* Enable toggle */}
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-gray-700">Enable Automatic Cleanup</span>
+                <p className="text-xs text-gray-400">When enabled, old data is automatically deleted on schedule</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRetention(prev => ({ ...prev, retention_enabled: prev.retention_enabled === 'true' ? 'false' : 'true' }))}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  retention.retention_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  retention.retention_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
+                }`} />
+              </button>
+            </div>
+
+            {/* Retention periods */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Discovery Runs (days)</label>
+                <input
+                  type="number" min={7} max={3650}
+                  value={retention.retention_discovery_days}
+                  onChange={e => setRetention(prev => ({ ...prev, retention_discovery_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.discovery_runs ?? 0} runs stored</p>}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Drift Reports (days)</label>
+                <input
+                  type="number" min={7} max={3650}
+                  value={retention.retention_drift_days}
+                  onChange={e => setRetention(prev => ({ ...prev, retention_drift_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.drift_reports ?? 0} reports stored</p>}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Activity Log (days)</label>
+                <input
+                  type="number" min={7} max={3650}
+                  value={retention.retention_activity_days}
+                  onChange={e => setRetention(prev => ({ ...prev, retention_activity_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.activity_log ?? 0} entries stored</p>}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Anomalies (days)</label>
+                <input
+                  type="number" min={7} max={3650}
+                  value={retention.retention_anomalies_days}
+                  onChange={e => setRetention(prev => ({ ...prev, retention_anomalies_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-400 mt-1">Only resolved anomalies are cleaned</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">SOAR Actions (days)</label>
+                <input
+                  type="number" min={7} max={3650}
+                  value={retention.retention_soar_days}
+                  onChange={e => setRetention(prev => ({ ...prev, retention_soar_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.soar_actions ?? 0} actions stored</p>}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notifications (days)</label>
+                <input
+                  type="number" min={7} max={3650}
+                  value={retention.retention_notifications_days}
+                  onChange={e => setRetention(prev => ({ ...prev, retention_notifications_days: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.notifications ?? 0} notifications stored</p>}
+              </div>
+            </div>
+
+            {/* Storage summary */}
+            {storageStats && (
+              <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-gray-700">Database Size</span>
+                  <span className="text-sm font-bold text-gray-900">{storageStats.total_size_mb} MB</span>
+                </div>
+                {Object.entries(storageStats.oldest_records).some(([, v]) => v) && (
+                  <div className="mt-2 text-xs text-gray-500 space-y-0.5">
+                    {Object.entries(storageStats.oldest_records).map(([table, oldest]) => oldest && (
+                      <div key={table} className="flex justify-between">
+                        <span>{table.replace(/_/g, ' ')}</span>
+                        <span>oldest: {new Date(oldest).toLocaleDateString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Cleanup result */}
+            {cleanupResult && (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                <p className="text-sm font-medium text-green-700">Cleanup complete: {cleanupResult.total} records deleted</p>
+                {cleanupResult.total > 0 && (
+                  <div className="mt-1 text-xs text-green-600 space-y-0.5">
+                    {Object.entries(cleanupResult.deleted).map(([table, count]) => count > 0 && (
+                      <div key={table}>{table.replace(/_/g, ' ')}: {count}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleRetentionSave}
+                disabled={retentionSaving}
+                className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${
+                  retentionSaving ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {retentionSaving ? 'Saving...' : 'Save Retention Policy'}
+              </button>
+              <button
+                onClick={handleManualCleanup}
+                disabled={cleanupRunning}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition border ${
+                  cleanupRunning ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-red-600 border-red-200 hover:bg-red-50'
+                }`}
+              >
+                {cleanupRunning ? 'Cleaning...' : 'Run Cleanup Now'}
+              </button>
+            </div>
           </div>
 
           {/* Save button */}

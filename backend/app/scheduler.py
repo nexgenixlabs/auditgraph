@@ -35,6 +35,7 @@ Usage:
     atexit.register(stop_scheduler)
 """
 import os
+import json
 import logging
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -624,6 +625,60 @@ def run_scheduled_report():
         logger.exception(e)
 
 
+def run_data_retention():
+    """
+    Run data retention cleanup based on configured policies.
+    Called daily by the scheduler at 03:00 UTC.
+    """
+    logger.info("=" * 70)
+    logger.info("DATA RETENTION CLEANUP STARTED")
+    logger.info(f"Time: {datetime.utcnow().isoformat()}")
+    logger.info("=" * 70)
+
+    try:
+        db = Database()
+        enabled = db.get_setting('retention_enabled', 'false')
+
+        if enabled != 'true':
+            logger.info("Data retention disabled in settings - skipping")
+            db.close()
+            return
+
+        discovery_days = int(db.get_setting('retention_discovery_days', '90'))
+        drift_days = int(db.get_setting('retention_drift_days', '90'))
+        activity_days = int(db.get_setting('retention_activity_days', '180'))
+        anomalies_days = int(db.get_setting('retention_anomalies_days', '90'))
+        soar_days = int(db.get_setting('retention_soar_days', '90'))
+        notif_days = int(db.get_setting('retention_notifications_days', '90'))
+
+        results = {}
+        run_counts = db.cleanup_old_discovery_runs(days=discovery_days)
+        results['discovery_runs'] = run_counts.get('discovery_runs', 0)
+        results['risk_scores'] = run_counts.get('risk_scores', 0)
+        results['drift_reports'] = db.cleanup_old_drift_reports(days=drift_days)
+        results['activity_log'] = db.cleanup_old_activity_log(days=activity_days)
+        results['anomalies'] = db.cleanup_old_anomalies(days=anomalies_days)
+        results['soar_actions'] = db.cleanup_old_soar_actions(days=soar_days)
+        results['notifications'] = db.cleanup_old_notifications(days=notif_days)
+
+        total = sum(results.values())
+        if total > 0:
+            db.log_activity('data_retention', f'Scheduled cleanup: {total} records deleted',
+                            json.dumps(results))
+            logger.info(f"✅ Data retention: {total} records deleted")
+            for table, count in results.items():
+                if count > 0:
+                    logger.info(f"   {table}: {count} deleted")
+        else:
+            logger.info("Data retention: no records to clean up")
+
+        db.close()
+
+    except Exception as e:
+        logger.error(f"Data retention failed: {e}")
+        logger.exception(e)
+
+
 # Global scheduler instance
 scheduler = None
 
@@ -692,12 +747,24 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Phase 72: Data retention cleanup — daily at 3:00 AM UTC
+    scheduler.add_job(
+        func=run_data_retention,
+        trigger=CronTrigger(hour=3, minute=0, timezone="UTC"),
+        id='data_retention',
+        name='Data Retention Cleanup (Daily, 03:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
 
     logger.info("✅ Scheduler started")
     logger.info(f"📅 Discovery: Every {interval_hours} hours")
     logger.info(f"📊 Report: {report_name} (enabled={report_enabled})")
+    logger.info("🗑️ Retention: Daily at 03:00 UTC")
 
     # Get next run times
     job = scheduler.get_job('scheduled_discovery')

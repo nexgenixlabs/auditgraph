@@ -945,11 +945,16 @@ def save_app_settings():
         'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
         'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
         'onboarding_completed',
+        'retention_discovery_days', 'retention_drift_days',
+        'retention_activity_days', 'retention_anomalies_days',
+        'retention_soar_days', 'retention_notifications_days',
+        'retention_enabled',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
         'report_schedule_enabled', 'onboarding_completed',
+        'retention_enabled',
     }
 
     # Filter to valid keys only
@@ -981,6 +986,16 @@ def save_app_settings():
         if key in ('email_to', 'report_email_to') and value:
             if '@' not in value:
                 errors.append(f"{key} must be a valid email address")
+                continue
+
+        if key.startswith('retention_') and key.endswith('_days'):
+            try:
+                days_val = int(value)
+                if days_val < 7 or days_val > 3650:
+                    errors.append(f"{key} must be between 7 and 3650 days")
+                    continue
+            except ValueError:
+                errors.append(f"{key} must be a number")
                 continue
 
         updates[key] = value
@@ -3976,6 +3991,289 @@ def get_role_usage_stats():
         db.close()
 
 
+# ── Phase 58: Compliance Auto-Remediation ─────────────────────────
+
+# Action types that can be auto-executed
+REMEDIATION_ACTIONS = {
+    'disable_identity': {
+        'label': 'Disable Identity',
+        'risk': 'high',
+        'description': 'Disable the service principal / identity in Entra ID',
+        'categories': ['governance'],
+        'patterns': ['dormant', 'never_used', 'stale'],
+    },
+    'flag_for_review': {
+        'label': 'Flag for Review',
+        'risk': 'low',
+        'description': 'Add an internal review flag for manual follow-up',
+        'categories': ['governance', 'monitoring', 'access_control', 'credential_hygiene'],
+        'patterns': ['*'],
+    },
+    'create_ticket': {
+        'label': 'Create Ticket',
+        'risk': 'low',
+        'description': 'Create a tracking ticket in the configured ticketing system',
+        'categories': ['governance', 'access_control', 'credential_hygiene'],
+        'patterns': ['*'],
+    },
+    'remove_role': {
+        'label': 'Remove Role Assignment',
+        'risk': 'high',
+        'description': 'Remove the specified Azure RBAC or Entra directory role assignment',
+        'categories': ['access_control'],
+        'patterns': ['global administrator', 'owner', 'privileged', 'user access administrator'],
+    },
+    'rotate_credential': {
+        'label': 'Rotate Credential',
+        'risk': 'medium',
+        'description': 'Initiate credential rotation (new secret/cert, invalidate old)',
+        'categories': ['credential_hygiene'],
+        'patterns': ['expired', 'expiring_soon', 'stale_credential'],
+    },
+}
+
+
+def _execute_remediation(action_type: str, identity: dict, playbook: dict, db) -> dict:
+    """Execute a remediation action. Returns execution log.
+    In dev/demo mode, actions are simulated. In production with Azure creds, real API calls would be made."""
+    log = {
+        'action_type': action_type,
+        'identity_id': identity.get('identity_id'),
+        'display_name': identity.get('display_name'),
+        'playbook_title': playbook.get('title'),
+        'timestamp': datetime.utcnow().isoformat(),
+    }
+
+    # Check if Azure credentials are configured for real execution
+    settings = db.get_settings(tenant_id=_tenant_id())
+    azure_configured = all(settings.get(k) for k in ('azure_tenant_id', 'azure_client_id', 'azure_client_secret'))
+
+    if action_type == 'flag_for_review':
+        # Internal action — always executes
+        log['result'] = 'success'
+        log['detail'] = f'Identity flagged for manual review: {playbook.get("title")}'
+        log['simulated'] = False
+        return log
+
+    if action_type == 'create_ticket':
+        # Check if SOAR ticket integration is configured
+        log['result'] = 'simulated'
+        log['detail'] = f'Ticket creation simulated: [{playbook.get("impact", "").upper()}] {playbook.get("title")} — {identity.get("display_name")}'
+        log['simulated'] = True
+        return log
+
+    if action_type == 'disable_identity':
+        if not azure_configured:
+            log['result'] = 'simulated'
+            log['detail'] = f'Would disable identity {identity.get("display_name")} (App ID: {identity.get("app_id", "N/A")}). Azure credentials not configured — simulated.'
+            log['simulated'] = True
+        else:
+            log['result'] = 'simulated'
+            log['detail'] = f'Identity disable queued for {identity.get("display_name")}. Actual Azure API call requires production approval workflow.'
+            log['simulated'] = True
+        return log
+
+    if action_type == 'remove_role':
+        log['result'] = 'simulated'
+        log['detail'] = f'Role removal queued for {identity.get("display_name")}. Requires manual approval before execution.'
+        log['simulated'] = True
+        return log
+
+    if action_type == 'rotate_credential':
+        log['result'] = 'simulated'
+        log['detail'] = f'Credential rotation queued for {identity.get("display_name")}. New credential will be generated on approval.'
+        log['simulated'] = True
+        return log
+
+    log['result'] = 'error'
+    log['detail'] = f'Unknown action type: {action_type}'
+    return log
+
+
+def execute_remediation(identity_id: str):
+    """Execute a remediation action for an identity/playbook pair."""
+    db = _db()
+    try:
+        body = request.get_json()
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        playbook_id = body.get('playbook_id')
+        action_type = body.get('action_type', 'flag_for_review')
+
+        if not playbook_id:
+            return jsonify({'error': 'playbook_id is required'}), 400
+
+        if action_type not in REMEDIATION_ACTIONS:
+            return jsonify({'error': f'Invalid action_type. Must be one of: {", ".join(REMEDIATION_ACTIONS.keys())}'}), 400
+
+        # Fetch identity
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT identity_id, display_name, identity_category, risk_level,
+                   app_id, activity_status
+            FROM identities
+            WHERE identity_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id,))
+        identity = cursor.fetchone()
+        cursor.close()
+
+        if not identity:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        # Fetch playbook
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM remediation_playbooks WHERE id = %s", (int(playbook_id),))
+        playbook = cursor.fetchone()
+        cursor.close()
+
+        if not playbook:
+            return jsonify({'error': 'Playbook not found'}), 404
+
+        # Execute
+        execution_log = _execute_remediation(action_type, dict(identity), dict(playbook), db)
+        exec_status = execution_log.get('result', 'error')
+
+        # Record in DB
+        user_id = None
+        if hasattr(g, 'current_user') and g.current_user:
+            user_id = g.current_user.get('id')
+
+        result = db.execute_remediation_action(
+            identity_id=identity_id,
+            playbook_id=int(playbook_id),
+            execution_status=exec_status,
+            execution_log=execution_log,
+            user_id=user_id,
+        )
+
+        # Serialize timestamps
+        for key in ('created_at', 'updated_at', 'executed_at'):
+            if result.get(key) and hasattr(result[key], 'isoformat'):
+                result[key] = result[key].isoformat()
+
+        _log(db, 'remediation_executed', f'Remediation executed: {action_type} on {identity["display_name"]}', {
+            'identity_id': identity_id,
+            'playbook_id': playbook_id,
+            'action_type': action_type,
+            'result': exec_status,
+            'simulated': execution_log.get('simulated', False),
+        })
+
+        return jsonify({
+            'action': result,
+            'execution_log': execution_log,
+        })
+    finally:
+        db.close()
+
+
+def get_remediation_queue_handler():
+    """Get the pending remediation queue across all identities."""
+    db = _db()
+    try:
+        status_filter = request.args.get('status', 'open')
+        impact_filter = request.args.get('impact')
+        category_filter = request.args.get('category')
+        limit = min(int(request.args.get('limit', '100')), 500)
+
+        queue = db.get_remediation_queue(
+            status_filter=status_filter,
+            impact_filter=impact_filter,
+            category_filter=category_filter,
+            limit=limit,
+        )
+
+        summary = db.get_remediation_summary()
+
+        return jsonify({
+            'queue': queue,
+            'summary': summary,
+            'available_actions': {k: {'label': v['label'], 'risk': v['risk'], 'description': v['description']}
+                                  for k, v in REMEDIATION_ACTIONS.items()},
+        })
+    finally:
+        db.close()
+
+
+def batch_auto_remediate():
+    """Batch execute safe (low-risk) remediations for all open actions matching criteria."""
+    db = _db()
+    try:
+        body = request.get_json() or {}
+        action_type = body.get('action_type', 'flag_for_review')
+        impact_filter = body.get('impact')
+        category_filter = body.get('category')
+        max_items = min(int(body.get('max_items', 50)), 200)
+
+        if action_type not in REMEDIATION_ACTIONS:
+            return jsonify({'error': f'Invalid action_type'}), 400
+
+        action_def = REMEDIATION_ACTIONS[action_type]
+        if action_def['risk'] == 'high':
+            return jsonify({'error': 'High-risk actions cannot be batch-executed. Use individual execution with approval.'}), 400
+
+        # Get open remediations
+        queue = db.get_remediation_queue(
+            status_filter='open',
+            impact_filter=impact_filter,
+            category_filter=category_filter,
+            limit=max_items,
+        )
+
+        user_id = None
+        if hasattr(g, 'current_user') and g.current_user:
+            user_id = g.current_user.get('id')
+
+        results = []
+        for item in queue:
+            identity = {
+                'identity_id': item['identity_id'],
+                'display_name': item['display_name'],
+                'app_id': '',
+                'activity_status': item.get('activity_status', ''),
+            }
+            playbook = {
+                'title': item['playbook_title'],
+                'impact': item['impact'],
+                'category': item['category'],
+            }
+
+            execution_log = _execute_remediation(action_type, identity, playbook, db)
+            exec_status = execution_log.get('result', 'error')
+
+            db.execute_remediation_action(
+                identity_id=item['identity_id'],
+                playbook_id=item['playbook_id'],
+                execution_status=exec_status,
+                execution_log=execution_log,
+                user_id=user_id,
+            )
+
+            results.append({
+                'identity_id': item['identity_id'],
+                'display_name': item['display_name'],
+                'playbook_title': item['playbook_title'],
+                'result': exec_status,
+            })
+
+        _log(db, 'remediation_batch', f'Batch {action_type}: {len(results)} actions executed', {
+            'action_type': action_type,
+            'count': len(results),
+            'impact_filter': impact_filter,
+            'category_filter': category_filter,
+        })
+
+        return jsonify({
+            'executed': len(results),
+            'action_type': action_type,
+            'results': results,
+        })
+    finally:
+        db.close()
+
+
 def get_role_mining():
     """GET /api/role-mining — role mining & optimization analysis."""
     db = _db()
@@ -4072,6 +4370,7 @@ def auth_login():
             'tenant_id': user.get('tenant_id'),
             'tenant_name': user.get('tenant_name'),
             'is_superadmin': user.get('is_superadmin', False),
+            'portal_role': user.get('portal_role'),
         }
     })
 
@@ -4120,6 +4419,7 @@ def auth_refresh():
             'tenant_id': user.get('tenant_id'),
             'tenant_name': user.get('tenant_name'),
             'is_superadmin': user.get('is_superadmin', False),
+            'portal_role': user.get('portal_role'),
         }
     })
 
@@ -4259,7 +4559,17 @@ def create_user_handler():
         else:
             tenant_id = current_user.get('tenant_id') if current_user else None
 
-        user = db.create_user(username, hashed, display_name, role, created_by, tenant_id=tenant_id)
+        # Phase 70: superadmins can set portal_role and is_superadmin on creation
+        is_superadmin_flag = False
+        portal_role_val = None
+        if current_user and current_user.get('is_superadmin'):
+            if 'is_superadmin' in data:
+                is_superadmin_flag = bool(data['is_superadmin'])
+            if 'portal_role' in data and data['portal_role'] in (None, 'support', 'superadmin'):
+                portal_role_val = data['portal_role']
+
+        user = db.create_user(username, hashed, display_name, role, created_by, tenant_id=tenant_id,
+                              is_superadmin=is_superadmin_flag, portal_role=portal_role_val)
 
         try:
             _log(db,'user_created', f'User "{username}" created with role "{role}"',
@@ -4335,6 +4645,17 @@ def update_user_handler(user_id):
             else:
                 updates['is_superadmin'] = bool(data['is_superadmin'])
 
+        # Phase 70: portal_role (superadmin only)
+        if 'portal_role' in data:
+            if not current_user or not current_user.get('is_superadmin'):
+                errors.append('Only superadmins can change portal_role')
+            else:
+                pr = data['portal_role']
+                if pr not in (None, 'support', 'superadmin'):
+                    errors.append('portal_role must be null, "support", or "superadmin"')
+                else:
+                    updates['portal_role'] = pr
+
         if errors:
             return jsonify({'error': '; '.join(errors)}), 400
 
@@ -4390,6 +4711,17 @@ def delete_user_handler(user_id):
             pass
 
         return jsonify({'message': f'User "{existing["username"]}" deleted'})
+    finally:
+        db.close()
+
+
+# ── Phase 70: Portal Users (Admin Console) ───────────────────────
+def get_portal_users_list():
+    """GET /api/portal-users — list users with portal_role (superadmin only)."""
+    db = _db()
+    try:
+        users = db.get_portal_users()
+        return jsonify({'users': users})
     finally:
         db.close()
 
@@ -6321,7 +6653,12 @@ def delete_tenant_handler(tenant_id):
         if existing.get('slug') == 'default':
             return jsonify({'error': 'Cannot delete the default tenant'}), 400
 
-        db.delete_tenant(tenant_id)
+        try:
+            db.delete_tenant(tenant_id)
+        except Exception as e:
+            logger.error(f"Failed to delete tenant {tenant_id}: {e}")
+            return jsonify({'error': f'Failed to delete tenant: {str(e)}'}), 500
+
         try:
             _log(db,'tenant_deleted',
                 f'Tenant "{existing["name"]}" deleted',
@@ -6342,6 +6679,31 @@ def get_current_tenant_handler():
     try:
         tenant = db.get_tenant_by_id(tid)
         return jsonify({'tenant': tenant})
+    finally:
+        db.close()
+
+
+def get_tenant_config():
+    """GET /api/tenant/config — cloud provider & add-on config for sidebar."""
+    tid = _tenant_id()
+    if not tid:
+        # Superadmin without tenant context — default Azure-only
+        return jsonify({
+            'cloud_providers': {
+                'azure': {'enabled': True, 'plan': 'starter'},
+                'aws': {'enabled': False, 'plan': None},
+                'gcp': {'enabled': False, 'plan': None},
+            },
+            'addons': {
+                'extended_retention': False,
+            },
+        })
+    db = _db()
+    try:
+        cfg = db.get_tenant_config(tid)
+        if not cfg:
+            return jsonify({'error': 'Tenant not found'}), 404
+        return jsonify(cfg)
     finally:
         db.close()
 
@@ -6817,7 +7179,9 @@ def get_resources():
                            'default_network_action', default_network_action,
                            'customer_managed_keys', customer_managed_keys,
                            'key_rotation_stale', key_rotation_stale,
-                           'shared_key_access', shared_key_access
+                           'shared_key_access', shared_key_access,
+                           'diagnostic_logging_enabled', diagnostic_logging_enabled,
+                           'sas_policy_enabled', sas_policy_enabled
                        ) AS key_config,
                        tags, created_at
                 FROM azure_storage_accounts
@@ -6915,10 +7279,11 @@ def get_resources():
 
 
 def get_resource_stats():
-    """GET /api/resources/stats — summary counts for dashboard."""
+    """GET /api/resources/stats — summary counts for dashboard. Supports ?resource_type= filter."""
     db = _db()
     try:
         tenant_id = _tenant_id()
+        resource_type = request.args.get('resource_type', '')
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_id = _latest_run_query(cursor, tenant_id)
         if not run_id:
@@ -6935,60 +7300,98 @@ def get_resource_stats():
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
 
+        include_sa = resource_type != 'key_vault'
+        include_kv = resource_type != 'storage_account'
+
+        zero_risk = {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
+
         # Storage account counts
-        cursor.execute(f"""
-            SELECT COUNT(*) as total,
-                   COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
-                   COUNT(*) FILTER (WHERE risk_level = 'high') as high,
-                   COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
-                   COUNT(*) FILTER (WHERE risk_level = 'low') as low,
-                   COUNT(*) FILTER (WHERE risk_level = 'info') as info
-            FROM azure_storage_accounts
-            WHERE discovery_run_id = %s{tenant_filter}
-        """, params)
-        sa = dict(cursor.fetchone())
+        if include_sa:
+            cursor.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
+                       COUNT(*) FILTER (WHERE risk_level = 'high') as high,
+                       COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
+                       COUNT(*) FILTER (WHERE risk_level = 'low') as low,
+                       COUNT(*) FILTER (WHERE risk_level = 'info') as info
+                FROM azure_storage_accounts
+                WHERE discovery_run_id = %s{tenant_filter}
+            """, params)
+            sa = dict(cursor.fetchone())
+        else:
+            sa = dict(zero_risk)
 
         # Key vault counts
-        cursor.execute(f"""
-            SELECT COUNT(*) as total,
-                   COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
-                   COUNT(*) FILTER (WHERE risk_level = 'high') as high,
-                   COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
-                   COUNT(*) FILTER (WHERE risk_level = 'low') as low,
-                   COUNT(*) FILTER (WHERE risk_level = 'info') as info
-            FROM azure_key_vaults
-            WHERE discovery_run_id = %s{tenant_filter}
-        """, params)
-        kv = dict(cursor.fetchone())
+        if include_kv:
+            cursor.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
+                       COUNT(*) FILTER (WHERE risk_level = 'high') as high,
+                       COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
+                       COUNT(*) FILTER (WHERE risk_level = 'low') as low,
+                       COUNT(*) FILTER (WHERE risk_level = 'info') as info
+                FROM azure_key_vaults
+                WHERE discovery_run_id = %s{tenant_filter}
+            """, params)
+            kv = dict(cursor.fetchone())
+        else:
+            kv = dict(zero_risk)
 
-        # Rotation compliance (storage)
-        cursor.execute(f"""
-            SELECT COUNT(*) as total,
-                   COUNT(*) FILTER (WHERE key_rotation_stale = true) as keys_stale,
-                   AVG(GREATEST(
-                       EXTRACT(EPOCH FROM (NOW() - key1_created_at)) / 86400,
-                       EXTRACT(EPOCH FROM (NOW() - key2_created_at)) / 86400
-                   ))::int as avg_key_age_days
-            FROM azure_storage_accounts
-            WHERE discovery_run_id = %s{tenant_filter}
-        """, params)
-        rotation_row = dict(cursor.fetchone())
+        # Rotation compliance & audit posture (storage-only stats)
+        rotation_data = None
+        audit_posture = None
+        if include_sa:
+            cursor.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE key_rotation_stale = true) as keys_stale,
+                       AVG(GREATEST(
+                           EXTRACT(EPOCH FROM (NOW() - key1_created_at)) / 86400,
+                           EXTRACT(EPOCH FROM (NOW() - key2_created_at)) / 86400
+                       ))::int as avg_key_age_days,
+                       COUNT(*) FILTER (WHERE shared_key_access = false) as aad_only,
+                       COUNT(*) FILTER (WHERE shared_key_access = true AND diagnostic_logging_enabled = true AND sas_policy_enabled = true) as auditable,
+                       COUNT(*) FILTER (WHERE shared_key_access = true AND diagnostic_logging_enabled = true AND (sas_policy_enabled IS NULL OR sas_policy_enabled = false)) as partial,
+                       COUNT(*) FILTER (WHERE shared_key_access = true AND (diagnostic_logging_enabled IS NULL OR diagnostic_logging_enabled = false)) as unauditable
+                FROM azure_storage_accounts
+                WHERE discovery_run_id = %s{tenant_filter}
+            """, params)
+            rotation_row = dict(cursor.fetchone())
+            rotation_data = {
+                'total_storage': rotation_row['total'],
+                'keys_stale': rotation_row['keys_stale'],
+                'avg_key_age_days': rotation_row['avg_key_age_days'] or 0,
+            }
+            audit_posture = {
+                'total': rotation_row['total'],
+                'aad_only': rotation_row['aad_only'],
+                'auditable': rotation_row['auditable'],
+                'partial': rotation_row['partial'],
+                'unauditable': rotation_row['unauditable'],
+            }
 
-        # Key vault expiry stats
-        cursor.execute(f"""
-            SELECT COALESCE(SUM(secrets_total), 0) as total_secrets,
-                   COALESCE(SUM(secrets_expired), 0) as expired_secrets,
-                   COALESCE(SUM(secrets_expiring_soon), 0) as expiring_secrets,
-                   COALESCE(SUM(keys_total), 0) as total_keys,
-                   COALESCE(SUM(keys_expired), 0) as expired_keys,
-                   COALESCE(SUM(keys_expiring_soon), 0) as expiring_keys,
-                   COALESCE(SUM(certs_total), 0) as total_certs,
-                   COALESCE(SUM(certs_expired), 0) as expired_certs,
-                   COALESCE(SUM(certs_expiring_soon), 0) as expiring_certs
-            FROM azure_key_vaults
-            WHERE discovery_run_id = %s{tenant_filter}
-        """, params)
-        expiry_row = dict(cursor.fetchone())
+        # Key vault expiry stats (vault-only stat)
+        expiry_data = None
+        if include_kv:
+            cursor.execute(f"""
+                SELECT COALESCE(SUM(secrets_total), 0) as total_secrets,
+                       COALESCE(SUM(secrets_expired), 0) as expired_secrets,
+                       COALESCE(SUM(secrets_expiring_soon), 0) as expiring_secrets,
+                       COALESCE(SUM(keys_total), 0) as total_keys,
+                       COALESCE(SUM(keys_expired), 0) as expired_keys,
+                       COALESCE(SUM(keys_expiring_soon), 0) as expiring_keys,
+                       COALESCE(SUM(certs_total), 0) as total_certs,
+                       COALESCE(SUM(certs_expired), 0) as expired_certs,
+                       COALESCE(SUM(certs_expiring_soon), 0) as expiring_certs
+                FROM azure_key_vaults
+                WHERE discovery_run_id = %s{tenant_filter}
+            """, params)
+            expiry_row = dict(cursor.fetchone())
+            expiry_data = {
+                'secrets': {'total': expiry_row['total_secrets'], 'expired': expiry_row['expired_secrets'], 'expiring_soon': expiry_row['expiring_secrets']},
+                'keys': {'total': expiry_row['total_keys'], 'expired': expiry_row['expired_keys'], 'expiring_soon': expiry_row['expiring_keys']},
+                'certs': {'total': expiry_row['total_certs'], 'expired': expiry_row['expired_certs'], 'expiring_soon': expiry_row['expiring_certs']},
+            }
+
         cursor.close()
 
         total = sa['total'] + kv['total']
@@ -7000,29 +7403,29 @@ def get_resource_stats():
             'info': sa['info'] + kv['info'],
         }
 
-        return jsonify({
+        result = {
             'total': total,
             'storage_accounts': sa['total'],
             'key_vaults': kv['total'],
             'by_risk': by_risk,
             'at_risk': by_risk['critical'] + by_risk['high'],
-            'rotation_compliance': {
-                'total_storage': rotation_row['total'],
-                'keys_stale': rotation_row['keys_stale'],
-                'avg_key_age_days': rotation_row['avg_key_age_days'] or 0,
-            },
-            'expiry_summary': {
-                'secrets': {'total': expiry_row['total_secrets'], 'expired': expiry_row['expired_secrets'], 'expiring_soon': expiry_row['expiring_secrets']},
-                'keys': {'total': expiry_row['total_keys'], 'expired': expiry_row['expired_keys'], 'expiring_soon': expiry_row['expiring_keys']},
-                'certs': {'total': expiry_row['total_certs'], 'expired': expiry_row['expired_certs'], 'expiring_soon': expiry_row['expiring_certs']},
-            },
-        })
+        }
+        if rotation_data is not None:
+            result['rotation_compliance'] = rotation_data
+        if audit_posture is not None:
+            result['audit_posture'] = audit_posture
+        if expiry_data is not None:
+            result['expiry_summary'] = expiry_data
+
+        return jsonify(result)
     finally:
         db.close()
 
 
 def get_resource_detail(resource_id):
     """GET /api/resources/<path:resource_id> — full detail for one resource."""
+    if not resource_id.startswith('/'):
+        resource_id = '/' + resource_id
     db = _db()
     try:
         tenant_id = _tenant_id()
@@ -7086,19 +7489,45 @@ def get_resource_detail(resource_id):
             if resource.get('key_rotation_stale') is True:
                 factors.append('Storage keys have not been rotated in >90 days')
                 recommendations.append('Rotate storage account keys every 90 days')
+            if resource.get('shared_key_access') is True and not resource.get('diagnostic_logging_enabled'):
+                factors.append('No diagnostic logging — shared key/SAS usage is unauditable')
+                recommendations.append('Enable diagnostic settings (StorageRead/Write/Delete) to Log Analytics or Event Hub')
+            if resource.get('diagnostic_logging_enabled') and resource.get('shared_key_access') is True:
+                factors.append('Shared key access enabled with logging — SAS tokens can be generated but usage is tracked')
+
             level = 'low'
-            if len(factors) >= 3:
+            if len(factors) >= 4:
+                level = 'critical'
+            elif len(factors) >= 3:
                 level = 'high'
             elif len(factors) >= 2:
                 level = 'medium'
             elif len(factors) >= 1:
                 level = 'medium'
+
+            # Compute auditability status
+            has_shared_key = resource.get('shared_key_access') is True
+            has_diag = resource.get('diagnostic_logging_enabled') is True
+            has_sas_policy = resource.get('sas_policy_enabled') is True
+            if not has_shared_key:
+                audit_status = 'compliant'
+                audit_label = 'Azure AD Only — Fully Auditable'
+            elif has_shared_key and has_diag and has_sas_policy:
+                audit_status = 'auditable'
+                audit_label = 'Shared Key + Logging + SAS Policy — Auditable'
+            elif has_shared_key and has_diag:
+                audit_status = 'partial'
+                audit_label = 'Shared Key + Logging — Partially Auditable (no SAS policy)'
             else:
-                level = 'low'
+                audit_status = 'unauditable'
+                audit_label = 'Shared Key without Logging — Unauditable'
+
             resource['sas_risk'] = {
                 'level': level,
                 'factors': factors,
                 'recommendations': recommendations,
+                'audit_status': audit_status,
+                'audit_label': audit_label,
             }
 
         return jsonify(resource)
@@ -7108,6 +7537,8 @@ def get_resource_detail(resource_id):
 
 def get_resource_access(resource_id):
     """GET /api/resources/<path:resource_id>/access — identities that can access this resource."""
+    if not resource_id.startswith('/'):
+        resource_id = '/' + resource_id
     db = _db()
     try:
         tenant_id = _tenant_id()
@@ -7117,11 +7548,8 @@ def get_resource_access(resource_id):
             cursor.close()
             return jsonify({'resource_id': resource_id, 'rbac_access': [], 'policy_access': [], 'count': 0, 'blast_radius': 0})
 
-        tenant_filter = ""
+        # Note: tenant filtering is already handled via run_id (which belongs to the tenant)
         params = [run_id, resource_id, resource_id]
-        if tenant_id:
-            tenant_filter = " AND i.tenant_id = %s"
-            params.append(tenant_id)
 
         # RBAC access
         cursor.execute(f"""
@@ -7132,7 +7560,6 @@ def get_resource_access(resource_id):
             JOIN role_assignments ra ON ra.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
               AND (ra.scope = %s OR %s LIKE ra.scope || '/%%')
-              {tenant_filter}
             ORDER BY i.risk_score DESC, ra.role_name
         """, params)
         rbac_rows = cursor.fetchall()
@@ -7144,6 +7571,23 @@ def get_resource_access(resource_id):
             entry = dict(r)
             entry['access_type'] = 'rbac'
             entry['over_privileged'] = entry.get('role_name', '') in OVER_PRIV_ROLES and entry.get('scope', '') == resource_id
+            # Classify access source by comparing assignment scope to resource_id
+            scope = entry.get('scope', '')
+            if scope == resource_id:
+                entry['access_source'] = 'direct'
+                entry['access_source_label'] = 'Direct'
+            elif '/resourceGroups/' in scope and '/providers/' not in scope.split('/resourceGroups/')[1]:
+                entry['access_source'] = 'resource_group'
+                entry['access_source_label'] = 'Inherited (Resource Group)'
+            elif scope.startswith('/subscriptions/') and scope.count('/') <= 2:
+                entry['access_source'] = 'subscription'
+                entry['access_source_label'] = 'Inherited (Subscription)'
+            elif '/managementGroups/' in scope:
+                entry['access_source'] = 'management_group'
+                entry['access_source_label'] = 'Inherited (Management Group)'
+            else:
+                entry['access_source'] = 'inherited'
+                entry['access_source_label'] = 'Inherited'
             rbac_access.append(entry)
             rbac_identity_ids.add(entry['id'])
 
@@ -7174,13 +7618,10 @@ def get_resource_access(resource_id):
             if policy_object_ids:
                 placeholders = ','.join(['%s'] * len(policy_object_ids))
                 id_params = [run_id] + policy_object_ids
-                if tenant_id:
-                    id_params.append(tenant_id)
                 cursor.execute(f"""
                     SELECT id, display_name, identity_category, risk_level, risk_score, object_id
                     FROM identities
                     WHERE discovery_run_id = %s AND object_id IN ({placeholders})
-                    {'AND tenant_id = %s' if tenant_id else ''}
                 """, id_params)
                 identity_map = {r['object_id']: dict(r) for r in cursor.fetchall()}
 
@@ -7205,12 +7646,18 @@ def get_resource_access(resource_id):
         cursor.close()
 
         blast_radius = len(rbac_identity_ids | policy_identity_ids)
+        # Access source breakdown
+        source_counts = {}
+        for entry in rbac_access:
+            src = entry.get('access_source', 'unknown')
+            source_counts[src] = source_counts.get(src, 0) + 1
         return jsonify({
             'resource_id': resource_id,
             'rbac_access': rbac_access,
             'policy_access': policy_access,
             'count': len(rbac_access) + len(policy_access),
             'blast_radius': blast_radius,
+            'access_source_breakdown': source_counts,
         })
     finally:
         db.close()
@@ -8389,6 +8836,980 @@ def get_system_health():
             'top_endpoints': top_endpoints,
             'discovery_runs': runs,
             'database': {'tables': tables},
+        })
+    finally:
+        db.close()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SPN Dashboard (Phase 71)
+# ═══════════════════════════════════════════════════════════════════
+
+SPN_CATEGORIES = ("service_principal", "managed_identity_system", "managed_identity_user")
+
+_DANGEROUS_ROLES_ORDERED = [
+    'global administrator', 'privileged role administrator',
+    'owner', 'user access administrator',
+    'privileged authentication administrator',
+    'contributor', 'security administrator',
+    'application administrator', 'cloud application administrator',
+    'key vault administrator', 'key vault secrets officer',
+    'storage blob data owner', 'exchange administrator',
+]
+
+
+def _compute_blast_radius(roles):
+    """Compute blast radius: high / medium / low based on role scope."""
+    high_roles = {'owner', 'user access administrator', 'contributor'}
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        st = (r.get('scope_type') or '').lower()
+        scope = (r.get('scope') or '')
+        if st == 'subscription' or (scope == '/' or (scope.startswith('/subscriptions/') and '/resourceGroups/' not in scope)):
+            if rn in high_roles:
+                return 'high'
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        st = (r.get('scope_type') or '').lower()
+        if st == 'resource_group' and rn in {'owner', 'contributor', 'user access administrator'}:
+            return 'medium'
+    for r in roles:
+        if r.get('role_name'):
+            return 'low'
+    return 'none'
+
+
+def _extract_critical_roles(roles):
+    """Return top 2 most dangerous roles for display."""
+    found = []
+    for dangerous in _DANGEROUS_ROLES_ORDERED:
+        for r in roles:
+            rn = (r.get('role_name') or '').lower()
+            if rn == dangerous and rn not in [f.lower() for f in found]:
+                found.append(r.get('role_name', ''))
+                if len(found) >= 2:
+                    return found
+    return found
+
+
+def _generate_risk_summary(identity, roles, credentials, entra_roles):
+    """Auto-generate risk summary text for an SPN."""
+    points = []
+    display = identity.get('display_name', 'This SPN')
+
+    # Check for dangerous roles
+    dangerous_entra = [r for r in entra_roles if (r.get('role_name') or '').lower() in (
+        'global administrator', 'privileged role administrator',
+        'privileged authentication administrator')]
+    dangerous_rbac = [r for r in roles if (r.get('role_name') or '').lower() in (
+        'owner', 'user access administrator') and (
+        (r.get('scope_type') or '').lower() == 'subscription' or (r.get('scope') or '') == '/')]
+    if dangerous_entra:
+        points.append(f"Has Entra directory role: {dangerous_entra[0]['role_name']}")
+    if dangerous_rbac:
+        scope = dangerous_rbac[0].get('scope', '')
+        points.append(f"Has {dangerous_rbac[0]['role_name']} at subscription scope")
+
+    # Credential age / status
+    cred_risk = identity.get('credential_risk', 'unknown')
+    if cred_risk == 'expired':
+        points.append("Has expired credentials (security risk — may indicate abandoned SPN)")
+    elif cred_risk == 'expiring_soon':
+        points.append("Credentials expiring within 30 days")
+
+    now = datetime.utcnow()
+    oldest_secret_days = 0
+    for c in credentials:
+        if c.get('credential_type') == 'secret' and c.get('start_datetime'):
+            start = c['start_datetime']
+            if isinstance(start, str):
+                try:
+                    start = datetime.fromisoformat(start.replace('Z', '+00:00')).replace(tzinfo=None)
+                except Exception:
+                    continue
+            age = (now - start).days
+            oldest_secret_days = max(oldest_secret_days, age)
+    if oldest_secret_days > 180:
+        points.append(f"Uses a {oldest_secret_days}-day-old client secret")
+    elif oldest_secret_days > 90:
+        points.append(f"Client secret is {oldest_secret_days} days old (consider rotation)")
+
+    # Federated vs secret
+    cred_types = set(c.get('credential_type', '') for c in credentials)
+    if 'secret' in cred_types and 'federated' not in cred_types:
+        points.append("Uses client secret — consider migrating to workload identity federation")
+
+    # Activity / usage
+    activity = identity.get('activity_status', 'unknown')
+    if activity in ('stale', 'inactive'):
+        points.append(f"Activity status is '{activity}' — may be unused")
+    elif activity == 'never_used':
+        points.append("Has never been used (candidate for removal)")
+    elif activity == 'unknown':
+        points.append("Usage telemetry unavailable — access risk still exists")
+
+    # Owner
+    if identity.get('owner_count', 0) == 0:
+        points.append("No registered owner — accountability gap")
+
+    if not points:
+        points.append("No significant risk factors identified")
+
+    return points
+
+
+def _generate_recommendations(identity, roles, credentials, entra_roles):
+    """Auto-generate actionable recommendations for an SPN."""
+    recs = []
+    cred_types = set(c.get('credential_type', '') for c in credentials)
+
+    if 'secret' in cred_types and 'federated' not in cred_types:
+        recs.append({
+            'priority': 'high',
+            'action': 'Migrate to workload identity federation',
+            'reason': 'Eliminates need for client secrets entirely'
+        })
+
+    cred_risk = identity.get('credential_risk', 'unknown')
+    if cred_risk == 'expired':
+        recs.append({
+            'priority': 'critical',
+            'action': 'Remove or rotate expired credentials',
+            'reason': 'Expired credentials indicate an abandoned or misconfigured SPN'
+        })
+    elif cred_risk == 'expiring_soon':
+        recs.append({
+            'priority': 'high',
+            'action': 'Rotate credentials before expiry',
+            'reason': 'Credentials will expire within 30 days'
+        })
+
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        st = (r.get('scope_type') or '').lower()
+        if rn == 'owner' and st == 'subscription':
+            recs.append({
+                'priority': 'critical',
+                'action': f"Restrict scope — {r['role_name']} at subscription is overprivileged",
+                'reason': 'SPNs rarely need Owner. Use Contributor or a custom role with least privilege.'
+            })
+            break
+
+    for r in entra_roles:
+        rn = (r.get('role_name') or '').lower()
+        if rn == 'global administrator':
+            recs.append({
+                'priority': 'critical',
+                'action': 'Remove Global Administrator from this SPN',
+                'reason': 'No SPN should have Global Admin. Use scoped roles instead.'
+            })
+            break
+
+    activity = identity.get('activity_status', 'unknown')
+    if activity in ('stale', 'never_used'):
+        recs.append({
+            'priority': 'medium',
+            'action': 'Investigate and consider decommissioning',
+            'reason': f"SPN appears {activity} — may be a leftover from decommissioned workload"
+        })
+
+    if identity.get('owner_count', 0) == 0:
+        recs.append({
+            'priority': 'medium',
+            'action': 'Assign an owner for accountability',
+            'reason': 'Unowned SPNs create governance blind spots'
+        })
+
+    if not recs:
+        recs.append({
+            'priority': 'info',
+            'action': 'No urgent actions required',
+            'reason': 'SPN configuration appears reasonable'
+        })
+
+    return recs
+
+
+def _generate_attacker_narrative(identity, roles, credentials, entra_roles):
+    """Generate 'What attackers could do' — plain-language threat scenarios."""
+    points = []
+    name = identity.get('display_name', 'This SPN')
+
+    # Check for subscription-level Owner/UAA
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        scope = r.get('scope') or ''
+        if rn == 'owner' and ('subscriptions' in scope and '/resourceGroups/' not in scope):
+            points.append(f"Could create new admin accounts and grant themselves persistent access across the entire subscription")
+            break
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        if rn == 'user access administrator':
+            points.append("Could escalate privileges by assigning Owner role to attacker-controlled identities")
+            break
+
+    # Entra admin
+    for r in entra_roles:
+        rn = (r.get('role_name') or '').lower()
+        if rn == 'global administrator':
+            points.append("Could take full control of the Entra tenant — reset passwords, create users, modify all settings")
+            break
+        if rn in ('application administrator', 'cloud application administrator'):
+            points.append("Could create backdoor applications with high-privilege API permissions")
+            break
+
+    # Key Vault access
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        if 'key vault' in rn and ('admin' in rn or 'officer' in rn or 'owner' in rn.replace('key vault ', '')):
+            points.append("Could exfiltrate secrets, certificates, and encryption keys from Key Vaults")
+            break
+
+    # Contributor at subscription
+    for r in roles:
+        rn = (r.get('role_name') or '').lower()
+        st = (r.get('scope_type') or '').lower()
+        if rn == 'contributor' and st == 'subscription':
+            points.append("Could deploy resources (VMs, storage) for cryptomining or data staging")
+            break
+
+    # Credential-based attacks
+    cred_types = set(c.get('credential_type', '') for c in credentials)
+    if 'secret' in cred_types:
+        points.append("Client secret could be extracted from code repos, config files, or environment variables")
+
+    if not points:
+        points.append("Limited blast radius — no high-privilege attack paths identified")
+
+    return points
+
+
+def _generate_auditor_questions(identity, roles, credentials, entra_roles):
+    """Generate 'What auditors will question' — compliance-focused probes."""
+    questions = []
+    name = identity.get('display_name', 'This SPN')
+
+    # Overprivileged roles
+    high_roles = [r for r in roles if (r.get('role_name') or '').lower() in ('owner', 'contributor', 'user access administrator')
+                  and (r.get('scope_type') or '').lower() == 'subscription']
+    if high_roles:
+        questions.append(f"Why does '{name}' need {high_roles[0]['role_name']} at subscription scope? Is least privilege applied?")
+
+    # Entra admin roles on SPN
+    if entra_roles:
+        questions.append(f"Why does a service principal have Entra directory roles? Is this justified by business need?")
+
+    # Credential hygiene
+    cred_risk = identity.get('credential_risk', 'unknown')
+    if cred_risk == 'expired':
+        questions.append("Credentials are expired — is this SPN abandoned? Why hasn't it been decommissioned?")
+    elif cred_risk == 'expiring_soon':
+        questions.append("Credentials are expiring soon — is there a rotation plan in place?")
+
+    now_str = identity.get('created_datetime', '')
+    cred_types = set(c.get('credential_type', '') for c in credentials)
+    if 'secret' in cred_types and 'federated' not in cred_types:
+        questions.append("Why is a client secret used instead of certificate or workload identity federation?")
+
+    # Activity
+    activity = identity.get('activity_status', 'unknown')
+    if activity == 'unknown':
+        questions.append("How do you prove this SPN is still in use? Sign-in telemetry is unavailable.")
+    elif activity in ('stale', 'never_used'):
+        questions.append(f"Activity is '{activity}' — can you justify continued access for an unused identity?")
+
+    # Ownership
+    if identity.get('owner_count', 0) == 0:
+        questions.append("Who is responsible for this SPN? No owner is registered — this is a governance gap.")
+
+    if not questions:
+        questions.append("No significant compliance concerns identified for this SPN.")
+
+    return questions
+
+
+def get_spn_stats():
+    """GET /api/spns/stats — SPN dashboard summary cards."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({
+                'total': 0, 'custom': 0, 'microsoft': 0,
+                'critical': 0, 'high_risk': 0,
+                'expired_credentials': 0, 'expiring_soon': 0,
+                'by_category': {}, 'by_risk': {},
+                'by_activity': {}, 'by_blast_radius': {},
+            })
+
+        base = "FROM identities i WHERE i.discovery_run_id = %s AND i.identity_category IN %s"
+        cats = SPN_CATEGORIES
+        params = [run_id, cats]
+
+        # Total + custom vs microsoft
+        cursor.execute(f"""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE NOT COALESCE(i.is_microsoft_system, false)) as custom,
+                   COUNT(*) FILTER (WHERE COALESCE(i.is_microsoft_system, false)) as microsoft
+            {base}
+        """, params)
+        counts = dict(cursor.fetchone())
+
+        # By risk level
+        cursor.execute(f"""
+            SELECT COALESCE(i.risk_level, 'info') as rl, COUNT(*) as c
+            {base}
+            AND NOT COALESCE(i.is_microsoft_system, false)
+            GROUP BY rl
+        """, params)
+        by_risk = {r['rl']: r['c'] for r in cursor.fetchall()}
+
+        # By category
+        cursor.execute(f"""
+            SELECT i.identity_category as cat, COUNT(*) as c
+            {base}
+            AND NOT COALESCE(i.is_microsoft_system, false)
+            GROUP BY cat
+        """, params)
+        by_category = {r['cat']: r['c'] for r in cursor.fetchall()}
+
+        # Credential risk
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE i.credential_risk = 'expired') as expired,
+                COUNT(*) FILTER (WHERE i.credential_risk = 'expiring_soon') as expiring_soon,
+                COUNT(*) FILTER (WHERE i.credential_count = 0 AND i.identity_category = 'service_principal') as no_credentials
+            {base}
+            AND NOT COALESCE(i.is_microsoft_system, false)
+        """, params)
+        cred = dict(cursor.fetchone())
+
+        # Activity status breakdown
+        cursor.execute(f"""
+            SELECT COALESCE(i.activity_status, 'unknown') as act, COUNT(*) as c
+            {base}
+            AND NOT COALESCE(i.is_microsoft_system, false)
+            GROUP BY act
+        """, params)
+        by_activity = {r['act']: r['c'] for r in cursor.fetchall()}
+
+        # Blast radius — join role_assignments to compute
+        cursor.execute("""
+            SELECT i.id,
+                   ARRAY_AGG(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL) as role_names,
+                   ARRAY_AGG(DISTINCT ra.scope_type) FILTER (WHERE ra.scope_type IS NOT NULL) as scope_types,
+                   ARRAY_AGG(DISTINCT ra.scope) FILTER (WHERE ra.scope IS NOT NULL) as scopes
+            FROM identities i
+            LEFT JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s AND i.identity_category IN %s
+            AND NOT COALESCE(i.is_microsoft_system, false)
+            GROUP BY i.id
+        """, params)
+        blast_counts = {'high': 0, 'medium': 0, 'low': 0, 'none': 0}
+        for row in cursor.fetchall():
+            roles_list = []
+            role_names = row.get('role_names') or []
+            scope_types = row.get('scope_types') or []
+            scopes = row.get('scopes') or []
+            for rn, st, sc in zip(role_names, scope_types, scopes):
+                roles_list.append({'role_name': rn, 'scope_type': st, 'scope': sc})
+            br = _compute_blast_radius(roles_list)
+            blast_counts[br] = blast_counts.get(br, 0) + 1
+
+        cursor.close()
+
+        return jsonify({
+            'total': counts['total'],
+            'custom': counts['custom'],
+            'microsoft': counts['microsoft'],
+            'critical': by_risk.get('critical', 0),
+            'high_risk': by_risk.get('high', 0),
+            'expired_credentials': cred['expired'],
+            'expiring_soon': cred['expiring_soon'],
+            'no_credentials': cred['no_credentials'],
+            'by_risk': by_risk,
+            'by_category': by_category,
+            'by_activity': by_activity,
+            'by_blast_radius': blast_counts,
+        })
+    finally:
+        db.close()
+
+
+def get_spn_list():
+    """GET /api/spns — SPN list with blast radius + critical roles."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        risk_level = request.args.get('risk_level', '')
+        category = request.args.get('category', '')
+        cred_filter = request.args.get('credential_filter', '')
+        blast = request.args.get('blast_radius', '')
+        activity = request.args.get('activity', '')
+        search_q = request.args.get('search', '')
+        hide_ms = request.args.get('hide_microsoft', 'true').lower() == 'true'
+        sort_by = request.args.get('sort', 'risk_score')
+        sort_dir = request.args.get('dir', 'desc')
+
+        cursor = db.conn.cursor()
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({'spns': [], 'count': 0, 'total': 0})
+
+        # Use existing identity list select
+        sql = _identity_list_select()
+        where = [" WHERE i.discovery_run_id = %s", " AND i.identity_category IN %s"]
+        params = [run_id, SPN_CATEGORIES]
+
+        if hide_ms:
+            where.append(" AND NOT COALESCE(i.is_microsoft_system, false)")
+        if risk_level:
+            where.append(" AND i.risk_level = %s")
+            params.append(risk_level)
+        if category:
+            where.append(" AND i.identity_category = %s")
+            params.append(category)
+        if cred_filter == 'expired':
+            where.append(" AND i.credential_risk = 'expired'")
+        elif cred_filter == 'expiring_soon':
+            where.append(" AND i.credential_risk = 'expiring_soon'")
+        elif cred_filter == 'no_credentials':
+            where.append(" AND i.credential_count = 0 AND i.identity_category = 'service_principal'")
+        if activity:
+            where.append(" AND i.activity_status = %s")
+            params.append(activity)
+        if search_q:
+            where.append(" AND (LOWER(i.display_name) LIKE %s OR LOWER(i.app_id) LIKE %s)")
+            like = f"%{search_q.lower()}%"
+            params.extend([like, like])
+
+        # Count total
+        count_sql = f"SELECT COUNT(*) FROM identities i {''.join(where)}"
+        cursor.execute(count_sql, params)
+        total = cursor.fetchone()[0]
+
+        # Sort
+        allowed_sorts = {
+            'risk_score': 'i.risk_score', 'display_name': 'i.display_name',
+            'credential_risk': 'i.credential_risk', 'next_expiry': 'i.next_expiry',
+            'activity_status': 'i.activity_status', 'risk_level': 'i.risk_level',
+            'created_datetime': 'i.created_datetime',
+        }
+        order_col = allowed_sorts.get(sort_by, 'i.risk_score')
+        order_dir = 'ASC' if sort_dir == 'asc' else 'DESC'
+        order_clause = f" ORDER BY {order_col} {order_dir} NULLS LAST"
+
+        full_sql = sql + ''.join(where) + order_clause + " LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+        cursor.execute(full_sql, params)
+        rows = cursor.fetchall()
+
+        # Map base identity data
+        spns = [_map_identity_row(r) for r in rows]
+
+        # Enrich with blast_radius and critical_roles for each SPN
+        if spns:
+            # Get identity IDs → db IDs mapping
+            id_list = [s['identity_id'] for s in spns]
+            placeholders = ','.join(['%s'] * len(id_list))
+            cursor.execute(f"""
+                SELECT i.identity_id, i.id FROM identities i
+                WHERE i.discovery_run_id = %s AND i.identity_id IN ({placeholders})
+            """, [run_id] + id_list)
+            id_map = {}
+            for row in cursor.fetchall():
+                id_map[row[0]] = row[1]
+
+            if id_map:
+                db_ids = list(id_map.values())
+                db_placeholders = ','.join(['%s'] * len(db_ids))
+
+                # Fetch roles for all SPNs in one query
+                cursor.execute(f"""
+                    SELECT identity_db_id, role_name, scope_type, scope
+                    FROM role_assignments
+                    WHERE identity_db_id IN ({db_placeholders})
+                """, db_ids)
+                roles_by_id = {}
+                for row in cursor.fetchall():
+                    roles_by_id.setdefault(row[0], []).append({
+                        'role_name': row[1], 'scope_type': row[2], 'scope': row[3]
+                    })
+
+                # Fetch entra roles
+                cursor.execute(f"""
+                    SELECT identity_db_id, role_name
+                    FROM entra_role_assignments
+                    WHERE identity_db_id IN ({db_placeholders})
+                """, db_ids)
+                entra_by_id = {}
+                for row in cursor.fetchall():
+                    entra_by_id.setdefault(row[0], []).append({'role_name': row[1]})
+
+                # Enrich each SPN
+                for spn in spns:
+                    db_id = id_map.get(spn['identity_id'])
+                    rbac_roles = roles_by_id.get(db_id, [])
+                    entra_roles = entra_by_id.get(db_id, [])
+                    all_roles = rbac_roles + [{'role_name': e['role_name'], 'scope_type': 'directory', 'scope': '/'} for e in entra_roles]
+                    spn['blast_radius'] = _compute_blast_radius(rbac_roles)
+                    spn['critical_roles'] = _extract_critical_roles(all_roles)
+
+        cursor.close()
+        return jsonify({'spns': spns, 'count': len(spns), 'total': total})
+    finally:
+        db.close()
+
+
+def get_spn_detail(identity_id):
+    """GET /api/spns/<identity_id> — Full SPN detail with risk summary + recommendations."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({'error': 'No discovery run found'}), 404
+
+        cursor.execute("""
+            SELECT * FROM identities
+            WHERE discovery_run_id = %s AND identity_id = %s
+        """, (run_id, identity_id))
+        identity = cursor.fetchone()
+        if not identity:
+            cursor.close()
+            return jsonify({'error': 'SPN not found'}), 404
+
+        db_id = identity['id']
+
+        # Roles
+        cursor.execute("SELECT * FROM role_assignments WHERE identity_db_id = %s", (db_id,))
+        roles = [dict(r) for r in cursor.fetchall()]
+
+        # Entra roles
+        cursor.execute("SELECT * FROM entra_role_assignments WHERE identity_db_id = %s", (db_id,))
+        entra_roles = [dict(r) for r in cursor.fetchall()]
+
+        # Credentials
+        cursor.execute("SELECT * FROM credentials WHERE identity_db_id = %s ORDER BY end_datetime ASC", (db_id,))
+        credentials = [dict(r) for r in cursor.fetchall()]
+
+        # Permissions
+        cursor.execute("SELECT * FROM graph_api_permissions WHERE identity_db_id = %s", (db_id,))
+        permissions = [dict(r) for r in cursor.fetchall()]
+
+        # Ownership
+        cursor.execute("SELECT * FROM sp_ownership WHERE identity_db_id = %s", (db_id,))
+        owners = [dict(r) for r in cursor.fetchall()]
+
+        cursor.close()
+
+        # Serialize timestamps
+        for lst in [roles, entra_roles, credentials, permissions, owners]:
+            for item in lst:
+                for k, v in item.items():
+                    if hasattr(v, 'isoformat'):
+                        item[k] = v.isoformat()
+
+        identity_dict = dict(identity)
+        for k, v in identity_dict.items():
+            if hasattr(v, 'isoformat'):
+                identity_dict[k] = v.isoformat()
+
+        # Compute SPN-specific fields
+        rbac_for_blast = [{'role_name': r.get('role_name'), 'scope_type': r.get('scope_type'), 'scope': r.get('scope')} for r in roles]
+        all_for_critical = rbac_for_blast + [{'role_name': e.get('role_name'), 'scope_type': 'directory', 'scope': '/'} for e in entra_roles]
+
+        return jsonify({
+            'identity': identity_dict,
+            'roles': roles,
+            'entra_roles': entra_roles,
+            'credentials': credentials,
+            'permissions': permissions,
+            'owners': owners,
+            'blast_radius': _compute_blast_radius(rbac_for_blast),
+            'critical_roles': _extract_critical_roles(all_for_critical),
+            'risk_summary': _generate_risk_summary(identity_dict, roles, credentials, entra_roles),
+            'recommendations': _generate_recommendations(identity_dict, roles, credentials, entra_roles),
+            'attacker_narrative': _generate_attacker_narrative(identity_dict, roles, credentials, entra_roles),
+            'auditor_questions': _generate_auditor_questions(identity_dict, roles, credentials, entra_roles),
+        })
+    finally:
+        db.close()
+
+
+# ── Phase 72: Data Retention & Archival ───────────────────────────
+
+def get_storage_stats():
+    """Return database storage statistics and retention policy info."""
+    db = _db()
+    try:
+        storage = db.get_storage_stats()
+        settings = db.get_settings(tenant_id=_tenant_id())
+
+        retention = {
+            'enabled': settings.get('retention_enabled', 'false') == 'true',
+            'discovery_days': int(settings.get('retention_discovery_days', '90')),
+            'drift_days': int(settings.get('retention_drift_days', '90')),
+            'activity_days': int(settings.get('retention_activity_days', '180')),
+            'anomalies_days': int(settings.get('retention_anomalies_days', '90')),
+            'soar_days': int(settings.get('retention_soar_days', '90')),
+            'notifications_days': int(settings.get('retention_notifications_days', '90')),
+        }
+
+        return jsonify({
+            'storage': storage,
+            'retention': retention,
+        })
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────
+# App Registration Audit (Phase 74)
+# ──────────────────────────────────────────────────────────
+
+def get_app_reg_stats():
+    """GET /api/app-registrations/stats — summary cards."""
+    db = _db()
+    try:
+        db._ensure_app_registrations_table()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({
+                'total': 0, 'by_risk': {}, 'ownerless': 0, 'stale': 0,
+                'expired_credentials': 0, 'expiring_soon': 0,
+                'multi_tenant': 0, 'third_party': 0, 'by_audience': {},
+            })
+
+        base = "FROM app_registrations ar WHERE ar.discovery_run_id = %s"
+        params = [run_id]
+
+        cursor.execute(f"SELECT COUNT(*) as total {base}", params)
+        total = cursor.fetchone()['total']
+
+        # By risk
+        cursor.execute(f"""
+            SELECT COALESCE(ar.risk_level, 'info') as rl, COUNT(*) as c
+            {base} GROUP BY rl
+        """, params)
+        by_risk = {r['rl']: r['c'] for r in cursor.fetchall()}
+
+        # Ownerless
+        cursor.execute(f"SELECT COUNT(*) as c {base} AND ar.owner_count = 0", params)
+        ownerless = cursor.fetchone()['c']
+
+        # Stale (has SPN but SPN is stale/never_used)
+        cursor.execute(f"""
+            SELECT COUNT(*) as c {base}
+            AND ar.has_service_principal = true
+            AND ar.spn_activity_status IN ('stale', 'never_used', 'inactive')
+        """, params)
+        stale = cursor.fetchone()['c']
+
+        # Also count apps with no SPN at all as potentially stale
+        cursor.execute(f"SELECT COUNT(*) as c {base} AND ar.has_service_principal = false", params)
+        no_spn = cursor.fetchone()['c']
+
+        # Credentials
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE ar.has_expired_credential = true) as expired,
+                COUNT(*) FILTER (WHERE ar.has_expiring_soon = true) as expiring_soon
+            {base}
+        """, params)
+        cred_row = dict(cursor.fetchone())
+
+        # Multi-tenant
+        cursor.execute(f"""
+            SELECT COUNT(*) as c {base}
+            AND ar.sign_in_audience IN ('AzureADMultipleOrgs', 'AzureADandPersonalMicrosoftAccount')
+        """, params)
+        multi_tenant = cursor.fetchone()['c']
+
+        # Third-party
+        cursor.execute(f"SELECT COUNT(*) as c {base} AND ar.is_third_party = true", params)
+        third_party = cursor.fetchone()['c']
+
+        # By audience
+        cursor.execute(f"""
+            SELECT COALESCE(ar.sign_in_audience, 'Unknown') as aud, COUNT(*) as c
+            {base} GROUP BY aud
+        """, params)
+        by_audience = {r['aud']: r['c'] for r in cursor.fetchall()}
+
+        cursor.close()
+        return jsonify({
+            'total': total,
+            'by_risk': by_risk,
+            'ownerless': ownerless,
+            'stale': stale,
+            'no_spn': no_spn,
+            'expired_credentials': cred_row['expired'],
+            'expiring_soon': cred_row['expiring_soon'],
+            'multi_tenant': multi_tenant,
+            'third_party': third_party,
+            'by_audience': by_audience,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_app_reg_list():
+    """GET /api/app-registrations — paginated list with filters."""
+    db = _db()
+    try:
+        db._ensure_app_registrations_table()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({'items': [], 'total': 0})
+
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        risk_filter = request.args.get('risk_level', '')
+        cred_filter = request.args.get('credential_status', '')
+        audience_filter = request.args.get('audience', '')
+        search = request.args.get('search', '').strip()
+        hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
+        sort_field = request.args.get('sort', 'risk_score')
+        sort_dir = request.args.get('dir', 'desc')
+
+        where = ["ar.discovery_run_id = %s"]
+        params: list = [run_id]
+
+        if hide_microsoft:
+            where.append("ar.is_third_party = false")
+            where.append("ar.app_owner_organization_id != ''")
+
+        if risk_filter:
+            where.append("ar.risk_level = %s")
+            params.append(risk_filter)
+        if cred_filter == 'expired':
+            where.append("ar.has_expired_credential = true")
+        elif cred_filter == 'expiring':
+            where.append("ar.has_expiring_soon = true")
+        elif cred_filter == 'healthy':
+            where.append("ar.has_expired_credential = false AND ar.has_expiring_soon = false")
+        if audience_filter:
+            where.append("ar.sign_in_audience = %s")
+            params.append(audience_filter)
+        if search:
+            where.append("ar.display_name ILIKE %s")
+            params.append(f'%{search}%')
+
+        where_sql = " AND ".join(where)
+
+        ALLOWED_SORT = {
+            'risk_score': 'ar.risk_score',
+            'display_name': 'ar.display_name',
+            'permission_count': 'ar.permission_count',
+            'owner_count': 'ar.owner_count',
+            'next_expiry': 'ar.next_expiry',
+            'created_datetime': 'ar.created_datetime',
+            'application_permission_count': 'ar.application_permission_count',
+        }
+        order_col = ALLOWED_SORT.get(sort_field, 'ar.risk_score')
+        order_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+
+        cursor.execute(f"SELECT COUNT(*) as total FROM app_registrations ar WHERE {where_sql}", params)
+        total = cursor.fetchone()['total']
+
+        cursor.execute(f"""
+            SELECT ar.id, ar.app_id, ar.app_object_id, ar.display_name,
+                   ar.risk_level, ar.risk_score,
+                   ar.permission_count, ar.application_permission_count,
+                   ar.delegated_permission_count, ar.high_risk_permissions,
+                   ar.secret_count, ar.certificate_count,
+                   ar.next_expiry, ar.has_expired_credential, ar.has_expiring_soon,
+                   ar.owner_count, ar.primary_owner,
+                   ar.sign_in_audience, ar.is_third_party,
+                   ar.has_service_principal, ar.spn_activity_status,
+                   ar.created_datetime
+            FROM app_registrations ar
+            WHERE {where_sql}
+            ORDER BY {order_col} {order_dir} NULLS LAST
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        items = [dict(r) for r in cursor.fetchall()]
+
+        # Serialize datetimes
+        for item in items:
+            for k in ('next_expiry', 'created_datetime'):
+                if item.get(k) and hasattr(item[k], 'isoformat'):
+                    item[k] = item[k].isoformat()
+
+        cursor.close()
+        return jsonify({'items': items, 'total': total})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_app_reg_detail(app_id):
+    """GET /api/app-registrations/<app_id> — full detail."""
+    db = _db()
+    try:
+        db._ensure_app_registrations_table()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_id = _latest_run_query(cursor, tenant_id)
+        if not run_id:
+            cursor.close()
+            return jsonify({'error': 'No discovery run'}), 404
+
+        cursor.execute("""
+            SELECT * FROM app_registrations ar
+            WHERE ar.discovery_run_id = %s AND ar.app_id = %s
+        """, (run_id, app_id))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return jsonify({'error': 'App registration not found'}), 404
+
+        data = dict(row)
+
+        # Serialize datetimes
+        for k in ('next_expiry', 'created_datetime', 'spn_last_sign_in', 'created_at'):
+            if data.get(k) and hasattr(data[k], 'isoformat'):
+                data[k] = data[k].isoformat()
+
+        # Linked SPN info
+        linked_spn = None
+        if data.get('linked_spn_id'):
+            cursor.execute("""
+                SELECT id, display_name, identity_category, risk_level, activity_status
+                FROM identities WHERE id = %s
+            """, (data['linked_spn_id'],))
+            spn_row = cursor.fetchone()
+            if spn_row:
+                linked_spn = dict(spn_row)
+
+        # Generate recommendations
+        recommendations = []
+        if data.get('owner_count', 0) == 0:
+            recommendations.append({
+                'priority': 'critical',
+                'action': 'Assign an owner to this application',
+                'reason': 'Ownerless apps have no accountability for credential rotation or access review.',
+            })
+        if data.get('has_expired_credential'):
+            recommendations.append({
+                'priority': 'high',
+                'action': 'Remove or rotate expired credentials',
+                'reason': 'Expired credentials indicate abandoned lifecycle management.',
+            })
+        if data.get('has_expiring_soon'):
+            recommendations.append({
+                'priority': 'high',
+                'action': 'Rotate credentials before expiry',
+                'reason': 'Credentials expiring soon may cause service disruption.',
+            })
+        if data.get('application_permission_count', 0) > 5:
+            recommendations.append({
+                'priority': 'high',
+                'action': 'Review and reduce Application-level permissions',
+                'reason': f'{data["application_permission_count"]} Application permissions is excessive — apply least-privilege.',
+            })
+        high_risk_perms = data.get('high_risk_permissions') or []
+        if high_risk_perms:
+            recommendations.append({
+                'priority': 'critical',
+                'action': 'Audit high-risk permissions',
+                'reason': f'Dangerous permissions: {", ".join(high_risk_perms[:3])}',
+            })
+        audience = data.get('sign_in_audience', '')
+        if audience in ('AzureADMultipleOrgs', 'AzureADandPersonalMicrosoftAccount'):
+            recommendations.append({
+                'priority': 'medium',
+                'action': 'Restrict audience to single tenant if possible',
+                'reason': 'Multi-tenant apps expand blast radius across organizations.',
+            })
+        if data.get('has_localhost_redirect'):
+            recommendations.append({
+                'priority': 'medium',
+                'action': 'Remove localhost redirect URIs',
+                'reason': 'Localhost URIs suggest dev/test configuration left in production.',
+            })
+        if data.get('has_http_redirect'):
+            recommendations.append({
+                'priority': 'medium',
+                'action': 'Upgrade redirect URIs to HTTPS',
+                'reason': 'Non-HTTPS redirect URIs expose tokens to interception.',
+            })
+        if not data.get('has_service_principal'):
+            recommendations.append({
+                'priority': 'info',
+                'action': 'Verify if this app registration is still needed',
+                'reason': 'No Service Principal means this app has never been consented or used.',
+            })
+
+        cursor.close()
+        return jsonify({
+            'app_registration': data,
+            'linked_spn': linked_spn,
+            'recommendations': recommendations,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def run_manual_cleanup():
+    """Trigger a manual data cleanup using retention settings."""
+    db = _db()
+    try:
+        settings = db.get_settings(tenant_id=_tenant_id())
+        results = {}
+
+        discovery_days = int(settings.get('retention_discovery_days', '90'))
+        drift_days = int(settings.get('retention_drift_days', '90'))
+        activity_days = int(settings.get('retention_activity_days', '180'))
+        anomalies_days = int(settings.get('retention_anomalies_days', '90'))
+        soar_days = int(settings.get('retention_soar_days', '90'))
+        notif_days = int(settings.get('retention_notifications_days', '90'))
+
+        run_counts = db.cleanup_old_discovery_runs(days=discovery_days)
+        results['discovery_runs'] = run_counts.get('discovery_runs', 0)
+        results['risk_scores'] = run_counts.get('risk_scores', 0)
+        results['drift_reports'] = db.cleanup_old_drift_reports(days=drift_days)
+        results['activity_log'] = db.cleanup_old_activity_log(days=activity_days)
+        results['anomalies'] = db.cleanup_old_anomalies(days=anomalies_days)
+        results['soar_actions'] = db.cleanup_old_soar_actions(days=soar_days)
+        results['notifications'] = db.cleanup_old_notifications(days=notif_days)
+
+        total = sum(results.values())
+        _log(db, 'data_cleanup', f'Manual cleanup: {total} records deleted', {
+            'results': results,
+            'retention_settings': {
+                'discovery_days': discovery_days,
+                'drift_days': drift_days,
+                'activity_days': activity_days,
+                'anomalies_days': anomalies_days,
+                'soar_days': soar_days,
+                'notifications_days': notif_days,
+            }
+        })
+
+        return jsonify({
+            'deleted': results,
+            'total': total,
         })
     finally:
         db.close()

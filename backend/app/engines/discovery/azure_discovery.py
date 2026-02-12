@@ -62,12 +62,33 @@ from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.resource import SubscriptionClient
 from azure.mgmt.storage import StorageManagementClient
 from azure.mgmt.keyvault import KeyVaultManagementClient
+try:
+    from azure.mgmt.monitor import MonitorManagementClient
+except ImportError:
+    MonitorManagementClient = None
 from azure.keyvault.secrets import SecretClient
 from azure.keyvault.keys import KeyClient
 from azure.keyvault.certificates import CertificateClient
 from app.database import Database
 from .models import DiscoveryResult
 import json
+
+# Well-known dangerous MS Graph Application permission GUIDs
+HIGH_RISK_PERMISSION_GUIDS = {
+    '9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8': 'RoleManagement.ReadWrite.Directory',
+    '19dbc75e-c2e2-444c-a770-ec596d67a115': 'Directory.ReadWrite.All',
+    'e2a3a72e-5f79-4c64-b005-482f1d733b6b': 'Mail.ReadWrite',
+    '75359482-378d-4052-8f01-80520e7db3cd': 'Files.ReadWrite.All',
+    '1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9': 'Application.ReadWrite.All',
+    '741f803b-c850-494e-b5df-cde7c675a1ca': 'User.ReadWrite.All',
+    '62a82d76-70ea-41e2-9197-370581804d09': 'Group.ReadWrite.All',
+    '06b708a9-e830-4db3-a914-8e69da51d44f': 'AppRoleAssignment.ReadWrite.All',
+    '01d4f32e-3f2d-4d15-9825-dc7784652969': 'RoleManagement.Read.Directory',
+    '7ab1d382-f21e-4acd-a863-ba3e13f7da61': 'Directory.Read.All',
+}
+
+# Microsoft Graph service principal resource ID (for requiredResourceAccess matching)
+MS_GRAPH_RESOURCE_ID = '00000003-0000-0000-c000-000000000000'
 
 class AzureDiscoveryEngine:
     """
@@ -260,6 +281,38 @@ class AzureDiscoveryEngine:
             kv['tenant_id'] = tenant_id_val
             self.db.save_key_vault(run_id, kv)
         print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
+
+        # Step 9c: Discover App Registrations
+        print("\n📋 Discovering App Registrations...")
+        try:
+            from psycopg2.extras import RealDictCursor as RDC
+            spn_cursor = self.db.conn.cursor(cursor_factory=RDC)
+            spn_cursor.execute("""
+                SELECT id, app_id, last_sign_in, activity_status
+                FROM identities
+                WHERE discovery_run_id = %s AND identity_category = 'service_principal'
+            """, (run_id,))
+            spn_app_id_map = {}
+            for row in spn_cursor.fetchall():
+                if row.get('app_id'):
+                    spn_app_id_map[row['app_id']] = {
+                        'id': row['id'],
+                        'last_sign_in': row['last_sign_in'].isoformat() if row.get('last_sign_in') else None,
+                        'activity_status': row.get('activity_status'),
+                    }
+            spn_cursor.close()
+
+            app_regs = asyncio.get_event_loop().run_until_complete(
+                self._discover_app_registrations(spn_app_id_map)
+            )
+            for ar in app_regs:
+                ar['tenant_id'] = tenant_id_val
+                self.db.save_app_registration(run_id, ar)
+            print(f"  ✓ Saved {len(app_regs)} app registrations")
+        except Exception as e:
+            print(f"  ✗ App registration discovery error: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Step 10: Complete discovery run
         print("\n✅ Completing discovery run...")
@@ -1448,9 +1501,42 @@ class AzureDiscoveryEngine:
                     except Exception:
                         pass  # listKeys may need elevated permissions
 
+                    # Diagnostic logging check (for SAS/key usage auditability)
+                    diag_enabled = False
+                    logging_destinations = []
+                    try:
+                        if MonitorManagementClient is not None:
+                            monitor_client = MonitorManagementClient(self.credential, sub_id)
+                            diag_settings = monitor_client.diagnostic_settings.list(resource_id)
+                            for ds in diag_settings.value if hasattr(diag_settings, 'value') else diag_settings:
+                                # Check if StorageRead/StorageWrite logs are captured
+                                has_storage_logs = False
+                                for log_setting in (getattr(ds, 'logs', None) or []):
+                                    cat = getattr(log_setting, 'category', '') or ''
+                                    enabled = getattr(log_setting, 'enabled', False)
+                                    if enabled and cat in ('StorageRead', 'StorageWrite', 'StorageDelete'):
+                                        has_storage_logs = True
+                                if has_storage_logs:
+                                    diag_enabled = True
+                                    dest = {}
+                                    if getattr(ds, 'workspace_id', None):
+                                        dest['type'] = 'log_analytics'
+                                        dest['target'] = ds.workspace_id
+                                    elif getattr(ds, 'storage_account_id', None):
+                                        dest['type'] = 'storage_account'
+                                        dest['target'] = ds.storage_account_id
+                                    elif getattr(ds, 'event_hub_authorization_rule_id', None):
+                                        dest['type'] = 'event_hub'
+                                    else:
+                                        dest['type'] = 'other'
+                                    logging_destinations.append(dest)
+                    except Exception:
+                        pass  # Monitor API may not be accessible
+
                     risk_score, risk_reasons = self._compute_storage_risk(
                         public_blob, https_only, tls, shared_key,
-                        default_action, pe_count, cmk, key_stale
+                        default_action, pe_count, cmk, key_stale,
+                        sas_policy_enabled, diag_enabled
                     )
                     risk_level = self._resource_risk_level(risk_score)
 
@@ -1477,6 +1563,8 @@ class AzureDiscoveryEngine:
                         'key_rotation_stale': key_stale,
                         'sas_policy_enabled': sas_policy_enabled,
                         'sas_expiration_period': sas_expiration_period,
+                        'diagnostic_logging_enabled': diag_enabled,
+                        'logging_destinations': logging_destinations,
                         'risk_level': risk_level, 'risk_score': risk_score,
                         'risk_reasons': risk_reasons,
                         'tags': dict(account.tags or {}),
@@ -1657,7 +1745,8 @@ class AzureDiscoveryEngine:
         return key_vaults
 
     def _compute_storage_risk(self, public_blob, https_only, tls, shared_key,
-                              default_action, pe_count, cmk, key_stale):
+                              default_action, pe_count, cmk, key_stale,
+                              sas_policy_enabled=False, diag_enabled=False):
         """Compute risk score for a storage account."""
         score = 0
         reasons = []
@@ -1677,6 +1766,10 @@ class AzureDiscoveryEngine:
             score += 15; reasons.append("Shared key access enabled (+15)")
         if pe_count == 0:
             score += 15; reasons.append("No private endpoints (+15)")
+        if shared_key and not sas_policy_enabled:
+            score += 10; reasons.append("No SAS expiration policy with shared key enabled (+10)")
+        if shared_key and not diag_enabled:
+            score += 10; reasons.append("Shared key access without diagnostic logging — unauditable (+10)")
         return (score, reasons)
 
     def _compute_keyvault_risk(self, soft_delete, purge_prot, public_access,
@@ -2534,6 +2627,276 @@ class AzureDiscoveryEngine:
             role_assignments=role_assignments
         )
     
+    # ──────────────────────────────────────────────────────────
+    # App Registration Discovery (Phase 74)
+    # ──────────────────────────────────────────────────────────
+
+    async def _discover_app_registrations(self, spn_app_id_map: Dict[str, Dict]) -> List[Dict[str, Any]]:
+        """Discover Entra ID App Registrations via Graph API."""
+        try:
+            results = []
+            from msgraph.generated.applications.applications_request_builder import ApplicationsRequestBuilder
+            from kiota_abstractions.base_request_configuration import RequestConfiguration
+
+            query_params = ApplicationsRequestBuilder.ApplicationsRequestBuilderGetQueryParameters(
+                top=999,
+                select=['id', 'appId', 'displayName', 'createdDateTime',
+                        'signInAudience', 'publisherDomain',
+                        'appOwnerOrganizationId', 'requiredResourceAccess',
+                        'passwordCredentials', 'keyCredentials',
+                        'web']
+            )
+            request_config = RequestConfiguration(query_parameters=query_params)
+
+            apps = await self.graph_client.applications.get(request_configuration=request_config)
+            all_apps = []
+            if apps and apps.value:
+                all_apps.extend(apps.value)
+
+            # Pagination
+            next_link = getattr(apps, 'odata_next_link', None) if apps else None
+            while next_link:
+                try:
+                    from msgraph.generated.applications.applications_request_builder import ApplicationsRequestBuilder as AB2
+                    apps = await self.graph_client.applications.with_url(next_link).get()
+                    if apps and apps.value:
+                        all_apps.extend(apps.value)
+                    next_link = getattr(apps, 'odata_next_link', None) if apps else None
+                except Exception:
+                    break
+
+            print(f"  ✓ Found {len(all_apps)} app registrations")
+
+            now = datetime.utcnow()
+
+            for app in all_apps:
+                app_id = getattr(app, 'app_id', None) or ''
+                object_id = getattr(app, 'id', None) or ''
+                display_name = getattr(app, 'display_name', None) or 'Unknown'
+
+                # Created
+                created = None
+                if hasattr(app, 'created_date_time') and app.created_date_time:
+                    created = app.created_date_time.isoformat()
+
+                # Sign-in audience
+                audience = getattr(app, 'sign_in_audience', None) or ''
+                publisher_domain = getattr(app, 'publisher_domain', None) or ''
+                owner_org_id = getattr(app, 'app_owner_organization_id', None) or ''
+
+                # Third-party check
+                is_third_party = bool(owner_org_id and owner_org_id != self.tenant_id)
+
+                # ── Permissions ──
+                app_perm_count = 0
+                delegated_perm_count = 0
+                high_risk_list = []
+                raw_perms = []
+
+                rra = getattr(app, 'required_resource_access', None) or []
+                for resource_access in rra:
+                    resource_app_id = getattr(resource_access, 'resource_app_id', '') or ''
+                    entries = getattr(resource_access, 'resource_access', None) or []
+                    perm_list = []
+                    for entry in entries:
+                        perm_id = getattr(entry, 'id', '') or ''
+                        perm_type = getattr(entry, 'type', '') or ''
+                        perm_list.append({'id': str(perm_id), 'type': perm_type})
+                        if perm_type == 'Role':
+                            app_perm_count += 1
+                            guid_str = str(perm_id)
+                            if guid_str in HIGH_RISK_PERMISSION_GUIDS:
+                                high_risk_list.append(HIGH_RISK_PERMISSION_GUIDS[guid_str])
+                        elif perm_type == 'Scope':
+                            delegated_perm_count += 1
+                    raw_perms.append({
+                        'resource_app_id': resource_app_id,
+                        'permissions': perm_list,
+                    })
+
+                total_perms = app_perm_count + delegated_perm_count
+
+                # ── Credentials ──
+                secrets = getattr(app, 'password_credentials', None) or []
+                certs = getattr(app, 'key_credentials', None) or []
+                secret_count = len(secrets)
+                cert_count = len(certs)
+                cred_details = []
+                next_expiry = None
+                has_expired = False
+                has_expiring_soon = False
+
+                for cred in list(secrets) + list(certs):
+                    cred_type = 'secret' if cred in secrets else 'certificate'
+                    end_dt = getattr(cred, 'end_date_time', None)
+                    start_dt = getattr(cred, 'start_date_time', None)
+                    key_id = str(getattr(cred, 'key_id', '') or '')
+                    cred_name = getattr(cred, 'display_name', None) or ''
+                    end_iso = end_dt.isoformat() if end_dt else None
+                    start_iso = start_dt.isoformat() if start_dt else None
+                    cred_details.append({
+                        'type': cred_type,
+                        'key_id': key_id,
+                        'display_name': cred_name,
+                        'start': start_iso,
+                        'end': end_iso,
+                    })
+                    if end_dt:
+                        if end_dt.replace(tzinfo=None) < now:
+                            has_expired = True
+                        else:
+                            days_left = (end_dt.replace(tzinfo=None) - now).days
+                            if days_left <= 30:
+                                has_expiring_soon = True
+                            if next_expiry is None or end_dt < next_expiry:
+                                next_expiry = end_dt
+
+                next_expiry_iso = next_expiry.isoformat() if next_expiry else None
+
+                # ── Redirect URIs ──
+                web = getattr(app, 'web', None)
+                redirect_uris_raw = []
+                if web:
+                    redirect_uris_raw = list(getattr(web, 'redirect_uris', None) or [])
+
+                redirect_uri_count = len(redirect_uris_raw)
+                has_localhost = any('localhost' in uri.lower() or '127.0.0.1' in uri for uri in redirect_uris_raw)
+                has_http = any(uri.lower().startswith('http://') and 'localhost' not in uri.lower() and '127.0.0.1' not in uri for uri in redirect_uris_raw)
+
+                # ── Owners ──
+                owners_list = []
+                try:
+                    owners_resp = await self.graph_client.applications.by_application_id(object_id).owners.get()
+                    if owners_resp and owners_resp.value:
+                        for o in owners_resp.value:
+                            owners_list.append({
+                                'object_id': getattr(o, 'id', '') or '',
+                                'display_name': getattr(o, 'display_name', '') or '',
+                                'upn': getattr(o, 'user_principal_name', '') or '',
+                                'type': getattr(o, 'odata_type', '') or '',
+                            })
+                except Exception:
+                    pass
+
+                owner_count = len(owners_list)
+                primary_owner = owners_list[0]['display_name'] if owners_list else None
+
+                # ── SPN cross-link ──
+                spn_info = spn_app_id_map.get(app_id, {})
+                has_spn = bool(spn_info)
+                linked_spn_id = spn_info.get('id')
+                spn_last_sign_in = spn_info.get('last_sign_in')
+                spn_activity = spn_info.get('activity_status')
+
+                # ── Risk scoring ──
+                risk_score, risk_reasons = self._compute_app_registration_risk(
+                    owner_count=owner_count,
+                    audience=audience,
+                    app_perm_count=app_perm_count,
+                    high_risk_list=high_risk_list,
+                    has_expired=has_expired,
+                    has_expiring_soon=has_expiring_soon,
+                    is_third_party=is_third_party,
+                    has_localhost=has_localhost,
+                    has_http=has_http,
+                    has_spn=has_spn,
+                    spn_activity=spn_activity,
+                )
+                if risk_score >= 80:
+                    risk_level = 'critical'
+                elif risk_score >= 50:
+                    risk_level = 'high'
+                elif risk_score >= 25:
+                    risk_level = 'medium'
+                elif risk_score > 0:
+                    risk_level = 'low'
+                else:
+                    risk_level = 'info'
+
+                results.append({
+                    'app_object_id': object_id,
+                    'app_id': app_id,
+                    'display_name': display_name,
+                    'created_datetime': created,
+                    'sign_in_audience': audience,
+                    'publisher_domain': publisher_domain,
+                    'app_owner_organization_id': owner_org_id,
+                    'is_third_party': is_third_party,
+                    'required_permissions': raw_perms,
+                    'permission_count': total_perms,
+                    'application_permission_count': app_perm_count,
+                    'delegated_permission_count': delegated_perm_count,
+                    'high_risk_permissions': high_risk_list,
+                    'secret_count': secret_count,
+                    'certificate_count': cert_count,
+                    'credential_details': cred_details,
+                    'next_expiry': next_expiry_iso,
+                    'has_expired_credential': has_expired,
+                    'has_expiring_soon': has_expiring_soon,
+                    'owner_count': owner_count,
+                    'owners': owners_list,
+                    'primary_owner': primary_owner,
+                    'has_service_principal': has_spn,
+                    'linked_spn_id': linked_spn_id,
+                    'spn_last_sign_in': spn_last_sign_in,
+                    'spn_activity_status': spn_activity,
+                    'redirect_uris': redirect_uris_raw,
+                    'redirect_uri_count': redirect_uri_count,
+                    'has_localhost_redirect': has_localhost,
+                    'has_http_redirect': has_http,
+                    'risk_level': risk_level,
+                    'risk_score': risk_score,
+                    'risk_reasons': risk_reasons,
+                })
+
+            return results
+        except Exception as e:
+            print(f"  ✗ App registration discovery failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _compute_app_registration_risk(self, owner_count, audience, app_perm_count,
+                                        high_risk_list, has_expired, has_expiring_soon,
+                                        is_third_party, has_localhost, has_http,
+                                        has_spn, spn_activity):
+        """Compute risk score for an app registration."""
+        score = 0
+        reasons = []
+
+        if owner_count == 0:
+            score += 40
+            reasons.append('No owner — no accountability')
+        if audience in ('AzureADMultipleOrgs', 'AzureADandPersonalMicrosoftAccount') and app_perm_count > 0:
+            score += 30
+            reasons.append(f'Multi-tenant with {app_perm_count} Application permissions')
+        if has_expired:
+            score += 25
+            reasons.append('Has expired credentials')
+        if app_perm_count > 5:
+            score += 20
+            reasons.append(f'{app_perm_count} Application-level permissions (excessive)')
+        if is_third_party:
+            score += 15
+            reasons.append('Third-party publisher')
+        if has_localhost:
+            score += 15
+            reasons.append('Localhost redirect URI (dev/test artifact)')
+        if has_http:
+            score += 15
+            reasons.append('Non-HTTPS redirect URI')
+        if has_spn and spn_activity in ('stale', 'never_used', 'inactive'):
+            score += 10
+            reasons.append(f'SPN is {spn_activity} — app may be abandoned')
+        if len(high_risk_list) > 3:
+            score += 10
+            reasons.append(f'{len(high_risk_list)} high-risk permissions')
+        if has_expiring_soon:
+            score += 10
+            reasons.append('Credentials expiring within 30 days')
+
+        return score, reasons
+
     def _save_results_to_json(self, result: DiscoveryResult):
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
         filename = f"discovery_results_{timestamp}.json"

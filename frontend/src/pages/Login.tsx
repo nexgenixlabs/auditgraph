@@ -46,10 +46,17 @@ export default function Login() {
     try {
       // Subdomain mode: scope login to detected tenant
       // Dev mode: no tenant scoping
-      await login(username, password, tenantSlug || undefined);
+      const userData = await login(username, password, tenantSlug || undefined);
 
       if (isPortal) {
-        // Portal mode: check which tenants the user can access
+        // Portal mode: users with portal access go straight to admin console
+        const portalRole = userData?.portal_role;
+        if (portalRole === 'superadmin' || portalRole === 'support') {
+          navigate('/admin');
+          return;
+        }
+
+        // Non-superadmin portal login: check tenants
         try {
           const res = await fetch('/api/auth/tenants');
           if (res.ok) {
@@ -57,10 +64,8 @@ export default function Login() {
             const tenants: TenantOption[] = data.tenants || [];
 
             if (tenants.length <= 1) {
-              // Single tenant or none — go to dashboard
               navigate('/');
             } else {
-              // Multiple tenants (superadmin) — show picker
               setUserTenants(tenants);
               setShowTenantPicker(true);
             }

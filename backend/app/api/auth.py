@@ -37,6 +37,7 @@ def generate_access_token(user: dict) -> str:
         'tenant_id': user.get('tenant_id'),
         'tenant_name': user.get('tenant_name'),
         'is_superadmin': user.get('is_superadmin', False),
+        'portal_role': user.get('portal_role'),
         'iat': datetime.now(timezone.utc),
         'exp': datetime.now(timezone.utc) + ACCESS_TOKEN_EXPIRY,
         'type': 'access',
@@ -158,6 +159,7 @@ def auth_middleware():
                 'tenant_id': payload.get('tenant_id'),
                 'tenant_name': payload.get('tenant_name'),
                 'is_superadmin': payload.get('is_superadmin', False),
+                'portal_role': payload.get('portal_role'),
             }
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401
@@ -201,6 +203,23 @@ def require_superadmin():
                 return jsonify({'error': 'Authentication required'}), 401
             if not user.get('is_superadmin'):
                 return jsonify({'error': 'Superadmin access required'}), 403
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def require_portal_access():
+    """Decorator for handlers that require portal access (support or superadmin).
+    Also accepts is_superadmin=True as fallback for JWTs issued before portal_role was added."""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            user = getattr(g, 'current_user', None)
+            if not user:
+                return jsonify({'error': 'Authentication required'}), 401
+            portal_role = user.get('portal_role')
+            if portal_role not in ('superadmin', 'support') and not user.get('is_superadmin'):
+                return jsonify({'error': 'Portal access required'}), 403
             return f(*args, **kwargs)
         return wrapper
     return decorator

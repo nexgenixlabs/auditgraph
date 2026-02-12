@@ -53,10 +53,12 @@ interface ResourceData {
   secrets_detail?: Array<{ name: string; enabled: boolean; expires_on: string | null; created_on: string | null; content_type?: string }>;
   keys_detail?: Array<{ name: string; enabled: boolean; expires_on: string | null; created_on: string | null; key_type?: string; key_size?: number }>;
   certs_detail?: Array<{ name: string; enabled: boolean; expires_on: string | null; created_on: string | null; subject?: string; thumbprint?: string }>;
-  // Storage SAS
+  // Storage SAS & Audit
   sas_policy_enabled?: boolean;
   sas_expiration_period?: string;
-  sas_risk?: { level: string; factors: string[]; recommendations: string[] };
+  diagnostic_logging_enabled?: boolean;
+  logging_destinations?: Array<{ type: string; target?: string }>;
+  sas_risk?: { level: string; factors: string[]; recommendations: string[]; audit_status?: string; audit_label?: string };
   // Network (shared)
   default_network_action?: string;
   ip_rules_count?: number;
@@ -78,6 +80,8 @@ interface AccessIdentity {
   access_type: 'rbac' | 'access_policy';
   over_privileged?: boolean;
   permissions_summary?: Record<string, string[]>;
+  access_source?: 'direct' | 'resource_group' | 'subscription' | 'management_group' | 'inherited';
+  access_source_label?: string;
 }
 
 type Tab = 'overview' | 'security' | 'network' | 'access' | 'compliance';
@@ -128,6 +132,10 @@ const STORAGE_COMPLIANCE: Record<string, { controls: string[]; description: stri
   sas_policy: {
     controls: ['CIS Azure 3.13'],
     description: 'SAS expiration policy limits the lifetime of shared access signature tokens',
+  },
+  diagnostic_logging: {
+    controls: ['CIS Azure 3.14', 'SOC2 CC7.2', 'NIST AU-2'],
+    description: 'Diagnostic logging must be enabled to audit shared key and SAS token usage',
   },
   bypass_limited: {
     controls: ['CIS Azure 3.9', 'NIST AC-4'],
@@ -536,8 +544,15 @@ function KeyRotationBars({ resource }: { resource: ResourceData }) {
 
 function SasSecuritySection({ resource }: { resource: ResourceData }) {
   const risk = resource.sas_risk;
-  const riskColor = risk?.level === 'high' ? 'border-red-200 bg-red-50' : risk?.level === 'medium' ? 'border-yellow-200 bg-yellow-50' : 'border-green-200 bg-green-50';
-  const shieldColor = risk?.level === 'high' ? 'text-red-500' : risk?.level === 'medium' ? 'text-yellow-500' : 'text-green-500';
+  const riskColor = risk?.level === 'critical' ? 'border-red-300 bg-red-50' : risk?.level === 'high' ? 'border-red-200 bg-red-50' : risk?.level === 'medium' ? 'border-yellow-200 bg-yellow-50' : 'border-green-200 bg-green-50';
+  const shieldColor = risk?.level === 'critical' || risk?.level === 'high' ? 'text-red-500' : risk?.level === 'medium' ? 'text-yellow-500' : 'text-green-500';
+
+  const AUDIT_STATUS_STYLE: Record<string, string> = {
+    compliant: 'bg-green-100 text-green-700 border-green-200',
+    auditable: 'bg-blue-100 text-blue-700 border-blue-200',
+    partial: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+    unauditable: 'bg-red-100 text-red-700 border-red-200',
+  };
 
   return (
     <div className={`border rounded-lg p-4 ${riskColor}`}>
@@ -547,11 +562,34 @@ function SasSecuritySection({ resource }: { resource: ResourceData }) {
         </svg>
         <h3 className="text-sm font-semibold text-gray-800">Shared Key & SAS Security</h3>
         {risk && <span className={`ml-auto px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-          risk.level === 'high' ? 'bg-red-100 text-red-700' : risk.level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+          risk.level === 'critical' ? 'bg-red-200 text-red-800' : risk.level === 'high' ? 'bg-red-100 text-red-700' : risk.level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
         }`}>{risk.level} risk</span>}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+      {/* Audit Status Banner */}
+      {risk?.audit_status && (
+        <div className={`border rounded-md px-3 py-2 mb-3 ${AUDIT_STATUS_STYLE[risk.audit_status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">
+              {risk.audit_status === 'compliant' ? '✓' : risk.audit_status === 'auditable' ? '◉' : risk.audit_status === 'partial' ? '◎' : '✗'}
+            </span>
+            <div>
+              <div className="text-xs font-semibold">{risk.audit_label}</div>
+              <div className="text-[10px] opacity-80">
+                {risk.audit_status === 'unauditable'
+                  ? 'SAS tokens can be generated from account keys with no visibility into usage'
+                  : risk.audit_status === 'partial'
+                  ? 'Usage is logged but SAS tokens have no enforced expiration limit'
+                  : risk.audit_status === 'auditable'
+                  ? 'Usage is logged and SAS tokens have enforced expiration policy'
+                  : 'Shared key access is disabled — only Azure AD authentication is allowed'}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
         <div className="text-sm">
           <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Shared Key Access</div>
           <span className={`font-medium ${resource.shared_key_access ? 'text-red-700' : 'text-green-700'}`}>
@@ -563,6 +601,21 @@ function SasSecuritySection({ resource }: { resource: ResourceData }) {
           <span className={`font-medium ${resource.sas_policy_enabled ? 'text-green-700' : 'text-yellow-700'}`}>
             {resource.sas_policy_enabled ? `Enabled (${resource.sas_expiration_period || 'configured'})` : 'Not configured'}
           </span>
+        </div>
+        <div className="text-sm">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Diagnostic Logging</div>
+          <span className={`font-medium ${resource.diagnostic_logging_enabled ? 'text-green-700' : 'text-red-700'}`}>
+            {resource.diagnostic_logging_enabled ? 'Enabled' : 'Not configured'}
+          </span>
+          {!!resource.logging_destinations && resource.logging_destinations.length > 0 && (
+            <div className="text-[10px] text-gray-500 mt-0.5">
+              {resource.logging_destinations.map((d, i) => (
+                <span key={i} className="inline-block mr-1 px-1 py-0.5 bg-white/60 rounded">
+                  {d.type === 'log_analytics' ? 'Log Analytics' : d.type === 'event_hub' ? 'Event Hub' : d.type === 'storage_account' ? 'Storage' : d.type}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <div className="text-sm">
           <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Key Rotation</div>
@@ -777,17 +830,45 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
     );
   }
 
+  // Compute access source breakdown
+  const sourceCounts: Record<string, number> = {};
+  rbacAccess.forEach(a => {
+    const src = a.access_source || 'unknown';
+    sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+  });
+
+  const SOURCE_BADGE: Record<string, string> = {
+    direct: 'bg-green-100 text-green-700',
+    resource_group: 'bg-blue-100 text-blue-700',
+    subscription: 'bg-yellow-100 text-yellow-700',
+    management_group: 'bg-purple-100 text-purple-700',
+    inherited: 'bg-gray-100 text-gray-600',
+  };
+
   return (
     <div className="space-y-4">
       {/* Summary banner */}
-      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg px-4 py-3 flex items-center justify-between">
-        <div className="text-sm text-blue-800 dark:text-blue-300">
-          <span className="font-bold">{blastRadius}</span> unique identities have access to this resource
+      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg px-4 py-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm text-blue-800 dark:text-blue-300">
+            <span className="font-bold">{blastRadius}</span> unique identities have access to this resource
+          </div>
+          <div className="flex gap-3 text-[10px]">
+            <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">{rbacAccess.length} RBAC</span>
+            {isKeyVault && <span className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded font-medium">{policyAccess.length} Access Policy</span>}
+          </div>
         </div>
-        <div className="flex gap-3 text-[10px]">
-          <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">{rbacAccess.length} RBAC</span>
-          {isKeyVault && <span className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded font-medium">{policyAccess.length} Access Policy</span>}
-        </div>
+        {/* Access source breakdown */}
+        {Object.keys(sourceCounts).length > 0 && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <span className="text-blue-600 dark:text-blue-400 font-medium">Access Source:</span>
+            {sourceCounts.direct && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded font-semibold">{sourceCounts.direct} Direct</span>}
+            {sourceCounts.resource_group && <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-semibold">{sourceCounts.resource_group} Resource Group</span>}
+            {sourceCounts.subscription && <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded font-semibold">{sourceCounts.subscription} Subscription</span>}
+            {sourceCounts.management_group && <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded font-semibold">{sourceCounts.management_group} Mgmt Group</span>}
+            {sourceCounts.inherited && <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded font-semibold">{sourceCounts.inherited} Inherited</span>}
+          </div>
+        )}
       </div>
 
       {/* RBAC Access table */}
@@ -802,6 +883,7 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                 <th className="px-4 py-2">Identity</th>
                 <th className="px-4 py-2">Category</th>
                 <th className="px-4 py-2">Role</th>
+                <th className="px-4 py-2">Source</th>
                 <th className="px-4 py-2">Scope</th>
                 <th className="px-4 py-2">Risk</th>
                 <th className="px-4 py-2">Flags</th>
@@ -823,7 +905,12 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                     </span>
                   </td>
                   <td className="px-4 py-2 text-gray-700 dark:text-gray-300">{id.role_name || '—'}</td>
-                  <td className="px-4 py-2 text-gray-600 dark:text-gray-400 text-[10px] truncate max-w-[200px]" title={id.scope}>{id.scope_type || '—'}</td>
+                  <td className="px-4 py-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${SOURCE_BADGE[id.access_source || 'inherited'] || 'bg-gray-100 text-gray-600'}`}>
+                      {id.access_source_label || id.access_source || '—'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2 text-gray-600 dark:text-gray-400 text-[10px] truncate max-w-[180px]" title={id.scope}>{id.scope_type || '—'}</td>
                   <td className="px-4 py-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(id.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
                       {id.risk_level}
@@ -923,6 +1010,7 @@ function ComplianceTab({ resource }: { resource: ResourceData }) {
     { key: 'key_rotation', label: 'Key Rotation (≤90 days)', pass: resource.key_rotation_stale === false },
     { key: 'private_endpoints', label: 'Private Endpoints Configured', pass: (resource.private_endpoint_count ?? 0) > 0 },
     { key: 'sas_policy', label: 'SAS Expiration Policy Enabled', pass: resource.sas_policy_enabled === true },
+    { key: 'diagnostic_logging', label: 'Diagnostic Logging Enabled', pass: resource.diagnostic_logging_enabled === true },
     { key: 'bypass_limited', label: 'Bypass Limited to AzureServices', pass: resource.bypass_settings === 'AzureServices' },
   ] : [
     { key: 'soft_delete', label: 'Soft Delete Enabled', pass: resource.soft_delete_enabled === true },
