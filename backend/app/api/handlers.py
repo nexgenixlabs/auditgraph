@@ -4522,13 +4522,10 @@ def get_users_list():
 
         if is_super:
             filter_tid = request.args.get('tenant_id', type=int)
-            # When viewing a specific tenant's users, exclude portal ops users
-            # When no filter (seeing all), show everyone
-            exclude_portal = filter_tid is not None
         else:
             filter_tid = _tenant_id()
-            # Non-superadmin callers never see portal ops users
-            exclude_portal = True
+        # Portal users have their own endpoint (/api/portal-users) — always exclude here
+        exclude_portal = True
 
         users = db.get_users(tenant_id=filter_tid, exclude_portal=exclude_portal)
         return jsonify({'users': users})
@@ -4577,11 +4574,6 @@ def create_user_handler():
         hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         current_user = getattr(g, 'current_user', None)
         created_by = current_user['id'] if current_user else None
-        if current_user and current_user.get('is_superadmin') and 'tenant_id' in data:
-            tenant_id = data.get('tenant_id')
-        else:
-            tenant_id = current_user.get('tenant_id') if current_user else None
-
         # Phase 70: superadmins can set portal_role and is_superadmin on creation
         is_superadmin_flag = False
         portal_role_val = None
@@ -4590,6 +4582,14 @@ def create_user_handler():
                 is_superadmin_flag = bool(data['is_superadmin'])
             if 'portal_role' in data and (data['portal_role'] is None or data['portal_role'] in VALID_PORTAL_ROLES):
                 portal_role_val = data['portal_role']
+
+        # Portal users (admin console operators) have no tenant — they're platform-level
+        if portal_role_val:
+            tenant_id = None
+        elif current_user and current_user.get('is_superadmin') and 'tenant_id' in data:
+            tenant_id = data.get('tenant_id')
+        else:
+            tenant_id = current_user.get('tenant_id') if current_user else None
 
         email_val = str(data.get('email', '')).strip() or None
         phone_val = str(data.get('phone', '')).strip() or None
