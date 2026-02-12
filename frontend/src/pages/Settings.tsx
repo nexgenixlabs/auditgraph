@@ -1,5 +1,16 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+
+interface CloudProviderConfig {
+  enabled: boolean;
+  plan: string | null;
+}
+
+interface TenantCloudConfig {
+  cloud_providers: Record<string, CloudProviderConfig>;
+  addons: Record<string, boolean>;
+}
 
 interface WebhookData {
   id: number;
@@ -118,6 +129,9 @@ interface SettingsData {
   report_schedule_enabled: string;
   report_schedule_frequency: string;
   report_email_to: string;
+  azure_tenant_id: string;
+  azure_client_id: string;
+  azure_client_secret: string;
 }
 
 interface StatusData {
@@ -129,13 +143,65 @@ interface StatusData {
 }
 
 export default function Settings() {
-  const { isSuperAdmin } = useAuth();
+  const { isSuperAdmin, user } = useAuth();
+  const location = useLocation();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [status, setStatus] = useState<StatusData | null>(null);
+
+  // Phase 78b: Cloud connections state
+  const [cloudConfig, setCloudConfig] = useState<TenantCloudConfig | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<{ status: 'success' | 'error'; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
+  const cloudSectionRef = useRef<HTMLDivElement>(null);
+  const isAdmin = user?.role === 'admin';
+
+  // Scroll to #cloud-connections anchor
+  useEffect(() => {
+    if (location.hash === '#cloud-connections' && cloudSectionRef.current) {
+      setTimeout(() => cloudSectionRef.current?.scrollIntoView({ behavior: 'smooth' }), 300);
+    }
+  }, [location.hash, loading]);
+
+  // Fetch cloud config
+  useEffect(() => {
+    fetch('/api/tenant/config')
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => {
+        if (cfg) setCloudConfig({ cloud_providers: cfg.cloud_providers, addons: cfg.addons });
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleTestConnection() {
+    if (!settings) return;
+    setTestingConnection(true);
+    setConnectionTestResult(null);
+    try {
+      const res = await fetch('/api/settings/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          azure_tenant_id: settings.azure_tenant_id,
+          azure_client_id: settings.azure_client_id,
+          azure_client_secret: settings.azure_client_secret,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setConnectionTestResult({ status: 'error', message: data.error || data.message || 'Connection failed' });
+      } else {
+        setConnectionTestResult({ status: data.status, message: data.message, subscriptions: data.subscriptions });
+      }
+    } catch (e: unknown) {
+      setConnectionTestResult({ status: 'error', message: e instanceof Error ? e.message : 'Network error' });
+    } finally {
+      setTestingConnection(false);
+    }
+  }
 
   // Phase 45: Tenant management state
   const [currentTenant, setCurrentTenant] = useState<any>(null);
@@ -560,7 +626,7 @@ export default function Settings() {
   const [users, setUsers] = useState<UserData[]>([]);
   const [userModal, setUserModal] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
-  const [userForm, setUserForm] = useState<UserFormData>({ username: '', display_name: '', password: '', role: 'viewer' });
+  const [userForm, setUserForm] = useState<UserFormData>({ username: '', display_name: '', password: '', role: 'compliance' });
   const [userSaving, setUserSaving] = useState(false);
   const [userError, setUserError] = useState<string | null>(null);
   const [userDeleteConfirm, setUserDeleteConfirm] = useState<number | null>(null);
@@ -583,7 +649,7 @@ export default function Settings() {
       setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role, tenant_id: u.tenant_id, is_superadmin: u.is_superadmin });
     } else {
       setEditingUser(null);
-      setUserForm({ username: '', display_name: '', password: '', role: 'viewer', tenant_id: undefined, is_superadmin: false });
+      setUserForm({ username: '', display_name: '', password: '', role: 'compliance', tenant_id: undefined, is_superadmin: false });
     }
     setUserError(null);
     setUserModal(true);
@@ -723,7 +789,7 @@ export default function Settings() {
   const [apiKeyModal, setApiKeyModal] = useState(false);
   const [editingApiKey, setEditingApiKey] = useState<ApiKeyData | null>(null);
   const [apiKeyForm, setApiKeyForm] = useState<ApiKeyFormData>({
-    name: '', description: '', role: 'viewer', expires_at: ''
+    name: '', description: '', role: 'compliance', expires_at: ''
   });
   const [apiKeySaving, setApiKeySaving] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
@@ -754,7 +820,7 @@ export default function Settings() {
       });
     } else {
       setEditingApiKey(null);
-      setApiKeyForm({ name: '', description: '', role: 'viewer', expires_at: '' });
+      setApiKeyForm({ name: '', description: '', role: 'compliance', expires_at: '' });
     }
     setApiKeyError(null);
     setNewKeyValue(null);
@@ -1043,7 +1109,7 @@ export default function Settings() {
     sso_idp_slo_url: '',
     sso_idp_x509_cert: '',
     sso_role_mapping: '{}',
-    sso_default_role: 'viewer',
+    sso_default_role: 'compliance',
     sso_jit_enabled: 'true',
     sso_force_sso: 'false',
   });
@@ -1206,7 +1272,7 @@ export default function Settings() {
           sso_idp_slo_url: data.sso_idp_slo_url || '',
           sso_idp_x509_cert: data.sso_idp_x509_cert || '',
           sso_role_mapping: data.sso_role_mapping || '{}',
-          sso_default_role: data.sso_default_role || 'viewer',
+          sso_default_role: data.sso_default_role || 'compliance',
           sso_jit_enabled: data.sso_jit_enabled || 'true',
           sso_force_sso: data.sso_force_sso || 'false',
         }));
@@ -1475,7 +1541,150 @@ export default function Settings() {
             </>
           )}
 
-          {/* Section 2: Discovery Schedule */}
+          {/* Section 2: Cloud Connections */}
+          <div ref={cloudSectionRef} id="cloud-connections" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="text-lg font-semibold text-gray-900">Cloud Connections</div>
+            <p className="text-xs text-gray-500">Configure cloud provider credentials for identity discovery.</p>
+
+            {!isAdmin ? (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-600">
+                Contact your tenant administrator to configure cloud credentials.
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {/* Azure */}
+                {cloudConfig?.cloud_providers?.azure?.enabled ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-blue-700">Azure</span>
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200">
+                        {cloudConfig.cloud_providers.azure.plan || 'enabled'}
+                      </span>
+                      {status?.azure_configured && (
+                        <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                          Connected
+                        </span>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Azure Tenant ID</label>
+                      <input
+                        type="text"
+                        value={settings?.azure_tenant_id || ''}
+                        onChange={e => update('azure_tenant_id' as keyof SettingsData, e.target.value)}
+                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Application (Client) ID</label>
+                      <input
+                        type="text"
+                        value={settings?.azure_client_id || ''}
+                        onChange={e => update('azure_client_id' as keyof SettingsData, e.target.value)}
+                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+                      <input
+                        type="password"
+                        value={settings?.azure_client_secret || ''}
+                        onChange={e => update('azure_client_secret' as keyof SettingsData, e.target.value)}
+                        placeholder="Enter client secret"
+                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">Secret is masked after saving. Clear and re-enter to change.</p>
+                    </div>
+
+                    <div className="flex items-center gap-3 pt-1">
+                      <button
+                        onClick={handleTestConnection}
+                        disabled={testingConnection || !settings?.azure_tenant_id || !settings?.azure_client_id || !settings?.azure_client_secret}
+                        className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
+                          testingConnection || !settings?.azure_tenant_id || !settings?.azure_client_id || !settings?.azure_client_secret
+                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                            : 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100'
+                        }`}
+                      >
+                        {testingConnection ? 'Testing...' : 'Test Connection'}
+                      </button>
+                      {connectionTestResult && (
+                        <span className={`text-sm ${connectionTestResult.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                          {connectionTestResult.message}
+                        </span>
+                      )}
+                    </div>
+
+                    {connectionTestResult?.status === 'success' && connectionTestResult.subscriptions && connectionTestResult.subscriptions.length > 0 && (
+                      <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                        <div className="text-xs font-semibold text-green-700 mb-1">Discovered Subscriptions</div>
+                        <div className="space-y-1">
+                          {connectionTestResult.subscriptions.map(sub => (
+                            <div key={sub.id} className="text-xs text-green-800 flex items-center gap-2">
+                              <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                              <span className="font-medium">{sub.name}</span>
+                              <span className="text-green-600 font-mono text-[10px]">{sub.id}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <p className="text-xs text-gray-400">
+                      Credentials are saved with the global &quot;Save Settings&quot; button below.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
+                    <div className="text-sm font-medium text-gray-600">Azure</div>
+                    <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
+                  </div>
+                )}
+
+                {/* AWS */}
+                {cloudConfig?.cloud_providers?.aws?.enabled ? (
+                  <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-semibold text-orange-700">AWS</span>
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-orange-50 text-orange-600 border border-orange-200">
+                        {cloudConfig.cloud_providers.aws.plan || 'enabled'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-orange-600">AWS credential configuration coming soon.</p>
+                  </div>
+                ) : cloudConfig ? (
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
+                    <div className="text-sm font-medium text-gray-600">AWS</div>
+                    <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
+                  </div>
+                ) : null}
+
+                {/* GCP */}
+                {cloudConfig?.cloud_providers?.gcp?.enabled ? (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-semibold text-red-600">GCP</span>
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-red-50 text-red-500 border border-red-200">
+                        {cloudConfig.cloud_providers.gcp.plan || 'enabled'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-red-500">GCP credential configuration coming soon.</p>
+                  </div>
+                ) : cloudConfig ? (
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
+                    <div className="text-sm font-medium text-gray-600">GCP</div>
+                    <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+
+          {/* Section 3: Discovery Schedule */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="text-lg font-semibold text-gray-900">Discovery Schedule</div>
 
@@ -1526,7 +1735,7 @@ export default function Settings() {
             </div>
           </div>
 
-          {/* Section 3: Email Notifications */}
+          {/* Section 4: Email Notifications */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div className="text-lg font-semibold text-gray-900">Email Notifications</div>
@@ -2058,7 +2267,7 @@ export default function Settings() {
                           {u.display_name}
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
                             u.role === 'admin' ? 'bg-red-50 text-red-700' :
-                            u.role === 'auditor' ? 'bg-blue-50 text-blue-700' :
+                            u.role === 'reader' ? 'bg-blue-50 text-blue-700' :
                             'bg-gray-100 text-gray-600'
                           }`}>
                             {u.role}
@@ -2173,7 +2382,7 @@ export default function Settings() {
                           {k.name}
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
                             k.role === 'admin' ? 'bg-red-50 text-red-700' :
-                            k.role === 'auditor' ? 'bg-blue-50 text-blue-700' :
+                            k.role === 'reader' ? 'bg-blue-50 text-blue-700' :
                             'bg-gray-100 text-gray-600'
                           }`}>
                             {k.role}
@@ -2321,8 +2530,8 @@ export default function Settings() {
                   onChange={e => setSsoConfig(prev => ({ ...prev, sso_default_role: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                 >
-                  <option value="viewer">Viewer</option>
-                  <option value="auditor">Auditor</option>
+                  <option value="compliance">Compliance</option>
+                  <option value="reader">Reader</option>
                   <option value="admin">Admin</option>
                 </select>
               </div>
@@ -2363,7 +2572,7 @@ export default function Settings() {
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs font-medium text-gray-600">Role Mapping (IdP Group → AuditGraph Role)</label>
                 <button
-                  onClick={() => setSsoRoleMappings(prev => [...prev, { group: '', role: 'viewer' }])}
+                  onClick={() => setSsoRoleMappings(prev => [...prev, { group: '', role: 'compliance' }])}
                   className="text-xs text-blue-600 hover:underline"
                 >
                   + Add Mapping
@@ -2394,8 +2603,8 @@ export default function Settings() {
                     }}
                     className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
                   >
-                    <option value="viewer">Viewer</option>
-                    <option value="auditor">Auditor</option>
+                    <option value="compliance">Compliance</option>
+                    <option value="reader">Reader</option>
                     <option value="admin">Admin</option>
                   </select>
                   <button
@@ -3322,14 +3531,14 @@ export default function Settings() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
               <div className="flex gap-2">
-                {['admin', 'auditor', 'viewer'].map(role => (
+                {['admin', 'reader', 'compliance'].map(role => (
                   <button
                     key={role}
                     onClick={() => setUserForm(prev => ({ ...prev, role }))}
                     className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
                       userForm.role === role
                         ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
-                          : role === 'auditor' ? 'bg-blue-600 text-white border-blue-600'
+                          : role === 'reader' ? 'bg-blue-600 text-white border-blue-600'
                           : 'bg-gray-600 text-white border-gray-600'
                         : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                     }`}
@@ -3340,7 +3549,7 @@ export default function Settings() {
               </div>
               <p className="text-xs text-gray-400 mt-1">
                 {userForm.role === 'admin' ? 'Full access: settings, users, discovery, webhooks, rules'
-                  : userForm.role === 'auditor' ? 'Read + remediation actions, exports, reports'
+                  : userForm.role === 'reader' ? 'Read + remediation actions, exports, reports'
                   : 'Read-only: view dashboards, identities, reports'}
               </p>
             </div>
@@ -3456,14 +3665,14 @@ export default function Settings() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
                   <div className="flex gap-2">
-                    {['admin', 'auditor', 'viewer'].map(role => (
+                    {['admin', 'reader', 'compliance'].map(role => (
                       <button
                         key={role}
                         onClick={() => setApiKeyForm(prev => ({ ...prev, role }))}
                         className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
                           apiKeyForm.role === role
                             ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
-                              : role === 'auditor' ? 'bg-blue-600 text-white border-blue-600'
+                              : role === 'reader' ? 'bg-blue-600 text-white border-blue-600'
                               : 'bg-gray-600 text-white border-gray-600'
                             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                         }`}

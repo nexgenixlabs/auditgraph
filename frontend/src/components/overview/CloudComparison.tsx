@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { CLOUD_PRICING, CLOUD_LABELS, type CloudProviderConfig } from '../../constants/pricing';
+import { useNavigate } from 'react-router-dom';
+import { CLOUD_LABELS, type CloudProviderConfig } from '../../constants/pricing';
 
 interface CloudRiskData {
   cloud: 'azure' | 'aws' | 'gcp';
@@ -113,6 +114,7 @@ function SeverityBadge({ level, count, onClick }: { level: string; count: number
 }
 
 export default function CloudComparison({ data, monitoredResources, resourceStats, onCloudClick, onRiskClick }: CloudComparisonProps) {
+  const navigate = useNavigate();
   const [cloudConfig, setCloudConfig] = useState<TenantCloudConfig | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
@@ -338,43 +340,71 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowAddModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 p-6">
             <div className="flex items-center justify-between mb-1">
-              <h3 className="text-lg font-bold text-gray-900">Add Cloud Provider</h3>
+              <h3 className="text-lg font-bold text-gray-900">Cloud Providers</h3>
               <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
             </div>
-            <p className="text-sm text-gray-500 mb-5">Select a cloud to enable. Each cloud is billed separately based on your plan.</p>
+            <p className="text-sm text-gray-500 mb-5">Manage your cloud provider connections.</p>
 
             {disabledClouds.length === 0 ? (
               <div className="text-center py-8">
                 <svg className="w-12 h-12 mx-auto text-green-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <div className="text-sm font-semibold text-gray-700">All cloud providers are already enabled!</div>
+                <div className="text-sm font-semibold text-gray-700">All cloud providers are enabled!</div>
+                <button
+                  onClick={() => { setShowAddModal(false); navigate('/settings#cloud-connections'); }}
+                  className="mt-3 text-sm text-blue-600 hover:text-blue-800 font-medium"
+                >
+                  Go to Settings &rarr; Cloud Connections
+                </button>
               </div>
             ) : (
               <div className="space-y-3">
+                {enabledClouds.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Enabled</div>
+                    {enabledClouds.map(cloud => {
+                      const meta = CLOUD_LABELS[cloud];
+                      return (
+                        <div
+                          key={cloud}
+                          className={`flex items-center gap-3 p-3 border rounded-xl mb-2 ${cloudBgColors[cloud]} ${cloudBorderColors[cloud]}`}
+                        >
+                          <div className="shrink-0">{cloudIcons[cloud]}</div>
+                          <div className="flex-1 min-w-0">
+                            <span className={`text-sm font-bold ${cloudTextColors[cloud]}`}>{meta?.label}</span>
+                            <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium ml-2">
+                              <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                              Enabled
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => { setShowAddModal(false); navigate('/settings#cloud-connections'); }}
+                            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                          >
+                            Configure
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Not Enabled</div>
                 {disabledClouds.map(cloud => {
                   const meta = CLOUD_LABELS[cloud];
-                  const pricing = CLOUD_PRICING[cloud];
-                  const startingPrice = pricing ? Math.min(...Object.values(pricing)) : 0;
                   return (
-                    <button
+                    <div
                       key={cloud}
-                      onClick={() => {
-                        // Contact admin flow — in production this would trigger a request
-                        setShowAddModal(false);
-                        window.location.href = '/settings';
-                      }}
-                      className={`w-full flex items-start gap-4 p-4 border-2 rounded-xl text-left transition hover:shadow-md ${cloudBorderColors[cloud]} hover:${cloudBgColors[cloud]}`}
+                      className={`flex items-start gap-3 p-4 border-2 border-dashed rounded-xl ${cloudBorderColors[cloud]}`}
                     >
-                      <div className="shrink-0 mt-0.5">{cloudIcons[cloud]}</div>
+                      <div className="shrink-0 mt-0.5 opacity-50">{cloudIcons[cloud]}</div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <span className={`text-sm font-bold ${cloudTextColors[cloud]}`}>{meta?.label}</span>
-                          <span className="text-xs font-semibold text-gray-500">from ${startingPrice}/mo</span>
-                        </div>
+                        <span className={`text-sm font-bold ${cloudTextColors[cloud]}`}>{meta?.label}</span>
                         <p className="text-xs text-gray-500 mt-1">{meta?.description}</p>
+                        <p className="text-xs text-gray-400 mt-1.5">Contact your AuditGraph administrator to enable this provider.</p>
                       </div>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -382,7 +412,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
 
             <div className="mt-5 pt-4 border-t border-gray-100 text-center">
               <button onClick={() => setShowAddModal(false)} className="text-sm text-gray-500 hover:text-gray-700">
-                Cancel
+                Close
               </button>
             </div>
           </div>

@@ -166,6 +166,9 @@ from app.api.handlers import (
     get_app_reg_list,
     get_app_reg_detail,
     get_tenant_config,
+    upload_tenant_logo,
+    delete_tenant_logo,
+    get_scan_modes,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -437,7 +440,7 @@ def create_app():
         return get_sa_governance_list()
 
     @app.post("/api/service-accounts/<identity_id>/attest")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def sa_gov_attest_route(identity_id):
         return post_sa_attestation(identity_id)
 
@@ -523,12 +526,12 @@ def create_app():
         return toggle_compliance_framework_handler(framework_id)
 
     @app.get("/api/compliance/gap-analysis")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def compliance_gap_analysis():
         return get_compliance_gap_analysis()
 
     @app.get("/api/compliance/trends")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def compliance_trends():
         return get_compliance_trends_handler()
 
@@ -580,7 +583,7 @@ def create_app():
     # Risk Simulation (Phase 49)
     # -----------------------
     @app.post("/api/identities/<identity_id>/simulate")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def identity_simulate(identity_id):
         return simulate_risk(identity_id)
 
@@ -695,7 +698,7 @@ def create_app():
         return get_remediation_status(identity_id)
 
     @app.post("/api/identities/<identity_id>/remediation-action")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def identity_remediation_action(identity_id):
         return post_remediation_action(identity_id)
 
@@ -707,7 +710,7 @@ def create_app():
     # Bulk Operations (Phase 25)
     # -----------------------
     @app.post("/api/bulk/remediation")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def bulk_remediation():
         return post_bulk_remediation()
 
@@ -752,6 +755,11 @@ def create_app():
     @require_role('admin')
     def settings_test_email():
         return test_email()
+
+    @app.post("/api/settings/test-connection")
+    @require_role('admin')
+    def settings_test_connection():
+        return test_azure_connection()
 
     # -----------------------
     # Webhooks (Phase 28 - Admin only for writes)
@@ -868,12 +876,12 @@ def create_app():
         return delete_access_review(campaign_id)
 
     @app.patch("/api/access-reviews/<int:campaign_id>/reviews/<int:review_id>")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def review_decision(campaign_id, review_id):
         return update_review_decision(campaign_id, review_id)
 
     @app.post("/api/access-reviews/<int:campaign_id>/reviews/bulk")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def review_bulk_decision(campaign_id):
         return bulk_review_decisions(campaign_id)
 
@@ -885,7 +893,7 @@ def create_app():
         return get_groups_list()
 
     @app.post("/api/groups")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def groups_create():
         return create_group_handler()
 
@@ -898,7 +906,7 @@ def create_app():
         return get_group_detail(group_id)
 
     @app.put("/api/groups/<int:group_id>")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def groups_update(group_id):
         return update_group_handler(group_id)
 
@@ -908,12 +916,12 @@ def create_app():
         return delete_group_handler(group_id)
 
     @app.post("/api/groups/<int:group_id>/members")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def groups_add_members(group_id):
         return add_group_members_handler(group_id)
 
     @app.delete("/api/groups/<int:group_id>/members")
-    @require_role('auditor', 'admin')
+    @require_role('reader', 'admin')
     def groups_remove_members(group_id):
         return remove_group_members_handler(group_id)
 
@@ -925,32 +933,32 @@ def create_app():
     # Azure Resource Discovery (Phase 52)
     # -----------------------
     @app.get("/api/resources/stats")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def resources_stats():
         return get_resource_stats()
 
     @app.get("/api/resources/expiry-summary")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def resources_expiry_summary():
         return get_resource_expiry_summary()
 
     @app.get("/api/resources/compliance-summary")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def resources_compliance_summary():
         return get_resource_compliance_summary()
 
     @app.get("/api/resources")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def resources_list():
         return get_resources()
 
     @app.get("/api/resources/<path:resource_id>")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def resources_detail(resource_id):
         return get_resource_detail(resource_id)
 
     @app.get("/api/resources/<path:resource_id>/access")
-    @require_role('viewer', 'auditor', 'admin')
+    @require_role('compliance', 'reader', 'admin')
     def resources_access(resource_id):
         return get_resource_access(resource_id)
 
@@ -1033,6 +1041,22 @@ def create_app():
     @app.post("/api/remediation/auto-execute")
     def remediation_auto_execute():
         return batch_auto_remediate()
+
+    # Phase 78: Tenant logo upload/delete
+    @app.post("/api/tenants/<int:tenant_id>/logo")
+    @require_portal_role('superadmin', 'poweradmin')
+    def tenant_logo_upload(tenant_id):
+        return upload_tenant_logo(tenant_id)
+
+    @app.delete("/api/tenants/<int:tenant_id>/logo")
+    @require_portal_role('superadmin', 'poweradmin')
+    def tenant_logo_delete(tenant_id):
+        return delete_tenant_logo(tenant_id)
+
+    # Phase 78: Scan modes
+    @app.get("/api/scan-modes")
+    def scan_modes():
+        return get_scan_modes()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

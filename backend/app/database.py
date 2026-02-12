@@ -2998,21 +2998,26 @@ class Database:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sso_codes_code ON sso_auth_codes(code)")
+        # Phase 78: force_password_change column
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS force_password_change BOOLEAN DEFAULT false")
+        # Phase 78: Role migration — auditor→reader, viewer→compliance
+        cursor.execute("UPDATE users SET role = 'reader' WHERE role = 'auditor'")
+        cursor.execute("UPDATE users SET role = 'compliance' WHERE role = 'viewer'")
         self.conn.commit()
         cursor.close()
         # Ensure tenants table + migration (adds tenant_id/is_superadmin to users if needed)
         self._ensure_tenants_table()
         Database._users_ensured = True
 
-    def create_user(self, username, password_hash, display_name, role='viewer', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None, email=None, phone=None):
+    def create_user(self, username, password_hash, display_name, role='compliance', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None, email=None, phone=None, force_password_change=False):
         """Create a new user. Returns user dict (without password_hash)."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone
-        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone))
+            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change
+        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3049,6 +3054,7 @@ class Database:
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
                    u.tenant_id, u.is_superadmin, u.portal_role,
+                   u.email, u.phone, u.force_password_change,
                    t.name AS tenant_name, t.slug AS tenant_slug
             FROM users u
             LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -3064,7 +3070,15 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def get_users(self, tenant_id=None):
+    def set_force_password_change(self, user_id, value=True):
+        """Set or clear force_password_change flag for a user."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE users SET force_password_change = %s WHERE id = %s", (value, user_id))
+        self.conn.commit()
+        cursor.close()
+
+    def get_users(self, tenant_id=None, exclude_portal=False):
         """Get all users. Returns list of user dicts WITHOUT password_hash."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -3077,9 +3091,14 @@ class Database:
             LEFT JOIN tenants t ON t.id = u.tenant_id
         """
         params = []
+        conditions = []
         if tenant_id is not None:
-            query += " WHERE u.tenant_id = %s"
+            conditions.append("u.tenant_id = %s")
             params.append(tenant_id)
+        if exclude_portal:
+            conditions.append("u.portal_role IS NULL")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY u.id"
         cursor.execute(query, params)
         rows = [dict(r) for r in cursor.fetchall()]
@@ -5525,6 +5544,12 @@ class Database:
         # Phase 77: Add license columns
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_activated_at TIMESTAMPTZ")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_expires_at TIMESTAMPTZ")
+        # Phase 78: Add logo_url column
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS logo_url TEXT")
+        # Phase 78: Migrate growth→pro plan + API key role renames
+        cursor.execute("UPDATE tenants SET plan = 'pro' WHERE plan = 'growth'")
+        cursor.execute("UPDATE api_keys SET role = 'reader' WHERE role = 'auditor'")
+        cursor.execute("UPDATE api_keys SET role = 'compliance' WHERE role = 'viewer'")
         self.conn.commit()
 
         # 2. Create default tenant if none exist

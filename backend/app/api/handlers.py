@@ -902,12 +902,22 @@ def get_app_settings():
     try:
         settings = db.get_settings(tenant_id=_tenant_id())
 
+        # Backfill Azure credentials from env vars if DB settings are empty
+        env_creds = {
+            'azure_tenant_id': os.getenv('AZURE_TENANT_ID', ''),
+            'azure_client_id': os.getenv('AZURE_CLIENT_ID', ''),
+            'azure_client_secret': os.getenv('AZURE_CLIENT_SECRET', ''),
+        }
+        for key, env_val in env_creds.items():
+            if not settings.get(key) and env_val:
+                settings[key] = env_val
+
+        # Mask azure_client_secret for API response
+        if settings.get('azure_client_secret'):
+            settings['azure_client_secret'] = '********'
+
         # Check Azure credential configuration (env vars OR DB settings)
         azure_configured = all([
-            os.getenv('AZURE_TENANT_ID'),
-            os.getenv('AZURE_CLIENT_ID'),
-            os.getenv('AZURE_CLIENT_SECRET'),
-        ]) or all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
@@ -966,6 +976,10 @@ def save_app_settings():
             continue
 
         value = str(value).strip()
+
+        # Skip masked secret — don't overwrite real secret with mask
+        if key == 'azure_client_secret' and value == '********':
+            continue
 
         if key == 'discovery_interval_hours':
             if value not in ('6', '12', '24'):
@@ -4297,7 +4311,7 @@ def get_remediation_dashboard_summary():
 # Phase 31: Authentication & User Management
 # ================================================================
 
-VALID_ROLES = {'admin', 'auditor', 'viewer'}
+VALID_ROLES = {'admin', 'reader', 'compliance'}
 
 
 def auth_login():
@@ -4371,6 +4385,7 @@ def auth_login():
             'tenant_name': user.get('tenant_name'),
             'is_superadmin': user.get('is_superadmin', False),
             'portal_role': user.get('portal_role'),
+            'force_password_change': user.get('force_password_change', False),
         }
     })
 
@@ -4420,6 +4435,7 @@ def auth_refresh():
             'tenant_name': user.get('tenant_name'),
             'is_superadmin': user.get('is_superadmin', False),
             'portal_role': user.get('portal_role'),
+            'force_password_change': user.get('force_password_change', False),
         }
     })
 
@@ -4469,8 +4485,8 @@ def change_password():
 
     if not current_password or not new_password:
         return jsonify({'error': 'Current password and new password are required'}), 400
-    if len(new_password) < 8:
-        return jsonify({'error': 'New password must be at least 8 characters'}), 400
+    if len(new_password) < 12:
+        return jsonify({'error': 'New password must be at least 12 characters'}), 400
 
     db = _db()
     try:
@@ -4483,6 +4499,8 @@ def change_password():
 
         new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         db.update_user(user['id'], password_hash=new_hash)
+        # Phase 78: Clear force_password_change after successful password change
+        db.set_force_password_change(user['id'], False)
 
         try:
             _log(db,'password_changed', f'User "{user["username"]}" changed their password',
@@ -4504,10 +4522,15 @@ def get_users_list():
 
         if is_super:
             filter_tid = request.args.get('tenant_id', type=int)
+            # When viewing a specific tenant's users, exclude portal ops users
+            # When no filter (seeing all), show everyone
+            exclude_portal = filter_tid is not None
         else:
             filter_tid = _tenant_id()
+            # Non-superadmin callers never see portal ops users
+            exclude_portal = True
 
-        users = db.get_users(tenant_id=filter_tid)
+        users = db.get_users(tenant_id=filter_tid, exclude_portal=exclude_portal)
         return jsonify({'users': users})
     finally:
         db.close()
@@ -7907,8 +7930,8 @@ def provision_tenant_handler(tenant_id):
         return jsonify({'error': 'admin_username must be at least 3 characters'}), 400
     if not admin_display_name:
         return jsonify({'error': 'admin_display_name is required'}), 400
-    if not admin_password or len(admin_password) < 8:
-        return jsonify({'error': 'admin_password must be at least 8 characters'}), 400
+    if not admin_password or len(admin_password) < 12:
+        return jsonify({'error': 'admin_password must be at least 12 characters'}), 400
 
     db = _db()
     try:
@@ -7924,7 +7947,7 @@ def provision_tenant_handler(tenant_id):
         current_user = getattr(g, 'current_user', None)
         created_by = current_user['id'] if current_user else None
 
-        user = db.create_user(admin_username, hashed, admin_display_name, 'admin', created_by, tenant_id=tenant_id)
+        user = db.create_user(admin_username, hashed, admin_display_name, 'admin', created_by, tenant_id=tenant_id, force_password_change=True)
 
         # Mark tenant as provisioned
         settings = tenant.get('settings') or {}
@@ -9824,5 +9847,188 @@ def run_manual_cleanup():
             'deleted': results,
             'total': total,
         })
+    finally:
+        db.close()
+
+
+# ============================================================
+# Phase 78: Tenant Logo Upload/Delete
+# ============================================================
+
+def upload_tenant_logo(tenant_id):
+    """POST /api/tenants/<id>/logo — Upload tenant logo (base64, max 500KB). Superadmin/poweradmin only."""
+    data = request.get_json(silent=True) or {}
+    logo_data = data.get('logo_data', '')
+    content_type = str(data.get('content_type', '')).lower()
+
+    if not logo_data:
+        return jsonify({'error': 'logo_data is required (base64-encoded)'}), 400
+
+    valid_types = {'image/png', 'image/jpeg', 'image/svg+xml'}
+    if content_type not in valid_types:
+        return jsonify({'error': f'Invalid content_type. Must be one of: {", ".join(valid_types)}'}), 400
+
+    # Check size (base64 is ~33% larger than binary, so 500KB binary ≈ 667KB base64)
+    import base64
+    try:
+        raw = base64.b64decode(logo_data)
+    except Exception:
+        return jsonify({'error': 'Invalid base64 data'}), 400
+
+    if len(raw) > 500 * 1024:
+        return jsonify({'error': 'Logo must be under 500KB'}), 400
+
+    logo_url = f'data:{content_type};base64,{logo_data}'
+
+    db = _db()
+    try:
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        cursor = db.conn.cursor()
+        cursor.execute("UPDATE tenants SET logo_url = %s, updated_at = NOW() WHERE id = %s", (logo_url, tenant_id))
+        db.conn.commit()
+        cursor.close()
+
+        _log(db, 'tenant_logo_uploaded', f'Logo uploaded for tenant "{tenant["name"]}"',
+             {'tenant_id': tenant_id})
+
+        return jsonify({'message': 'Logo uploaded', 'logo_url': logo_url})
+    finally:
+        db.close()
+
+
+def delete_tenant_logo(tenant_id):
+    """DELETE /api/tenants/<id>/logo — Remove tenant logo. Superadmin/poweradmin only."""
+    db = _db()
+    try:
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        cursor = db.conn.cursor()
+        cursor.execute("UPDATE tenants SET logo_url = NULL, updated_at = NOW() WHERE id = %s", (tenant_id,))
+        db.conn.commit()
+        cursor.close()
+
+        _log(db, 'tenant_logo_deleted', f'Logo removed for tenant "{tenant["name"]}"',
+             {'tenant_id': tenant_id})
+
+        return jsonify({'message': 'Logo removed'})
+    finally:
+        db.close()
+
+
+# ============================================================
+# Phase 78: Scan Modes
+# ============================================================
+
+SCAN_MODES = {
+    'quick': {
+        'label': 'Quick Scan',
+        'description': 'Identities only — fastest, ideal for daily monitoring',
+        'includes': ['identities'],
+        'estimated_minutes': 2,
+    },
+    'standard': {
+        'label': 'Standard Scan',
+        'description': 'Identities + roles + credentials — recommended default',
+        'includes': ['identities', 'roles', 'credentials'],
+        'estimated_minutes': 10,
+    },
+    'deep': {
+        'label': 'Deep Audit',
+        'description': 'Full audit: identities, roles, credentials, PIM, CA, resources, app registrations',
+        'includes': ['identities', 'roles', 'credentials', 'pim', 'conditional_access', 'resources', 'app_registrations'],
+        'estimated_minutes': 30,
+    },
+}
+
+
+def get_scan_modes():
+    """GET /api/scan-modes — Return available scan mode definitions."""
+    return jsonify({'scan_modes': SCAN_MODES})
+
+
+# ============================================================
+# Phase 78: Tier Limits
+# ============================================================
+
+TIER_LIMITS = {
+    'free': {'max_identities': 50, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules']},
+    'trial': {'max_identities': 500, 'trial_days': 14, 'blocked_features': []},
+    'pro': {'max_identities': None, 'blocked_features': []},
+    'enterprise': {'max_identities': None, 'blocked_features': []},
+}
+
+
+def _check_tier_limits(db, tenant_id):
+    """Check if tenant is within tier limits. Returns (ok, error_dict) tuple."""
+    tenant = db.get_tenant_by_id(tenant_id)
+    if not tenant:
+        return True, None
+
+    plan = tenant.get('plan', 'free')
+    limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
+
+    # Check identity count limit
+    if limits.get('max_identities'):
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities i
+            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            WHERE dr.tenant_id = %s AND i.discovery_run_id = (
+                SELECT id FROM discovery_runs WHERE tenant_id = %s ORDER BY id DESC LIMIT 1
+            )
+        """, (tenant_id, tenant_id))
+        count = cursor.fetchone()[0]
+        cursor.close()
+        if count >= limits['max_identities']:
+            return False, {
+                'error': f'{plan.capitalize()} plan is limited to {limits["max_identities"]} identities. Current: {count}.',
+                'upgrade_required': True,
+                'current_plan': plan,
+            }
+
+    # Check trial expiry
+    if plan == 'trial' and tenant.get('license_activated_at'):
+        from datetime import timedelta
+        activated = tenant['license_activated_at']
+        if isinstance(activated, str):
+            activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
+        if datetime.now(activated.tzinfo if activated.tzinfo else None) > activated + timedelta(days=14):
+            return False, {
+                'error': 'Trial period has expired. Please upgrade to continue.',
+                'upgrade_required': True,
+                'current_plan': plan,
+            }
+
+    return True, None
+
+
+def check_feature_gate(feature_name):
+    """Check if a feature is available for the current tenant's plan."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        if not tenant_id:
+            return True, None
+
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return True, None
+
+        plan = tenant.get('plan', 'free')
+        limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
+        blocked = limits.get('blocked_features', [])
+
+        if feature_name in blocked:
+            return False, {
+                'error': f'{feature_name.replace("_", " ").title()} is not available on the {plan.capitalize()} plan.',
+                'upgrade_required': True,
+                'current_plan': plan,
+            }
+        return True, None
     finally:
         db.close()
