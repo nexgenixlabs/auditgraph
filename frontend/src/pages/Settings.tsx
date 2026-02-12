@@ -141,6 +141,7 @@ interface SettingsData {
   gcp_service_account_json: string;
   timezone: string;
   theme: string;
+  copilot_api_key: string;
 }
 
 interface StatusData {
@@ -3139,7 +3140,44 @@ export default function Settings() {
             </div>
           </div>
 
-          {/* Section 13: Integrations (Phase 83) */}
+          {/* Section 13: AI Security Copilot (Phase 79) */}
+          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-gray-900">AI Security Copilot</div>
+                <div className="text-xs text-gray-500">Configure the AI-powered security assistant</div>
+              </div>
+            </div>
+
+            <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3 text-xs text-indigo-700">
+              The Security Copilot uses Anthropic's Claude API to answer questions about your security posture using live AuditGraph data as context.
+              You need an Anthropic API key to use this feature. Get one at{' '}
+              <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="underline font-medium">console.anthropic.com</a>.
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Anthropic API Key
+              </label>
+              <input
+                type="password"
+                value={settings?.copilot_api_key || ''}
+                onChange={e => update('copilot_api_key', e.target.value)}
+                placeholder="sk-ant-api03-..."
+                className="w-full md:w-96 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Your API key is stored securely and only used server-side for copilot requests.
+              </p>
+            </div>
+          </div>
+
+          {/* Section 14: Integrations (Phase 83) */}
           <IntegrationsSection />
 
           {/* Save button */}

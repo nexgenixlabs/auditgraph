@@ -12,11 +12,13 @@ interface User {
   force_password_change?: boolean;
 }
 
+type PortalContext = 'admin' | 'client';
+
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  login: (username: string, password: string, tenantSlug?: string) => Promise<any>;
+  login: (username: string, password: string, tenantSlug?: string, portal?: PortalContext) => Promise<any>;
   loginWithSsoCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
@@ -28,6 +30,19 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+/** Detect which portal we're running in based on current URL path. */
+function detectPortal(): PortalContext {
+  return window.location.pathname.startsWith('/admin') ? 'admin' : 'client';
+}
+
+/** Get localStorage key names for a given portal context. */
+function tokenKeys(portal: PortalContext) {
+  if (portal === 'admin') {
+    return { access: 'admin_access_token', refresh: 'admin_refresh_token' };
+  }
+  return { access: 'access_token', refresh: 'refresh_token' };
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -57,7 +72,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const tryRefresh = useCallback(async (): Promise<boolean> => {
-    const refreshToken = localStorage.getItem('refresh_token');
+    const portal = detectPortal();
+    const keys = tokenKeys(portal);
+    const refreshToken = localStorage.getItem(keys.refresh);
     if (!refreshToken) return false;
 
     try {
@@ -69,8 +86,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!res.ok) return false;
 
       const data = await res.json();
-      localStorage.setItem('access_token', data.access_token);
-      localStorage.setItem('refresh_token', data.refresh_token);
+      localStorage.setItem(keys.access, data.access_token);
+      localStorage.setItem(keys.refresh, data.refresh_token);
       setUser(data.user);
       return true;
     } catch {
@@ -87,7 +104,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // Attach auth header to API calls (except login/refresh)
       if (url.startsWith('/api/') && !url.startsWith('/api/auth/login') && !url.startsWith('/api/auth/refresh')) {
-        const token = localStorage.getItem('access_token');
+        const portal = detectPortal();
+        const keys = tokenKeys(portal);
+        const token = localStorage.getItem(keys.access);
         if (token) {
           const headers = new Headers(init?.headers);
           if (!headers.has('Authorization')) {
@@ -111,15 +130,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         const refreshed = await refreshingRef.current;
         if (refreshed) {
-          const newToken = localStorage.getItem('access_token');
+          const portal = detectPortal();
+          const keys = tokenKeys(portal);
+          const newToken = localStorage.getItem(keys.access);
           if (newToken) {
             const headers = new Headers(init?.headers);
             headers.set('Authorization', `Bearer ${newToken}`);
             response = await origFetch(input, { ...init, headers });
           }
         } else {
-          localStorage.removeItem('access_token');
-          localStorage.removeItem('refresh_token');
+          const portal = detectPortal();
+          const keys = tokenKeys(portal);
+          localStorage.removeItem(keys.access);
+          localStorage.removeItem(keys.refresh);
           setUser(null);
         }
       }
@@ -132,7 +155,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Check existing token on mount
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
+    const portal = detectPortal();
+    const keys = tokenKeys(portal);
+    const token = localStorage.getItem(keys.access);
     if (!token) {
       setLoading(false);
       return;
@@ -149,17 +174,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {
         tryRefresh().then(ok => {
           if (!ok) {
-            localStorage.removeItem('access_token');
-            localStorage.removeItem('refresh_token');
+            localStorage.removeItem(keys.access);
+            localStorage.removeItem(keys.refresh);
           }
         });
       })
       .finally(() => setLoading(false));
   }, [tryRefresh]);
 
-  const login = useCallback(async (username: string, password: string, tenantSlug?: string) => {
+  const login = useCallback(async (username: string, password: string, tenantSlug?: string, portal?: PortalContext) => {
+    const resolvedPortal = portal || detectPortal();
+    const keys = tokenKeys(resolvedPortal);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const body: any = { username, password };
+    const body: any = { username, password, portal: resolvedPortal };
     if (tenantSlug) body.tenant_slug = tenantSlug;
     const res = await originalFetchRef.current('/api/auth/login', {
       method: 'POST',
@@ -171,14 +198,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || 'Login failed');
     }
     const data = await res.json();
-    localStorage.setItem('access_token', data.access_token);
-    localStorage.setItem('refresh_token', data.refresh_token);
+    localStorage.setItem(keys.access, data.access_token);
+    localStorage.setItem(keys.refresh, data.refresh_token);
     setUser(data.user);
     return data.user;
   }, []);
 
   // Phase 54: SSO code-to-token exchange
   const loginWithSsoCode = useCallback(async (code: string) => {
+    const portal = detectPortal();
+    const keys = tokenKeys(portal);
     const res = await originalFetchRef.current('/api/auth/saml/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -189,14 +218,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || 'SSO login failed');
     }
     const data = await res.json();
-    localStorage.setItem('access_token', data.access_token);
-    localStorage.setItem('refresh_token', data.refresh_token);
+    localStorage.setItem(keys.access, data.access_token);
+    localStorage.setItem(keys.refresh, data.refresh_token);
     setUser(data.user);
   }, []);
 
   const logout = useCallback(async () => {
-    const refreshToken = localStorage.getItem('refresh_token');
-    const accessToken = localStorage.getItem('access_token');
+    const portal = detectPortal();
+    const keys = tokenKeys(portal);
+    const refreshToken = localStorage.getItem(keys.refresh);
+    const accessToken = localStorage.getItem(keys.access);
     try {
       await originalFetchRef.current('/api/auth/logout', {
         method: 'POST',
@@ -204,15 +235,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           'Content-Type': 'application/json',
           ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
         },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        body: JSON.stringify({ refresh_token: refreshToken, portal }),
       });
     } catch { /* ignore */ }
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    localStorage.removeItem('active_tenant_id');
-    localStorage.removeItem('active_tenant_name');
-    setActiveTenantId(null);
-    setActiveTenantName(null);
+    // Only clear the current portal's tokens
+    localStorage.removeItem(keys.access);
+    localStorage.removeItem(keys.refresh);
+    // Only clear tenant context if logging out of admin portal
+    if (portal === 'admin') {
+      localStorage.removeItem('active_tenant_id');
+      localStorage.removeItem('active_tenant_name');
+      setActiveTenantId(null);
+      setActiveTenantName(null);
+    }
     setUser(null);
   }, []);
 

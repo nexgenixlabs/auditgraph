@@ -912,9 +912,11 @@ def get_app_settings():
             if not settings.get(key) and env_val:
                 settings[key] = env_val
 
-        # Mask azure_client_secret for API response
+        # Mask secrets for API response
         if settings.get('azure_client_secret'):
             settings['azure_client_secret'] = '********'
+        if settings.get('copilot_api_key'):
+            settings['copilot_api_key'] = '********'
 
         # Check Azure credential configuration (env vars OR DB settings)
         azure_configured = all([
@@ -960,6 +962,7 @@ def save_app_settings():
         'retention_activity_days', 'retention_anomalies_days',
         'retention_soar_days', 'retention_notifications_days',
         'retention_enabled',
+        'copilot_api_key',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
@@ -978,8 +981,8 @@ def save_app_settings():
 
         value = str(value).strip()
 
-        # Skip masked secret — don't overwrite real secret with mask
-        if key == 'azure_client_secret' and value == '********':
+        # Skip masked secrets — don't overwrite real secret with mask
+        if key in ('azure_client_secret', 'copilot_api_key') and value == '********':
             continue
 
         if key == 'discovery_interval_hours':

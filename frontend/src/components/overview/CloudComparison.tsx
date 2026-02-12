@@ -145,50 +145,9 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
     return found || { cloud: cloud as 'azure' | 'aws' | 'gcp', total: 0, critical: 0, high: 0, medium: 0, low: 0 };
   });
 
-  // Summary calculations
-  const totalIdentities = enabledData.reduce((s, d) => s + d.total, 0);
-  const totalCritical = enabledData.reduce((s, d) => s + d.critical, 0);
-  const totalHigh = enabledData.reduce((s, d) => s + d.high, 0);
-
   return (
     <div className="space-y-5">
-      {/* Summary Strip — 4 Metric Cards */}
-      <div className="grid grid-cols-4 gap-4">
-        <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-start gap-3">
-          <div className="w-1 h-12 rounded-full bg-blue-500 shrink-0" />
-          <div>
-            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Cloud Providers</div>
-            <div className="text-2xl font-extrabold text-gray-900 mt-0.5">{enabledClouds.length}</div>
-            <div className="text-[11px] text-gray-400">of 3 enabled</div>
-          </div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-start gap-3">
-          <div className="w-1 h-12 rounded-full bg-purple-500 shrink-0" />
-          <div>
-            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Total Identities</div>
-            <div className="text-2xl font-extrabold text-gray-900 mt-0.5">{totalIdentities.toLocaleString()}</div>
-            <div className="text-[11px] text-gray-400">monitored</div>
-          </div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-start gap-3">
-          <div className="w-1 h-12 rounded-full bg-red-500 shrink-0" />
-          <div>
-            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Critical Risks</div>
-            <div className="text-2xl font-extrabold text-red-700 mt-0.5">{totalCritical}</div>
-            <div className="text-[11px] text-gray-400">require action</div>
-          </div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-start gap-3">
-          <div className="w-1 h-12 rounded-full bg-amber-500 shrink-0" />
-          <div>
-            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">High Risks</div>
-            <div className="text-2xl font-extrabold text-amber-700 mt-0.5">{totalHigh}</div>
-            <div className="text-[11px] text-gray-400">need attention</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Section Header */}
+      {/* Risk by Cloud Provider */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
           <div>

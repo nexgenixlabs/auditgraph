@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  PRIMARY_CLOUD_PRICE, ADDON_CLOUD_PRICE,
+  CLOUD_PRICING, ENTERPRISE_BASE, ENTERPRISE_BUNDLES,
   ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
   CLOUD_LABELS, ACCOUNT_TIER_LABELS,
   SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
@@ -38,6 +38,7 @@ const DEFAULT_CLOUD_CONFIG: CloudConfig = {
   },
   addons: {
     extended_retention: false,
+    additional_users_5pack: false,
   },
 };
 
@@ -147,7 +148,6 @@ export default function AdminTenants() {
 
   async function changePlan(t: Tenant, plan: string) {
     try {
-      // Auto-set license_activated_at when activating a paid plan
       const payload: Record<string, unknown> = { plan };
       if ((plan === 'pro' || plan === 'enterprise' || plan === 'trial') && !t.license_activated_at) {
         payload.license_activated_at = new Date().toISOString();
@@ -160,9 +160,6 @@ export default function AdminTenants() {
       fetchTenants();
     } catch { /* ignore */ }
   }
-
-  // Phase 78: View As disabled — coming soon
-  // function handleViewAs(t: Tenant) { switchTenant(t.id, t.name); window.location.href = '/'; }
 
   async function handleDelete() {
     if (!showDeleteConfirm) return;
@@ -282,7 +279,6 @@ export default function AdminTenants() {
         addons: configForm.addons,
       };
       const payload: Record<string, unknown> = { settings: mergedSettings, subscription_term: configTerm };
-      // Auto-set license_activated_at if switching to a term commitment and not already set
       if (configTerm > 0 && !showConfigure.license_activated_at) {
         payload.license_activated_at = new Date().toISOString();
       }
@@ -342,12 +338,15 @@ export default function AdminTenants() {
     return s && typeof s === 'object' && (s as Record<string, unknown>).provisioned === true;
   };
 
-  const monthlyTotal = calculateMonthlyTotal(configForm);
-  const cloudBase = calculateCloudBaseTotal(configForm);
-  const addonBase = calculateAddonTotal(configForm);
+  const configPlan = showConfigure?.plan || 'pro';
+  const isEnterprise = configPlan === 'enterprise';
+  const monthlyTotal = calculateMonthlyTotal(configForm, configPlan);
+  const cloudBase = calculateCloudBaseTotal(configForm, configPlan);
+  const addonBase = calculateAddonTotal(configForm, configPlan);
   const termDiscount = getTermDiscount(configTerm);
-  const discountedMonthly = calculateDiscountedMonthly(configForm, configTerm);
+  const discountedMonthly = calculateDiscountedMonthly(configForm, configTerm, configPlan);
   const termSavingsMonthly = monthlyTotal - discountedMonthly;
+  const enterpriseBundles = ENTERPRISE_BUNDLES[configTerm] || [];
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading tenants...</div>;
 
@@ -542,8 +541,17 @@ export default function AdminTenants() {
               <p className="text-xs text-slate-400 mt-0.5">{showConfigure.slug}.auditgraph.io</p>
             </div>
             <div className="text-right">
-              <div className="text-lg font-bold text-white">${monthlyTotal.toLocaleString()}<span className="text-xs font-normal text-slate-400">/mo</span></div>
-              <div className="text-[10px] text-slate-400">Base: ${cloudBase.toLocaleString()} + Add-ons: ${addonBase.toLocaleString()}</div>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isEnterprise ? 'bg-purple-500/20 text-purple-300' : 'bg-blue-500/20 text-blue-300'}`}>
+                  {configPlan.toUpperCase()}
+                </span>
+                <span className="text-lg font-bold text-white">${monthlyTotal.toLocaleString()}<span className="text-xs font-normal text-slate-400">/mo</span></span>
+              </div>
+              {isEnterprise ? (
+                <div className="text-[10px] text-slate-400">All clouds & add-ons included</div>
+              ) : (
+                <div className="text-[10px] text-slate-400">Clouds: ${cloudBase.toLocaleString()} + Add-ons: ${addonBase.toLocaleString()}</div>
+              )}
             </div>
             <button onClick={() => setShowConfigure(null)} className="text-slate-400 hover:text-white text-lg leading-none ml-4">&times;</button>
           </div>
@@ -553,46 +561,49 @@ export default function AdminTenants() {
             <div className="mb-6">
               <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Cloud Providers</h4>
               <div className="space-y-3">
-                {(() => {
-                  const enabledKeys = getEnabledClouds(configForm);
-                  return Object.entries(CLOUD_LABELS).map(([key, meta]) => {
-                    const cfg = configForm.cloud_providers[key] || { enabled: false, plan: null };
-                    const isPrimary = enabledKeys[0] === key;
-                    const price = cfg.enabled ? (isPrimary ? PRIMARY_CLOUD_PRICE : ADDON_CLOUD_PRICE) : 0;
-                    return (
-                      <div key={key} className={`border-2 rounded-xl p-4 transition ${cfg.enabled ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200 bg-gray-50/30'}`}>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <span className={`px-2 py-0.5 rounded text-xs font-bold ${meta.bg} ${meta.color}`}>{meta.label}</span>
-                            <span className="text-xs text-gray-500">{meta.description}</span>
-                          </div>
-                          <button
-                            onClick={() => toggleCloudProvider(key)}
-                            className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${cfg.enabled ? 'bg-blue-500' : 'bg-gray-300'}`}
-                          >
-                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${cfg.enabled ? 'translate-x-5' : ''}`} />
-                          </button>
+                {Object.entries(CLOUD_LABELS).map(([key, meta]) => {
+                  const cfg = configForm.cloud_providers[key] || { enabled: false, plan: null };
+                  const perCloudPrice = CLOUD_PRICING[key]?.pro || 0;
+                  return (
+                    <div key={key} className={`border-2 rounded-xl p-4 transition ${cfg.enabled ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200 bg-gray-50/30'}`}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className={`px-2 py-0.5 rounded text-xs font-bold ${meta.bg} ${meta.color}`}>{meta.label}</span>
+                          <span className="text-xs text-gray-500">{meta.description}</span>
                         </div>
-                        {cfg.enabled && (
-                          <div className="mt-3">
-                            <div className="flex items-center justify-between px-3 py-2 border border-blue-400 bg-blue-50 rounded-lg">
-                              <span className={`text-xs font-semibold ${isPrimary ? 'text-blue-700' : 'text-gray-600'}`}>
-                                {isPrimary ? 'Primary Cloud' : 'Add-on Cloud'}
-                              </span>
-                              <span className="text-xs font-bold text-blue-700">${price}/mo <span className="text-[10px] font-normal text-gray-400">excl. tax</span></span>
-                            </div>
-                          </div>
-                        )}
+                        <button
+                          onClick={() => toggleCloudProvider(key)}
+                          className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${cfg.enabled ? 'bg-blue-500' : 'bg-gray-300'}`}
+                        >
+                          <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${cfg.enabled ? 'translate-x-5' : ''}`} />
+                        </button>
                       </div>
-                    );
-                  });
-                })()}
+                      {cfg.enabled && (
+                        <div className="mt-3">
+                          <div className="flex items-center justify-between px-3 py-2 border border-blue-400 bg-blue-50 rounded-lg">
+                            {isEnterprise ? (
+                              <>
+                                <span className="text-xs font-semibold text-purple-700">Included in Enterprise</span>
+                                <span className="text-[10px] font-bold text-green-600 uppercase tracking-wider">Included</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-xs font-semibold text-blue-700">Pro</span>
+                                <span className="text-xs font-bold text-blue-700">${perCloudPrice}/mo <span className="text-[10px] font-normal text-gray-400">excl. tax</span></span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
             {/* Base Features (included with Pro+) */}
             <div className="mb-6">
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Included with Pro</h4>
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Included with Pro & Enterprise</h4>
               <div className="space-y-2">
                 {Object.entries(BASE_FEATURES).map(([key, feat]) => (
                   <div key={key} className="flex items-center justify-between border-2 border-green-200 bg-green-50/30 rounded-xl px-4 py-3">
@@ -611,20 +622,28 @@ export default function AdminTenants() {
               </div>
             </div>
 
-            {/* Paid Add-Ons */}
+            {/* Paid Add-Ons (Pro only — Enterprise includes all) */}
             <div className="mb-6">
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Paid Add-Ons</h4>
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">
+                {isEnterprise ? 'Add-Ons (Included with Enterprise)' : 'Paid Add-Ons'}
+              </h4>
               <div className="space-y-2">
                 {Object.entries(ADDON_PRICING).map(([key, addon]) => {
                   const enabled = configForm.addons[key] || false;
                   return (
                     <div
                       key={key}
-                      className={`flex items-center justify-between border-2 rounded-xl px-4 py-3 transition ${enabled ? 'border-green-300 bg-green-50/30' : 'border-gray-200'}`}
+                      className={`flex items-center justify-between border-2 rounded-xl px-4 py-3 transition ${
+                        isEnterprise
+                          ? 'border-green-200 bg-green-50/30'
+                          : enabled ? 'border-green-300 bg-green-50/30' : 'border-gray-200'
+                      }`}
                     >
                       <div className="flex items-center gap-3">
-                        <div className={`w-5 h-5 rounded flex items-center justify-center ${enabled ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-400'}`}>
-                          {enabled ? (
+                        <div className={`w-5 h-5 rounded flex items-center justify-center ${
+                          isEnterprise || enabled ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-400'
+                        }`}>
+                          {isEnterprise || enabled ? (
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
                           ) : (
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
@@ -636,13 +655,19 @@ export default function AdminTenants() {
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className={`text-xs font-bold ${enabled ? 'text-green-700' : 'text-gray-400'}`}>+${addon.price}/mo</span>
-                        <button
-                          onClick={() => toggleAddon(key)}
-                          className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${enabled ? 'bg-green-500' : 'bg-gray-300'}`}
-                        >
-                          <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${enabled ? 'translate-x-5' : ''}`} />
-                        </button>
+                        {isEnterprise ? (
+                          <span className="text-[10px] font-bold text-green-600 uppercase tracking-wider">Included</span>
+                        ) : (
+                          <>
+                            <span className={`text-xs font-bold ${enabled ? 'text-green-700' : 'text-gray-400'}`}>+${addon.price}/mo</span>
+                            <button
+                              onClick={() => toggleAddon(key)}
+                              className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${enabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                            >
+                              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${enabled ? 'translate-x-5' : ''}`} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -695,42 +720,57 @@ export default function AdminTenants() {
                 </button>
               ))}
             </div>
+            {/* Enterprise term bundles */}
+            {isEnterprise && enterpriseBundles.length > 0 && (
+              <div className="mt-3 bg-purple-50 border border-purple-200 rounded-lg px-4 py-2.5">
+                <div className="text-[10px] font-semibold text-purple-700 uppercase tracking-wider mb-1">Enterprise {getTermLabel(configTerm)} Bundle</div>
+                <div className="flex flex-wrap gap-2">
+                  {enterpriseBundles.map(b => (
+                    <span key={b} className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px] font-semibold">{b}</span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Dark Billing Summary Card */}
           <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
             {/* Line items */}
             <div className="space-y-1.5 mb-3">
-              {(() => {
-                const enabled = getEnabledClouds(configForm);
-                return enabled.map((key, idx) => {
-                  const isPrimary = idx === 0;
-                  const price = isPrimary ? PRIMARY_CLOUD_PRICE : ADDON_CLOUD_PRICE;
-                  return (
-                    <div key={key} className="flex items-center justify-between text-xs">
-                      <span className="text-slate-300">{CLOUD_LABELS[key]?.label} ({isPrimary ? 'Primary' : 'Add-on'})</span>
-                      <span className="text-white font-semibold">${price.toLocaleString()}/mo</span>
-                    </div>
-                  );
-                });
-              })()}
-              {Object.entries(configForm.addons).map(([key, enabled]) => {
-                if (!enabled) return null;
-                const addon = ADDON_PRICING[key];
-                if (!addon) return null;
-                return (
-                  <div key={key} className="flex items-center justify-between text-xs">
-                    <span className="text-slate-300">{addon.label}</span>
-                    <span className="text-white font-semibold">+${addon.price}/mo</span>
-                  </div>
-                );
-              })}
+              {isEnterprise ? (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-300">Enterprise Base (all clouds & add-ons)</span>
+                  <span className="text-white font-semibold">${ENTERPRISE_BASE.toLocaleString()}/mo</span>
+                </div>
+              ) : (
+                <>
+                  {getEnabledClouds(configForm).map(key => {
+                    const price = CLOUD_PRICING[key]?.pro || 0;
+                    return (
+                      <div key={key} className="flex items-center justify-between text-xs">
+                        <span className="text-slate-300">{CLOUD_LABELS[key]?.label}</span>
+                        <span className="text-white font-semibold">${price.toLocaleString()}/mo</span>
+                      </div>
+                    );
+                  })}
+                  {Object.entries(configForm.addons).map(([key, enabled]) => {
+                    if (!enabled) return null;
+                    const addon = ADDON_PRICING[key];
+                    if (!addon) return null;
+                    return (
+                      <div key={key} className="flex items-center justify-between text-xs">
+                        <span className="text-slate-300">{addon.label}</span>
+                        <span className="text-white font-semibold">+${addon.price}/mo</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
 
             <div className="border-t border-slate-700 pt-3 space-y-2">
               {configTerm === 0 ? (
                 <>
-                  {/* Monthly — just show monthly total */}
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-bold text-white">Monthly Total</span>
                     <div className="text-right">
@@ -741,7 +781,6 @@ export default function AdminTenants() {
                 </>
               ) : (
                 <>
-                  {/* Term commitment — show discounted rate + total contract */}
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">Base Monthly</span>
                     <span className="text-xs text-slate-400 line-through">${monthlyTotal.toLocaleString()}/mo</span>

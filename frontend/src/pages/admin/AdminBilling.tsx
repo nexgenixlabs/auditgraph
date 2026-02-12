@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
+  CLOUD_PRICING, ENTERPRISE_BASE,
   ADDON_PRICING, CLOUD_LABELS,
   ACCOUNT_TIER_LABELS, calculateMonthlyTotal, getEnabledClouds, getCloudPrice,
   getTermDiscount, getTermLabel, SUBSCRIPTION_TERMS,
@@ -35,7 +36,8 @@ function getTenantConfig(t: TenantBilling): CloudConfig {
 
 function getTenantMrr(t: TenantBilling): number {
   if (!t.enabled) return 0;
-  const base = calculateMonthlyTotal(getTenantConfig(t));
+  if (t.plan === 'free' || t.plan === 'trial') return 0;
+  const base = calculateMonthlyTotal(getTenantConfig(t), t.plan);
   const discount = getTermDiscount(t.subscription_term || 0);
   return Math.round(base * (1 - discount));
 }
@@ -77,28 +79,39 @@ export default function AdminBilling() {
   const totalMrr = useMemo(() => tenants.reduce((sum, t) => sum + getTenantMrr(t), 0), [tenants]);
   const projectedArr = totalMrr * 12;
 
-  // Revenue by cloud provider (primary/addon model)
+  // Revenue by cloud provider (per-cloud pricing model)
   const revenueByCloud = useMemo(() => {
     const result: Record<string, number> = { azure: 0, aws: 0, gcp: 0 };
     for (const t of tenants) {
-      if (!t.enabled) continue;
+      if (!t.enabled || t.plan === 'free' || t.plan === 'trial') continue;
       const cfg = getTenantConfig(t);
       const enabled = getEnabledClouds(cfg);
-      for (const provider of enabled) {
-        result[provider] = (result[provider] || 0) + getCloudPrice(cfg, provider);
+      if (t.plan === 'enterprise') {
+        // Enterprise: distribute base evenly across enabled clouds for display
+        if (enabled.length > 0) {
+          const perCloud = Math.round(ENTERPRISE_BASE / enabled.length);
+          for (const provider of enabled) {
+            result[provider] = (result[provider] || 0) + perCloud;
+          }
+        }
+      } else {
+        // Pro: per-cloud pricing
+        for (const provider of enabled) {
+          result[provider] = (result[provider] || 0) + getCloudPrice(cfg, provider);
+        }
       }
     }
     return result;
   }, [tenants]);
 
-  // Revenue by add-on
+  // Revenue by add-on (Pro only — Enterprise includes all)
   const revenueByAddon = useMemo(() => {
     const result: Record<string, { revenue: number; count: number }> = {};
     for (const key of Object.keys(ADDON_PRICING)) {
       result[key] = { revenue: 0, count: 0 };
     }
     for (const t of tenants) {
-      if (!t.enabled) continue;
+      if (!t.enabled || t.plan !== 'pro') continue;
       const cfg = getTenantConfig(t);
       for (const [addon, enabled] of Object.entries(cfg.addons)) {
         if (enabled && ADDON_PRICING[addon]) {
@@ -282,7 +295,7 @@ export default function AdminBilling() {
               const cfg = getTenantConfig(t);
               const enabledClouds = Object.entries(cfg.cloud_providers).filter(([, v]) => v.enabled).map(([k]) => k);
               const cloudsToShow = enabledClouds.length > 0 ? enabledClouds : ['azure'];
-              const addonCount = Object.values(cfg.addons).filter(Boolean).length;
+              const addonCount = t.plan === 'enterprise' ? Object.keys(ADDON_PRICING).length : Object.values(cfg.addons).filter(Boolean).length;
               const mrr = getTenantMrr(t);
               const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
               const ls = licenseLabel(t);
@@ -312,7 +325,9 @@ export default function AdminBilling() {
                   </td>
                   <td className="px-4 py-2.5 text-gray-700">
                     {addonCount > 0 ? (
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">{addonCount} add-on{addonCount !== 1 ? 's' : ''}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">
+                        {t.plan === 'enterprise' ? 'All included' : `${addonCount} add-on${addonCount !== 1 ? 's' : ''}`}
+                      </span>
                     ) : (
                       <span className="text-gray-400">&mdash;</span>
                     )}

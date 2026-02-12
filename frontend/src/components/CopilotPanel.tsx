@@ -21,15 +21,34 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
   const [configured, setConfigured] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [addonEnabled, setAddonEnabled] = useState<boolean | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Check if AI Copilot add-on is enabled for this tenant
   useEffect(() => {
-    if (open) {
+    if (!open) return;
+    fetch('/api/tenant/config')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) { setAddonEnabled(true); return; } // no config = allow
+        const plan = data.plan || 'free';
+        // Enterprise includes everything; otherwise check add-on toggle
+        if (plan === 'enterprise') {
+          setAddonEnabled(true);
+        } else {
+          setAddonEnabled(!!data.addons?.ai_copilot);
+        }
+      })
+      .catch(() => setAddonEnabled(true)); // on error, allow access
+  }, [open]);
+
+  useEffect(() => {
+    if (open && addonEnabled) {
       fetchSuggestions();
       inputRef.current?.focus();
     }
-  }, [open]);
+  }, [open, addonEnabled]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -130,7 +149,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-slate-700 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-950/50 dark:to-purple-950/50">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
-              <svg className="w-4.5 h-4.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-[18px] h-[18px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
             </div>
@@ -169,8 +188,29 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
           </div>
         </div>
 
+        {/* Add-on not enabled gate */}
+        {addonEnabled === false && (
+          <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mb-4">
+              <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+            </div>
+            <h3 className="text-base font-bold text-gray-900 dark:text-white mb-1">AI Copilot Add-On</h3>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mb-2">
+              The AI Security Copilot is available as a paid add-on ($149/mo) or included with the Enterprise plan.
+            </p>
+            <p className="text-xs text-gray-400 dark:text-slate-500 mb-4">
+              Get AI-powered security analysis, natural language queries, and contextual recommendations using your live AuditGraph data.
+            </p>
+            <span className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg opacity-60 cursor-not-allowed">
+              Contact Admin to Enable
+            </span>
+          </div>
+        )}
+
         {/* History sidebar */}
-        {showHistory && (
+        {addonEnabled !== false && showHistory && (
           <div className="border-b border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/50 max-h-48 overflow-y-auto">
             <div className="p-2 space-y-1">
               {conversations.length === 0 && (
@@ -200,7 +240,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
         )}
 
         {/* Not configured warning */}
-        {!configured && messages.length === 0 && (
+        {addonEnabled !== false && !configured && messages.length === 0 && (
           <div className="mx-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
             <div className="text-xs font-medium text-amber-800 dark:text-amber-300">API Key Required</div>
             <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
@@ -210,7 +250,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
         )}
 
         {/* Suggestions */}
-        {messages.length === 0 && suggestions.length > 0 && (
+        {addonEnabled !== false && messages.length === 0 && suggestions.length > 0 && (
           <div className="px-4 pt-4">
             <div className="text-[10px] font-semibold text-gray-500 dark:text-slate-400 uppercase mb-2">Quick Ask</div>
             <div className="flex flex-wrap gap-1.5">
@@ -229,7 +269,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
         )}
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        {addonEnabled !== false && <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {messages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] rounded-xl px-3 py-2 ${
@@ -257,36 +297,38 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
             </div>
           )}
           <div ref={messagesEndRef} />
-        </div>
+        </div>}
 
         {/* Input */}
-        <div className="border-t border-gray-200 dark:border-slate-700 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <input
-              ref={inputRef}
-              type="text"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask about your security posture..."
-              className="flex-1 px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-              disabled={loading}
-            />
-            <button
-              onClick={() => sendMessage()}
-              disabled={loading || !input.trim()}
-              className={`p-2 rounded-lg transition ${
-                loading || !input.trim()
-                  ? 'text-gray-300 dark:text-slate-600 cursor-not-allowed'
-                  : 'text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30'
-              }`}
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-              </svg>
-            </button>
+        {addonEnabled !== false && (
+          <div className="border-t border-gray-200 dark:border-slate-700 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <input
+                ref={inputRef}
+                type="text"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask about your security posture..."
+                className="flex-1 px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                disabled={loading}
+              />
+              <button
+                onClick={() => sendMessage()}
+                disabled={loading || !input.trim()}
+                className={`p-2 rounded-lg transition ${
+                  loading || !input.trim()
+                    ? 'text-gray-300 dark:text-slate-600 cursor-not-allowed'
+                    : 'text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30'
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </>
   );
