@@ -728,27 +728,43 @@ export default function AdminTenants() {
             </div>
 
             <div className="border-t border-slate-700 pt-3 space-y-2">
-              {termDiscount > 0 && (
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-400">Base Monthly</span>
-                  <span className="text-xs text-slate-400 line-through">${monthlyTotal.toLocaleString()}/mo</span>
-                </div>
-              )}
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-sm font-bold text-white">Effective Monthly</span>
-                  {termDiscount > 0 && <span className="ml-2 text-[10px] font-semibold text-green-400">{getTermLabel(configTerm)} — {termDiscount * 100}% off</span>}
-                </div>
-                <div className="text-right">
-                  <span className="text-xl font-extrabold text-white">${discountedMonthly.toLocaleString()}/mo</span>
-                  <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
-                </div>
-              </div>
-              {termDiscount > 0 && (
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-400">You save</span>
-                  <span className="text-xs font-semibold text-green-400">${termSavingsMonthly.toLocaleString()}/mo (${(termSavingsMonthly * 12).toLocaleString()}/yr)</span>
-                </div>
+              {configTerm === 0 ? (
+                <>
+                  {/* Monthly — just show monthly total */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white">Monthly Total</span>
+                    <div className="text-right">
+                      <span className="text-xl font-extrabold text-white">${monthlyTotal.toLocaleString()}/mo</span>
+                      <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Term commitment — show discounted rate + total contract */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-400">Base Monthly</span>
+                    <span className="text-xs text-slate-400 line-through">${monthlyTotal.toLocaleString()}/mo</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-300">Discounted Monthly <span className="text-green-400">({termDiscount * 100}% off)</span></span>
+                    <span className="text-sm font-semibold text-white">${discountedMonthly.toLocaleString()}/mo</span>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-700">
+                    <div>
+                      <span className="text-sm font-bold text-white">{getTermLabel(configTerm)} Contract</span>
+                      <div className="text-[10px] text-slate-400">{configTerm * 12} months</div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xl font-extrabold text-cyan-400">${(discountedMonthly * configTerm * 12).toLocaleString()}</span>
+                      <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-400">Total savings over {configTerm}yr{configTerm > 1 ? 's' : ''}</span>
+                    <span className="text-xs font-semibold text-green-400">${(termSavingsMonthly * configTerm * 12).toLocaleString()}</span>
+                  </div>
+                </>
               )}
             </div>
 
