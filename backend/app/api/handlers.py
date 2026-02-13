@@ -298,11 +298,11 @@ def get_identity_details(identity_id: str):
                    dr.completed_at as run_completed_at
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s
+            WHERE i.identity_id = %s AND dr.tenant_id = %s
             ORDER BY i.discovery_run_id DESC
             LIMIT 1
             """,
-            (identity_id,),
+            (identity_id, _tenant_id()),
         )
         row = cursor.fetchone()
         if not row:
@@ -379,11 +379,11 @@ def get_identity_details(identity_id: str):
                         WHERE identity_id = %s
                           AND discovery_run_id = (
                               SELECT MAX(id) FROM discovery_runs
-                              WHERE status = 'completed' AND id < %s
+                              WHERE status = 'completed' AND id < %s AND tenant_id = %s
                           )
                         LIMIT 1
                         """,
-                        (identity_id, current_run_id),
+                        (identity_id, current_run_id, _tenant_id()),
                     )
                 prev = cursor.fetchone()
                 if prev:
@@ -537,9 +537,11 @@ def get_discovery_runs():
             """
             SELECT id, status, started_at, completed_at, total_identities, critical_count, high_count, medium_count
             FROM discovery_runs
+            WHERE tenant_id = %s
             ORDER BY id DESC
             LIMIT 50
-            """
+            """,
+            (_tenant_id(),),
         )
         rows = cursor.fetchall()
 
@@ -577,14 +579,14 @@ def get_drift_report(run_id: int):
             })
             return jsonify(report)
 
-        # Fall back to live computation: find the previous run
+        # Fall back to live computation: find the previous run (tenant-scoped)
         cursor = db.conn.cursor()
         cursor.execute("""
             SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND id < %s
+            WHERE status = 'completed' AND id < %s AND tenant_id = %s
             ORDER BY id DESC
             LIMIT 1
-        """, (run_id,))
+        """, (run_id, _tenant_id()))
         prev_row = cursor.fetchone()
         cursor.close()
 
@@ -691,11 +693,11 @@ def get_trends():
                     WHERE i.discovery_run_id = dr.id
                 ), 0) as avg_risk_score
             FROM discovery_runs dr
-            WHERE dr.status = 'completed'
+            WHERE dr.status = 'completed' AND dr.tenant_id = %s
             ORDER BY dr.id DESC
             LIMIT %s
             """,
-            (limit,),
+            (_tenant_id(), limit),
         )
         rows = cursor.fetchall()
 
@@ -734,9 +736,9 @@ def get_trends_velocity():
 
         cursor.execute("""
             SELECT id, completed_at FROM discovery_runs
-            WHERE status = 'completed'
+            WHERE status = 'completed' AND tenant_id = %s
             ORDER BY id DESC LIMIT %s
-        """, (limit,))
+        """, (_tenant_id(), limit))
         runs = list(reversed(cursor.fetchall()))
 
         if len(runs) < 2:
@@ -868,9 +870,9 @@ def get_batch_risk_history():
 
         cursor.execute("""
             SELECT id FROM discovery_runs
-            WHERE status = 'completed'
+            WHERE status = 'completed' AND tenant_id = %s
             ORDER BY id DESC LIMIT %s
-        """, (run_limit,))
+        """, (_tenant_id(), run_limit))
         run_ids = [r[0] for r in cursor.fetchall()]
 
         if not run_ids:
@@ -2899,9 +2901,9 @@ def get_compliance_trends_handler():
             cursor = db.conn.cursor()
             cursor.execute("""
                 SELECT id FROM discovery_runs
-                WHERE status = 'completed'
+                WHERE status = 'completed' AND tenant_id = %s
                 ORDER BY id DESC LIMIT %s
-            """, (limit,))
+            """, (_tenant_id(), limit))
             run_ids = [r[0] for r in cursor.fetchall()]
             cursor.close()
 
@@ -3101,15 +3103,16 @@ def get_dashboard_posture():
     cursor = db.conn.cursor()
 
     try:
-        # Get latest two completed runs for trend comparison
+        # Get latest two completed runs for trend comparison (tenant-scoped)
         cursor.execute(
             """
             SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
             FROM discovery_runs
-            WHERE status = 'completed'
+            WHERE status = 'completed' AND tenant_id = %s
             ORDER BY id DESC
             LIMIT 2
-            """
+            """,
+            (_tenant_id(),),
         )
         runs = cursor.fetchall()
 
@@ -3228,8 +3231,8 @@ def get_identity_summary():
     cursor = db.conn.cursor()
 
     try:
-        # Get latest completed discovery run
-        cursor.execute("SELECT MAX(id), MAX(completed_at) FROM discovery_runs WHERE status = 'completed'")
+        # Get latest completed discovery run (tenant-scoped)
+        cursor.execute("SELECT MAX(id), MAX(completed_at) FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (_tenant_id(),))
         row = cursor.fetchone()
         run_id = row[0] if row else None
         completed_at = row[1] if row else None
@@ -3860,14 +3863,14 @@ def get_identity_pim_data(identity_id):
     cursor = db.conn.cursor()
 
     try:
-        # Resolve identity_db_id from identity_id
+        # Resolve identity_db_id from identity_id (tenant-scoped)
         cursor.execute("""
             SELECT i.id FROM identities i
-            JOIN (SELECT MAX(id) as rid FROM discovery_runs WHERE status = 'completed') dr
+            JOIN (SELECT MAX(id) as rid FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s) dr
             ON i.discovery_run_id = dr.rid
             WHERE i.identity_id = %s
             LIMIT 1
-        """, (identity_id,))
+        """, (_tenant_id(), identity_id))
         row = cursor.fetchone()
         if not row:
             return jsonify({"eligible_assignments": [], "activations": [], "overuse_metrics": {
@@ -5041,9 +5044,9 @@ def _export_drift():
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT id FROM discovery_runs WHERE status = 'completed'
+            SELECT id FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s
             ORDER BY id DESC LIMIT 1
-        """)
+        """, (_tenant_id(),))
         row = cursor.fetchone()
         cursor.close()
         if not row:
