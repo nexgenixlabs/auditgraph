@@ -82,3 +82,7 @@ python3-saml>=1.16.0
 
 # Monitoring (Phase 68)
 psutil>=5.9.0
+gunicorn
+Flask>=3.0.0
+APScheduler>=3.10.0
+sendgrid>=6.10.0

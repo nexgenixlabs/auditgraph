@@ -33,8 +33,9 @@ function extractTenantSlug(): string | null {
 
   const hostname = window.location.hostname;
 
-  // Dev mode: no subdomain on localhost
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.')) {
+  // Dev mode or platform hostnames: no tenant scoping
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.')
+      || hostname.endsWith('.azurewebsites.net')) {
     return null;
   }
 
