@@ -24,7 +24,7 @@ const TenantContext = createContext<TenantContextValue>({
   isPortal: false,
 });
 
-const RESERVED_PREFIXES = ['app', 'www', 'api', 'admin', 'mail', 'smtp'];
+const RESERVED_PREFIXES = ['app', 'www', 'api', 'admin', 'mail', 'smtp', 'dev', 'qa', 'stage', 'staging', 'prod'];
 
 function extractTenantSlug(): string | null {
   // Dev override via env var
