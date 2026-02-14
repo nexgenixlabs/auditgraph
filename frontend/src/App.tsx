@@ -383,6 +383,9 @@ function AppContent() {
     return <Navigate to="/onboarding" replace />;
   }
 
+  // Detect admin subdomain (admin.auditgraph.ai) — render admin portal at root
+  const isAdminSubdomain = window.location.hostname.split('.')[0] === 'admin';
+
   return (
     <ToastProvider>
       <Routes>
@@ -401,6 +404,13 @@ function AppContent() {
         <Route path="/admin/*" element={
           <ErrorBoundary><AdminConsole /></ErrorBoundary>
         } />
+
+        {/* Admin subdomain: render admin portal at root */}
+        {isAdminSubdomain && (
+          <Route path="/*" element={
+            <ErrorBoundary><AdminConsole /></ErrorBoundary>
+          } />
+        )}
 
         {/* All other routes - with sidebar + topbar, protected */}
         <Route path="/*" element={
