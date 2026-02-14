@@ -44,4 +44,3 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_BACKEND_PUBLISH_PROFILE }}
           package: backend-deploy.zip
-          startup-command: 'gunicorn --bind 0.0.0.0:8000 --timeout 120 wsgi:app'
