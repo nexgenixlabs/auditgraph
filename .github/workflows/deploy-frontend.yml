@@ -73,3 +73,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_FRONTEND_PUBLISH_PROFILE }}
           package: frontend-deploy.zip
+          startup-command: 'node startup.js'
