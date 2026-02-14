@@ -40,12 +40,30 @@ jobs:
         working-directory: frontend
         run: |
           mkdir -p deploy
+
+          # Copy pre-built React app and Express server
           cp -r build deploy/build
           cp startup.js deploy/
-          cp package.json deploy/
-          cp package-lock.json deploy/
+
+          # Create a minimal package.json for deployment (no build script)
+          # This prevents Azure Oryx from trying to rebuild React
+          node -e "
+            const pkg = require('./package.json');
+            const deployPkg = {
+              name: pkg.name,
+              version: pkg.version,
+              private: true,
+              scripts: { start: 'node startup.js' },
+              dependencies: {
+                express: pkg.dependencies.express,
+                'http-proxy-middleware': pkg.dependencies['http-proxy-middleware']
+              }
+            };
+            require('fs').writeFileSync('deploy/package.json', JSON.stringify(deployPkg, null, 2));
+          "
+
           cd deploy
-          npm ci --production
+          npm install --production
           zip -r ../../frontend-deploy.zip .
 
       - name: Deploy to Azure App Service
