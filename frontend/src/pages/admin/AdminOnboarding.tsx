@@ -1,281 +1,442 @@
 import React, { useState } from 'react';
 import { SUBSCRIPTION_TERMS } from '../../constants/pricing';
 
-const STEPS = ['Organization', 'Admin User', 'Review', 'Complete'];
-
 const RESERVED_SLUGS = new Set([
   'admin', 'api', 'www', 'app', 'portal', 'login', 'auth', 'sso',
   'status', 'docs', 'help', 'support', 'billing', 'dashboard', 'health',
   'metrics', 'system', 'internal', 'test', 'staging', 'dev', 'prod',
 ]);
 
-interface TenantForm {
+const INDUSTRIES = [
+  'Financial Services', 'Healthcare', 'Technology', 'Manufacturing',
+  'Retail', 'Government', 'Education', 'Energy & Utilities',
+  'Telecommunications', 'Media & Entertainment', 'Legal', 'Other',
+];
+
+const COMPLIANCE_FRAMEWORKS = [
+  'SOC 2', 'ISO 27001', 'HIPAA', 'PCI DSS', 'NIST CSF',
+  'GDPR', 'FedRAMP', 'CIS Controls', 'SOX', 'None / Not Sure',
+];
+
+interface OnboardingForm {
   name: string;
   slug: string;
   plan: string;
   subscription_term: number;
+  industry: string;
+  compliance_framework: string;
+  primary_cloud: string;
+  root_username: string;
+  root_email: string;
+  root_password: string;
 }
 
-interface AdminForm {
-  admin_username: string;
-  admin_display_name: string;
-  admin_password: string;
+function generatePassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';
+  let pw = '';
+  for (let i = 0; i < 16; i++) pw += chars[Math.floor(Math.random() * chars.length)];
+  return pw;
 }
 
 export default function AdminOnboarding() {
-  const [step, setStep] = useState(0);
-  const [tenantForm, setTenantForm] = useState<TenantForm>({ name: '', slug: '', plan: 'pro', subscription_term: 1 });
-  const [adminForm, setAdminForm] = useState<AdminForm>({ admin_username: '', admin_display_name: '', admin_password: '' });
-  const [createdTenantId, setCreatedTenantId] = useState<number | null>(null);
-  const [createdTenantSlug, setCreatedTenantSlug] = useState('');
+  const [form, setForm] = useState<OnboardingForm>({
+    name: '', slug: '', plan: 'pro', subscription_term: 1,
+    industry: '', compliance_framework: '',
+    primary_cloud: 'azure',
+    root_username: '', root_email: '', root_password: '',
+  });
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [createdSlug, setCreatedSlug] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  const slugError = tenantForm.slug && RESERVED_SLUGS.has(tenantForm.slug)
-    ? `"${tenantForm.slug}" is a reserved slug`
+  const slugError = form.slug && RESERVED_SLUGS.has(form.slug)
+    ? `"${form.slug}" is a reserved slug`
     : null;
 
-  function handleNextFromOrg() {
-    if (slugError || !tenantForm.name || !tenantForm.slug) return;
-    setStep(1);
+  const canSubmit =
+    form.name.trim() &&
+    form.slug.trim() &&
+    !slugError &&
+    form.root_username.trim().length >= 3 &&
+    form.root_email.trim() &&
+    form.root_password.length >= 12;
+
+  function handleNameChange(name: string) {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    setForm(p => ({ ...p, name, slug }));
   }
 
-  async function handleCreateAndProvision() {
-    if (slugError) return;
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit || slugError) return;
     setError(null);
     setProcessing(true);
     try {
-      // Step 1: Create tenant
-      const createRes = await fetch('/api/tenants', {
+      const res = await fetch('/api/tenants', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(tenantForm),
+        body: JSON.stringify(form),
       });
-      const createData = await createRes.json();
-      if (!createRes.ok) throw new Error(createData.error || 'Failed to create tenant');
-      const tenantId = createData.tenant.id;
-      setCreatedTenantId(tenantId);
-      setCreatedTenantSlug(createData.tenant.slug);
-
-      // Step 2: Provision admin user
-      const provRes = await fetch(`/api/tenants/${tenantId}/provision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(adminForm),
-      });
-      const provData = await provRes.json();
-      if (!provRes.ok) throw new Error(provData.error || 'Failed to provision');
-      setStep(3); // Complete
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create tenant');
+      setCreatedSlug(data.tenant.slug);
+      setSuccess(true);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed');
+      setError(err instanceof Error ? err.message : 'Failed to create tenant');
     } finally {
       setProcessing(false);
     }
   }
 
-  const portalUrl = `${createdTenantSlug}.auditgraph.ai`;
+  function handleCopyCredentials() {
+    const text = `Portal: ${createdSlug}.auditgraph.ai\nUsername: ${form.root_username}\nPassword: ${form.root_password}`;
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
 
-  return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-gray-900">Client Onboarding</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Set up a new organization in 4 steps</p>
-      </div>
+  function handleReset() {
+    setForm({
+      name: '', slug: '', plan: 'pro', subscription_term: 1,
+      industry: '', compliance_framework: '',
+      primary_cloud: 'azure',
+      root_username: '', root_email: '', root_password: '',
+    });
+    setSuccess(false);
+    setCreatedSlug('');
+    setCopied(false);
+    setShowPassword(false);
+  }
 
-      {/* Step indicator */}
-      <div className="flex items-center gap-2">
-        {STEPS.map((s, i) => (
-          <React.Fragment key={s}>
-            <div className={`flex items-center gap-1.5 ${i <= step ? 'text-blue-600' : 'text-gray-400'}`}>
-              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2 ${
-                i < step ? 'bg-blue-600 border-blue-600 text-white' :
-                i === step ? 'border-blue-600 text-blue-600' :
-                'border-gray-300 text-gray-400'
-              }`}>
-                {i < step ? '\u2713' : i + 1}
-              </div>
-              <span className="text-xs font-medium">{s}</span>
-            </div>
-            {i < STEPS.length - 1 && <div className={`flex-1 h-0.5 ${i < step ? 'bg-blue-600' : 'bg-gray-200'}`} />}
-          </React.Fragment>
-        ))}
-      </div>
-
-      {error && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-          {error}
-          <button onClick={() => setError(null)} className="ml-2 text-red-500">\u00d7</button>
-        </div>
-      )}
-
-      {/* Step 0: Organization */}
-      {step === 0 && (
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Organization Details</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Organization Name</label>
-              <input value={tenantForm.name} onChange={e => setTenantForm(p => ({ ...p, name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Acme Corporation" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">URL Slug</label>
-              <div className="flex items-center gap-1">
-                <input value={tenantForm.slug} onChange={e => setTenantForm(p => ({ ...p, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, '') }))} className={`w-48 px-3 py-2 border rounded-lg text-sm font-mono ${slugError ? 'border-red-400' : 'border-gray-300'}`} placeholder="acme" />
-                <span className="text-sm text-gray-500">.auditgraph.ai</span>
-              </div>
-              {slugError && <p className="text-xs text-red-600 mt-1">{slugError}</p>}
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Plan</label>
-              <div className="flex gap-3">
-                {['free', 'trial', 'pro', 'enterprise'].map(p => (
-                  <label key={p} className={`flex items-center gap-2 px-4 py-2.5 border rounded-lg cursor-pointer transition ${
-                    tenantForm.plan === p ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
-                  }`}>
-                    <input type="radio" name="plan" value={p} checked={tenantForm.plan === p} onChange={() => setTenantForm(prev => ({ ...prev, plan: p }))} className="sr-only" />
-                    <span className={`text-sm font-medium capitalize ${tenantForm.plan === p ? 'text-blue-700' : 'text-gray-700'}`}>{p}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            {(tenantForm.plan === 'pro' || tenantForm.plan === 'enterprise') && (
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Subscription Term</label>
-                <div className="flex gap-3">
-                  {SUBSCRIPTION_TERMS.map(t => (
-                    <label key={t.value} className={`flex items-center justify-between px-4 py-2.5 border rounded-lg cursor-pointer transition ${
-                      tenantForm.subscription_term === t.value ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
-                    }`}>
-                      <input type="radio" name="term" value={t.value} checked={tenantForm.subscription_term === t.value} onChange={() => setTenantForm(prev => ({ ...prev, subscription_term: t.value }))} className="sr-only" />
-                      <div>
-                        <span className={`text-sm font-medium ${tenantForm.subscription_term === t.value ? 'text-blue-700' : 'text-gray-700'}`}>{t.label}</span>
-                        {t.discount > 0 && <span className="ml-1.5 text-[10px] font-semibold text-green-600">{t.discount * 100}% off</span>}
-                      </div>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-            <button onClick={handleNextFromOrg} disabled={!tenantForm.name || !tenantForm.slug || !!slugError} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
-              Next
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Step 1: Admin User */}
-      {step === 1 && (
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Create Admin User for {tenantForm.name}</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Username</label>
-              <input value={adminForm.admin_username} onChange={e => setAdminForm(p => ({ ...p, admin_username: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="admin" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Display Name</label>
-              <input value={adminForm.admin_display_name} onChange={e => setAdminForm(p => ({ ...p, admin_display_name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="John Admin" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Password (min 12 characters)</label>
-              <input type="password" value={adminForm.admin_password} onChange={e => setAdminForm(p => ({ ...p, admin_password: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Secure password" />
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setStep(2)} disabled={!adminForm.admin_username || !adminForm.admin_display_name || adminForm.admin_password.length < 12} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
-                Review
-              </button>
-              <button onClick={() => setStep(0)} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Back</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Step 2: Review */}
-      {step === 2 && (
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Review & Confirm</h3>
-          <div className="space-y-3 mb-6">
-            <div className="flex justify-between py-2 border-b border-gray-100">
-              <span className="text-sm text-gray-500">Organization</span>
-              <span className="text-sm font-medium text-gray-800">{tenantForm.name}</span>
-            </div>
-            <div className="flex justify-between py-2 border-b border-gray-100">
-              <span className="text-sm text-gray-500">URL</span>
-              <span className="text-sm font-mono text-blue-600">{portalUrl}</span>
-            </div>
-            <div className="flex justify-between py-2 border-b border-gray-100">
-              <span className="text-sm text-gray-500">Plan</span>
-              <span className="text-sm font-medium text-gray-800 capitalize">{tenantForm.plan}</span>
-            </div>
-            <div className="flex justify-between py-2 border-b border-gray-100">
-              <span className="text-sm text-gray-500">Term</span>
-              <span className="text-sm font-medium text-gray-800">
-                {SUBSCRIPTION_TERMS.find(t => t.value === tenantForm.subscription_term)?.label || 'Monthly'}
-                {(SUBSCRIPTION_TERMS.find(t => t.value === tenantForm.subscription_term)?.discount || 0) > 0 && (
-                  <span className="ml-1.5 text-xs text-green-600">({(SUBSCRIPTION_TERMS.find(t => t.value === tenantForm.subscription_term)?.discount || 0) * 100}% discount)</span>
-                )}
-              </span>
-            </div>
-            <div className="flex justify-between py-2 border-b border-gray-100">
-              <span className="text-sm text-gray-500">Admin Username</span>
-              <span className="text-sm font-medium text-gray-800">{adminForm.admin_username}</span>
-            </div>
-            <div className="flex justify-between py-2">
-              <span className="text-sm text-gray-500">Admin Name</span>
-              <span className="text-sm font-medium text-gray-800">{adminForm.admin_display_name}</span>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={handleCreateAndProvision} disabled={processing} className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 transition">
-              {processing ? 'Creating...' : 'Create Organization'}
-            </button>
-            <button onClick={() => setStep(1)} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Back</button>
-          </div>
-        </div>
-      )}
-
-      {/* Step 3: Complete */}
-      {step === 3 && (
-        <div className="bg-white border border-green-200 rounded-lg p-6 text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 text-green-600 text-2xl mb-4">{'\u2713'}</div>
-          <h3 className="text-lg font-bold text-gray-900 mb-2">Organization Provisioned!</h3>
-          <p className="text-sm text-gray-600 mb-1">
-            <strong>{tenantForm.name}</strong> is ready. Share the credentials below with the client.
+  // Success state
+  if (success) {
+    return (
+      <div className="max-w-2xl mx-auto space-y-6">
+        <div className="bg-gray-900 border border-green-700 rounded-xl p-8 text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-900/50 text-green-400 text-2xl mb-4">{'\u2713'}</div>
+          <h3 className="text-lg font-bold text-white mb-2">Organization Created!</h3>
+          <p className="text-sm text-gray-300 mb-1">
+            <strong className="text-white">{form.name}</strong> is ready at <span className="font-mono text-blue-400">{createdSlug}.auditgraph.ai</span>
           </p>
-          <p className="text-xs text-amber-600 mb-4">The admin user will be prompted to change their password on first login.</p>
-          <div className="bg-gray-50 rounded-lg p-4 text-left max-w-sm mx-auto space-y-2 mb-4">
+          <p className="text-xs text-amber-400 mb-5">The root user will be prompted to change their password on first login.</p>
+
+          <div className="bg-gray-800 rounded-lg p-4 text-left max-w-sm mx-auto space-y-2 mb-5">
             <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Portal URL:</span>
-              <span className="font-mono text-blue-600">{portalUrl}</span>
+              <span className="text-gray-400">Portal URL:</span>
+              <span className="font-mono text-blue-400">{createdSlug}.auditgraph.ai</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Username:</span>
-              <span className="font-medium">{adminForm.admin_username}</span>
+              <span className="text-gray-400">Username:</span>
+              <span className="font-medium text-white">{form.root_username}</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Password:</span>
-              <span className="font-medium text-gray-400">(as set during provisioning)</span>
+              <span className="text-gray-400">Password:</span>
+              <span className="font-medium font-mono text-xs text-white">{form.root_password}</span>
             </div>
           </div>
+
           <button
-            onClick={() => {
-              const text = `Portal: ${portalUrl}\nUsername: ${adminForm.admin_username}`;
-              navigator.clipboard.writeText(text);
-            }}
-            className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200 transition mb-3"
+            onClick={handleCopyCredentials}
+            className="px-5 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-medium rounded-lg hover:from-blue-600 hover:to-cyan-600 transition"
           >
-            Copy Credentials
+            {copied ? 'Copied!' : 'Copy Credentials'}
           </button>
-          <div className="mt-4 flex items-center justify-center gap-4">
-            <a href="/admin" className="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
-              Go to Tenants
+
+          <div className="mt-5 flex items-center justify-center gap-4">
+            <a href="/admin/tenants" className="text-sm text-blue-400 hover:text-blue-300 hover:underline">
+              View Tenants
             </a>
-            <button onClick={() => { setStep(0); setCreatedTenantId(null); setCreatedTenantSlug(''); }} className="text-sm text-gray-500 hover:text-gray-700 hover:underline">
+            <button onClick={handleReset} className="text-sm text-gray-400 hover:text-white hover:underline">
               Onboard Another
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-6">
+      <div>
+        <h2 className="text-xl font-bold text-white">Client Onboarding</h2>
+        <p className="text-sm text-gray-400 mt-0.5">Create a new organization with a single form</p>
+      </div>
+
+      {error && (
+        <div className="bg-red-900/30 border border-red-700 rounded-lg p-3 text-sm text-red-300">
+          {error}
+          <button onClick={() => setError(null)} className="ml-2 text-red-400 hover:text-red-300">&times;</button>
+        </div>
       )}
+
+      <form onSubmit={handleSubmit} className="bg-gray-900 border border-gray-700 rounded-xl divide-y divide-gray-700">
+        {/* Section 1: Organization Details */}
+        <div className="p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+            </svg>
+            <h3 className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Organization Details</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-400 mb-1">Organization Name</label>
+              <input
+                value={form.name}
+                onChange={e => handleNameChange(e.target.value)}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="Acme Corporation"
+                required
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-400 mb-1">URL Slug</label>
+              <div className="flex items-center gap-1">
+                <input
+                  value={form.slug}
+                  onChange={e => setForm(p => ({ ...p, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, '') }))}
+                  className={`w-48 px-3 py-2 bg-gray-800 border rounded-lg text-sm font-mono text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${slugError ? 'border-red-500' : 'border-gray-600'}`}
+                  placeholder="acme"
+                  required
+                />
+                <span className="text-sm text-gray-500">.auditgraph.ai</span>
+              </div>
+              {slugError && <p className="text-xs text-red-400 mt-1">{slugError}</p>}
+            </div>
+          </div>
+        </div>
+
+        {/* Section 2: Plan */}
+        <div className="p-6 space-y-4">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Plan</h3>
+          <div className="flex gap-3">
+            {['free', 'trial', 'pro', 'enterprise'].map(p => (
+              <label key={p} className={`flex items-center gap-2 px-5 py-2.5 border rounded-lg cursor-pointer transition ${
+                form.plan === p ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-600 text-gray-300 hover:border-gray-500'
+              }`}>
+                <input type="radio" name="plan" value={p} checked={form.plan === p} onChange={() => setForm(prev => ({ ...prev, plan: p }))} className="sr-only" />
+                <span className="text-sm font-medium capitalize">{p}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Section 3: Subscription Term */}
+        {(form.plan === 'pro' || form.plan === 'enterprise') && (
+          <div className="p-6 space-y-4">
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Subscription Term</h3>
+            <div className="flex gap-3">
+              {SUBSCRIPTION_TERMS.map(t => (
+                <label key={t.value} className={`flex items-center justify-between px-5 py-2.5 border rounded-lg cursor-pointer transition ${
+                  form.subscription_term === t.value ? 'border-blue-500 text-blue-400' : 'border-gray-600 text-gray-400 hover:border-gray-500'
+                }`}>
+                  <input type="radio" name="term" value={t.value} checked={form.subscription_term === t.value} onChange={() => setForm(prev => ({ ...prev, subscription_term: t.value }))} className="sr-only" />
+                  <div>
+                    <span className="text-sm font-medium">{t.label}</span>
+                    {t.discount > 0 && <span className="ml-1.5 text-[10px] font-semibold text-green-400">{t.discount * 100}% off</span>}
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Section 4: Industry & Compliance */}
+        <div className="p-6 space-y-4">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Industry & Compliance</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Industry</label>
+              <select
+                value={form.industry}
+                onChange={e => setForm(p => ({ ...p, industry: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">Select industry...</option>
+                {INDUSTRIES.map(i => <option key={i} value={i}>{i}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Primary Compliance Framework</label>
+              <select
+                value={form.compliance_framework}
+                onChange={e => setForm(p => ({ ...p, compliance_framework: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">Select framework...</option>
+                {COMPLIANCE_FRAMEWORKS.map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* Section 5: Cloud Providers */}
+        <div className="p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z" />
+            </svg>
+            <h3 className="text-xs font-semibold text-purple-400 uppercase tracking-wider">Primary Cloud Provider</h3>
+          </div>
+          <p className="text-xs text-gray-500">Select the primary cloud provider for this organization. Additional providers can be enabled later.</p>
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { key: 'azure', label: 'Azure' },
+              { key: 'aws', label: 'AWS' },
+              { key: 'gcp', label: 'GCP' },
+            ].map(cloud => (
+              <label
+                key={cloud.key}
+                className={`relative flex flex-col items-center gap-2 px-4 py-5 border-2 rounded-xl cursor-pointer transition ${
+                  form.primary_cloud === cloud.key
+                    ? 'border-blue-500 bg-blue-900/20'
+                    : 'border-gray-600 hover:border-gray-500'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="primary_cloud"
+                  value={cloud.key}
+                  checked={form.primary_cloud === cloud.key}
+                  onChange={() => setForm(p => ({ ...p, primary_cloud: cloud.key }))}
+                  className="sr-only"
+                />
+                <svg className={`w-8 h-8 ${form.primary_cloud === cloud.key ? 'text-blue-400' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z" />
+                </svg>
+                <span className={`text-sm font-semibold ${form.primary_cloud === cloud.key ? 'text-white' : 'text-gray-400'}`}>
+                  {cloud.label}
+                </span>
+                {form.primary_cloud === cloud.key && (
+                  <>
+                    <span className="absolute top-2 right-2 w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">{'\u2713'}</span>
+                    <span className="absolute top-2 left-2 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-500 text-gray-900">PRIMARY</span>
+                  </>
+                )}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Section 6: Root User Account */}
+        <div className="p-6 space-y-4 border-t border-amber-600/50">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            <h3 className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Root User Account</h3>
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-500 text-gray-900">Required</span>
+          </div>
+          <div className="bg-amber-900/30 border border-amber-700 rounded-lg px-4 py-3 text-xs text-amber-300 flex items-start gap-2">
+            <svg className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            These credentials will be shared with the client. The user will be required to change their password on first login.
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Username</label>
+              <input
+                value={form.root_username}
+                onChange={e => setForm(p => ({ ...p, root_username: e.target.value.toLowerCase().replace(/\s/g, '') }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="admin"
+                required
+                minLength={3}
+              />
+              {form.root_username && form.root_username.length < 3 && (
+                <p className="text-[10px] text-red-400 mt-1">Min 3 characters</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Email</label>
+              <input
+                type="email"
+                value={form.root_email}
+                onChange={e => setForm(p => ({ ...p, root_email: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="admin@company.com"
+                required
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-400 mb-1">Password (min 12 characters)</label>
+              <div className="flex gap-2">
+                <div className="flex-1 relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={form.root_password}
+                    onChange={e => setForm(p => ({ ...p, root_password: e.target.value }))}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm font-mono text-white placeholder-gray-500 pr-10 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Secure password"
+                    required
+                    minLength={12}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-300"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      {showPassword ? (
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21" />
+                      ) : (
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      )}
+                    </svg>
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const pw = generatePassword();
+                    setForm(p => ({ ...p, root_password: pw }));
+                    setShowPassword(true);
+                  }}
+                  className="px-3 py-2 bg-gray-700 text-gray-300 text-xs font-medium rounded-lg hover:bg-gray-600 transition whitespace-nowrap"
+                >
+                  Generate
+                </button>
+                {form.root_password && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(form.root_password);
+                    }}
+                    className="px-3 py-2 bg-gray-700 text-gray-300 text-xs font-medium rounded-lg hover:bg-gray-600 transition"
+                  >
+                    Copy
+                  </button>
+                )}
+              </div>
+              {form.root_password && form.root_password.length < 12 && (
+                <p className="text-[10px] text-red-400 mt-1">Min 12 characters</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Submit */}
+        <div className="p-6 flex items-center gap-3">
+          <button
+            type="submit"
+            disabled={!canSubmit || processing}
+            className="px-8 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-medium rounded-lg hover:from-blue-600 hover:to-cyan-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
+          >
+            {processing ? 'Creating Organization...' : 'Create Organization'}
+          </button>
+          <button
+            type="button"
+            onClick={handleReset}
+            className="px-4 py-2.5 text-gray-400 hover:text-white border border-gray-600 rounded-lg text-sm transition"
+          >
+            Reset
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

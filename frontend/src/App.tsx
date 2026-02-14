@@ -37,6 +37,9 @@ import AccessReviews from './pages/AccessReviews';
 import RoleMining from './pages/RoleMining';
 import IdentityGroups from './pages/IdentityGroups';
 import Login from './pages/Login';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import LockedDashboard from './pages/LockedDashboard';
 import CrossTenantAnalytics from './pages/CrossTenantAnalytics';
 import OnboardingWizard from './pages/OnboardingWizard';
 import Resources from './pages/Resources';
@@ -317,6 +320,7 @@ function AppContent() {
   const [copilotOpen, setCopilotOpen] = useState(false);
   const { dark, toggle: toggleTheme } = useTheme();
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [tenantStage, setTenantStage] = useState<string>('active');
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -338,6 +342,17 @@ function AppContent() {
         if (data && !data.onboarding_completed && !data.azure_configured) {
           setNeedsOnboarding(true);
         }
+      })
+      .catch(() => {});
+  }, [user, loading]);
+
+  // Phase 85: Fetch tenant onboarding stage (non-superadmin only)
+  useEffect(() => {
+    if (!user || loading || user.is_superadmin) return;
+    fetch('/api/tenant/stage')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.stage) setTenantStage(data.stage);
       })
       .catch(() => {});
   }, [user, loading]);
@@ -385,12 +400,22 @@ function AppContent() {
 
   // Detect admin subdomain (admin.auditgraph.ai) — render admin portal at root
   const isAdminSubdomain = window.location.hostname.split('.')[0] === 'admin';
+  const isAdminAccessible = isAdminSubdomain
+    || window.location.hostname === 'localhost'
+    || window.location.hostname === '127.0.0.1';
+
+  // Lock all non-settings routes when tenant is not yet active
+  const locked = tenantStage !== 'active';
 
   return (
     <ToastProvider>
       <Routes>
         {/* Login route - no nav bar */}
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
+
+        {/* Phase 84: Password reset routes - public, no nav bar */}
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
 
         {/* Phase 54: SSO callback - no nav bar, no auth required */}
         <Route path="/sso-callback" element={<SsoCallback />} />
@@ -402,7 +427,9 @@ function AppContent() {
 
         {/* Admin Console - standalone layout with own login, sidebar, topbar */}
         <Route path="/admin/*" element={
-          <ErrorBoundary><AdminConsole /></ErrorBoundary>
+          isAdminAccessible
+            ? <ErrorBoundary><AdminConsole /></ErrorBoundary>
+            : <Navigate to="/login" replace />
         } />
 
         {/* Admin subdomain: render admin portal at root */}
@@ -420,7 +447,7 @@ function AppContent() {
               <TopBar dark={dark} onToggleTheme={toggleTheme} onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
               {/* Left Sidebar */}
-              <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} />
+              <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} />
 
               {/* Global Search Modal */}
               <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
@@ -431,31 +458,39 @@ function AppContent() {
               {/* Page Content */}
               <main className="pl-60 pt-14 min-h-screen w-full overflow-x-hidden">
                 <Routes>
-                  <Route path="/" element={<ErrorBoundary><Overview /></ErrorBoundary>} />
-                  <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
-                  <Route path="/identities" element={<ErrorBoundary><Identities /></ErrorBoundary>} />
-                  <Route path="/identities/compare" element={<ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
-                  <Route path="/identities/:id" element={<ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-                  <Route path="/reports" element={<ErrorBoundary><Reports /></ErrorBoundary>} />
-                  <Route path="/compliance" element={<ErrorBoundary><Compliance /></ErrorBoundary>} />
-                  <Route path="/drift" element={<ErrorBoundary><DriftHistory /></ErrorBoundary>} />
-                  <Route path="/exports" element={<ErrorBoundary><Exports /></ErrorBoundary>} />
-                  <Route path="/access-reviews" element={<ErrorBoundary><AccessReviews /></ErrorBoundary>} />
-                  <Route path="/role-mining" element={<ErrorBoundary><RoleMining /></ErrorBoundary>} />
-                  <Route path="/groups" element={<ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
-                  <Route path="/service-accounts" element={<ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
-                  <Route path="/spns" element={<ErrorBoundary><SPNDashboard /></ErrorBoundary>} />
-                  <Route path="/app-registrations" element={<ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
-                  <Route path="/resources" element={<ErrorBoundary><Resources /></ErrorBoundary>} />
-                  <Route path="/resources/detail" element={<ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
+                  <Route path="/" element={
+                    tenantStage !== 'active'
+                      ? <ErrorBoundary><LockedDashboard /></ErrorBoundary>
+                      : <ErrorBoundary><Overview /></ErrorBoundary>
+                  } />
+                  <Route path="/dashboard" element={
+                    tenantStage !== 'active'
+                      ? <Navigate to="/" replace />
+                      : <ErrorBoundary><Dashboard /></ErrorBoundary>
+                  } />
+                  <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
+                  <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
+                  <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
+                  <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
+                  <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
+                  <Route path="/drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftHistory /></ErrorBoundary>} />
+                  <Route path="/exports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Exports /></ErrorBoundary>} />
+                  <Route path="/access-reviews" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AccessReviews /></ErrorBoundary>} />
+                  <Route path="/role-mining" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RoleMining /></ErrorBoundary>} />
+                  <Route path="/groups" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
+                  <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
+                  <Route path="/spns" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SPNDashboard /></ErrorBoundary>} />
+                  <Route path="/app-registrations" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
+                  <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
+                  <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><Settings /></ErrorBoundary>
                     </ProtectedRoute>
                   } />
-                  <Route path="/activity" element={<ErrorBoundary><ActivityLog /></ErrorBoundary>} />
-                  <Route path="/notifications" element={<ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
-                  <Route path="/analytics" element={<ErrorBoundary><CrossTenantAnalytics /></ErrorBoundary>} />
+                  <Route path="/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ActivityLog /></ErrorBoundary>} />
+                  <Route path="/notifications" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
+                  <Route path="/analytics" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><CrossTenantAnalytics /></ErrorBoundary>} />
                 </Routes>
               </main>
             </div>

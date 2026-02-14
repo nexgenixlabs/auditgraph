@@ -2786,15 +2786,20 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_read_created ON notifications(read, created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_severity ON notifications(severity)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_category ON notifications(category)")
+        cursor.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_tenant ON notifications(tenant_id)")
         self.conn.commit()
         cursor.close()
 
-    def get_notifications(self, limit=50, offset=0, read=None, severity=None, category=None) -> list:
+    def get_notifications(self, limit=50, offset=0, read=None, severity=None, category=None, tenant_id=None) -> list:
         """Get notifications with optional filters."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         conditions = []
         params = []
+        if tenant_id is not None:
+            conditions.append("tenant_id = %s")
+            params.append(tenant_id)
         if read is not None:
             conditions.append("read = %s")
             params.append(read)
@@ -2834,36 +2839,41 @@ class Database:
                 result[ts_field] = result[ts_field].isoformat()
         return result
 
-    def get_notification_stats(self) -> dict:
+    def get_notification_stats(self, tenant_id=None) -> dict:
         """Get notification statistics (unread count, by severity, by category)."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT COUNT(*) as total FROM notifications")
+        tenant_filter = ""
+        tenant_params: list = []
+        if tenant_id is not None:
+            tenant_filter = " AND tenant_id = %s"
+            tenant_params = [tenant_id]
+        cursor.execute(f"SELECT COUNT(*) as total FROM notifications WHERE true{tenant_filter}", tenant_params)
         total = cursor.fetchone()['total']
-        cursor.execute("SELECT COUNT(*) as unread FROM notifications WHERE read = false")
+        cursor.execute(f"SELECT COUNT(*) as unread FROM notifications WHERE read = false{tenant_filter}", tenant_params)
         unread = cursor.fetchone()['unread']
-        cursor.execute("SELECT severity, COUNT(*) as cnt FROM notifications WHERE read = false GROUP BY severity")
+        cursor.execute(f"SELECT severity, COUNT(*) as cnt FROM notifications WHERE read = false{tenant_filter} GROUP BY severity", tenant_params)
         by_severity = {r['severity']: r['cnt'] for r in cursor.fetchall()}
-        cursor.execute("SELECT category, COUNT(*) as cnt FROM notifications WHERE read = false GROUP BY category")
+        cursor.execute(f"SELECT category, COUNT(*) as cnt FROM notifications WHERE read = false{tenant_filter} GROUP BY category", tenant_params)
         by_category = {r['category']: r['cnt'] for r in cursor.fetchall()}
         cursor.close()
         return {'total': total, 'unread': unread, 'by_severity': by_severity, 'by_category': by_category}
 
     def create_notification(self, event_type, category, severity, title, description,
                             payload=None, related_identity_id=None, related_identity_name=None,
-                            related_run_id=None) -> dict:
+                            related_run_id=None, tenant_id=None) -> dict:
         """Create a new notification."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO notifications
                 (event_type, category, severity, title, description, payload,
-                 related_identity_id, related_identity_name, related_run_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 related_identity_id, related_identity_name, related_run_id, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (event_type, category, severity, title, description,
               json.dumps(payload) if payload else None,
-              related_identity_id, related_identity_name, related_run_id))
+              related_identity_id, related_identity_name, related_run_id, tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -2891,11 +2901,14 @@ class Database:
                 result[ts_field] = result[ts_field].isoformat()
         return result
 
-    def mark_all_notifications_read(self) -> int:
+    def mark_all_notifications_read(self, tenant_id=None) -> int:
         """Mark all unread notifications as read. Returns count updated."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor()
-        cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false")
+        if tenant_id is not None:
+            cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false AND tenant_id = %s", (tenant_id,))
+        else:
+            cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false")
         count = cursor.rowcount
         self.conn.commit()
         cursor.close()
@@ -3003,21 +3016,42 @@ class Database:
         # Phase 78: Role migration — auditor→reader, viewer→compliance
         cursor.execute("UPDATE users SET role = 'reader' WHERE role = 'auditor'")
         cursor.execute("UPDATE users SET role = 'compliance' WHERE role = 'viewer'")
+        # Phase 84: Root user, password reset, account lockout columns
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_root_user BOOLEAN DEFAULT false")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token TEXT")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ")
+        # Phase 84: Admin audit log
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id SERIAL PRIMARY KEY,
+                admin_user_id INTEGER,
+                action TEXT NOT NULL,
+                target_user_id INTEGER,
+                target_tenant_id INTEGER,
+                details JSONB DEFAULT '{}',
+                ip_address TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_action ON admin_audit_log(action)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_target_user ON admin_audit_log(target_user_id)")
         self.conn.commit()
         cursor.close()
         # Ensure tenants table + migration (adds tenant_id/is_superadmin to users if needed)
         self._ensure_tenants_table()
         Database._users_ensured = True
 
-    def create_user(self, username, password_hash, display_name, role='compliance', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None, email=None, phone=None, force_password_change=False):
+    def create_user(self, username, password_hash, display_name, role='compliance', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None, email=None, phone=None, force_password_change=False, is_root_user=False):
         """Create a new user. Returns user dict (without password_hash)."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change
-        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change))
+            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user
+        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3226,6 +3260,123 @@ class Database:
         self.conn.commit()
         cursor.close()
 
+    # --------------------------------------------------
+    # Phase 84: Password reset & account lockout methods
+    # --------------------------------------------------
+
+    def get_user_by_email(self, email, tenant_id=None):
+        """Lookup user by email (for forgot password). Returns full dict INCLUDING password_hash."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if tenant_id is not None:
+            cursor.execute("""
+                SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
+                FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id
+                WHERE LOWER(u.email) = LOWER(%s) AND u.tenant_id = %s AND u.enabled = true
+            """, (email, tenant_id))
+        else:
+            cursor.execute("""
+                SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
+                FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id
+                WHERE LOWER(u.email) = LOWER(%s) AND u.enabled = true
+            """, (email,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_user_by_reset_token(self, token_hash):
+        """Lookup user by hashed password reset token. Returns None if expired."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
+            FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id
+            WHERE u.password_reset_token = %s
+              AND u.password_reset_expires > NOW()
+              AND u.enabled = true
+        """, (token_hash,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def set_password_reset_token(self, user_id, token_hash, expires):
+        """Store hashed reset token and expiry on a user."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE users SET password_reset_token = %s, password_reset_expires = %s
+            WHERE id = %s
+        """, (token_hash, expires, user_id))
+        self.conn.commit()
+        cursor.close()
+
+    def clear_password_reset_token(self, user_id):
+        """Null out reset token/expiry after use."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE users SET password_reset_token = NULL, password_reset_expires = NULL
+            WHERE id = %s
+        """, (user_id,))
+        self.conn.commit()
+        cursor.close()
+
+    def increment_failed_login(self, user_id):
+        """Increment failed_login_attempts. Lock account for 15 min after 5 failures."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE users SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1
+            WHERE id = %s
+            RETURNING failed_login_attempts
+        """, (user_id,))
+        row = cursor.fetchone()
+        attempts = row['failed_login_attempts'] if row else 0
+        if attempts >= 5:
+            cursor.execute("""
+                UPDATE users SET locked_until = NOW() + INTERVAL '15 minutes'
+                WHERE id = %s
+            """, (user_id,))
+        self.conn.commit()
+        cursor.close()
+        return attempts
+
+    def reset_failed_login(self, user_id):
+        """Reset failed attempts to 0 and clear locked_until."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE users SET failed_login_attempts = 0, locked_until = NULL
+            WHERE id = %s
+        """, (user_id,))
+        self.conn.commit()
+        cursor.close()
+
+    def count_recent_reset_requests(self, email, hours=1):
+        """Count how many reset tokens were created for this email in the last N hours."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE LOWER(email) = LOWER(%s)
+              AND password_reset_expires IS NOT NULL
+              AND password_reset_expires > NOW() - INTERVAL '%s hours'
+        """, (email, hours))
+        count = cursor.fetchone()[0]
+        cursor.close()
+        return count
+
+    def log_admin_audit(self, admin_user_id, action, target_user_id=None, target_tenant_id=None, details=None, ip_address=None):
+        """Insert into admin_audit_log."""
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO admin_audit_log (admin_user_id, action, target_user_id, target_tenant_id, details, ip_address)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (admin_user_id, action, target_user_id, target_tenant_id, json.dumps(details or {}), ip_address))
+        self.conn.commit()
+        cursor.close()
+
     def ensure_default_admin(self):
         """Create default admin user if no users exist."""
         import bcrypt as bcrypt_lib
@@ -3245,7 +3396,7 @@ class Database:
                 cursor2.close()
             except Exception:
                 pass
-            username = os.getenv('ADMIN_USERNAME', 'admin')
+            username = os.getenv('ADMIN_USERNAME', 'techadmin')
             password = os.getenv('ADMIN_PASSWORD', 'changeme')
             hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
             self.create_user(username, hashed, 'Administrator', 'admin', tenant_id=default_tenant_id)
@@ -5548,13 +5699,22 @@ class Database:
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS logo_url TEXT")
         # Subscription term: 0=monthly, 1/3/5 = year commitments
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_term INTEGER NOT NULL DEFAULT 0")
+        # Phase 85: Tenant onboarding metadata
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS primary_cloud VARCHAR(20)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS industry VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS compliance_framework VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'")
         # Phase 78: Migrate growth→pro plan + API key role renames
         cursor.execute("UPDATE tenants SET plan = 'pro' WHERE plan = 'growth'")
         cursor.execute("UPDATE api_keys SET role = 'reader' WHERE role = 'auditor'")
         cursor.execute("UPDATE api_keys SET role = 'compliance' WHERE role = 'viewer'")
         self.conn.commit()
 
-        # 2. Create default tenant if none exist
+        # 2. Rename any existing "Default Organization" → "Acme Organization"
+        cursor.execute("UPDATE tenants SET name = 'Acme Organization' WHERE slug = 'default' AND name = 'Default Organization'")
+        self.conn.commit()
+
+        # 3. Create default tenant if none exist
         cursor.execute("SELECT COUNT(*) FROM tenants")
         tenant_count = cursor.fetchone()[0]
 
@@ -5562,7 +5722,7 @@ class Database:
         if tenant_count == 0:
             cursor.execute("""
                 INSERT INTO tenants (name, slug, plan)
-                VALUES ('Default Organization', 'default', 'enterprise')
+                VALUES ('Acme Organization', 'default', 'enterprise')
                 RETURNING id
             """)
             default_tenant_id = cursor.fetchone()[0]
@@ -5572,7 +5732,7 @@ class Database:
             row = cursor.fetchone()
             default_tenant_id = row[0] if row else None
 
-        # 3. Add tenant_id + is_superadmin + portal_role columns to users
+        # 4. Add tenant_id + is_superadmin + portal_role columns to users
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT false")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS portal_role VARCHAR(20)")
@@ -5693,32 +5853,35 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at'):
+        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
 
-    def create_tenant(self, name, slug, plan='free', settings=None):
+    def create_tenant(self, name, slug, plan='free', settings=None,
+                      primary_cloud=None, industry=None, compliance_framework=None):
         """Create a new tenant."""
         self._ensure_tenants_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO tenants (name, slug, plan, settings)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO tenants (name, slug, plan, settings, primary_cloud, industry, compliance_framework)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
-        """, (name, slug, plan, json.dumps(settings or {})))
+        """, (name, slug, plan, json.dumps(settings or {}),
+              primary_cloud, industry, compliance_framework))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
-        for ts in ('created_at', 'updated_at'):
+        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
             if row.get(ts):
                 row[ts] = row[ts].isoformat()
         return row
 
     def update_tenant(self, tenant_id, **kwargs):
-        """Update tenant fields. Allowed: name, plan, enabled, settings, license_activated_at, license_expires_at, subscription_term."""
+        """Update tenant fields."""
         self._ensure_tenants_table()
-        allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at', 'subscription_term'}
+        allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at',
+                   'subscription_term', 'primary_cloud', 'industry', 'compliance_framework', 'status'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_tenant_by_id(tenant_id)

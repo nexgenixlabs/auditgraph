@@ -7,7 +7,9 @@ This module contains all HTTP endpoint handler functions for the AuditGraph API.
 import os
 import time
 import bcrypt
-from datetime import datetime
+import secrets
+import hashlib
+from datetime import datetime, timedelta, timezone
 from flask import jsonify, request, g, Response
 from dotenv import load_dotenv
 import json
@@ -2052,7 +2054,8 @@ def get_notifications_list():
 
         notifications = db.get_notifications(
             limit=limit, offset=offset, read=read,
-            severity=severity, category=category
+            severity=severity, category=category,
+            tenant_id=_tenant_id()
         )
         return jsonify({
             "notifications": notifications,
@@ -2068,7 +2071,7 @@ def get_notification_stats_handler():
     """GET /api/notifications/stats — unread count and breakdowns."""
     db = _db()
     try:
-        stats = db.get_notification_stats()
+        stats = db.get_notification_stats(tenant_id=_tenant_id())
         return jsonify(stats)
     finally:
         db.close()
@@ -2080,6 +2083,11 @@ def mark_notification_handler(notification_id):
     try:
         existing = db.get_notification(notification_id)
         if not existing:
+            return jsonify({"error": "Notification not found"}), 404
+
+        # Tenant isolation: verify notification belongs to this tenant
+        tid = _tenant_id()
+        if tid is not None and existing.get('tenant_id') != tid:
             return jsonify({"error": "Notification not found"}), 404
 
         data = request.get_json(silent=True) or {}
@@ -2100,7 +2108,7 @@ def mark_all_notifications_read_handler():
     """POST /api/notifications/mark-all-read — bulk mark all as read."""
     db = _db()
     try:
-        count = db.mark_all_notifications_read()
+        count = db.mark_all_notifications_read(tenant_id=_tenant_id())
         return jsonify({"status": "ok", "marked_read": count})
     finally:
         db.close()
@@ -4363,7 +4371,27 @@ def auth_login():
                 pass
             return jsonify({'error': 'Invalid credentials'}), 401
 
+        # Phase 84: Account lockout check
+        locked_until = user.get('locked_until')
+        if locked_until:
+            if isinstance(locked_until, str):
+                locked_until = datetime.fromisoformat(locked_until)
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            if locked_until > datetime.now(timezone.utc):
+                remaining = int((locked_until - datetime.now(timezone.utc)).total_seconds() / 60) + 1
+                return jsonify({
+                    'error': 'Account locked',
+                    'locked_until': locked_until.isoformat(),
+                    'message': f'Too many failed attempts. Try again in {remaining} minutes.'
+                }), 423
+
         if not bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            # Phase 84: Increment failed login attempts
+            try:
+                db.increment_failed_login(user['id'])
+            except Exception:
+                pass
             try:
                 _log(db,'auth_failed', f'Login failed for "{username}": wrong password',
                                 {'username': username, 'ip': request.remote_addr})
@@ -4378,11 +4406,19 @@ def auth_login():
                 return jsonify({'error': 'Organization not found'}), 404
             if not target_tenant.get('enabled'):
                 return jsonify({'error': 'Organization is disabled'}), 403
+            # Block superadmins from logging into client portals
+            if user.get('is_superadmin') and portal == 'client':
+                return jsonify({'error': 'Platform administrators must use the admin portal.'}), 403
             if not user.get('is_superadmin') and user.get('tenant_id') != target_tenant['id']:
                 return jsonify({'error': 'You do not belong to this organization'}), 403
 
         # Do all DB writes while connection 1 is still open
         db.update_last_login(user['id'])
+        # Phase 84: Reset failed login counter on success
+        try:
+            db.reset_failed_login(user['id'])
+        except Exception:
+            pass
 
         try:
             action_type = 'admin_login' if portal == 'admin' else 'auth_login'
@@ -4539,6 +4575,166 @@ def change_password():
             pass
 
         return jsonify({'message': 'Password changed successfully'})
+    finally:
+        db.close()
+
+
+def forgot_password_handler():
+    """POST /api/auth/forgot-password — initiate password reset (public)."""
+    data = request.get_json(silent=True) or {}
+    email = str(data.get('email', '')).strip().lower()
+    tenant_slug = str(data.get('tenant_slug', '')).strip() or None
+
+    # Always return success to prevent email enumeration
+    success_msg = 'If an account exists with this email, a password reset link has been sent.'
+
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+
+    db = _db()
+    try:
+        # Resolve tenant_id from slug if provided
+        tenant_id = None
+        if tenant_slug:
+            tenant = db.get_tenant_by_slug(tenant_slug)
+            if tenant:
+                tenant_id = tenant['id']
+
+        user = db.get_user_by_email(email, tenant_id=tenant_id)
+        if not user:
+            return jsonify({'message': success_msg})
+
+        # Rate limit: max 3 reset requests per email per hour
+        recent = db.count_recent_reset_requests(email)
+        if recent >= 3:
+            return jsonify({'message': success_msg})
+
+        # Generate token
+        raw_token = secrets.token_urlsafe(48)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        db.set_password_reset_token(user['id'], token_hash, expires)
+
+        # Build reset URL (log it — email delivery uses existing EmailService if configured)
+        reset_url = f"/reset-password?token={raw_token}"
+        print(f"[Password Reset] User: {email}, Token: {raw_token}, URL: {reset_url}")
+
+        try:
+            _log(db, 'password_reset_requested',
+                 f'Password reset requested for "{email}"',
+                 {'user_id': user['id'], 'reset_url': reset_url, 'ip': request.remote_addr})
+        except Exception:
+            pass
+
+        return jsonify({'message': success_msg})
+    finally:
+        db.close()
+
+
+def validate_reset_token_handler():
+    """GET /api/auth/validate-reset-token — check if a reset token is valid (public)."""
+    token = request.args.get('token', '').strip()
+    if not token:
+        return jsonify({'valid': False}), 400
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    db = _db()
+    try:
+        user = db.get_user_by_reset_token(token_hash)
+        if not user:
+            return jsonify({'valid': False})
+
+        # Mask email: show first 2 chars + *** + domain
+        email = user.get('email', '') or ''
+        if '@' in email:
+            local, domain = email.split('@', 1)
+            masked = local[:2] + '***@' + domain
+        else:
+            masked = '***'
+
+        return jsonify({'valid': True, 'email': masked})
+    finally:
+        db.close()
+
+
+def reset_password_handler():
+    """POST /api/auth/reset-password — reset password with token (public)."""
+    data = request.get_json(silent=True) or {}
+    token = str(data.get('token', '')).strip()
+    new_password = str(data.get('new_password', ''))
+
+    if not token:
+        return jsonify({'error': 'Reset token is required'}), 400
+    if not new_password or len(new_password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    db = _db()
+    try:
+        user = db.get_user_by_reset_token(token_hash)
+        if not user:
+            return jsonify({'error': 'Invalid or expired reset token'}), 400
+
+        new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        db.update_user(user['id'], password_hash=new_hash)
+        db.clear_password_reset_token(user['id'])
+        db.reset_failed_login(user['id'])
+        db.set_force_password_change(user['id'], False)
+
+        try:
+            _log(db, 'password_reset_completed',
+                 f'Password reset completed for user "{user["username"]}"',
+                 {'user_id': user['id'], 'ip': request.remote_addr})
+        except Exception:
+            pass
+
+        return jsonify({'message': 'Password reset successfully. You can now log in with your new password.'})
+    finally:
+        db.close()
+
+
+def admin_reset_user_password(user_id):
+    """POST /api/users/<id>/reset-password — admin resets a user's password."""
+    current_user = getattr(g, 'current_user', None)
+    if not current_user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    db = _db()
+    try:
+        target = db.get_user_by_id(user_id)
+        if not target:
+            return jsonify({'error': 'User not found'}), 404
+
+        # Generate temporary password
+        temp_password = secrets.token_urlsafe(16)
+        new_hash = bcrypt.hashpw(temp_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        db.update_user(user_id, password_hash=new_hash)
+        db.set_force_password_change(user_id, True)
+        db.reset_failed_login(user_id)
+        db.clear_password_reset_token(user_id)
+
+        try:
+            db.log_admin_audit(current_user['id'], 'admin_password_reset',
+                               target_user_id=user_id,
+                               target_tenant_id=target.get('tenant_id'),
+                               details={'target_username': target['username']},
+                               ip_address=request.remote_addr)
+        except Exception:
+            pass
+
+        try:
+            _log(db, 'admin_password_reset',
+                 f'Admin "{current_user["username"]}" reset password for user "{target["username"]}"',
+                 {'admin_user_id': current_user['id'], 'target_user_id': user_id})
+        except Exception:
+            pass
+
+        return jsonify({
+            'message': f'Password reset for "{target["username"]}". User will be required to change it on next login.',
+            'temp_password': temp_password,
+        })
     finally:
         db.close()
 
@@ -6647,13 +6843,23 @@ def create_tenant_handler():
     if plan not in ('free', 'trial', 'pro', 'enterprise'):
         return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
 
+    # Phase 85: Optional onboarding fields
+    primary_cloud = str(data.get('primary_cloud', '')).strip().lower() or None
+    industry = str(data.get('industry', '')).strip() or None
+    compliance_framework = str(data.get('compliance_framework', '')).strip() or None
+    if primary_cloud and primary_cloud not in ('azure', 'aws', 'gcp'):
+        return jsonify({'error': 'primary_cloud must be azure, aws, or gcp'}), 400
+
     db = _db()
     try:
         existing = db.get_tenant_by_slug(slug)
         if existing:
             return jsonify({'error': f'Tenant slug "{slug}" already exists'}), 409
 
-        tenant = db.create_tenant(name, slug, plan)
+        tenant = db.create_tenant(name, slug, plan,
+                                  primary_cloud=primary_cloud,
+                                  industry=industry,
+                                  compliance_framework=compliance_framework)
 
         # Set subscription term + auto-compute dates if provided
         term = int(data.get('subscription_term', 0))
@@ -6672,7 +6878,66 @@ def create_tenant_handler():
                 {'tenant_id': tenant['id'], 'slug': slug, 'plan': plan})
         except Exception:
             pass
-        return jsonify({'tenant': tenant, 'message': 'Tenant created'}), 201
+
+        # Phase 84: Optional root user creation during tenant onboarding
+        root_username = str(data.get('root_username', '')).strip().lower()
+        root_email = str(data.get('root_email', '')).strip().lower()
+        root_password = str(data.get('root_password', ''))
+        root_user = None
+
+        if root_username and root_password:
+            if len(root_username) < 3:
+                return jsonify({'error': 'root_username must be at least 3 characters'}), 400
+            if len(root_password) < 8:
+                return jsonify({'error': 'root_password must be at least 8 characters'}), 400
+
+            existing_user = db.get_user_by_username(root_username)
+            if existing_user:
+                return jsonify({'error': f'Username "{root_username}" already exists'}), 409
+
+            hashed = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            current_user = getattr(g, 'current_user', None)
+            created_by = current_user['id'] if current_user else None
+
+            root_user = db.create_user(
+                root_username, hashed, root_username,
+                role='admin', created_by=created_by,
+                tenant_id=tenant['id'], is_root_user=True,
+                force_password_change=True,
+                email=root_email or None
+            )
+
+            # Mark tenant as provisioned + set onboarding stage + auto-enable primary cloud
+            settings = tenant.get('settings') or {}
+            if isinstance(settings, str):
+                try:
+                    settings = json.loads(settings)
+                except Exception:
+                    settings = {}
+            settings['provisioned'] = True
+            settings['provisioned_at'] = datetime.utcnow().isoformat()
+            settings['onboarding_stage'] = 'password_change'
+            # Auto-enable primary cloud in cloud_providers
+            if primary_cloud:
+                cp = settings.get('cloud_providers', {})
+                cp[primary_cloud] = {'enabled': True, 'plan': plan if plan in ('pro', 'enterprise') else 'pro'}
+                settings['cloud_providers'] = cp
+            db.update_tenant(tenant['id'], settings=settings)
+            tenant = db.get_tenant_by_id(tenant['id'])
+
+            try:
+                admin_id = current_user['id'] if current_user else None
+                db.log_admin_audit(admin_id, 'tenant_root_user_created',
+                                   target_user_id=root_user['id'], target_tenant_id=tenant['id'],
+                                   details={'root_username': root_username},
+                                   ip_address=request.remote_addr)
+            except Exception:
+                pass
+
+        result = {'tenant': tenant, 'message': 'Tenant created'}
+        if root_user:
+            result['root_user'] = {k: v for k, v in root_user.items() if k != 'password_hash'}
+        return jsonify(result), 201
     finally:
         db.close()
 
@@ -6720,6 +6985,21 @@ def update_tenant_handler(tenant_id):
             elif term == 0:
                 # Monthly — no fixed expiry
                 updates['license_expires_at'] = None
+        # Phase 85: Additional tenant metadata fields
+        if 'primary_cloud' in data:
+            pc = str(data['primary_cloud']).strip().lower()
+            if pc and pc not in ('azure', 'aws', 'gcp'):
+                return jsonify({'error': 'primary_cloud must be azure, aws, or gcp'}), 400
+            updates['primary_cloud'] = pc or None
+        if 'industry' in data:
+            updates['industry'] = str(data['industry']).strip() or None
+        if 'compliance_framework' in data:
+            updates['compliance_framework'] = str(data['compliance_framework']).strip() or None
+        if 'status' in data:
+            st = str(data['status']).strip().lower()
+            if st not in ('active', 'trial', 'suspended', 'cancelled'):
+                return jsonify({'error': 'status must be active, trial, suspended, or cancelled'}), 400
+            updates['status'] = st
 
         if not updates:
             return jsonify({'tenant': existing, 'message': 'No changes'})
@@ -6797,6 +7077,95 @@ def get_tenant_config():
         if not cfg:
             return jsonify({'error': 'Tenant not found'}), 404
         return jsonify(cfg)
+    finally:
+        db.close()
+
+
+# ── Phase 85: Tenant Branding & Onboarding Stage ─────────────────
+
+
+def get_tenant_branding():
+    """GET /api/auth/tenant-branding?slug=<slug> — public branding info for login page."""
+    slug = request.args.get('slug', '').strip().lower()
+    if not slug:
+        return jsonify({'error': 'slug parameter required'}), 400
+    db = _db()
+    try:
+        tenant = db.get_tenant_by_slug(slug)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+        settings = tenant.get('settings') or {}
+        if isinstance(settings, str):
+            try:
+                settings = json.loads(settings)
+            except Exception:
+                settings = {}
+        return jsonify({
+            'company_name': tenant.get('name'),
+            'slug': tenant.get('slug'),
+            'logo_url': tenant.get('logo_url') or settings.get('logo_url'),
+        })
+    finally:
+        db.close()
+
+
+def get_tenant_stage():
+    """GET /api/tenant/stage — onboarding stage for current tenant."""
+    tid = _tenant_id()
+    if not tid:
+        return jsonify({'stage': 'active', 'primary_cloud': None, 'tenant_name': None})
+    db = _db()
+    try:
+        tenant = db.get_tenant_by_id(tid)
+        if not tenant:
+            return jsonify({'stage': 'active', 'primary_cloud': None, 'tenant_name': None})
+        settings = tenant.get('settings') or {}
+        if isinstance(settings, str):
+            try:
+                settings = json.loads(settings)
+            except Exception:
+                settings = {}
+        stage = settings.get('onboarding_stage', 'active')
+        return jsonify({
+            'stage': stage,
+            'primary_cloud': tenant.get('primary_cloud'),
+            'tenant_name': tenant.get('name'),
+        })
+    finally:
+        db.close()
+
+
+def update_tenant_stage():
+    """POST /api/tenant/stage — update onboarding stage (admin only)."""
+    data = request.get_json(silent=True) or {}
+    stage = str(data.get('stage', '')).strip().lower()
+    if stage not in ('password_change', 'locked', 'authenticating', 'active'):
+        return jsonify({'error': 'stage must be password_change, locked, authenticating, or active'}), 400
+
+    tid = _tenant_id()
+    if not tid:
+        return jsonify({'error': 'No tenant context'}), 400
+
+    db = _db()
+    try:
+        tenant = db.get_tenant_by_id(tid)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+        settings = tenant.get('settings') or {}
+        if isinstance(settings, str):
+            try:
+                settings = json.loads(settings)
+            except Exception:
+                settings = {}
+        settings['onboarding_stage'] = stage
+        db.update_tenant(tid, settings=settings)
+        try:
+            _log(db, 'tenant_stage_updated',
+                 f'Onboarding stage changed to "{stage}"',
+                 {'tenant_id': tid, 'stage': stage})
+        except Exception:
+            pass
+        return jsonify({'stage': stage, 'message': 'Stage updated'})
     finally:
         db.close()
 

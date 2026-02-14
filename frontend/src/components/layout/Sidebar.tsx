@@ -30,6 +30,7 @@ interface NavGroup {
 interface SidebarProps {
   isAdmin: boolean;
   isSuperAdmin: boolean;
+  locked?: boolean;
 }
 
 interface CloudProviderConfig {
@@ -84,7 +85,7 @@ const gcpSubItems: NavItem[] = [
   { to: '/identities?cloud=gcp', label: 'Service Accounts', icon: spnIcon },
 ];
 
-const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
+const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
   const location = useLocation();
   const [openSubGroups, setOpenSubGroups] = useState<Record<string, boolean>>({
     Azure: true,
@@ -209,11 +210,15 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
 
   const renderNavItem = (item: NavItem, indented?: boolean) => {
     const active = isActive(item.to, item.matchExact);
+    const isSettings = item.to === '/settings';
+    const isLocked = locked && !isSettings;
     return (
       <li key={item.to}>
         <Link
-          to={item.to}
+          to={isLocked ? '#' : item.to}
+          onClick={isLocked ? (e: React.MouseEvent) => e.preventDefault() : undefined}
           className={`flex items-center gap-2.5 ${indented ? 'pl-8 pr-3' : 'px-3'} py-1.5 rounded-md text-sm transition-colors ${
+            isLocked ? 'opacity-40 pointer-events-none' :
             active
               ? 'bg-blue-50 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-medium'
               : 'text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 hover:text-gray-900 dark:hover:text-white'
@@ -223,6 +228,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin }) => {
             {item.icon}
           </span>
           {item.label}
+          {locked && isSettings && (
+            <span className="ml-auto w-1.5 h-1.5 rounded-full bg-amber-500" />
+          )}
         </Link>
       </li>
     );

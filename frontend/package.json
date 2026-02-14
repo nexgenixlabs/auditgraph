@@ -14,6 +14,7 @@
     "@types/react-dom": "^19.2.3",
     "@xyflow/react": "^12.10.0",
     "axios": "^1.13.2",
+    "express": "^5.2.1",
     "jspdf": "^4.1.0",
     "jspdf-autotable": "^5.0.7",
     "react": "^19.2.3",

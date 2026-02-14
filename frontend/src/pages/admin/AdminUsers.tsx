@@ -54,6 +54,10 @@ export default function AdminUsers() {
     new_password: '',
   });
 
+  // Phase 84: Admin password reset
+  const [showTempPassword, setShowTempPassword] = useState<string | null>(null);
+  const [resetLoading, setResetLoading] = useState(false);
+
   const fetchUsers = useCallback(async () => {
     try {
       const res = await fetch('/api/portal-users');
@@ -155,6 +159,25 @@ export default function AdminUsers() {
     }
   }
 
+  async function handleAdminResetPassword(userId: number) {
+    setResetLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/users/${userId}/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+      setShowTempPassword(data.temp_password);
+      setSuccess(data.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to reset password');
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
   function openProfile(u: PortalUser) {
     setSelectedUser(u);
     setEditForm({
@@ -183,14 +206,14 @@ export default function AdminUsers() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Portal Users</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage admin portal staff across all portal roles</p>
+          <h1 className="text-xl font-bold text-gray-900">AuditGraph Tech Users</h1>
+          <p className="text-sm text-gray-500 mt-1">Manage engineering and platform staff across all portal roles</p>
         </div>
         <button
           onClick={() => setShowCreate(true)}
           className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
         >
-          + Add Portal User
+          + Add an Engineer
         </button>
       </div>
 
@@ -369,7 +392,7 @@ export default function AdminUsers() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Reset Password</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Set Password</label>
                 <input
                   type="password"
                   value={editForm.new_password}
@@ -381,6 +404,15 @@ export default function AdminUsers() {
                 {editForm.new_password && editForm.new_password.length < 8 && (
                   <p className="text-[10px] text-red-500 mt-1">Min 8 characters</p>
                 )}
+                <button
+                  type="button"
+                  onClick={() => handleAdminResetPassword(selectedUser.id)}
+                  disabled={resetLoading || selectedUser.id === currentUser?.id}
+                  className="mt-2 w-full py-1.5 text-xs font-medium text-orange-700 bg-orange-50 border border-orange-200 rounded-lg hover:bg-orange-100 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {resetLoading ? 'Resetting...' : 'Generate Temporary Password'}
+                </button>
+                <p className="text-[10px] text-gray-400 mt-1">Generates a temp password. User must change it on next login.</p>
               </div>
 
               {/* Metadata */}
@@ -418,7 +450,7 @@ export default function AdminUsers() {
       {showCreate && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreate(false)}>
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 mb-4">Add Portal User</h2>
+            <h2 className="text-lg font-bold text-gray-900 mb-4">Add an Engineer</h2>
             <form onSubmit={handleCreate} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
@@ -508,6 +540,38 @@ export default function AdminUsers() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Phase 84: Temporary password modal */}
+      {showTempPassword && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowTempPassword(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 mb-2">Temporary Password</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              This password is shown only once. The user will be required to change it on next login.
+            </p>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-sm break-all select-all">
+              {showTempPassword}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(showTempPassword);
+                  setSuccess('Password copied to clipboard');
+                }}
+                className="flex-1 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
+              >
+                Copy to Clipboard
+              </button>
+              <button
+                onClick={() => setShowTempPassword(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

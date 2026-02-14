@@ -65,7 +65,6 @@ export default function AdminTenants() {
   const isReadOnly = !canWrite;
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showCreate, setShowCreate] = useState(false);
   const [showProvision, setShowProvision] = useState<number | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<Tenant | null>(null);
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
@@ -74,7 +73,6 @@ export default function AdminTenants() {
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
-  const [createForm, setCreateForm] = useState({ name: '', slug: '', plan: 'pro' });
   const [provisionForm, setProvisionForm] = useState<ProvisionForm>({ admin_username: '', admin_display_name: '', admin_password: '' });
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -95,26 +93,6 @@ export default function AdminTenants() {
   }, []);
 
   useEffect(() => { fetchTenants(); }, [fetchTenants]);
-
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    try {
-      const res = await fetch('/api/tenants', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createForm),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create tenant');
-      setSuccess(`Tenant "${data.tenant.name}" created successfully`);
-      setShowCreate(false);
-      setCreateForm({ name: '', slug: '', plan: 'pro' });
-      fetchTenants();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create tenant');
-    }
-  }
 
   async function handleProvision(tenantId: number) {
     setError(null);
@@ -358,45 +336,16 @@ export default function AdminTenants() {
           <p className="text-sm text-gray-500 mt-0.5">{tenants.length} organizations</p>
         </div>
         {canWrite && (
-          <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
-            Create Tenant
-          </button>
+          <p className="text-xs text-gray-500">
+            To create a new tenant, use the{' '}
+            <a href="/admin/onboarding" className="text-blue-600 hover:text-blue-700 underline">Onboarding</a> tab.
+          </p>
         )}
       </div>
 
       {/* Status messages */}
       {error && <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{error}<button onClick={() => setError(null)} className="ml-2 text-red-500">&times;</button></div>}
       {success && <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-700">{success}<button onClick={() => setSuccess(null)} className="ml-2 text-green-500">&times;</button></div>}
-
-      {/* Create modal */}
-      {showCreate && (
-        <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
-          <h3 className="text-sm font-semibold text-gray-800 mb-3">New Tenant</h3>
-          <form onSubmit={handleCreate} className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Name</label>
-              <input value={createForm.name} onChange={e => setCreateForm(p => ({ ...p, name: e.target.value }))} required className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Acme Corp" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Slug (URL)</label>
-              <input value={createForm.slug} onChange={e => setCreateForm(p => ({ ...p, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, '') }))} required className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="acme-corp" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Plan</label>
-              <select value={createForm.plan} onChange={e => setCreateForm(p => ({ ...p, plan: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                <option value="free">Free</option>
-                <option value="trial">Trial</option>
-                <option value="pro">Pro</option>
-                <option value="enterprise">Enterprise</option>
-              </select>
-            </div>
-            <div className="col-span-3 flex gap-2">
-              <button type="submit" className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">Create</button>
-              <button type="button" onClick={() => setShowCreate(false)} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Cancel</button>
-            </div>
-          </form>
-        </div>
-      )}
 
       {/* Provision modal */}
       {showProvision !== null && (
