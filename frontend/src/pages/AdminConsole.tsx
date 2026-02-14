@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { AdminOverview, AdminTenants, AdminOnboarding, AdminMonitoring, AdminBilling, AdminUsers } from './admin';
+import { AdminOverview, AdminTenants, AdminOnboarding, AdminMonitoring, AdminBilling, AdminUsers, AdminProfile } from './admin';
 
 type PortalRole = 'superadmin' | 'poweradmin' | 'billing' | 'reader';
 
@@ -21,6 +21,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: 'onboarding', label: 'Onboarding', icon: 'M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z', allowedRoles: ['superadmin', 'poweradmin'] },
   { path: 'monitoring', label: 'Monitoring', icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z', allowedRoles: ['superadmin', 'poweradmin', 'reader'] },
   { path: 'billing', label: 'Billing', icon: 'M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z', allowedRoles: ['superadmin', 'poweradmin', 'billing'] },
+  { path: 'profile', label: 'Profile', icon: 'M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
 ];
 
 const ROLE_BADGE_COLORS: Record<PortalRole, string> = {
@@ -61,9 +62,9 @@ function AdminLogin() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
-          <img src="/auditgraph-logo.png" alt="AuditGraph" className="w-16 h-16 rounded-2xl mb-4 mx-auto" />
-          <h1 className="text-2xl font-bold text-white">AuditGraph</h1>
-          <p className="text-sm text-gray-400 mt-1">Admin Portal</p>
+          <img src="/auditgraph-logo.png" alt="NexgenixLabs" className="w-16 h-16 rounded-2xl mb-4 mx-auto" />
+          <h1 className="text-2xl font-bold text-white">NexgenixLabs</h1>
+          <p className="text-sm text-gray-400 mt-1">Platform Administration</p>
         </div>
 
         <div className="bg-gray-900 rounded-xl border border-gray-700 shadow-lg p-8 space-y-5">
@@ -170,9 +171,9 @@ export default function AdminConsole() {
       {/* Admin Top Bar */}
       <div className="h-14 bg-gray-900 border-b border-gray-700 flex items-center justify-between px-5 flex-shrink-0">
         <div className="flex items-center gap-3">
-          <img src="/auditgraph-logo.png" alt="AuditGraph" className="w-8 h-8 rounded-lg" />
+          <img src="/auditgraph-logo.png" alt="NexgenixLabs" className="w-8 h-8 rounded-lg" />
           <div>
-            <span className="text-sm font-semibold text-white">AuditGraph</span>
+            <span className="text-sm font-semibold text-white">NexgenixLabs</span>
             <span className="text-xs text-gray-400 ml-2">Admin Portal</span>
           </div>
         </div>
@@ -185,12 +186,12 @@ export default function AdminConsole() {
               Back to Dashboard
             </button>
           )}
-          <div className="flex items-center gap-2">
+          <Link to="/admin/profile" className="flex items-center gap-2 hover:opacity-80 transition">
             <span className="text-xs text-gray-400">{user?.display_name || user?.username}</span>
             <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${badgeColor}`}>
               {portalRole}
             </span>
-          </div>
+          </Link>
           <button
             onClick={() => { logout(); }}
             className="text-xs text-gray-400 hover:text-white transition"
@@ -241,6 +242,7 @@ export default function AdminConsole() {
             {isRouteAllowed(['superadmin', 'poweradmin']) && <Route path="onboarding" element={<AdminOnboarding />} />}
             {isRouteAllowed(['superadmin', 'poweradmin', 'reader']) && <Route path="monitoring" element={<AdminMonitoring />} />}
             {isRouteAllowed(['superadmin', 'poweradmin', 'billing']) && <Route path="billing" element={<AdminBilling />} />}
+            <Route path="profile" element={<AdminProfile />} />
           </Routes>
         </div>
       </div>

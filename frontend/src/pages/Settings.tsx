@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { getTermLabel, getTermDiscount, ACCOUNT_TIER_LABELS } from '../constants/pricing';
 
@@ -155,6 +155,7 @@ interface StatusData {
 export default function Settings() {
   const { isSuperAdmin, user } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,6 +169,71 @@ export default function Settings() {
   const [connectionTestResult, setConnectionTestResult] = useState<{ status: 'success' | 'error'; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
   const cloudSectionRef = useRef<HTMLDivElement>(null);
   const isAdmin = user?.role === 'admin';
+
+  // Phase 85: Tenant onboarding stage
+  const [tenantStage, setTenantStage] = useState<string>('active');
+  const [primaryCloud, setPrimaryCloud] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+  const [addingCloud, setAddingCloud] = useState(false);
+
+  useEffect(() => {
+    if (user?.is_superadmin) return;
+    fetch('/api/tenant/stage')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.stage) setTenantStage(data.stage);
+        if (data?.primary_cloud) setPrimaryCloud(data.primary_cloud);
+      })
+      .catch(() => {});
+  }, [user]);
+
+  async function handleSaveAndUnlock() {
+    if (!settings) return;
+    setUnlocking(true);
+    setError(null);
+    try {
+      // 1. Save settings
+      const saveRes = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      });
+      if (!saveRes.ok) {
+        const data = await saveRes.json();
+        throw new Error(data.error || 'Save failed');
+      }
+      // 2. Test connection
+      const testRes = await fetch('/api/settings/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          azure_tenant_id: settings.azure_tenant_id,
+          azure_client_id: settings.azure_client_id,
+          azure_client_secret: settings.azure_client_secret,
+        }),
+      });
+      const testData = await testRes.json();
+      if (!testRes.ok || testData.status !== 'success') {
+        throw new Error(testData.error || testData.message || 'Connection test failed. Please check your credentials.');
+      }
+      // 3. Update stage to active
+      await fetch('/api/tenant/stage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: 'active' }),
+      });
+      // 4. Trigger first discovery
+      try {
+        await fetch('/api/runs/trigger', { method: 'POST' });
+      } catch { /* ignore */ }
+      // 5. Navigate to overview
+      navigate('/');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to save and unlock');
+    } finally {
+      setUnlocking(false);
+    }
+  }
 
   // Scroll to #cloud-connections anchor
   useEffect(() => {
@@ -1323,6 +1389,21 @@ export default function Settings() {
         </p>
       </div>
 
+      {/* Phase 85: Locked stage banner */}
+      {tenantStage === 'locked' && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3">
+          <svg className="w-5 h-5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+          <div>
+            <div className="text-sm font-semibold text-amber-800">Complete Cloud Setup</div>
+            <p className="text-xs text-amber-700">
+              Enter your cloud provider credentials below, test the connection, then click "Save &amp; Run First Discovery" to unlock your dashboard.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Error / Success */}
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
@@ -1496,6 +1577,21 @@ export default function Settings() {
             <div className="text-lg font-semibold text-gray-900">Cloud Connections</div>
             <p className="text-xs text-gray-500">Configure cloud provider credentials for identity discovery.</p>
 
+            {tenantStage === 'locked' && (
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
+                <svg className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                  <div className="text-sm font-semibold text-blue-800">Connect Your Cloud Provider</div>
+                  <p className="text-xs text-blue-700 mt-0.5">
+                    Your administrator has enabled <strong className="font-semibold">{primaryCloud ? primaryCloud.charAt(0).toUpperCase() + primaryCloud.slice(1) : 'your cloud provider'}</strong> for your organization.
+                    Add your connector credentials below to start monitoring.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {!isAdmin ? (
               <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-600">
                 Contact your tenant administrator to configure cloud credentials.
@@ -1503,7 +1599,10 @@ export default function Settings() {
             ) : (
               <div className="space-y-5">
                 {/* Azure */}
-                {cloudConfig?.cloud_providers?.azure?.enabled ? (
+                {cloudConfig?.cloud_providers?.azure?.enabled ? (() => {
+                  const hasCredentials = !!(settings?.azure_tenant_id || settings?.azure_client_id);
+                  const showForm = hasCredentials || addingCloud;
+                  return showForm ? (
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-blue-700">Azure</span>
@@ -1562,6 +1661,14 @@ export default function Settings() {
                       >
                         {testingConnection ? 'Testing...' : 'Test Connection'}
                       </button>
+                      {!hasCredentials && (
+                        <button
+                          onClick={() => setAddingCloud(false)}
+                          className="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 transition"
+                        >
+                          Cancel
+                        </button>
+                      )}
                       {connectionTestResult && (
                         <span className={`text-sm ${connectionTestResult.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
                           {connectionTestResult.message}
@@ -1584,11 +1691,60 @@ export default function Settings() {
                       </div>
                     )}
 
-                    <p className="text-xs text-gray-400">
-                      Credentials are saved with the global &quot;Save Settings&quot; button below.
-                    </p>
+                    {tenantStage === 'locked' && connectionTestResult?.status === 'success' && (
+                      <button
+                        type="button"
+                        onClick={handleSaveAndUnlock}
+                        disabled={unlocking}
+                        className="w-full py-3 text-sm font-semibold text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 transition flex items-center justify-center gap-2"
+                      >
+                        {unlocking ? (
+                          <>
+                            <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                            Saving & Running First Discovery...
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            Save &amp; Run First Discovery
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    {tenantStage !== 'locked' && (
+                      <p className="text-xs text-gray-400">
+                        Credentials are saved with the global &quot;Save Settings&quot; button below.
+                      </p>
+                    )}
                   </div>
                 ) : (
+                  /* Empty state — no credentials yet */
+                  <div className="border border-dashed border-gray-300 rounded-xl p-6 text-center">
+                    <div className="flex items-center justify-center gap-2 mb-2">
+                      <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z" />
+                      </svg>
+                      <span className="text-sm font-semibold text-gray-800">Azure</span>
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200">Primary</span>
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-50 text-amber-600 border border-amber-200">Not Connected</span>
+                    </div>
+                    <p className="text-xs text-gray-500 mb-4">No cloud credentials configured. Connect your Azure environment to start identity discovery.</p>
+                    <button
+                      onClick={() => setAddingCloud(true)}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Add Cloud Connection
+                    </button>
+                  </div>
+                );
+                })() : (
                   <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
                     <div className="text-sm font-medium text-gray-600">Azure</div>
                     <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
@@ -2986,8 +3142,8 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Section 12: Data Retention (Phase 72) */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+          {/* Section 12: Data Retention (Phase 72) — superadmin only */}
+          {isSuperAdmin && <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div>
               <div className="text-lg font-semibold text-gray-900">Data Retention</div>
               <p className="text-sm text-gray-500 mt-0.5">
@@ -3138,10 +3294,10 @@ export default function Settings() {
                 {cleanupRunning ? 'Cleaning...' : 'Run Cleanup Now'}
               </button>
             </div>
-          </div>
+          </div>}
 
-          {/* Section 13: AI Security Copilot (Phase 79) */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+          {/* Section 13: AI Security Copilot (Phase 79) — superadmin only */}
+          {isSuperAdmin && <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
                 <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3175,7 +3331,7 @@ export default function Settings() {
                 Your API key is stored securely and only used server-side for copilot requests.
               </p>
             </div>
-          </div>
+          </div>}
 
           {/* Section 14: Integrations (Phase 83) */}
           <IntegrationsSection />

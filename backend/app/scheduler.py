@@ -436,6 +436,13 @@ def _generate_notifications(current_run_id: int, changes: dict, db: Database):
         from app.services.notification_service import NotificationService
         notifier = NotificationService()
 
+        # Look up tenant_id from the discovery run
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (current_run_id,))
+        run_tenant = cursor.fetchone()
+        tid = run_tenant[0] if run_tenant else None
+        cursor.close()
+
         # Get run summary
         cursor = db.conn.cursor()
         cursor.execute("""
@@ -455,28 +462,28 @@ def _generate_notifications(current_run_id: int, changes: dict, db: Database):
                 'low': run_row[4] or 0,
             }
 
-        notifier.notify_discovery_completed(current_run_id, summary)
+        notifier.notify_discovery_completed(current_run_id, summary, tenant_id=tid)
 
         new_ids = changes.get('new_identities', [])
         if new_ids:
-            notifier.notify_new_identities(current_run_id, new_ids)
+            notifier.notify_new_identities(current_run_id, new_ids, tenant_id=tid)
 
         removed_ids = changes.get('removed_identities', [])
         if removed_ids:
-            notifier.notify_removed_identities(current_run_id, removed_ids)
+            notifier.notify_removed_identities(current_run_id, removed_ids, tenant_id=tid)
 
         risk_changes = changes.get('risk_changes', [])
         escalations = [c for c in risk_changes if c.get('direction') == 'increased' or c.get('new_risk') in ('critical', 'high')]
         if escalations:
-            notifier.notify_risk_escalations(current_run_id, escalations)
+            notifier.notify_risk_escalations(current_run_id, escalations, tenant_id=tid)
 
         perm_changes = changes.get('permission_changes', [])
         if perm_changes:
-            notifier.notify_permission_changes(current_run_id, perm_changes)
+            notifier.notify_permission_changes(current_run_id, perm_changes, tenant_id=tid)
 
         cred_changes = changes.get('credential_changes', [])
         if cred_changes:
-            notifier.notify_credential_changes(current_run_id, cred_changes)
+            notifier.notify_credential_changes(current_run_id, cred_changes, tenant_id=tid)
 
         # Cleanup old notifications
         cleaned = db.cleanup_old_notifications(days=90)

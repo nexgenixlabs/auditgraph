@@ -24,7 +24,7 @@ const TenantContext = createContext<TenantContextValue>({
   isPortal: false,
 });
 
-const RESERVED_PREFIXES = ['app', 'www', 'api', 'admin', 'mail', 'smtp'];
+const RESERVED_PREFIXES = ['app', 'www', 'api', 'admin', 'mail', 'smtp', 'dev', 'qa', 'stage', 'staging', 'prod'];
 
 function extractTenantSlug(): string | null {
   // Dev override via env var
@@ -33,8 +33,9 @@ function extractTenantSlug(): string | null {
 
   const hostname = window.location.hostname;
 
-  // Dev mode: no subdomain on localhost
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.')) {
+  // Dev mode or platform hostnames: no tenant scoping
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.')
+      || hostname.endsWith('.azurewebsites.net')) {
     return null;
   }
 

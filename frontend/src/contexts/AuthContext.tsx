@@ -112,10 +112,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (!headers.has('Authorization')) {
             headers.set('Authorization', `Bearer ${token}`);
           }
-          // Phase 46: Attach tenant override header for superadmins
+          // Phase 46: Attach tenant override header for superadmins (admin portal only)
           const activeTid = localStorage.getItem('active_tenant_id');
           if (activeTid && !headers.has('X-Tenant-Id')) {
-            headers.set('X-Tenant-Id', activeTid);
+            const currentPortal = detectPortal();
+            if (currentPortal === 'admin') {
+              headers.set('X-Tenant-Id', activeTid);
+            }
           }
           init = { ...init, headers };
         }
@@ -195,12 +198,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'Login failed');
+      throw new Error(data.message || data.error || 'Login failed');
     }
     const data = await res.json();
     localStorage.setItem(keys.access, data.access_token);
     localStorage.setItem(keys.refresh, data.refresh_token);
-    setUser(data.user);
+    // Don't set user when force_password_change is required — keeps user null
+    // so the /login route stays active and Login.tsx can show the password change form
+    if (!data.user?.force_password_change) {
+      setUser(data.user);
+    }
     return data.user;
   }, []);
 

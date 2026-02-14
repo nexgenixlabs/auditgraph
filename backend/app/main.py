@@ -167,6 +167,9 @@ from app.api.handlers import (
     get_app_reg_list,
     get_app_reg_detail,
     get_tenant_config,
+    get_tenant_branding,
+    get_tenant_stage,
+    update_tenant_stage,
     upload_tenant_logo,
     delete_tenant_logo,
     get_scan_modes,
@@ -178,6 +181,10 @@ from app.api.handlers import (
     get_integration_settings,
     save_integration_settings,
     test_integration_webhook,
+    forgot_password_handler,
+    validate_reset_token_handler,
+    reset_password_handler,
+    admin_reset_user_password,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -243,6 +250,19 @@ def create_app():
     def password_change():
         return change_password()
 
+    # Phase 84: Password reset & account lockout
+    @app.post("/api/auth/forgot-password")
+    def forgot_password():
+        return forgot_password_handler()
+
+    @app.get("/api/auth/validate-reset-token")
+    def validate_reset_token():
+        return validate_reset_token_handler()
+
+    @app.post("/api/auth/reset-password")
+    def reset_password():
+        return reset_password_handler()
+
     # -----------------------
     # User Management (Phase 31 - Admin only)
     # -----------------------
@@ -265,6 +285,11 @@ def create_app():
     @require_role('admin')
     def users_delete(user_id):
         return delete_user_handler(user_id)
+
+    @app.post("/api/users/<int:user_id>/reset-password")
+    @require_role('admin')
+    def users_reset_password(user_id):
+        return admin_reset_user_password(user_id)
 
     # -----------------------
     # API Key Management (Phase 42 - Admin only)
@@ -374,6 +399,20 @@ def create_app():
     @app.get("/api/tenant/config")
     def tenant_config():
         return get_tenant_config()
+
+    # Phase 85: Tenant branding (public) + onboarding stage
+    @app.get("/api/auth/tenant-branding")
+    def tenant_branding():
+        return get_tenant_branding()
+
+    @app.get("/api/tenant/stage")
+    def tenant_stage_get():
+        return get_tenant_stage()
+
+    @app.post("/api/tenant/stage")
+    @require_role('admin')
+    def tenant_stage_update():
+        return update_tenant_stage()
 
     # Phase 53: SaaS Platform
     @app.get("/api/tenants/by-slug/<slug>")

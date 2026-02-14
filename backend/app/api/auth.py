@@ -27,6 +27,10 @@ PUBLIC_PATHS = {
     '/api/health',
     '/health',
     '/api/metrics',
+    '/api/auth/forgot-password',
+    '/api/auth/reset-password',
+    '/api/auth/validate-reset-token',
+    '/api/auth/tenant-branding',
 }
 
 

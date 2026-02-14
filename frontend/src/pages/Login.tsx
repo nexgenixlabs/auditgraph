@@ -31,6 +31,9 @@ export default function Login() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
 
+  // Phase 85: Tenant branding for login page
+  const [branding, setBranding] = useState<{ company_name: string; slug: string; logo_url: string | null } | null>(null);
+
   useEffect(() => {
     const slug = tenantSlug || resolvedTenant?.slug;
     if (!slug) return;
@@ -43,6 +46,13 @@ export default function Login() {
         }
       })
       .catch(() => {});
+    // Phase 85: Fetch tenant branding
+    fetch(`/api/auth/tenant-branding?slug=${encodeURIComponent(slug)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data) setBranding(data);
+      })
+      .catch(() => {});
   }, [tenantSlug, resolvedTenant]);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -53,6 +63,10 @@ export default function Login() {
       // Subdomain mode: scope login to detected tenant
       // Dev mode: no tenant scoping
       const userData = await login(username, password, tenantSlug || undefined);
+
+      // Clear stale admin tenant context on client login
+      localStorage.removeItem('active_tenant_id');
+      localStorage.removeItem('active_tenant_name');
 
       // Phase 78: Check if password change is required
       if (userData?.force_password_change) {
@@ -124,6 +138,10 @@ export default function Login() {
       const userData = await login(username, newPassword, tenantSlug || undefined);
       setForcePasswordChange(false);
 
+      // Clear stale admin tenant context
+      localStorage.removeItem('active_tenant_id');
+      localStorage.removeItem('active_tenant_name');
+
       if (isPortal) {
         const portalRole = userData?.portal_role;
         if (portalRole && ['superadmin', 'poweradmin', 'billing', 'reader'].includes(portalRole)) {
@@ -131,7 +149,15 @@ export default function Login() {
           return;
         }
       }
-      navigate('/');
+      // Phase 85: Transition onboarding stage to 'locked' after password change
+      try {
+        await fetch('/api/tenant/stage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stage: 'locked' }),
+        });
+      } catch { /* ignore */ }
+      navigate('/settings#cloud-connections');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to change password');
     } finally {
@@ -216,9 +242,13 @@ export default function Login() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-md px-4">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              AG
-            </div>
+            {branding?.logo_url ? (
+              <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
+            ) : (
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
+                {(branding?.company_name || resolvedTenant?.name || 'AG').substring(0, 2).toUpperCase()}
+              </div>
+            )}
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Set New Password</h1>
             <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Your administrator requires you to set a new password</p>
           </div>
@@ -274,7 +304,7 @@ export default function Login() {
           </div>
 
           <p className="text-center text-xs text-gray-400 mt-6">
-            Enterprise Identity Risk Intelligence
+            Powered by AuditGraph
           </p>
         </div>
       </div>
@@ -287,23 +317,20 @@ export default function Login() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-            AG
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">AuditGraph</h1>
-          {resolvedTenant ? (
-            <div className="mt-2">
-              <p className="text-sm text-gray-500">
-                Sign in to <span className="font-semibold text-gray-700 dark:text-slate-300">{resolvedTenant.name}</span>
-              </p>
-              <span className={`inline-block mt-1 px-2 py-0.5 rounded text-[10px] font-semibold ${
-                resolvedTenant.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
-                resolvedTenant.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
-                'bg-gray-100 text-gray-600'
-              }`}>{resolvedTenant.plan}</span>
-            </div>
+          {branding?.logo_url ? (
+            <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
           ) : (
-            <p className="text-sm text-gray-500 mt-1">Sign in to your account</p>
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
+              {(branding?.company_name || resolvedTenant?.name || 'AG').substring(0, 2).toUpperCase()}
+            </div>
+          )}
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+            {branding?.company_name || resolvedTenant?.name || 'AuditGraph'}
+          </h1>
+          {resolvedTenant ? (
+            <p className="text-sm text-gray-500 mt-1">Sign in to your organization's portal</p>
+          ) : (
+            <p className="text-sm text-gray-500 mt-1">Welcome</p>
           )}
         </div>
 
@@ -362,7 +389,16 @@ export default function Login() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">Password</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-slate-300">Password</label>
+                  <button
+                    type="button"
+                    onClick={() => navigate('/forgot-password')}
+                    className="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 transition"
+                  >
+                    Forgot Password?
+                  </button>
+                </div>
                 <input
                   type="password"
                   value={password}
@@ -389,7 +425,7 @@ export default function Login() {
         </div>
 
         <p className="text-center text-xs text-gray-400 mt-6">
-          Enterprise Identity Risk Intelligence
+          Powered by AuditGraph
         </p>
       </div>
     </div>
