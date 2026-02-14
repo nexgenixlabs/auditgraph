@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: app-auditgraph-frontend
+  AZURE_WEBAPP_NAME: app-auditgraph-web
   NODE_VERSION: '20'
 
 jobs:
