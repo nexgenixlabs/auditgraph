@@ -54,7 +54,7 @@ class Database:
                 database=os.getenv("DB_NAME"),
                 user=os.getenv("DB_USER"),
                 password=os.getenv("DB_PASSWORD"),
-                sslmode="require",
+                sslmode=os.getenv("DB_SSLMODE", "require"),
             )
             print("✓ Connected to database")
         except Exception as e:
@@ -122,6 +122,8 @@ class Database:
         self.conn.commit()
         cursor.close()
 
+    _risk_factors_col_ensured = False
+
     def save_identity(self, run_id: int, identity_data: Dict) -> int:
         """
         Save an identity to the database (UPSERT)
@@ -130,6 +132,15 @@ class Database:
             identity database ID
         """
         cursor = self.conn.cursor()
+
+        # Ensure risk_factors JSONB column exists (V2 risk engine)
+        if not Database._risk_factors_col_ensured:
+            try:
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS risk_factors JSONB DEFAULT '[]'::jsonb")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+            Database._risk_factors_col_ensured = True
 
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
@@ -161,6 +172,7 @@ class Database:
                 risk_level,
                 risk_score,
                 risk_reasons,
+                risk_factors,
 
                 credential_expiration,
                 credential_status,
@@ -188,7 +200,7 @@ class Database:
                 %s, %s,
                 %s,
                 %s, %s, %s,
-                %s, %s, %s,
+                %s, %s, %s, %s,
                 %s, %s,
                 %s, %s,
                 %s, %s,
@@ -213,6 +225,7 @@ class Database:
                 risk_level = EXCLUDED.risk_level,
                 risk_score = EXCLUDED.risk_score,
                 risk_reasons = EXCLUDED.risk_reasons,
+                risk_factors = EXCLUDED.risk_factors,
 
                 credential_expiration = EXCLUDED.credential_expiration,
                 credential_status = EXCLUDED.credential_status,
@@ -263,6 +276,7 @@ class Database:
                 identity_data.get("risk_level"),
                 identity_data.get("risk_score", 0),
                 identity_data.get("risk_reasons", []),
+                json.dumps(identity_data.get("risk_factors", [])),
 
                 identity_data.get("credential_expiration"),
                 identity_data.get("credential_status"),
@@ -6316,3 +6330,242 @@ class Database:
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
+
+    # ================================================================
+    # Cloud Subscriptions (per-account monitoring)
+    # ================================================================
+
+    def _ensure_cloud_subscriptions_table(self):
+        """Create cloud_subscriptions table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cloud_subscriptions (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                cloud VARCHAR(20) NOT NULL,
+                account_id VARCHAR(255) NOT NULL,
+                account_name VARCHAR(500),
+                status VARCHAR(20) DEFAULT 'discovered',
+                monitored BOOLEAN DEFAULT false,
+                activated_at TIMESTAMPTZ,
+                activated_by INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(tenant_id, cloud, account_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_tenant ON cloud_subscriptions(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_cloud ON cloud_subscriptions(cloud)")
+        self.conn.commit()
+        cursor.close()
+
+    def get_cloud_subscriptions(self, tenant_id, cloud=None):
+        """List cloud subscriptions for a tenant."""
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        query = "SELECT * FROM cloud_subscriptions WHERE tenant_id = %s"
+        params = [tenant_id]
+        if cloud:
+            query += " AND cloud = %s"
+            params.append(cloud)
+        query += " ORDER BY cloud, account_name"
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts in ('activated_at', 'created_at'):
+                if r.get(ts):
+                    r[ts] = r[ts].isoformat()
+        return rows
+
+    def get_subscription_stats(self, tenant_id):
+        """Summary counts for cloud subscriptions."""
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE monitored = true) as active,
+                COUNT(*) FILTER (WHERE monitored = false) as discovered,
+                COUNT(DISTINCT cloud) as clouds
+            FROM cloud_subscriptions
+            WHERE tenant_id = %s
+        """, (tenant_id,))
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return row
+
+    def activate_cloud_subscription(self, sub_id, user_id):
+        """Activate a subscription for monitoring."""
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE cloud_subscriptions
+            SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
+            WHERE id = %s
+            RETURNING *
+        """, (user_id, sub_id))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('activated_at', 'created_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def deactivate_cloud_subscription(self, sub_id):
+        """Stop monitoring a subscription."""
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE cloud_subscriptions
+            SET monitored = false, status = 'inactive'
+            WHERE id = %s
+            RETURNING *
+        """, (sub_id,))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('activated_at', 'created_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    # ================================================================
+    # Identity ↔ Subscription Access (multi-subscription model)
+    # ================================================================
+
+    _isa_ensured = False
+
+    def _ensure_identity_subscription_access_table(self):
+        """Create identity_subscription_access junction table if it doesn't exist."""
+        if Database._isa_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_subscription_access (
+                id BIGSERIAL PRIMARY KEY,
+                identity_db_id BIGINT NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+                identity_id TEXT NOT NULL,
+                subscription_id TEXT NOT NULL,
+                subscription_name TEXT,
+                rbac_role TEXT NOT NULL,
+                scope TEXT,
+                scope_type TEXT,
+                risk_level TEXT,
+                last_activity TIMESTAMPTZ,
+                discovered_at TIMESTAMPTZ DEFAULT NOW(),
+                discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                UNIQUE(identity_db_id, subscription_id, rbac_role, scope)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_identity ON identity_subscription_access(identity_db_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_sub ON identity_subscription_access(subscription_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_identity_id ON identity_subscription_access(identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_run ON identity_subscription_access(discovery_run_id)")
+        # Add primary_subscription_id and additional_subscription_count to identities if missing
+        for col, coltype in [
+            ('primary_subscription_id', 'TEXT'),
+            ('additional_subscription_count', 'INTEGER DEFAULT 0'),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col} {coltype}")
+            except Exception:
+                pass
+        self.conn.commit()
+        cursor.close()
+        Database._isa_ensured = True
+
+    def save_identity_subscription_access(self, identity_db_id, identity_id, role_assignment, subscription_id, subscription_name, run_id):
+        """Insert one identity ↔ subscription RBAC access row (upsert on conflict)."""
+        self._ensure_identity_subscription_access_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO identity_subscription_access
+                (identity_db_id, identity_id, subscription_id, subscription_name,
+                 rbac_role, scope, scope_type, risk_level, discovery_run_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (identity_db_id, subscription_id, rbac_role, scope) DO UPDATE
+            SET risk_level = EXCLUDED.risk_level,
+                subscription_name = EXCLUDED.subscription_name,
+                discovery_run_id = EXCLUDED.discovery_run_id,
+                discovered_at = NOW()
+        """, (
+            identity_db_id, identity_id, subscription_id, subscription_name,
+            role_assignment.get('role_name', 'Unknown'),
+            role_assignment.get('scope', ''),
+            role_assignment.get('scope_type', 'subscription'),
+            role_assignment.get('risk_level', 'info'),
+            run_id,
+        ))
+        self.conn.commit()
+        cursor.close()
+
+    def update_identity_subscription_summary(self, identity_db_id):
+        """Compute primary_subscription_id and additional_subscription_count from junction table."""
+        self._ensure_identity_subscription_access_table()
+        cursor = self.conn.cursor()
+        # Get distinct subscriptions with their highest-privilege role
+        cursor.execute("""
+            SELECT subscription_id, subscription_name,
+                   MAX(CASE
+                       WHEN LOWER(rbac_role) LIKE '%%owner%%' THEN 4
+                       WHEN LOWER(rbac_role) LIKE '%%contributor%%' THEN 3
+                       WHEN LOWER(rbac_role) LIKE '%%admin%%' THEN 3
+                       WHEN LOWER(rbac_role) LIKE '%%writer%%' THEN 2
+                       WHEN LOWER(rbac_role) LIKE '%%reader%%' THEN 1
+                       ELSE 0
+                   END) as role_priority
+            FROM identity_subscription_access
+            WHERE identity_db_id = %s
+            GROUP BY subscription_id, subscription_name
+            ORDER BY role_priority DESC, subscription_name ASC
+        """, (identity_db_id,))
+        rows = cursor.fetchall()
+        if rows:
+            primary_sub_id = rows[0][0]
+            additional_count = max(0, len(rows) - 1)
+            cursor.execute("""
+                UPDATE identities
+                SET primary_subscription_id = %s, additional_subscription_count = %s
+                WHERE id = %s
+            """, (primary_sub_id, additional_count, identity_db_id))
+            self.conn.commit()
+        cursor.close()
+
+    def get_identity_subscription_access(self, identity_db_id):
+        """Get all subscription access records for an identity."""
+        self._ensure_identity_subscription_access_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT subscription_id, subscription_name, rbac_role, scope,
+                   scope_type, risk_level, last_activity, discovered_at
+            FROM identity_subscription_access
+            WHERE identity_db_id = %s
+            ORDER BY subscription_name, rbac_role
+        """, (identity_db_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts in ('last_activity', 'discovered_at'):
+                if r.get(ts):
+                    r[ts] = r[ts].isoformat()
+        return rows
+
+    def get_identities_by_subscription(self, subscription_id):
+        """Get all identity IDs that have access to a given subscription."""
+        self._ensure_identity_subscription_access_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT identity_id
+            FROM identity_subscription_access
+            WHERE subscription_id = %s
+        """, (subscription_id,))
+        ids = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        return ids

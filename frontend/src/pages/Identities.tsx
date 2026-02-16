@@ -9,10 +9,16 @@ import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS } from '../utils/exportUtils';
+import { maskCredential } from '../utils/maskCredential';
+import IdentityDrawer from '../components/IdentityDrawer';
+import ExposureGraph from '../components/graph/ExposureGraph';
 import {
   type IdentityCategory, type RiskLevel, type DormantStatus,
+  type PrivilegedLevel, type EffectiveScope, type CredentialHealth,
   CATEGORY_FILTER_OPTIONS, RISK_FILTER_OPTIONS, RISK_ORDER, RISK_BADGE, RISK_SOLID, CLOUD_BADGE,
   THRESHOLDS, DORMANT_LABELS, DATA_EXPLANATIONS,
+  PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, EFFECTIVE_SCOPE_ORDER, CREDENTIAL_HEALTH_CONFIG,
+  SCOPE_LABELS, CATEGORY_LABELS_MULTI,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
 } from '../constants/metrics';
 
@@ -50,6 +56,13 @@ interface IdentityRow {
   has_permanent_assignment?: boolean;
   ca_coverage_status?: string | null;
   ca_mfa_enforced?: boolean;
+  subscription_id?: string | null;
+  subscription_name?: string | null;
+  primary_subscription_id?: string | null;
+  additional_subscription_count?: number;
+  effective_scope?: EffectiveScope;
+  privileged_level?: PrivilegedLevel;
+  credential_health?: CredentialHealth;
 }
 
 interface SavedView {
@@ -69,6 +82,8 @@ type SortField =
   | 'display_name'
   | 'identity_type'
   | 'identity_category'
+  | 'subscription_id'
+  | 'subscription_name'
   | 'cloud'
   | 'risk_level'
   | 'entra_role_count'
@@ -78,7 +93,9 @@ type SortField =
   | 'credential_expiration'
   | 'created_datetime'
   | 'last_seen_auth'
-  | 'dormant';
+  | 'dormant'
+  | 'effective_scope'
+  | 'credential_health';
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -203,9 +220,28 @@ const CATEGORY_BADGE_COLORS: Record<string, string> = {
   guest: 'bg-pink-50 text-pink-700',
 };
 
-function CategoryBadge({ category }: { category?: IdentityCategory }) {
+function CategoryBadge({ category, cloud }: { category?: IdentityCategory; cloud?: string }) {
   const color = CATEGORY_BADGE_COLORS[category || ''] || 'bg-gray-50 text-gray-600';
-  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${color}`}>{getCategoryShortLabel(category)}</span>;
+  const cloudLabels = cloud && CATEGORY_LABELS_MULTI[cloud.toLowerCase()];
+  const label = (cloudLabels && cloudLabels[category || '']) || getCategoryShortLabel(category);
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${color}`}>{label}</span>;
+}
+
+function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
+  const cfg = PRIVILEGED_LEVELS[level || 'standard'];
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.color}`} title={cfg.tooltip}>{cfg.label}</span>;
+}
+
+function ScopeBadge({ scope, cloud }: { scope?: EffectiveScope; cloud?: string }) {
+  const cfg = EFFECTIVE_SCOPE_CONFIG[scope || 'none'];
+  const cloudLabels = cloud && SCOPE_LABELS[cloud.toLowerCase()];
+  const label = (cloudLabels && cloudLabels[scope || '']) || cfg.label;
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.color}`}>{label}</span>;
+}
+
+function CredentialHealthBadge({ health }: { health?: CredentialHealth }) {
+  const cfg = CREDENTIAL_HEALTH_CONFIG[health || 'none'];
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.color}`}>{cfg.label}</span>;
 }
 
 function TypeLabel({ type }: { type?: string }) {
@@ -234,6 +270,8 @@ export default function IdentitiesPage() {
   const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
   const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
   const [caFilter, setCaFilter] = useState<'all' | 'covered' | 'not_covered'>('all');
+  const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
+  const [allSubscriptions, setAllSubscriptions] = useState<{subscription_id: string; subscription_name: string}[]>([]);
   const [groupFilter, setGroupFilter] = useState<number | 'all'>('all');
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
@@ -265,10 +303,23 @@ export default function IdentitiesPage() {
   const [queryTotal, setQueryTotal] = useState(0);
   const [riskHistories, setRiskHistories] = useState<Record<string, number[]>>({});
 
+  // V2: Drawer + view mode state
+  const [drawerIdentityId, setDrawerIdentityId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'table' | 'graph'>('table');
+
   const { addToast } = useToast();
   const { user, isAdmin } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Dynamic column labels based on active cloud filter
+  function accountLabel(suffix: 'ID' | 'Name'): string {
+    const params = new URLSearchParams(location.search);
+    const cloud = params.get('cloud');
+    if (cloud === 'aws') return `Account ${suffix}`;
+    if (cloud === 'gcp') return `Project ${suffix}`;
+    return `Subscription ${suffix}`;
+  }
 
   // URL param sync
   useEffect(() => {
@@ -334,6 +385,13 @@ export default function IdentitiesPage() {
           has_permanent_assignment: raw.has_permanent_assignment ?? false,
           ca_coverage_status: raw.ca_coverage_status || null,
           ca_mfa_enforced: raw.ca_mfa_enforced ?? false,
+          subscription_id: raw.subscription_id || null,
+          subscription_name: raw.subscription_name || null,
+          primary_subscription_id: raw.primary_subscription_id || null,
+          additional_subscription_count: raw.additional_subscription_count ?? 0,
+          effective_scope: raw.effective_scope || 'none',
+          privileged_level: raw.privileged_level || 'standard',
+          credential_health: raw.credential_health || 'none',
         }));
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
@@ -379,6 +437,14 @@ export default function IdentitiesPage() {
   }, []);
 
   useEffect(() => { loadViews(); }, [loadViews]);
+
+  // Load distinct subscriptions for filter
+  useEffect(() => {
+    fetch('/api/subscriptions/distinct')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setAllSubscriptions(d.subscriptions || []))
+      .catch(() => {});
+  }, []);
 
   // Load groups for filter
   useEffect(() => {
@@ -462,6 +528,13 @@ export default function IdentitiesPage() {
           has_permanent_assignment: raw.has_permanent_assignment ?? false,
           ca_coverage_status: raw.ca_coverage_status || null,
           ca_mfa_enforced: raw.ca_mfa_enforced ?? false,
+          subscription_id: raw.subscription_id || null,
+          subscription_name: raw.subscription_name || null,
+          primary_subscription_id: raw.primary_subscription_id || null,
+          additional_subscription_count: raw.additional_subscription_count ?? 0,
+          effective_scope: raw.effective_scope || 'none',
+          privileged_level: raw.privileged_level || 'standard',
+          credential_health: raw.credential_health || 'none',
         }));
         setQueryResults(rows);
         setQueryTotal(data.total ?? rows.length);
@@ -503,6 +576,7 @@ export default function IdentitiesPage() {
     if (search) f.search = search;
     if (riskFilter !== 'all') f.risk_level = riskFilter;
     if (categoryFilter !== 'all') f.category = categoryFilter;
+    if (subscriptionFilter !== 'all') f.subscription_id = subscriptionFilter;
     if (ownerFilter !== 'all') f.owner_status = ownerFilter;
     if (activityFilter !== 'all') f.activity_status = activityFilter;
     if (tierFilter !== 'all') f.privilege_tier = tierFilter.join(',');
@@ -534,6 +608,7 @@ export default function IdentitiesPage() {
     setSearch(f.search || '');
     setRiskFilter((f.risk_level as RiskLevel) || 'all');
     setCategoryFilter((f.category as IdentityCategory) || 'all');
+    setSubscriptionFilter(f.subscription_id || 'all');
     setOwnerFilter(f.owner_status === 'unowned' ? 'unowned' : 'all');
     setActivityFilter(f.activity_status === 'dormant' ? 'dormant' : 'all');
     if (f.privilege_tier) {
@@ -640,6 +715,11 @@ export default function IdentitiesPage() {
           case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
           case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
           case 'privilege_tier': aVal = getPrivilegeTier(a); bVal = getPrivilegeTier(b); break;
+          case 'effective_scope': aVal = EFFECTIVE_SCOPE_ORDER[a.effective_scope || 'none']; bVal = EFFECTIVE_SCOPE_ORDER[b.effective_scope || 'none']; break;
+          case 'credential_health': {
+            const chOrder: Record<string, number> = { expired: 4, expiring: 3, ok: 2, none: 1 };
+            aVal = chOrder[a.credential_health || 'none'] || 0; bVal = chOrder[b.credential_health || 'none'] || 0; break;
+          }
           case 'credential_expiration':
             aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
             bVal = b.credential_expiration ? new Date(b.credential_expiration).getTime() : Infinity;
@@ -675,6 +755,7 @@ export default function IdentitiesPage() {
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
     if (riskFilter !== 'all') result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
     if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
+    if (subscriptionFilter !== 'all') result = result.filter(i => i.subscription_id === subscriptionFilter);
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (activityFilter === 'dormant') result = result.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'idle' || d === 'never'; });
     if (tierFilter !== 'all') result = result.filter(i => tierFilter.includes(getPrivilegeTier(i)));
@@ -706,11 +787,18 @@ export default function IdentitiesPage() {
         case 'display_name': aVal = safeLower(a.display_name); bVal = safeLower(b.display_name); break;
         case 'identity_type': aVal = safeLower(a.identity_type); bVal = safeLower(b.identity_type); break;
         case 'identity_category': aVal = safeLower(a.identity_category); bVal = safeLower(b.identity_category); break;
+        case 'subscription_id': aVal = safeLower(a.subscription_id); bVal = safeLower(b.subscription_id); break;
+        case 'subscription_name': aVal = safeLower(a.subscription_name); bVal = safeLower(b.subscription_name); break;
         case 'cloud': aVal = safeLower(a.cloud); bVal = safeLower(b.cloud); break;
         case 'entra_role_count': aVal = a.entra_role_count ?? 0; bVal = b.entra_role_count ?? 0; break;
         case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
         case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
         case 'privilege_tier': aVal = getPrivilegeTier(a); bVal = getPrivilegeTier(b); break;
+        case 'effective_scope': aVal = EFFECTIVE_SCOPE_ORDER[a.effective_scope || 'none']; bVal = EFFECTIVE_SCOPE_ORDER[b.effective_scope || 'none']; break;
+        case 'credential_health': {
+          const chOrd: Record<string, number> = { expired: 4, expiring: 3, ok: 2, none: 1 };
+          aVal = chOrd[a.credential_health || 'none'] || 0; bVal = chOrd[b.credential_health || 'none'] || 0; break;
+        }
         case 'credential_expiration':
           aVal = a.credential_expiration ? new Date(a.credential_expiration).getTime() : Infinity;
           bVal = b.credential_expiration ? new Date(b.credential_expiration).getTime() : Infinity;
@@ -738,13 +826,13 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, riskFilter, categoryFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, riskFilter, categoryFilter, subscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
     else {
       setSortField(field);
-      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant'].includes(field) ? 'desc' : 'asc');
+      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health'].includes(field) ? 'desc' : 'asc');
     }
   }
 
@@ -796,9 +884,10 @@ export default function IdentitiesPage() {
   // Export CSV
   function exportToCSV() {
     if (selectedIds.size === 0) { alert('Select identities first.'); return; }
-    const headers = ['Display Name','Identity ID','Type','Category','Cloud','Risk','Score','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
+    const headers = ['Display Name','Identity ID','Type','Category','Subscription Name','Subscription ID','Cloud','Risk','Score','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
     const rows = selectedIdentities.map(i => [
       i.display_name, i.identity_id, i.identity_type || '', getCategoryLabel(i.identity_category),
+      i.subscription_name || '', i.subscription_id || '',
       i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), i.risk_score ?? 0,
       `T${getPrivilegeTier(i)}`, i.entra_role_count ?? 0, i.rbac_role_count ?? 0,
       i.api_permission_count ?? 0, i.credential_expiration || '', i.created_datetime || '',
@@ -863,7 +952,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 15; // checkbox + 13 data cols + trend sparkline
+  const colSpan = 9; // checkbox + 8 V2 primary columns
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -874,8 +963,25 @@ export default function IdentitiesPage() {
           <p className="text-sm text-gray-500">Full identity inventory — click any row for deep-dive</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* View toggle */}
+          <div className="flex border rounded-lg overflow-hidden">
+            <button
+              onClick={() => setViewMode('table')}
+              className={`px-2.5 py-1 text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              Table
+            </button>
+            <button
+              onClick={() => setViewMode('graph')}
+              className={`px-2.5 py-1 text-xs font-medium transition-colors ${viewMode === 'graph' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              Graph
+            </button>
+          </div>
           <span className="text-sm text-gray-600">
-            {loading ? 'Loading…' : `${filtered.length} of ${identities.length}`}
+            {loading ? 'Loading…' : subscriptionFilter !== 'all'
+              ? `${filtered.length} of ${identities.length} identities in ${allSubscriptions.find(s => s.subscription_id === subscriptionFilter)?.subscription_name || subscriptionFilter}`
+              : `${filtered.length} of ${identities.length}`}
             {selectedIds.size > 0 && <span className="ml-1 text-blue-600 font-semibold">({selectedIds.size} sel)</span>}
           </span>
           {!loading && filtered.length > 0 && (
@@ -1137,7 +1243,7 @@ export default function IdentitiesPage() {
         </div>
 
         {queryMode === 'simple' ? (
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
           <input value={search} onChange={e => { setSearch(e.target.value); clearActiveView(); }} placeholder="Search name, ID, owner…"
             className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
           <select value={riskFilter} onChange={e => { setRiskFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
@@ -1146,11 +1252,15 @@ export default function IdentitiesPage() {
           <select value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
             {CATEGORY_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
+          <select value={subscriptionFilter} onChange={e => { setSubscriptionFilter(e.target.value); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
+            <option value="all">All {accountLabel('Name')}s</option>
+            {allSubscriptions.map(s => <option key={s.subscription_id} value={s.subscription_id}>{s.subscription_name || s.subscription_id}</option>)}
+          </select>
           <select value={groupFilter === 'all' ? 'all' : String(groupFilter)} onChange={e => setGroupFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} className="border rounded-lg px-3 py-1.5 text-sm">
             <option value="all">All Groups</option>
             {allGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.member_count})</option>)}
           </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setGroupFilter('all'); setActiveViewId(null); navigate('/identities', { replace: true }); }}
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setSubscriptionFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setGroupFilter('all'); setActiveViewId(null); navigate('/identities', { replace: true }); }}
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>
@@ -1166,9 +1276,15 @@ export default function IdentitiesPage() {
           />
         )}
         {/* Active filter chips from recommendations (simple mode only) */}
-        {queryMode === 'simple' && (ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all') && (
+        {queryMode === 'simple' && (subscriptionFilter !== 'all' || ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all') && (
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <span className="text-[10px] text-gray-500 uppercase font-semibold">Active filters:</span>
+            {subscriptionFilter !== 'all' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                {accountLabel('Name')}: {allSubscriptions.find(s => s.subscription_id === subscriptionFilter)?.subscription_name || subscriptionFilter}
+                <button onClick={() => { setSubscriptionFilter('all'); }} className="hover:text-indigo-600">&times;</button>
+              </span>
+            )}
             {ownerFilter === 'unowned' && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
                 No Owner
@@ -1203,7 +1319,39 @@ export default function IdentitiesPage() {
         )}
       </div>
 
+      {/* KPI Summary Strip */}
+      {!loading && identities.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-3">
+          {[
+            { label: 'Total', value: identities.length, onClick: () => { setRiskFilter('all'); setCategoryFilter('all'); setActivityFilter('all'); setCredentialFilter('all'); setTierFilter('all'); navigate('/identities', { replace: true }); } },
+            { label: 'Privileged', value: identities.filter(i => i.privileged_level === 'privileged').length, color: 'text-red-700 bg-red-50 border-red-200', onClick: () => { setTierFilter([0]); navigate('/identities?privilege_tier=0', { replace: true }); } },
+            { label: 'External', value: identities.filter(i => i.identity_category === 'guest').length, color: 'text-pink-700 bg-pink-50 border-pink-200', onClick: () => { setCategoryFilter('guest'); navigate('/identities?identity_category=guest', { replace: true }); } },
+            { label: 'Zombie', value: identities.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'never'; }).length, color: 'text-orange-700 bg-orange-50 border-orange-200', onClick: () => { setActivityFilter('dormant'); navigate('/identities?activity_status=dormant', { replace: true }); } },
+            { label: 'Cred Risk', value: identities.filter(i => i.credential_health === 'expired' || i.credential_health === 'expiring').length, color: 'text-amber-700 bg-amber-50 border-amber-200', onClick: () => { setCredentialFilter('expired'); navigate('/identities?credential_status=expired', { replace: true }); } },
+            { label: 'High/Crit', value: identities.filter(i => i.risk_level === 'critical' || i.risk_level === 'high').length, color: 'text-red-700 bg-red-50 border-red-200', onClick: () => { setRiskFilter('critical'); navigate('/identities?risk_level=critical', { replace: true }); } },
+          ].map(kpi => (
+            <button
+              key={kpi.label}
+              onClick={kpi.onClick}
+              className={`flex flex-col items-center p-2.5 rounded-xl border transition hover:shadow-sm cursor-pointer ${kpi.color || 'text-gray-700 bg-white border-gray-200'}`}
+            >
+              <span className="text-lg font-bold">{kpi.value}</span>
+              <span className="text-[10px] font-medium uppercase tracking-wide">{kpi.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Exposure Graph (V2 Phase 5) */}
+      {viewMode === 'graph' && (
+        <ExposureGraph
+          identityIds={filtered.map(i => i.identity_id)}
+          onNodeClick={(id) => setDrawerIdentityId(id)}
+        />
+      )}
+
       {/* Table */}
+      {viewMode === 'table' && (<>
       <div className="bg-white border rounded-xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="min-w-full text-[12px]">
@@ -1213,20 +1361,14 @@ export default function IdentitiesPage() {
                   <input type="checkbox" checked={filtered.length > 0 && selectedIds.size === filtered.length} onChange={selectAll}
                     className="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer" />
                 </th>
-                <SortHeader label="Identity Name" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Type" field="identity_type" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Identity" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Category" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Privileged" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Scope" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Entra" field="entra_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="RBAC" field="rbac_role_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Graph API" field="api_permission_count" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Tier" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Secret/Expiry" field="credential_expiration" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Credentials" field="credential_health" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Activity" field="dormant" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <th className="px-2 py-2.5 whitespace-nowrap text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Trend</th>
+                <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -1236,13 +1378,10 @@ export default function IdentitiesPage() {
                 <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-gray-500">No identities match filters.</td></tr>
-              ) : filtered.map(i => {
-                const tier = getPrivilegeTier(i);
-                const dormant = getDormantStatus(i);
-                return (
+              ) : filtered.map(i => (
                   <tr key={i.identity_id}
-                    className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''}`}
-                    onClick={() => navigate(`/identities/${encodeURIComponent(i.identity_id)}`)}
+                    className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''} ${drawerIdentityId === i.identity_id ? 'bg-blue-100' : ''}`}
+                    onClick={() => setDrawerIdentityId(i.identity_id)}
                   >
                     {/* Checkbox */}
                     <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
@@ -1250,20 +1389,32 @@ export default function IdentitiesPage() {
                         className="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer" />
                     </td>
 
-                    {/* Name */}
-                    <td className="px-2 py-2 max-w-[180px]">
-                      <div className="font-medium text-gray-900 truncate" title={i.display_name}>{i.display_name}</div>
-                      <div className="text-[10px] text-gray-400 font-mono">{i.identity_id.substring(0, 8)}…</div>
+                    {/* Identity (name + type icon + ID snippet) */}
+                    <td className="px-2 py-2 max-w-[220px]">
+                      <div className="flex items-center gap-1.5">
+                        <TypeLabel type={i.identity_type} />
+                        <div className="min-w-0">
+                          <div className="font-medium text-gray-900 truncate" title={i.display_name}>{i.display_name}</div>
+                          <div className="text-[10px] text-gray-400 font-mono truncate">{i.identity_id.substring(0, 12)}…</div>
+                        </div>
+                      </div>
                     </td>
 
-                    {/* Type */}
-                    <td className="px-2 py-2"><TypeLabel type={i.identity_type} /></td>
-
                     {/* Category */}
-                    <td className="px-2 py-2"><CategoryBadge category={i.identity_category} /></td>
+                    <td className="px-2 py-2"><CategoryBadge category={i.identity_category} cloud={i.cloud} /></td>
 
-                    {/* Cloud */}
-                    <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
+                    {/* Privileged */}
+                    <td className="px-2 py-2">
+                      <div className="flex items-center gap-1">
+                        <PrivilegedBadge level={i.privileged_level} />
+                        {(i.pim_eligible_count ?? 0) > 0 && (
+                          <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700" title={`${i.pim_eligible_count} PIM eligible`}>PIM</span>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* Effective Scope */}
+                    <td className="px-2 py-2"><ScopeBadge scope={i.effective_scope} cloud={i.cloud} /></td>
 
                     {/* Risk */}
                     <td className="px-2 py-2">
@@ -1274,7 +1425,7 @@ export default function IdentitiesPage() {
                             ? `CA: ${i.ca_coverage_status}${i.ca_mfa_enforced ? ' + MFA' : ''}`
                             : DATA_EXPLANATIONS.CA_POLICY
                         }>
-                          <svg className={`w-3.5 h-3.5 ${
+                          <svg className={`w-3 h-3 ${
                             !i.ca_coverage_status ? 'text-gray-300' :
                             i.ca_coverage_status === 'covered' && i.ca_mfa_enforced ? 'text-green-500' :
                             i.ca_coverage_status === 'covered' ? 'text-yellow-500' :
@@ -1286,107 +1437,46 @@ export default function IdentitiesPage() {
                       </div>
                     </td>
 
-                    {/* Entra Roles */}
-                    <td className="px-2 py-2 text-center">
-                      {(i.entra_role_count ?? 0) > 0 ? (
-                        <div className="flex items-center justify-center gap-1">
-                          <RiskDot level={i.entra_max_risk} />
-                          <span className="font-semibold text-indigo-700">{i.entra_role_count}</span>
-                          {(i.pim_eligible_count ?? 0) > 0 && (
-                            <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700" title={`${i.pim_eligible_count} PIM eligible role(s)`}>PIM</span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-center gap-1">
-                          <span className="text-gray-300">0</span>
-                          {(i.pim_eligible_count ?? 0) > 0 && (
-                            <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700" title={`${i.pim_eligible_count} PIM eligible role(s)`}>PIM</span>
-                          )}
-                        </div>
-                      )}
-                    </td>
-
-                    {/* RBAC Roles */}
-                    <td className="px-2 py-2 text-center">
-                      {(i.rbac_role_count ?? 0) > 0 ? (
-                        <div className="flex items-center justify-center gap-1">
-                          <RiskDot level={i.rbac_max_risk} />
-                          <span className="font-semibold text-blue-700">{i.rbac_role_count}</span>
-                        </div>
-                      ) : <span className="text-gray-300">0</span>}
-                    </td>
-
-                    {/* Graph API */}
-                    <td className="px-2 py-2 text-center">
-                      {(i.api_permission_count ?? 0) > 0 ? (
-                        <div className="flex items-center justify-center gap-1">
-                          <RiskDot level={i.graph_max_risk} />
-                          <span className="font-semibold text-purple-700">{i.api_permission_count}</span>
-                        </div>
-                      ) : <span className="text-gray-300">0</span>}
-                    </td>
-
-                    {/* Privilege Tier */}
-                    <td className="px-2 py-2 text-center"><TierBadge tier={tier} /></td>
-
-                    {/* Secret/Expiry */}
+                    {/* Credential Health */}
                     <td className="px-2 py-2">
                       {i.identity_category === 'human_user' || i.identity_category === 'guest' ? (
                         <span className="text-[10px] text-gray-300" title={DATA_EXPLANATIONS.CREDENTIAL_NA}>N/A</span>
-                      ) : (i.credential_count ?? 0) > 0 ? (
-                        <div>
-                          <span className="text-gray-600">{i.credential_count}</span>
-                          {(() => {
-                            const cd = credentialCountdownText(i.credential_expiration);
-                            return cd ? <div className={`text-[10px] font-medium ${cd.color}`}>{cd.text}</div> : null;
-                          })()}
-                        </div>
                       ) : (
-                        <span className="text-[10px] text-gray-400" title="No secrets or certificates registered">0</span>
+                        <div className="flex items-center gap-1">
+                          <CredentialHealthBadge health={i.credential_health} />
+                          {i.credential_health !== 'none' && (i.credential_count ?? 0) > 0 && (
+                            <span className="text-[10px] text-gray-400">{i.credential_count}</span>
+                          )}
+                        </div>
                       )}
                     </td>
-
-                    {/* Created */}
-                    <td className="px-2 py-2 text-gray-600 whitespace-nowrap">{formatDate(i.created_datetime)}</td>
 
                     {/* Last Used */}
                     <td className="px-2 py-2 whitespace-nowrap">
                       {i.last_seen_auth ? (
                         <span className="text-gray-600">{formatDate(i.last_seen_auth)}</span>
                       ) : (
-                        <span className="text-[10px] text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>
-                          Unknown<span className="text-gray-300 ml-0.5">(P1/P2)</span>
-                        </span>
+                        <span className="text-[10px] text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>Unknown</span>
                       )}
                     </td>
 
-                    {/* Dormant */}
-                    <td className="px-2 py-2 text-center"><DormantBadge status={dormant} /></td>
-
-                    {/* Trend Sparkline */}
-                    <td className="px-2 py-2">
-                      {(() => {
-                        const hist = riskHistories[i.identity_id];
-                        if (!hist || hist.length < 2) return <span className="text-gray-300 text-[10px]">--</span>;
-                        const color = hist[hist.length - 1] > hist[0] ? '#ef4444' : hist[hist.length - 1] < hist[0] ? '#22c55e' : '#6b7280';
-                        return <Sparkline data={hist} color={color} width={80} height={24} filled showDot />;
-                      })()}
-                    </td>
+                    {/* Cloud */}
+                    <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
                   </tr>
-                );
-              })}
+                ))}
             </tbody>
           </table>
         </div>
       </div>
 
       <div className="mt-3 text-[11px] text-gray-400 text-center">
-        T0 = Control Plane (Global Admin, Priv Role Admin, tenant Owner) |
-        T1 = Management Plane (User/Exchange/Intune Admin, sub Owner/Contributor) |
-        T2 = Data/App (scoped roles, risky perms) |
-        T3 = Standard.
-        Activity: Stale 90d+ = no sign-in 90+ days | Never Used = created &gt;30d, no sign-in | Idle 30-90d | New = created &lt;30d.
+        Privileged = T0 Global Admin, Priv Role Admin |
+        Elevated = T1 User Admin, Contributor |
+        Standard = T2-T3 scoped/no privileged roles.
+        Scope = broadest level of access (Tenant &gt; Directory &gt; Subscription &gt; RG &gt; Resource).
+        Click any row to inspect.
       </div>
+      </>)}
 
       {/* Bulk Action Confirmation Modal */}
       {bulkConfirm && (
@@ -1425,6 +1515,14 @@ export default function IdentitiesPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Identity Detail Drawer */}
+      {drawerIdentityId && (
+        <>
+          <div className="fixed inset-0 bg-black/20 z-40" onClick={() => setDrawerIdentityId(null)} />
+          <IdentityDrawer identityId={drawerIdentityId} onClose={() => setDrawerIdentityId(null)} />
+        </>
       )}
 
       {/* Add to Group Modal */}

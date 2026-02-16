@@ -1221,6 +1221,8 @@ class AzureDiscoveryEngine:
                         'why_critical': why_critical,
                         'resource_type': resource_type,
                         'resource_name': resource_name,
+                        'subscription_id': sub_id,
+                        'subscription_name': sub_name,
                     })
 
             except Exception as e:
@@ -2107,23 +2109,18 @@ class AzureDiscoveryEngine:
         credentials_map: Dict[str, List[Dict]] = None
     ) -> List[Dict]:
         """
-        Enhanced points-based risk calculation for all identities.
+        V2 structured risk calculation. Produces both risk_reasons (backward compat)
+        and risk_factors JSONB (structured factor cards).
 
-        Risk Score Breakdown:
-        - Entra ID Roles: Global Admin (100), Privileged Role Admin (90), App Admin (80), Security Admin (60)
-        - Azure RBAC: Owner on subscription (100), Contributor on subscription (80), User Access Admin (70)
-        - API Permissions: Write permissions (60), Read-all permissions (40)
-        - Orphaned permissions: API access without role justification (30)
-        - App Roles: Admin app roles (50)
-        - Usage: Never used with credentials (40), Dormant 90+ days (20)
-        - Credentials: Expired credentials (35)
-
-        Risk Levels:
-        - 120+ points = CRITICAL
-        - 70-119 points = HIGH
-        - 40-69 points = MEDIUM
-        - 0-39 points = LOW/INFO
+        V2 Risk Levels:
+        - 900+ = CRITICAL
+        - 500-899 = HIGH
+        - 200-499 = MEDIUM
+        - 1-199 = LOW
+        - 0 = INFO
         """
+        from app.engines.risk_catalog import make_factor, score_to_level_v2
+
         permissions_map = permissions_map or {}
         app_roles_map = app_roles_map or {}
         credentials_map = credentials_map or {}
@@ -2147,9 +2144,8 @@ class AzureDiscoveryEngine:
             identity_app_roles = app_roles_map.get(identity_id, [])
             identity_credentials = credentials_map.get(identity_id, [])
 
-            # Initialize scoring
-            risk_score = 0
-            risk_reasons = []
+            # Initialize V2 scoring
+            risk_factors = []
 
             # ============================================================
             # 1. Entra ID Directory Roles (highest privilege)
@@ -2157,26 +2153,19 @@ class AzureDiscoveryEngine:
             for entra_role in identity_entra_roles:
                 role_name_lower = entra_role['role_name'].lower()
                 if 'global administrator' in role_name_lower:
-                    risk_score += 100
-                    risk_reasons.append('Global Administrator: Full tenant control - violates SOC2 least privilege, HIPAA access controls (§164.312), PCI-DSS requirement 7')
+                    risk_factors.append(make_factor("TENANT_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'privileged role administrator' in role_name_lower:
-                    risk_score += 90
-                    risk_reasons.append('Privileged Role Admin: Can assign any role - privilege escalation risk, violates SOC2 separation of duties')
+                    risk_factors.append(make_factor("PRIV_ROLE_ADMIN", f"entra_role:{entra_role['role_name']}"))
                 elif 'application administrator' in role_name_lower or 'cloud application administrator' in role_name_lower:
-                    risk_score += 80
-                    risk_reasons.append(f"{entra_role['role_name']}: Can manage all apps/SPNs - potential data access via credentials, HIPAA BAA concerns")
+                    risk_factors.append(make_factor("APP_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'user administrator' in role_name_lower:
-                    risk_score += 60
-                    risk_reasons.append('User Administrator: Can reset passwords, create users - SOC2 access control risk, PCI-DSS 8.1 violation')
+                    risk_factors.append(make_factor("USER_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'security administrator' in role_name_lower:
-                    risk_score += 60
-                    risk_reasons.append('Security Administrator: Can modify security policies - violates SOC2 change management controls')
+                    risk_factors.append(make_factor("SECURITY_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'exchange administrator' in role_name_lower:
-                    risk_score += 50
-                    risk_reasons.append('Exchange Administrator: Full mailbox access - HIPAA ePHI exposure risk, SOC2 confidentiality')
+                    risk_factors.append(make_factor("EXCHANGE_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'sharepoint administrator' in role_name_lower:
-                    risk_score += 50
-                    risk_reasons.append('SharePoint Administrator: Full document access - potential PII/PHI exposure, GDPR Art. 32 risk')
+                    risk_factors.append(make_factor("SHAREPOINT_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
 
             # ============================================================
             # 2. Azure RBAC Roles
@@ -2187,27 +2176,20 @@ class AzureDiscoveryEngine:
 
                 if 'owner' in role_name:
                     if scope_type == 'subscription':
-                        risk_score += 100
-                        risk_reasons.append('Owner on Subscription: Full control including IAM - violates SOC2 least privilege, PCI-DSS 7.1, HIPAA §164.312(a)(1)')
+                        risk_factors.append(make_factor("SUBSCRIPTION_OWNER", f"rbac:{role['role_name']}@{scope_type}"))
                     elif scope_type == 'resource_group':
-                        risk_score += 60
-                        risk_reasons.append('Owner on Resource Group: Can delete all resources, modify access - SOC2 availability risk')
+                        risk_factors.append(make_factor("RG_OWNER", f"rbac:{role['role_name']}@{scope_type}"))
                     else:
-                        risk_score += 30
-                        risk_reasons.append(f"Owner role on {scope_type}")
+                        risk_factors.append(make_factor("RESOURCE_OWNER", f"rbac:{role['role_name']}@{scope_type}"))
                 elif 'contributor' in role_name:
                     if scope_type == 'subscription':
-                        risk_score += 80
-                        risk_reasons.append('Contributor on Subscription: Can create/modify/delete all resources - violates SOC2 least privilege, PCI-DSS 7.2 access restrictions')
+                        risk_factors.append(make_factor("SUBSCRIPTION_CONTRIBUTOR", f"rbac:{role['role_name']}@{scope_type}"))
                     elif scope_type == 'resource_group':
-                        risk_score += 40
-                        risk_reasons.append('Contributor on Resource Group: Broad resource modification access - review for SOC2 least privilege compliance')
+                        risk_factors.append(make_factor("RG_CONTRIBUTOR", f"rbac:{role['role_name']}@{scope_type}"))
                 elif 'user access administrator' in role_name:
-                    risk_score += 70
-                    risk_reasons.append('User Access Administrator: Can grant any role to any user - privilege escalation risk, violates SOC2 separation of duties, PCI-DSS 7.1')
+                    risk_factors.append(make_factor("UAA_ROLE", f"rbac:{role['role_name']}@{scope_type}"))
                 elif 'key vault' in role_name and ('administrator' in role_name or 'officer' in role_name):
-                    risk_score += 50
-                    risk_reasons.append(f"Key Vault Admin/Officer: Access to secrets/keys/certificates - HIPAA encryption key controls (§164.312(a)(2)(iv)), PCI-DSS 3.5 key management")
+                    risk_factors.append(make_factor("KEYVAULT_FULL_ACCESS", f"rbac:{role['role_name']}@{scope_type}"))
 
             # ============================================================
             # 3. API Permissions (Graph API)
@@ -2223,25 +2205,22 @@ class AzureDiscoveryEngine:
                     read_all_permissions.append(perm.get('permission_name'))
 
             if write_permissions:
-                risk_score += 60
-                risk_reasons.append(f"Graph API Write Access: {len(write_permissions)} write permission(s) - can modify tenant data, SOC2 change management, HIPAA §164.312(c) integrity controls")
+                risk_factors.append(make_factor("DIRECTORY_RW_API", f"{len(write_permissions)} write perm(s): {', '.join(write_permissions[:3])}"))
 
             if read_all_permissions and not write_permissions:
-                risk_score += 40
-                risk_reasons.append(f"Graph API Read-All Access: {len(read_all_permissions)} permission(s) - broad data access, potential PII/PHI exposure, GDPR Art. 32")
+                risk_factors.append(make_factor("DIRECTORY_READ_ALL_API", f"{len(read_all_permissions)} read-all perm(s)"))
 
             # ============================================================
-            # 4. Orphaned Permissions (API access without role justification)
+            # 4. Orphaned Permissions
             # ============================================================
             has_roles = len(identity_roles) > 0 or len(identity_entra_roles) > 0
             has_permissions = len(identity_permissions) > 0
 
             if not has_roles and has_permissions:
-                risk_score += 30
-                risk_reasons.append('API permissions without role justification (orphaned)')
+                risk_factors.append(make_factor("ORPHANED_PERMISSIONS", f"{len(identity_permissions)} API perms without role justification"))
 
             # ============================================================
-            # 5. App Roles (Custom application roles)
+            # 5. App Roles
             # ============================================================
             admin_app_roles = []
             for app_role in identity_app_roles:
@@ -2250,17 +2229,16 @@ class AzureDiscoveryEngine:
                     admin_app_roles.append(app_role)
 
             if admin_app_roles:
-                risk_score += 50
-                risk_reasons.append(f"Has {len(admin_app_roles)} administrative app role(s)")
+                risk_factors.append(make_factor("ADMIN_APP_ROLES", f"{len(admin_app_roles)} admin app role(s)"))
             elif identity_app_roles:
-                risk_score += 20
-                risk_reasons.append(f"Has {len(identity_app_roles)} app role assignment(s)")
+                risk_factors.append(make_factor("STANDARD_APP_ROLES", f"{len(identity_app_roles)} app role(s)"))
 
             # ============================================================
             # 6. Credential Status
             # ============================================================
             has_expired = False
             has_expiring_soon = False
+            active_cred_count = 0
             for cred in identity_credentials:
                 end_date = cred.get('end_datetime')
                 if end_date:
@@ -2273,39 +2251,37 @@ class AzureDiscoveryEngine:
                         now = datetime.now(timezone.utc)
                         if end_dt < now:
                             has_expired = True
-                        elif (end_dt - now).days < 30:
-                            has_expiring_soon = True
+                        else:
+                            active_cred_count += 1
+                            if (end_dt - now).days < 30:
+                                has_expiring_soon = True
                     except:
-                        pass
+                        active_cred_count += 1
 
             if has_expired:
-                risk_score += 35
-                risk_reasons.append('Has expired credentials')
+                risk_factors.append(make_factor("SECRET_EXPIRED", "Unrotated expired credential(s)"))
             elif has_expiring_soon:
-                risk_score += 15
-                risk_reasons.append('Has credentials expiring within 30 days')
+                risk_factors.append(make_factor("SECRET_EXPIRING_SOON", "Credential(s) expiring within 30 days"))
+
+            if active_cred_count > 1:
+                risk_factors.append(make_factor("MULTIPLE_ACTIVE_SECRETS", f"{active_cred_count} active credentials"))
 
             # ============================================================
-            # 7. No roles and no permissions (truly orphaned)
+            # 7. Orphaned identity
             # ============================================================
             if not has_roles and not has_permissions and not identity_app_roles:
                 if identity.get('identity_type') != 'user':
-                    risk_score += 25
-                    risk_reasons.append('No role assignments (potentially orphaned identity)')
+                    risk_factors.append(make_factor("ORPHANED_IDENTITY", "No role assignments"))
 
             # ============================================================
-            # Convert score to risk level
+            # Sum V2 score and derive level
             # ============================================================
-            if risk_score >= 120:
-                risk_level = 'critical'
-            elif risk_score >= 70:
-                risk_level = 'high'
-            elif risk_score >= 40:
-                risk_level = 'medium'
-            elif risk_score > 0:
-                risk_level = 'low'
-            else:
-                risk_level = 'info'
+            risk_score = sum(f['points'] for f in risk_factors)
+            risk_level = score_to_level_v2(risk_score)
+
+            # Backward-compat: derive risk_reasons from factors
+            risk_reasons = [f"{f['description']} (+{f['points']})" for f in risk_factors]
+            if not risk_reasons:
                 risk_reasons = ['No elevated privileges detected']
 
             # ============================================================
@@ -2334,16 +2310,7 @@ class AzureDiscoveryEngine:
                     elif adj != 0:
                         risk_score += adj
                         risk_reasons.extend(extra_reasons)
-                        if risk_score >= 120:
-                            risk_level = 'critical'
-                        elif risk_score >= 70:
-                            risk_level = 'high'
-                        elif risk_score >= 40:
-                            risk_level = 'medium'
-                        elif risk_score > 0:
-                            risk_level = 'low'
-                        else:
-                            risk_level = 'info'
+                        risk_level = score_to_level_v2(risk_score)
             except Exception as e:
                 logger.warning(f"Custom risk rules error: {e}")
 
@@ -2355,7 +2322,8 @@ class AzureDiscoveryEngine:
             # Store results
             identity['risk_level'] = risk_level
             identity['risk_score'] = risk_score
-            identity['risk_reasons'] = risk_reasons if risk_reasons else ['No elevated privileges detected']
+            identity['risk_reasons'] = risk_reasons
+            identity['risk_factors'] = risk_factors
             identity['roles'] = identity_roles
             identity['entra_roles'] = identity_entra_roles
             identity['role_count'] = len(identity_roles) + len(identity_entra_roles)
@@ -2366,14 +2334,14 @@ class AzureDiscoveryEngine:
             if risk_level in ['critical', 'high']:
                 emoji = '🚨' if risk_level == 'critical' else '🟠'
                 print(f"    {emoji} {identity['display_name']}: {risk_level.upper()} ({risk_score} pts)")
-                for reason in risk_reasons[:3]:  # Show top 3 reasons
-                    print(f"       • {reason}")
+                for factor in risk_factors[:3]:
+                    print(f"       • {factor['code']}: +{factor['points']} ({factor['severity']})")
 
         # Summary
         critical_count = sum(1 for i in identities if i.get('risk_level') == 'critical')
         high_count = sum(1 for i in identities if i.get('risk_level') == 'high')
 
-        print(f"\n  📊 Risk Summary:")
+        print(f"\n  📊 Risk Summary (V2 scale):")
         print(f"     Total: {len(identities)} customer-owned identities")
         print(f"     🔴 Critical: {critical_count}  🟠 High: {high_count}")
 
@@ -2521,7 +2489,27 @@ class AzureDiscoveryEngine:
             identity_roles = identity.get('roles', [])
             for role in identity_roles:
                 self.db.save_role_assignment(identity_db_id, role)
-            
+
+            # Save identity ↔ subscription access (multi-subscription junction table)
+            seen_sub_roles = set()
+            for role in identity_roles:
+                sub_id_from_role = role.get('subscription_id')
+                if sub_id_from_role:
+                    key = (sub_id_from_role, role.get('role_name', ''), role.get('scope', ''))
+                    if key not in seen_sub_roles:
+                        seen_sub_roles.add(key)
+                        self.db.save_identity_subscription_access(
+                            identity_db_id,
+                            identity.get('identity_id', ''),
+                            role,
+                            sub_id_from_role,
+                            role.get('subscription_name', ''),
+                            run_id,
+                        )
+            # Compute primary subscription + additional count
+            if seen_sub_roles:
+                self.db.update_identity_subscription_summary(identity_db_id)
+
             # Save Entra ID role assignments for this identity
             identity_entra_roles = identity.get('entra_roles', [])
             for entra_role in identity_entra_roles:

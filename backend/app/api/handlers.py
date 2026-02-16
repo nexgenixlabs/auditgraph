@@ -305,6 +305,8 @@ def get_identity_details(identity_id: str):
                    COALESCE(i.app_role_count, 0) as app_role_count,
                    i.ca_coverage_status,
                    COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
+                   -- Risk V2
+                   i.risk_factors,
                    -- Evidence fields (Pillar 5)
                    i.discovery_run_id,
                    dr.completed_at as run_completed_at
@@ -358,11 +360,12 @@ def get_identity_details(identity_id: str):
             "app_role_count": int(row[26] or 0),
             "ca_coverage_status": row[27] or None,
             "ca_mfa_enforced": bool(row[28]) if row[28] is not None else False,
-            "discovery_run_id": row[29],
+            "risk_factors": row[29] if row[29] else [],
+            "discovery_run_id": row[30],
         }
 
-        run_completed_at = row[30].isoformat() if row[30] else None
-        current_run_id = row[29]
+        run_completed_at = row[31].isoformat() if row[31] else None
+        current_run_id = row[30]
 
         # Trend comparison: get this identity's state from the previous run (Pillar 6)
         trend = None
@@ -1754,7 +1757,35 @@ def _identity_list_select():
              LIMIT 1) as primary_subscription_id,
             GREATEST(0, COALESCE((SELECT COUNT(DISTINCT isa_c.subscription_id) - 1
              FROM identity_subscription_access isa_c
-             WHERE isa_c.identity_db_id = i.id), 0)) as additional_subscription_count
+             WHERE isa_c.identity_db_id = i.id), 0)) as additional_subscription_count,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM entra_role_assignments era2
+                    WHERE era2.identity_db_id = i.id
+                    AND (era2.directory_scope IS NULL OR era2.directory_scope = '/')
+                ) THEN 'tenant'
+                WHEN EXISTS (
+                    SELECT 1 FROM role_assignments ra2
+                    WHERE ra2.identity_db_id = i.id AND ra2.scope_type = 'tenant'
+                ) THEN 'tenant'
+                WHEN EXISTS (
+                    SELECT 1 FROM role_assignments ra2
+                    WHERE ra2.identity_db_id = i.id AND ra2.scope_type = 'subscription'
+                ) THEN 'subscription'
+                WHEN EXISTS (
+                    SELECT 1 FROM role_assignments ra2
+                    WHERE ra2.identity_db_id = i.id AND ra2.scope_type = 'resource_group'
+                ) THEN 'resource_group'
+                WHEN EXISTS (
+                    SELECT 1 FROM role_assignments ra2
+                    WHERE ra2.identity_db_id = i.id AND ra2.scope_type = 'resource'
+                ) THEN 'resource'
+                WHEN EXISTS (
+                    SELECT 1 FROM entra_role_assignments era2
+                    WHERE era2.identity_db_id = i.id
+                ) THEN 'directory'
+                ELSE 'none'
+            END as effective_scope
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -1812,6 +1843,14 @@ def _map_identity_row(row):
         "subscription_name": row[40] or None,
         "primary_subscription_id": row[41] or None,
         "additional_subscription_count": int(row[42] or 0),
+        "effective_scope": row[43] if len(row) > 43 and row[43] else "none",
+        "privileged_level": "privileged" if int(row[34] or 3) == 0 else "elevated" if int(row[34] or 3) == 1 else "standard",
+        "credential_health": (
+            "none" if int(row[5] or 0) == 0
+            else "expired" if (row[7] or "").lower() == "expired"
+            else "expiring" if (row[7] or "").lower() == "expiring_soon"
+            else "ok"
+        ),
     }
 
 
@@ -10726,6 +10765,239 @@ def copilot_suggestions():
         return jsonify({'suggestions': suggestions, 'configured': True})
     finally:
         db.close()
+
+
+# ── Identity Dashboard V2: Exposure Graph ──────────────────────
+
+def get_exposure_graph():
+    """POST /api/identities/exposure-graph — build exposure graph for up to 50 identities."""
+    data = request.get_json() or {}
+    identity_ids = data.get('identity_ids', [])
+    preset = data.get('preset')
+
+    if not identity_ids and not preset:
+        return jsonify({"error": "identity_ids or preset required"}), 400
+
+    db = _db()
+    cursor = db.conn.cursor()
+    tid = _tenant_id()
+
+    try:
+        # If preset, fetch matching identity_ids
+        if preset and not identity_ids:
+            preset_filters = {
+                'privileged': "AND i.privilege_tier = 0",
+                'external': "AND i.identity_category = 'guest'",
+                'non_human': "AND i.identity_category IN ('service_principal','managed_identity_system','managed_identity_user')",
+                'zombie': "AND i.activity_status IN ('stale','never_used')",
+                'secret_risk': "AND i.credential_status IN ('expired','expiring_soon')",
+            }
+            where = preset_filters.get(preset, '')
+            cursor.execute(f"""
+                SELECT i.identity_id FROM identities i
+                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                WHERE dr.tenant_id = %s {where}
+                ORDER BY i.risk_score DESC LIMIT 50
+            """, (tid,))
+            identity_ids = [r[0] for r in cursor.fetchall()]
+
+        if not identity_ids:
+            return jsonify({"nodes": [], "edges": []})
+
+        # Cap at 50
+        identity_ids = identity_ids[:50]
+
+        nodes = []
+        edges = []
+        seen_roles = set()
+        seen_scopes = set()
+
+        for idx, iid in enumerate(identity_ids):
+            cursor.execute("""
+                SELECT i.id, i.identity_id, i.display_name, i.risk_level, i.risk_score,
+                       i.identity_category, i.activity_status
+                FROM identities i
+                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                WHERE i.identity_id = %s AND dr.tenant_id = %s
+                ORDER BY i.discovery_run_id DESC LIMIT 1
+            """, (iid, tid))
+            row = cursor.fetchone()
+            if not row:
+                continue
+
+            db_id, identity_id, display_name, risk_level, risk_score, category, activity = row
+            node_id = f"id_{identity_id}"
+
+            # Identity node (left column)
+            nodes.append({
+                "id": node_id,
+                "type": "identity",
+                "position": {"x": 50, "y": idx * 100},
+                "data": {
+                    "label": display_name,
+                    "risk_level": risk_level or 'info',
+                    "risk_score": risk_score or 0,
+                    "category": category,
+                    "identity_id": identity_id,
+                },
+            })
+
+            # Get role assignments
+            cursor.execute("""
+                SELECT role_name, scope_type, scope
+                FROM role_assignments WHERE identity_db_id = %s
+            """, (db_id,))
+            for rn, st, sc in cursor.fetchall():
+                role_key = rn
+                if role_key not in seen_roles:
+                    seen_roles.add(role_key)
+                    nodes.append({
+                        "id": f"role_{role_key}",
+                        "type": "role",
+                        "position": {"x": 400, "y": len(seen_roles) * 60},
+                        "data": {"label": rn, "role_type": "azure"},
+                    })
+                edges.append({
+                    "id": f"e_{node_id}_{role_key}",
+                    "source": node_id,
+                    "target": f"role_{role_key}",
+                    "label": st or '',
+                    "style": {"stroke": "#6366f1"},
+                })
+
+                # Scope node
+                scope_key = st or 'unknown'
+                if scope_key not in seen_scopes:
+                    seen_scopes.add(scope_key)
+                    nodes.append({
+                        "id": f"scope_{scope_key}",
+                        "type": "scope",
+                        "position": {"x": 750, "y": len(seen_scopes) * 60},
+                        "data": {"label": scope_key.replace('_', ' ').title()},
+                    })
+                edges.append({
+                    "id": f"e_role_{role_key}_{scope_key}",
+                    "source": f"role_{role_key}",
+                    "target": f"scope_{scope_key}",
+                    "style": {"stroke": "#94a3b8"},
+                })
+
+            # Entra roles
+            cursor.execute("""
+                SELECT role_name FROM entra_role_assignments WHERE identity_db_id = %s
+            """, (db_id,))
+            for (rn,) in cursor.fetchall():
+                role_key = f"entra_{rn}"
+                if role_key not in seen_roles:
+                    seen_roles.add(role_key)
+                    nodes.append({
+                        "id": f"role_{role_key}",
+                        "type": "role",
+                        "position": {"x": 400, "y": len(seen_roles) * 60},
+                        "data": {"label": rn, "role_type": "entra"},
+                    })
+                edges.append({
+                    "id": f"e_{node_id}_{role_key}",
+                    "source": node_id,
+                    "target": f"role_{role_key}",
+                    "label": "entra",
+                    "style": {"stroke": "#8b5cf6"},
+                })
+
+        return jsonify({"nodes": nodes, "edges": edges, "total_identities": len(identity_ids)})
+    finally:
+        cursor.close()
+
+
+# ── Identity Dashboard V2: Usage Intelligence ─────────────────
+
+def get_identity_usage(identity_id):
+    """GET /api/identities/<id>/usage — usage intelligence with confidence indicator."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        # Get identity with activity + credential data
+        cursor.execute("""
+            SELECT i.id, i.activity_status, i.last_seen_auth, i.last_sign_in,
+                   i.credential_count, i.credential_status, i.credential_expiration
+            FROM identities i
+            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            WHERE i.identity_id = %s AND dr.tenant_id = %s
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, _tenant_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Identity not found"}), 404
+
+        identity_db_id = row[0]
+        activity_status = row[1] or 'unknown'
+        last_seen_auth = row[2]
+        last_sign_in = row[3]
+        last_used = last_seen_auth or last_sign_in
+
+        # Confidence
+        confidence = 'low'
+        usage_source = 'none'
+        if last_used:
+            from datetime import datetime, timezone
+            try:
+                if isinstance(last_used, str):
+                    last_dt = datetime.fromisoformat(last_used.replace('Z', '+00:00'))
+                else:
+                    last_dt = last_used if last_used.tzinfo else last_used.replace(tzinfo=timezone.utc)
+                days = (datetime.now(timezone.utc) - last_dt).days
+                if days < 90:
+                    confidence = 'high'
+                    usage_source = 'sign_in_logs'
+                else:
+                    confidence = 'medium'
+                    usage_source = 'sign_in_logs'
+            except:
+                confidence = 'low'
+                usage_source = 'inferred'
+        else:
+            confidence = 'low'
+            usage_source = 'none'
+
+        # Granted vs used: check role usage_status
+        cursor.execute("""
+            SELECT role_name, 'azure' as role_type, scope_type,
+                   COALESCE(usage_status, 'unknown') as usage_status
+            FROM role_assignments WHERE identity_db_id = %s
+            UNION ALL
+            SELECT role_name, 'entra' as role_type, 'directory' as scope_type,
+                   COALESCE(usage_status, 'unknown') as usage_status
+            FROM entra_role_assignments WHERE identity_db_id = %s
+        """, (identity_db_id, identity_db_id))
+        all_roles = cursor.fetchall()
+
+        total_roles = len(all_roles)
+        definitely_unused = [r for r in all_roles if r[3] == 'definitely_unused']
+        used_roles = total_roles - len(definitely_unused)
+
+        # Permissions count
+        cursor.execute("SELECT COUNT(*) FROM graph_api_permissions WHERE identity_db_id = %s", (identity_db_id,))
+        perm_count = cursor.fetchone()[0] or 0
+
+        return jsonify({
+            "identity_id": identity_id,
+            "last_used": last_used.isoformat() if hasattr(last_used, 'isoformat') else last_used,
+            "usage_source": usage_source,
+            "confidence": confidence,
+            "activity_status": activity_status,
+            "granted_vs_used": {
+                "total_roles": total_roles,
+                "used_roles": used_roles,
+                "never_used_count": len(definitely_unused),
+                "never_used_roles": [
+                    {"role_name": r[0], "role_type": r[1], "scope_type": r[2]}
+                    for r in definitely_unused[:20]
+                ],
+                "total_permissions": perm_count,
+            },
+        })
+    finally:
+        cursor.close()
 
 
 # ── Phase 80: Identity Timeline / Forensic View ───────────────

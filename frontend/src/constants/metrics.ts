@@ -158,6 +158,54 @@ export const DATA_EXPLANATIONS = {
   NO_DATA:        'Not yet collected — run a discovery scan',
 } as const;
 
+// ── Identity Dashboard V2 ────────────────────────────────────────────
+
+export type PrivilegedLevel = 'privileged' | 'elevated' | 'standard';
+
+export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: string; tooltip: string }> = {
+  privileged: { label: 'Privileged',  color: 'bg-red-100 text-red-800 border-red-200',     tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
+  elevated:   { label: 'Elevated',    color: 'bg-orange-100 text-orange-800 border-orange-200', tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
+  standard:   { label: 'Standard',    color: 'bg-gray-100 text-gray-600 border-gray-200',  tooltip: 'Tier 2-3: Limited or no privileged roles' },
+};
+
+export type EffectiveScope = 'tenant' | 'directory' | 'subscription' | 'resource_group' | 'resource' | 'none';
+
+export const EFFECTIVE_SCOPE_ORDER: Record<EffectiveScope, number> = {
+  tenant: 6, directory: 5, subscription: 4, resource_group: 3, resource: 2, none: 1,
+};
+
+export const EFFECTIVE_SCOPE_CONFIG: Record<EffectiveScope, { label: string; color: string; icon: string }> = {
+  tenant:         { label: 'Tenant',      color: 'bg-red-100 text-red-700',      icon: 'T' },
+  directory:      { label: 'Directory',   color: 'bg-purple-100 text-purple-700', icon: 'D' },
+  subscription:   { label: 'Subscription', color: 'bg-orange-100 text-orange-700', icon: 'S' },
+  resource_group: { label: 'RG',          color: 'bg-yellow-100 text-yellow-700', icon: 'R' },
+  resource:       { label: 'Resource',    color: 'bg-blue-100 text-blue-700',    icon: 'r' },
+  none:           { label: 'None',        color: 'bg-gray-100 text-gray-500',    icon: '-' },
+};
+
+export type CredentialHealth = 'ok' | 'expiring' | 'expired' | 'none';
+
+export const CREDENTIAL_HEALTH_CONFIG: Record<CredentialHealth, { label: string; color: string }> = {
+  ok:       { label: 'OK',       color: 'bg-green-100 text-green-700' },
+  expiring: { label: 'Expiring', color: 'bg-orange-100 text-orange-700' },
+  expired:  { label: 'Expired',  color: 'bg-red-100 text-red-700' },
+  none:     { label: 'None',     color: 'bg-gray-100 text-gray-500' },
+};
+
+// Multi-cloud scope labels
+export const SCOPE_LABELS: Record<string, Record<string, string>> = {
+  azure: { tenant: 'Tenant', subscription: 'Subscription', resource_group: 'Resource Group', resource: 'Resource', directory: 'Directory' },
+  aws:   { organization: 'Organization', account: 'Account', resource: 'Resource' },
+  gcp:   { organization: 'Organization', project: 'Project', resource: 'Resource' },
+};
+
+// Multi-cloud category labels
+export const CATEGORY_LABELS_MULTI: Record<string, Record<string, string>> = {
+  azure: { human_user: 'Human', guest: 'Guest', service_principal: 'Workload', managed_identity_system: 'System MI', managed_identity_user: 'User MI' },
+  aws:   { human_user: 'IAM User', service_principal: 'Role', managed_identity_system: 'Service', guest: 'Federated' },
+  gcp:   { human_user: 'User', service_principal: 'Service Acct', guest: 'External' },
+};
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 export function safeLower(v: any): string {

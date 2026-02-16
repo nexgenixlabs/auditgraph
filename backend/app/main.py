@@ -19,6 +19,8 @@ from app.api.handlers import (
     get_overview_insights,
     get_identity_graph_data,
     get_identity_pim_data,
+    get_identity_usage,
+    get_exposure_graph,
     get_dashboard_ca_summary,
     get_discovery_runs,
     get_drift_report,
@@ -185,6 +187,12 @@ from app.api.handlers import (
     validate_reset_token_handler,
     reset_password_handler,
     admin_reset_user_password,
+    get_subscriptions_list,
+    get_subscriptions_stats,
+    activate_subscription,
+    deactivate_subscription,
+    get_subscriptions_distinct,
+    get_identity_subscriptions,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -210,6 +218,15 @@ def create_app():
             MetricsCollector.get().record_request(
                 request.method, path, response.status_code, duration_ms)
         return response
+
+    # Ensure identity_subscription_access table exists (Phase 84: multi-sub model)
+    try:
+        from app.database import Database as _DbInit
+        _db_init = _DbInit()
+        _db_init._ensure_identity_subscription_access_table()
+        _db_init.close()
+    except Exception as e:
+        print(f"  ⚠️ Could not ensure identity_subscription_access table: {e}")
 
     # -----------------------
     # Health & Monitoring (Phase 68)
@@ -350,7 +367,7 @@ def create_app():
         return get_soar_action_stats_handler()
 
     @app.post("/api/soar/execute")
-    @require_role('admin')
+    @require_role('admin', 'security_admin')
     def soar_execute():
         return execute_soar_action_handler()
 
@@ -488,7 +505,7 @@ def create_app():
         return get_sa_governance_list()
 
     @app.post("/api/service-accounts/<identity_id>/attest")
-    @require_role('reader', 'admin')
+    @require_role('admin', 'security_admin', 'reader')
     def sa_gov_attest_route(identity_id):
         return post_sa_attestation(identity_id)
 
@@ -527,7 +544,7 @@ def create_app():
         return get_onboarding_status()
 
     @app.post("/api/onboarding/test-connection")
-    @require_role('admin')
+    @require_role('admin', 'security_admin')
     def onboarding_test_connection():
         return test_azure_connection()
 
@@ -579,12 +596,12 @@ def create_app():
         return toggle_compliance_framework_handler(framework_id)
 
     @app.get("/api/compliance/gap-analysis")
-    @require_role('compliance', 'reader', 'admin')
+    @require_role('admin', 'security_admin', 'compliance', 'reader')
     def compliance_gap_analysis():
         return get_compliance_gap_analysis()
 
     @app.get("/api/compliance/trends")
-    @require_role('compliance', 'reader', 'admin')
+    @require_role('admin', 'security_admin', 'compliance', 'reader')
     def compliance_trends():
         return get_compliance_trends_handler()
 
@@ -636,7 +653,7 @@ def create_app():
     # Risk Simulation (Phase 49)
     # -----------------------
     @app.post("/api/identities/<identity_id>/simulate")
-    @require_role('reader', 'admin')
+    @require_role('admin', 'security_admin', 'reader')
     def identity_simulate(identity_id):
         return simulate_risk(identity_id)
 
@@ -664,6 +681,14 @@ def create_app():
     @app.get("/api/identities/<identity_id>/pim")
     def identity_pim_data(identity_id):
         return get_identity_pim_data(identity_id)
+
+    @app.get("/api/identities/<identity_id>/usage")
+    def identity_usage(identity_id):
+        return get_identity_usage(identity_id)
+
+    @app.post("/api/identities/exposure-graph")
+    def exposure_graph():
+        return get_exposure_graph()
 
     # -----------------------
     # Conditional Access summary
@@ -703,7 +728,7 @@ def create_app():
         return get_discovery_runs()
 
     @app.post("/api/runs/trigger")
-    @require_role('admin')
+    @require_role('admin', 'security_admin')
     def runs_trigger():
         return trigger_discovery()
 
@@ -810,7 +835,7 @@ def create_app():
         return test_email()
 
     @app.post("/api/settings/test-connection")
-    @require_role('admin')
+    @require_role('admin', 'security_admin')
     def settings_test_connection():
         return test_azure_connection()
 
@@ -1157,6 +1182,35 @@ def create_app():
     @require_role('admin')
     def integrations_test():
         return test_integration_webhook()
+
+    # -----------------------
+    # Cloud Subscriptions (per-account monitoring)
+    # -----------------------
+    @app.get("/api/subscriptions")
+    def subscriptions_list():
+        return get_subscriptions_list()
+
+    @app.get("/api/subscriptions/stats")
+    def subscriptions_stats():
+        return get_subscriptions_stats()
+
+    @app.post("/api/subscriptions/activate")
+    @require_role('admin', 'security_admin')
+    def subscriptions_activate():
+        return activate_subscription()
+
+    @app.put("/api/subscriptions/<int:sub_id>/deactivate")
+    @require_role('admin', 'security_admin')
+    def subscriptions_deactivate(sub_id):
+        return deactivate_subscription(sub_id)
+
+    @app.get("/api/subscriptions/distinct")
+    def subscriptions_distinct():
+        return get_subscriptions_distinct()
+
+    @app.get("/api/identities/<path:identity_id>/subscriptions")
+    def identity_subscriptions(identity_id):
+        return get_identity_subscriptions(identity_id)
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

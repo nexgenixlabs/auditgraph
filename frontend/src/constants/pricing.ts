@@ -134,6 +134,17 @@ export function calculateAddonTotal(cfg: CloudConfig, plan?: string): number {
   return total;
 }
 
+// ── Per-Account Pricing (Subscription-based) ────────────────────────────────
+export const ACCOUNT_PRICING = {
+  direct: 69,   // $69/month per monitored account (Azure sub / AWS acct / GCP project)
+  msp: 40,      // $40/month MSP/CSP partner rate
+};
+
+export const PLATFORM_FEE = {
+  direct: 200,  // $200/month base platform fee
+  msp: 500,     // $500/month MSP platform fee
+};
+
 // Phase 78: Tier limits for free/trial enforcement
 export const TIER_LIMITS: Record<string, { max_identities: number | null; trial_days?: number; blocked_features: string[] }> = {
   free: { max_identities: 50, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot'] },
