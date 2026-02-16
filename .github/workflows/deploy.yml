@@ -50,6 +50,8 @@ jobs:
         with:
           context: ./frontend
           push: true
+          build-args: |
+            REACT_APP_API_URL=https://api.auditgraph.ai
           tags: |
             ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-frontend:${{ github.sha }}
             ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-frontend:latest
