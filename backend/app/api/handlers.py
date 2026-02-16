@@ -1126,9 +1126,12 @@ def trigger_discovery():
     import threading
     from app.scheduler import trigger_manual_discovery
 
+    tid = _tenant_id()
+    tname = g.current_user.get('tenant_name') if hasattr(g, 'current_user') and g.current_user else None
+
     def _run():
         try:
-            trigger_manual_discovery()
+            trigger_manual_discovery(db_tenant_id=tid, tenant_name=tname)
         except Exception as e:
             logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
 

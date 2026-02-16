@@ -93,82 +93,97 @@ SCAN_MODES = {
 
 def run_scheduled_discovery(scan_mode: str = 'deep'):
     """
-    Runs the discovery process.
+    Runs the discovery process for ALL enabled tenants.
+    Each tenant's Azure credentials are read from tenant-scoped settings.
     Called by the scheduler.
     """
     logger.info("=" * 70)
-    logger.info("SCHEDULED DISCOVERY STARTED")
+    logger.info("SCHEDULED DISCOVERY STARTED (multi-tenant)")
     logger.info(f"Time: {datetime.utcnow().isoformat()}")
     logger.info("=" * 70)
-    
+
+    # Get list of enabled tenants
+    admin_db = Database()  # No tenant context → superadmin/startup path
     try:
-        # Get credentials from environment
-        tenant_id = os.getenv("AZURE_TENANT_ID")
-        client_id = os.getenv("AZURE_CLIENT_ID")
-        client_secret = os.getenv("AZURE_CLIENT_SECRET")
+        cursor = admin_db.conn.cursor()
+        cursor.execute("SELECT id, name FROM tenants WHERE enabled = TRUE ORDER BY id")
+        tenants = cursor.fetchall()
+        cursor.close()
+    finally:
+        admin_db.close()
 
-        # Phase 48: Fallback to DB settings (onboarding wizard stores creds here)
-        if not all([tenant_id, client_id, client_secret]):
-            try:
-                settings_db = Database()
-                settings = settings_db.get_system_settings()
-                tenant_id = tenant_id or settings.get('azure_tenant_id')
-                client_id = client_id or settings.get('azure_client_id')
-                client_secret = client_secret or settings.get('azure_client_secret')
-                settings_db.close()
-            except Exception:
-                pass
+    if not tenants:
+        logger.warning("No enabled tenants found, skipping discovery")
+        return
 
-        # Validate
-        if not all([tenant_id, client_id, client_secret]):
-            logger.error("❌ Missing Azure credentials in environment and DB settings")
-            return
-        
-        logger.info("✓ Azure credentials loaded")
-        
-        # Initialize discovery engine
-        engine = AzureDiscoveryEngine(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret,
-        )
-        logger.info("✓ Discovery engine initialized")
-        
-        # Run discovery
-        logger.info("▶ Starting discovery...")
-        engine.run_discovery()
-        
-        logger.info("✅ SCHEDULED DISCOVERY COMPLETED SUCCESSFULLY")
-        logger.info("=" * 70)
-
-        # Log activity
+    for db_tenant_id, tenant_name in tenants:
+        logger.info(f"▶ Running discovery for tenant: {tenant_name} (id={db_tenant_id})")
         try:
-            act_db = Database()
-            act_db.log_activity('discovery_completed', 'Scheduled discovery run completed')
-            act_db.close()
-        except Exception:
-            pass
+            _run_tenant_discovery(db_tenant_id, tenant_name, scan_mode)
+        except Exception as e:
+            logger.error(f"❌ Discovery FAILED for tenant {tenant_name}: {str(e)}")
+            logger.exception(e)
+            _dispatch_notification('scan_failed', {
+                'title': f'Discovery Scan Failed — {tenant_name}',
+                'description': f'Discovery failed for tenant {tenant_name}: {str(e)[:200]}',
+                'severity': 'critical',
+            })
 
-        # Check for identity changes and send email notification
-        _send_change_notification_if_needed()
+    logger.info("=" * 70)
+    logger.info("SCHEDULED DISCOVERY COMPLETED (all tenants)")
+    logger.info("=" * 70)
 
-        # Phase 83: Dispatch scan_complete notification
-        _dispatch_notification('scan_complete', {
-            'title': 'Discovery Scan Complete',
-            'description': 'Scheduled discovery run completed successfully.',
-            'severity': 'info',
-        })
 
-    except Exception as e:
-        logger.error(f"❌ SCHEDULED DISCOVERY FAILED: {str(e)}")
-        logger.exception(e)
+def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep'):
+    """Run discovery for a single tenant using their stored Azure credentials."""
+    # Read this tenant's settings (with RLS context)
+    settings_db = Database(tenant_id=db_tenant_id)
+    try:
+        settings = settings_db.get_system_settings()
+    finally:
+        settings_db.close()
 
-        # Phase 83: Dispatch scan_failed notification
-        _dispatch_notification('scan_failed', {
-            'title': 'Discovery Scan Failed',
-            'description': f'Scheduled discovery run failed: {str(e)[:200]}',
-            'severity': 'critical',
-        })
+    azure_tenant_id = settings.get('azure_tenant_id')
+    azure_client_id = settings.get('azure_client_id')
+    azure_client_secret = settings.get('azure_client_secret')
+
+    if not all([azure_tenant_id, azure_client_id, azure_client_secret]):
+        logger.info(f"  ⏭ Skipping tenant {tenant_name} — no Azure credentials configured")
+        return
+
+    logger.info(f"  ✓ Azure credentials loaded for {tenant_name}")
+
+    # Initialize discovery engine with RLS tenant context
+    engine = AzureDiscoveryEngine(
+        tenant_id=azure_tenant_id,
+        client_id=azure_client_id,
+        client_secret=azure_client_secret,
+        db_tenant_id=db_tenant_id,
+    )
+    logger.info(f"  ✓ Discovery engine initialized for {tenant_name}")
+
+    # Run discovery
+    engine.run_discovery()
+
+    logger.info(f"  ✅ Discovery completed for {tenant_name}")
+
+    # Log activity (with tenant context)
+    try:
+        act_db = Database(tenant_id=db_tenant_id)
+        act_db.log_activity('discovery_completed', f'Scheduled discovery run completed for {tenant_name}')
+        act_db.close()
+    except Exception:
+        pass
+
+    # Check for identity changes and send email notification
+    _send_change_notification_if_needed()
+
+    # Phase 83: Dispatch scan_complete notification
+    _dispatch_notification('scan_complete', {
+        'title': f'Discovery Scan Complete — {tenant_name}',
+        'description': f'Scheduled discovery run completed for {tenant_name}.',
+        'severity': 'info',
+    })
 
 
 def _send_change_notification_if_needed():
@@ -905,13 +920,18 @@ def get_next_report_time():
     return None
 
 
-def trigger_manual_discovery(scan_mode: str = 'deep'):
+def trigger_manual_discovery(scan_mode: str = 'deep', db_tenant_id: int = None, tenant_name: str = None):
     """
     Trigger discovery immediately (manual override).
-    Used by API endpoint or admin panel.
+    If db_tenant_id is provided, runs for that single tenant only.
+    Otherwise runs for all tenants (scheduled behavior).
     """
-    logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED (mode={scan_mode})")
-    run_scheduled_discovery(scan_mode=scan_mode)
+    if db_tenant_id is not None:
+        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for tenant {tenant_name or db_tenant_id} (mode={scan_mode})")
+        _run_tenant_discovery(db_tenant_id, tenant_name or str(db_tenant_id), scan_mode)
+    else:
+        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for all tenants (mode={scan_mode})")
+        run_scheduled_discovery(scan_mode=scan_mode)
 
 
 # For testing the scheduler in isolation

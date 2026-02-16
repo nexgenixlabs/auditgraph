@@ -109,7 +109,7 @@ class AzureDiscoveryEngine:
         subscription_name: Human-readable subscription name
     """
 
-    def __init__(self, tenant_id: str, client_id: str, client_secret: str):
+    def __init__(self, tenant_id: str, client_id: str, client_secret: str, db_tenant_id=None):
         """
         Initialize the discovery engine with Azure credentials.
 
@@ -117,11 +117,13 @@ class AzureDiscoveryEngine:
             tenant_id: Azure AD tenant ID
             client_id: Service principal application ID
             client_secret: Service principal client secret
+            db_tenant_id: AuditGraph tenant ID (integer) for RLS context
         """
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.client_secret = client_secret
-        self.db = Database()
+        self.db_tenant_id = db_tenant_id
+        self.db = Database(tenant_id=db_tenant_id)
         
         self.credential = ClientSecretCredential(
             tenant_id=tenant_id,
