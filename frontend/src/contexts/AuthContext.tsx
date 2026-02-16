@@ -31,6 +31,21 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/**
+ * API base URL — empty string in dev (proxy handles it),
+ * full backend URL in production (SWA has no proxy).
+ * Set via REACT_APP_API_URL at build time.
+ */
+const API_BASE = process.env.REACT_APP_API_URL || '';
+
+/** Resolve a /api/* path to a full URL when API_BASE is set. */
+function resolveApiUrl(url: string): string {
+  if (API_BASE && url.startsWith('/api/')) {
+    return `${API_BASE}${url}`;
+  }
+  return url;
+}
+
 /** Detect which portal we're running in based on current URL path. */
 function detectPortal(): PortalContext {
   return window.location.pathname.startsWith('/admin') ? 'admin' : 'client';
@@ -78,7 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!refreshToken) return false;
 
     try {
-      const res = await originalFetchRef.current('/api/auth/refresh', {
+      const res = await originalFetchRef.current(resolveApiUrl('/api/auth/refresh'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refresh_token: refreshToken }),
@@ -124,7 +139,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      let response = await origFetch(input, init);
+      // Resolve /api/* URLs to full backend URL when API_BASE is set (SWA mode)
+      const resolvedInput = typeof input === 'string' ? resolveApiUrl(input) : input;
+      let response = await origFetch(resolvedInput, init);
 
       // On 401, try token refresh once (deduplicated)
       if (response.status === 401 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
@@ -139,7 +156,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (newToken) {
             const headers = new Headers(init?.headers);
             headers.set('Authorization', `Bearer ${newToken}`);
-            response = await origFetch(input, { ...init, headers });
+            response = await origFetch(resolvedInput, { ...init, headers });
           }
         } else {
           const portal = detectPortal();
@@ -166,7 +183,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    originalFetchRef.current('/api/auth/me', {
+    originalFetchRef.current(resolveApiUrl('/api/auth/me'), {
       headers: { 'Authorization': `Bearer ${token}` },
     })
       .then(res => {
@@ -191,7 +208,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const body: any = { username, password, portal: resolvedPortal };
     if (tenantSlug) body.tenant_slug = tenantSlug;
-    const res = await originalFetchRef.current('/api/auth/login', {
+    const res = await originalFetchRef.current(resolveApiUrl('/api/auth/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -215,7 +232,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const loginWithSsoCode = useCallback(async (code: string) => {
     const portal = detectPortal();
     const keys = tokenKeys(portal);
-    const res = await originalFetchRef.current('/api/auth/saml/token', {
+    const res = await originalFetchRef.current(resolveApiUrl('/api/auth/saml/token'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code }),
@@ -236,7 +253,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const refreshToken = localStorage.getItem(keys.refresh);
     const accessToken = localStorage.getItem(keys.access);
     try {
-      await originalFetchRef.current('/api/auth/logout', {
+      await originalFetchRef.current(resolveApiUrl('/api/auth/logout'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

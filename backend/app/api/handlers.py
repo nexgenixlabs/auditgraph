@@ -225,6 +225,16 @@ def get_identities():
             query += " AND LOWER(i.display_name) LIKE %s"
             params.append(f"%{search.lower()}%")
 
+        subscription_filter = request.args.get("subscription_id")
+        if subscription_filter:
+            # Check junction table for ANY access (not just primary/discovery subscription)
+            query += """ AND (dr_sub.subscription_id = %s
+                OR i.identity_id IN (
+                    SELECT isa.identity_id FROM identity_subscription_access isa
+                    WHERE isa.subscription_id = %s
+                ))"""
+            params.extend([subscription_filter, subscription_filter])
+
         # Get total count before pagination
         count_query = f"SELECT COUNT(*) FROM ({query}) sub"
         cursor.execute(count_query, params)
@@ -959,8 +969,11 @@ def save_app_settings():
         'discovery_interval_hours', 'email_enabled', 'email_to',
         'notify_new_identities', 'notify_removed_identities',
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
+        'notify_weekly_digest',
         'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
         'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
+        'aws_access_key_id', 'aws_secret_access_key', 'aws_region',
+        'gcp_project_id', 'gcp_service_account_json',
         'onboarding_completed',
         'retention_discovery_days', 'retention_drift_days',
         'retention_activity_days', 'retention_anomalies_days',
@@ -971,6 +984,7 @@ def save_app_settings():
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
+        'notify_weekly_digest',
         'report_schedule_enabled', 'onboarding_completed',
         'retention_enabled',
     }
@@ -986,7 +1000,7 @@ def save_app_settings():
         value = str(value).strip()
 
         # Skip masked secrets — don't overwrite real secret with mask
-        if key in ('azure_client_secret', 'copilot_api_key') and value == '********':
+        if key in ('azure_client_secret', 'aws_secret_access_key', 'gcp_service_account_json', 'copilot_api_key') and value == '********':
             continue
 
         if key == 'discovery_interval_hours':
@@ -1725,8 +1739,24 @@ def _identity_list_select():
             COALESCE(i.pim_eligible_count, 0) as pim_eligible_count,
             COALESCE(i.has_permanent_assignment, false) as has_permanent_assignment,
             i.ca_coverage_status,
-            COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced
+            COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
+            dr_sub.subscription_id as sub_id,
+            dr_sub.subscription_name as sub_name,
+            (SELECT isa_p.subscription_id FROM identity_subscription_access isa_p
+             WHERE isa_p.identity_db_id = i.id
+             ORDER BY CASE
+                 WHEN LOWER(isa_p.rbac_role) LIKE '%%owner%%' THEN 4
+                 WHEN LOWER(isa_p.rbac_role) LIKE '%%contributor%%' THEN 3
+                 WHEN LOWER(isa_p.rbac_role) LIKE '%%admin%%' THEN 3
+                 WHEN LOWER(isa_p.rbac_role) LIKE '%%writer%%' THEN 2
+                 ELSE 1
+             END DESC, isa_p.subscription_name ASC
+             LIMIT 1) as primary_subscription_id,
+            GREATEST(0, COALESCE((SELECT COUNT(DISTINCT isa_c.subscription_id) - 1
+             FROM identity_subscription_access isa_c
+             WHERE isa_c.identity_db_id = i.id), 0)) as additional_subscription_count
         FROM identities i
+        LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
 
 
@@ -1778,6 +1808,10 @@ def _map_identity_row(row):
         "has_permanent_assignment": bool(row[36]) if row[36] is not None else False,
         "ca_coverage_status": row[37] or None,
         "ca_mfa_enforced": bool(row[38]) if row[38] is not None else False,
+        "subscription_id": row[39] or None,
+        "subscription_name": row[40] or None,
+        "primary_subscription_id": row[41] or None,
+        "additional_subscription_count": int(row[42] or 0),
     }
 
 
@@ -4320,10 +4354,64 @@ def batch_auto_remediate():
 
 
 def get_role_mining():
-    """GET /api/role-mining — role mining & optimization analysis."""
+    """GET /api/role-mining — role mining v2: toxic combos, evidence, bundles, blast radius."""
     db = _db()
     try:
-        return jsonify(db.get_role_mining_data())
+        window_days = request.args.get('window_days', 90, type=int)
+        window_days = max(7, min(365, window_days))
+
+        from app.engines.role_mining import RoleMiningEngine
+        engine = RoleMiningEngine(db, window_days=window_days)
+        result = engine.analyze()
+
+        # Backward compat: keep legacy "findings" array for any old consumers
+        legacy_findings = []
+        for f in result.get('unused_findings', []):
+            legacy_findings.append({
+                'identity_id': f['identity_id'],
+                'identity_name': f['identity_name'],
+                'identity_category': f['identity_category'],
+                'role_name': f['role_name'],
+                'source': f['source'],
+                'type': f['finding_type'],
+                'risk_level': f['risk_level'],
+                'days_since_assigned': f.get('days_since_assigned'),
+                'scope': f.get('scope'),
+                'recommendation': f['recommendation'],
+                'assignment_method': f.get('assignment_method', 'direct'),
+            })
+        for f in result.get('redundant_findings', []):
+            legacy_findings.append({
+                'identity_id': f['identity_id'],
+                'identity_name': f['identity_name'],
+                'identity_category': f['identity_category'],
+                'role_name': f['role_name'],
+                'source': f['source'],
+                'type': 'redundant',
+                'risk_level': f.get('risk_level', 'medium'),
+                'days_since_assigned': None,
+                'scope': f.get('scope'),
+                'recommendation': f['recommendation'],
+                'assignment_method': f.get('assignment_method', 'direct'),
+            })
+        for f in result.get('orphaned_findings', []):
+            legacy_findings.append({
+                'identity_id': f['identity_id'],
+                'identity_name': f['identity_name'],
+                'identity_category': f['identity_category'],
+                'role_name': f['role_name'],
+                'source': f['source'],
+                'type': 'orphaned',
+                'risk_level': f.get('risk_level', 'medium'),
+                'days_since_assigned': None,
+                'scope': f.get('scope'),
+                'recommendation': f['recommendation'],
+                'assignment_method': f.get('assignment_method', 'direct'),
+            })
+
+        result['findings'] = legacy_findings
+        result['role_bundles'] = result.pop('bundles', [])
+        return jsonify(result)
     finally:
         db.close()
 
@@ -4342,7 +4430,7 @@ def get_remediation_dashboard_summary():
 # Phase 31: Authentication & User Management
 # ================================================================
 
-VALID_ROLES = {'admin', 'reader', 'compliance'}
+VALID_ROLES = {'admin', 'security_admin', 'compliance', 'reader'}
 
 
 def auth_login():
@@ -10842,8 +10930,8 @@ def get_identity_attack_paths(identity_id):
             cursor.execute("""
                 SELECT permission_name, permission_type
                 FROM graph_api_permissions
-                WHERE identity_id = %s AND permission_name = ANY(%s)
-            """, (identity_id, list(DANGEROUS_PERMISSIONS)))
+                WHERE identity_db_id = %s AND permission_name = ANY(%s)
+            """, (db_id, list(DANGEROUS_PERMISSIONS)))
             dangerous_perms = cursor.fetchall()
             for p in dangerous_perms:
                 paths.append({
@@ -10863,10 +10951,10 @@ def get_identity_attack_paths(identity_id):
         # 2. Dangerous Entra roles
         try:
             cursor.execute("""
-                SELECT role_name, scope
+                SELECT role_name, directory_scope
                 FROM entra_role_assignments
-                WHERE identity_id = %s AND role_name = ANY(%s)
-            """, (identity_id, list(DANGEROUS_ROLES)))
+                WHERE identity_db_id = %s AND role_name = ANY(%s)
+            """, (db_id, list(DANGEROUS_ROLES)))
             dangerous_roles = cursor.fetchall()
             for r in dangerous_roles:
                 paths.append({
@@ -10886,7 +10974,7 @@ def get_identity_attack_paths(identity_id):
         # 3. Ownership chain: identity owns SPNs with privileged roles
         try:
             cursor.execute("""
-                SELECT DISTINCT o.identity_id as owned_id, i2.display_name as owned_name
+                SELECT DISTINCT o.identity_id as owned_id, i2.display_name as owned_name, i2.id as owned_db_id
                 FROM sp_ownership o
                 JOIN identities i2 ON i2.identity_id = o.identity_id AND i2.discovery_run_id = (
                     SELECT MAX(discovery_run_id) FROM identities WHERE identity_id = o.identity_id
@@ -10897,8 +10985,8 @@ def get_identity_attack_paths(identity_id):
             for owned in owned_spns:
                 cursor.execute("""
                     SELECT role_name FROM entra_role_assignments
-                    WHERE identity_id = %s AND role_name = ANY(%s)
-                """, (owned[0], list(DANGEROUS_ROLES)))
+                    WHERE identity_db_id = %s AND role_name = ANY(%s)
+                """, (owned[2], list(DANGEROUS_ROLES)))
                 priv_roles = cursor.fetchall()
                 if priv_roles:
                     paths.append({
@@ -10943,10 +11031,10 @@ def get_identity_attack_paths(identity_id):
             cursor.execute("""
                 SELECT role_name, scope
                 FROM role_assignments
-                WHERE identity_id = %s
+                WHERE identity_db_id = %s
                   AND role_name IN ('Owner', 'Contributor')
                   AND (scope ~ '^/subscriptions/[^/]+$' OR scope = '/')
-            """, (identity_id,))
+            """, (db_id,))
             sub_roles = cursor.fetchall()
             for sr in sub_roles:
                 paths.append({
@@ -11097,5 +11185,129 @@ def check_feature_gate(feature_name):
                 'current_plan': plan,
             }
         return True, None
+    finally:
+        db.close()
+
+
+# ================================================================
+# Cloud Subscriptions (per-account monitoring)
+# ================================================================
+
+def get_subscriptions_list():
+    """GET /api/subscriptions — list cloud subscriptions for current tenant."""
+    db = _db()
+    try:
+        cloud = request.args.get('cloud')
+        subs = db.get_cloud_subscriptions(_tenant_id(), cloud=cloud)
+        return jsonify({'subscriptions': subs})
+    finally:
+        db.close()
+
+
+def get_subscriptions_stats():
+    """GET /api/subscriptions/stats — summary counts."""
+    db = _db()
+    try:
+        stats = db.get_subscription_stats(_tenant_id())
+        return jsonify(stats)
+    finally:
+        db.close()
+
+
+def activate_subscription():
+    """POST /api/subscriptions/activate — activate a subscription for monitoring."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+        sub_id = data.get('id')
+        if not sub_id:
+            return jsonify({'error': 'Subscription id is required'}), 400
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        result = db.activate_cloud_subscription(sub_id, user_id)
+        if not result:
+            return jsonify({'error': 'Subscription not found'}), 404
+
+        _log(db, 'subscription_activated', f"Activated subscription {result.get('account_id')}", {'subscription_id': sub_id})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def deactivate_subscription(sub_id):
+    """PUT /api/subscriptions/<id>/deactivate — stop monitoring."""
+    db = _db()
+    try:
+        result = db.deactivate_cloud_subscription(sub_id)
+        if not result:
+            return jsonify({'error': 'Subscription not found'}), 404
+
+        _log(db, 'subscription_deactivated', f"Deactivated subscription {result.get('account_id')}", {'subscription_id': sub_id})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_subscriptions_distinct():
+    """GET /api/subscriptions/distinct — distinct subscription_id/name pairs from discovery_runs."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT subscription_id, subscription_name
+            FROM discovery_runs
+            WHERE tenant_id = %s
+              AND subscription_id IS NOT NULL
+              AND subscription_id != ''
+            ORDER BY subscription_name
+        """, (_tenant_id(),))
+        rows = cursor.fetchall()
+        cursor.close()
+        return jsonify({'subscriptions': [{'subscription_id': r[0], 'subscription_name': r[1] or r[0]} for r in rows]})
+    except Exception:
+        return jsonify({'subscriptions': []})
+    finally:
+        db.close()
+
+
+def get_identity_subscriptions(identity_id):
+    """GET /api/identities/<identity_id>/subscriptions — all subscription access for an identity."""
+    db = _db()
+    try:
+        # Resolve identity_id to identity_db_id from latest run
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT i.id FROM identities i
+            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            WHERE i.identity_id = %s AND dr.tenant_id = %s
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, _tenant_id()))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'subscriptions': [], 'count': 0})
+        identity_db_id = row[0]
+        subs = db.get_identity_subscription_access(identity_db_id)
+        # Group by subscription for a cleaner response
+        by_sub = {}
+        for s in subs:
+            sub_id = s['subscription_id']
+            if sub_id not in by_sub:
+                by_sub[sub_id] = {
+                    'subscription_id': sub_id,
+                    'subscription_name': s['subscription_name'],
+                    'roles': [],
+                }
+            by_sub[sub_id]['roles'].append({
+                'rbac_role': s['rbac_role'],
+                'scope': s['scope'],
+                'scope_type': s['scope_type'],
+                'risk_level': s['risk_level'],
+            })
+        result = sorted(by_sub.values(), key=lambda x: x['subscription_name'] or '')
+        return jsonify({'subscriptions': result, 'count': len(result)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     finally:
         db.close()
