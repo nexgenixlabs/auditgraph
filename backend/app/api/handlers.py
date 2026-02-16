@@ -942,10 +942,9 @@ def get_app_settings():
     try:
         settings = db.get_settings(tenant_id=_tenant_id())
 
-        # SECURITY: Never backfill env var credentials into tenant-scoped responses.
-        # Env vars are for the scheduler (system-level). Each tenant must configure
-        # their own credentials via the Settings UI. Backfilling would leak one
-        # tenant's credentials to every other tenant that hasn't configured their own.
+        # SECURITY: Do NOT backfill env var credential VALUES into settings dict.
+        # That would leak one tenant's credentials to every other tenant.
+        # Settings dict only contains this tenant's own DB-stored values.
 
         # Mask secrets for API response
         if settings.get('azure_client_secret'):
@@ -953,11 +952,15 @@ def get_app_settings():
         if settings.get('copilot_api_key'):
             settings['copilot_api_key'] = '********'
 
-        # Check Azure credential configuration (tenant's own DB settings only)
+        # Check Azure credential configuration (env vars OR DB settings)
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
+        ]) or all([
+            os.getenv('AZURE_TENANT_ID'),
+            os.getenv('AZURE_CLIENT_ID'),
+            os.getenv('AZURE_CLIENT_SECRET'),
         ])
 
         # Check scheduler state
