@@ -159,6 +159,10 @@ from app.api.handlers import (
     post_sa_attestation,
     get_sa_governance_settings,
     save_sa_governance_settings,
+    get_governance_identities,
+    get_governance_identity_detail,
+    post_governance_decision,
+    get_governance_stats,
     health_check,
     prometheus_metrics,
     get_system_health,
@@ -523,6 +527,26 @@ def create_app():
     @require_role('admin')
     def sa_gov_settings_save_route():
         return save_sa_governance_settings()
+
+    # -----------------------
+    # Identity Governance V2 — Risk-Aware Certification
+    # -----------------------
+    @app.get("/api/governance/identities")
+    def governance_identities_route():
+        return get_governance_identities()
+
+    @app.get("/api/governance/identities/<identity_id>")
+    def governance_identity_detail_route(identity_id):
+        return get_governance_identity_detail(identity_id)
+
+    @app.post("/api/governance/identities/<identity_id>/decide")
+    @require_role('admin', 'security_admin', 'auditor')
+    def governance_decision_route(identity_id):
+        return post_governance_decision(identity_id)
+
+    @app.get("/api/governance/stats")
+    def governance_stats_route():
+        return get_governance_stats()
 
     # -----------------------
     # Cross-Tenant Analytics (Phase 47 - all portal roles, used by Overview)

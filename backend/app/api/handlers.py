@@ -10081,6 +10081,640 @@ def save_sa_governance_settings():
 
 
 # ---------------------------------------------------------------------------
+# Identity Governance V2 — Risk-Aware Certification Engine
+# ---------------------------------------------------------------------------
+
+def get_governance_identities():
+    """GET /api/governance/identities — Enriched SA list with risk scores, access context,
+    credential detail, governance status, and recommended actions."""
+    from app.database import _compute_governance_risk, _compute_gov_recommended_action
+    db = _db()
+    tid = _tenant_id()
+
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        run_id = _latest_run_query(cursor, tid)
+        if not run_id:
+            return jsonify({'items': [], 'total': 0})
+
+        policies = _load_sa_gov_policies(db, tid)
+
+        # Parse query params
+        search = request.args.get('search', '').strip()
+        risk_band = request.args.get('risk_band', '').strip()
+        gov_status_filter = request.args.get('governance_status', '').strip()
+        category_filter = request.args.get('category', '').strip()
+        sort_by = request.args.get('sort_by', 'risk_score')
+        sort_dir = request.args.get('sort_dir', 'desc')
+        limit = min(int(request.args.get('limit', '50')), 200)
+        offset = int(request.args.get('offset', '0'))
+
+        # Build WHERE
+        where_clauses = ["i.discovery_run_id = %s", "i.identity_category IN %s"]
+        params = [run_id, SA_CATEGORIES]
+
+        if search:
+            where_clauses.append("LOWER(i.display_name) LIKE %s")
+            params.append(f"%{search.lower()}%")
+
+        if category_filter and category_filter in SA_CATEGORIES:
+            where_clauses.append("i.identity_category = %s")
+            params.append(category_filter)
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Count total (before risk_band filter, which is post-compute)
+        cursor.execute(f"SELECT COUNT(*) as cnt FROM identities i WHERE {where_sql}", params)
+        total_pre = cursor.fetchone()['cnt']
+
+        # Fetch all matching (risk_band and gov_status are post-compute filters)
+        sort_map = {
+            'display_name': 'i.display_name',
+            'risk_score': 'COALESCE(i.risk_score, 0)',
+            'risk_level': 'i.risk_level',
+            'identity_category': 'i.identity_category',
+            'owner_count': 'COALESCE(i.owner_count, 0)',
+            'credential_risk': 'i.credential_risk',
+            'activity_status': 'i.activity_status',
+            'last_sign_in': 'i.last_sign_in',
+        }
+        order_col = sort_map.get(sort_by, 'COALESCE(i.risk_score, 0)')
+        order_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+
+        # If filtering by risk_band or gov_status, fetch ALL and filter in Python
+        need_post_filter = bool(risk_band) or bool(gov_status_filter)
+        fetch_limit = 'ALL' if need_post_filter else str(limit)
+        fetch_offset = '0' if need_post_filter else str(offset)
+
+        cursor.execute(f"""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   i.risk_level, COALESCE(i.risk_score, 0) as risk_score,
+                   COALESCE(i.owner_count, 0) as owner_count, i.owner_display_name,
+                   i.credential_risk, i.credential_count, i.credential_expiration,
+                   i.next_expiry, i.activity_status, i.last_sign_in, i.created_datetime,
+                   i.app_type
+            FROM identities i
+            WHERE {where_sql}
+            ORDER BY {order_col} {order_dir} NULLS LAST
+            LIMIT {fetch_limit} OFFSET {fetch_offset}
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        if not rows:
+            return jsonify({'items': [], 'total': 0})
+
+        # Batch fetch latest attestations
+        page_ids = [r['identity_id'] for r in rows]
+        cursor.execute("""
+            SELECT DISTINCT ON (identity_id) identity_id, status as att_status,
+                   attested_at, next_due,
+                   (SELECT display_name FROM users WHERE id = sa.attested_by) as attester_name
+            FROM sa_attestations sa
+            WHERE identity_id = ANY(%s)
+            ORDER BY identity_id, attested_at DESC
+        """, (page_ids,))
+        att_map = {}
+        for ar in cursor.fetchall():
+            att_map[ar['identity_id']] = dict(ar)
+
+        # Batch fetch role_assignments
+        db_ids = [r['id'] for r in rows]
+        role_map = {}
+        if db_ids:
+            cursor.execute("""
+                SELECT identity_db_id, role_name, scope, scope_type
+                FROM role_assignments
+                WHERE identity_db_id = ANY(%s)
+            """, (db_ids,))
+            for rr in cursor.fetchall():
+                role_map.setdefault(rr['identity_db_id'], []).append(dict(rr))
+
+        # Batch fetch credentials
+        cred_map = {}
+        if db_ids:
+            cursor.execute("""
+                SELECT identity_db_id, credential_type, start_datetime, end_datetime, display_name
+                FROM credentials
+                WHERE identity_db_id = ANY(%s)
+            """, (db_ids,))
+            for cr in cursor.fetchall():
+                cred_map.setdefault(cr['identity_db_id'], []).append(dict(cr))
+
+        # Batch fetch graph_api_permissions
+        perm_map = {}
+        if db_ids:
+            cursor.execute("""
+                SELECT identity_db_id, permission_name, permission_type
+                FROM graph_api_permissions
+                WHERE identity_db_id = ANY(%s)
+            """, (db_ids,))
+            for pr in cursor.fetchall():
+                perm_map.setdefault(pr['identity_db_id'], []).append(dict(pr))
+
+        # Batch fetch latest governance decisions
+        decision_map = {}
+        if page_ids:
+            cursor.execute("""
+                SELECT DISTINCT ON (identity_id) identity_id, decision, reason,
+                       risk_score_snapshot, risk_band_snapshot, created_at,
+                       (SELECT display_name FROM users WHERE id = gd.decided_by) as decided_by_name
+                FROM governance_decisions gd
+                WHERE identity_id = ANY(%s)
+                ORDER BY identity_id, created_at DESC
+            """, (page_ids,))
+            for dr in cursor.fetchall():
+                decision_map[dr['identity_id']] = dict(dr)
+
+        # Compute risk scores and build response
+        items = []
+        for r in rows:
+            att = att_map.get(r['identity_id'])
+            roles = role_map.get(r['id'], [])
+            creds = cred_map.get(r['id'], [])
+            perms = perm_map.get(r['id'], [])
+            owner_count = r['owner_count']
+
+            score, band, factors = _compute_governance_risk(
+                r, roles, creds, perms, att, owner_count, policies
+            )
+
+            is_dormant = r.get('activity_status', '') in ('stale', 'never_used')
+            is_unowned = owner_count == 0
+            cred_risk = r.get('credential_risk', '')
+            is_managed = r['identity_category'] in ('managed_identity_system', 'managed_identity_user')
+
+            rec_action, rec_detail, rec_reduction = _compute_gov_recommended_action(
+                score, band, factors, is_dormant, is_unowned, cred_risk, is_managed
+            )
+
+            # Governance status
+            gov_status, gov_issues = _compute_governance_status(r, att, policies)
+
+            # Apply post-compute filters
+            if risk_band and band.lower() != risk_band.lower():
+                continue
+            if gov_status_filter and gov_status != gov_status_filter:
+                continue
+
+            # Latest decision
+            last_dec = decision_map.get(r['identity_id'])
+
+            # Top role
+            top_role = ''
+            if roles:
+                from app.database import _GOV_PRIVILEGED_ROLES
+                sorted_roles = sorted(roles, key=lambda x: _GOV_PRIVILEGED_ROLES.get(x.get('role_name', ''), 0), reverse=True)
+                top_role = sorted_roles[0].get('role_name', '') if sorted_roles else ''
+
+            items.append({
+                'identity_id': r['identity_id'],
+                'identity_db_id': r['id'],
+                'display_name': r['display_name'],
+                'identity_category': r['identity_category'],
+                'risk_score': score,
+                'risk_band': band,
+                'risk_factors': factors[:5],
+                'governance_status': gov_status,
+                'governance_issues': gov_issues,
+                'recommended_action': rec_action,
+                'recommended_detail': rec_detail,
+                'expected_reduction': rec_reduction,
+                'owner_display_name': r['owner_display_name'],
+                'owner_count': owner_count,
+                'credential_risk': cred_risk,
+                'credential_count': r.get('credential_count') or 0,
+                'activity_status': r.get('activity_status', ''),
+                'last_sign_in': r['last_sign_in'].isoformat() if r.get('last_sign_in') else None,
+                'top_role': top_role,
+                'role_count': len(roles),
+                'permission_count': len(perms),
+                'last_decision': {
+                    'decision': last_dec['decision'],
+                    'decided_by': last_dec.get('decided_by_name', ''),
+                    'created_at': last_dec['created_at'].isoformat() if last_dec.get('created_at') and hasattr(last_dec['created_at'], 'isoformat') else str(last_dec.get('created_at', '')),
+                } if last_dec else None,
+            })
+
+        # Sort post-compute results if needed
+        if need_post_filter:
+            total_filtered = len(items)
+            items = items[offset:offset + limit]
+        else:
+            total_filtered = total_pre
+
+        return jsonify({'items': items, 'total': total_filtered})
+    finally:
+        db.close()
+
+
+def get_governance_identity_detail(identity_id):
+    """GET /api/governance/identities/<identity_id> — Full risk detail with factors, access, credentials."""
+    from app.database import _compute_governance_risk, _compute_gov_recommended_action, _GOV_PRIVILEGED_ROLES
+    db = _db()
+    tid = _tenant_id()
+
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Find identity
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   i.risk_level, COALESCE(i.risk_score, 0) as risk_score,
+                   COALESCE(i.owner_count, 0) as owner_count, i.owner_display_name,
+                   i.credential_risk, i.credential_count, i.credential_expiration,
+                   i.next_expiry, i.activity_status, i.last_sign_in, i.created_datetime,
+                   i.app_type, i.app_id
+            FROM identities i
+            WHERE i.identity_id = %s AND i.identity_category IN %s
+            ORDER BY i.id DESC LIMIT 1
+        """, (identity_id, SA_CATEGORIES))
+        identity = cursor.fetchone()
+        if not identity:
+            return jsonify({'error': 'Service account not found'}), 404
+
+        db_id = identity['id']
+        policies = _load_sa_gov_policies(db, tid)
+
+        # Fetch roles
+        cursor.execute("""
+            SELECT role_name, scope, scope_type, assignment_type
+            FROM role_assignments WHERE identity_db_id = %s
+        """, (db_id,))
+        roles = [dict(r) for r in cursor.fetchall()]
+
+        # Fetch entra roles
+        cursor.execute("""
+            SELECT role_name, is_permanent, is_pim_eligible
+            FROM entra_role_assignments WHERE identity_db_id = %s
+        """, (db_id,))
+        entra_roles = [dict(r) for r in cursor.fetchall()]
+
+        # Fetch credentials
+        cursor.execute("""
+            SELECT credential_type, display_name, start_datetime, end_datetime, key_id
+            FROM credentials WHERE identity_db_id = %s
+        """, (db_id,))
+        credentials = [dict(r) for r in cursor.fetchall()]
+
+        # Fetch graph_api_permissions
+        cursor.execute("""
+            SELECT permission_name, permission_type, resource_name
+            FROM graph_api_permissions WHERE identity_db_id = %s
+        """, (db_id,))
+        graph_perms = [dict(r) for r in cursor.fetchall()]
+
+        # Fetch owners
+        cursor.execute("""
+            SELECT owner_display_name, owner_id, owner_type
+            FROM sp_ownership WHERE identity_db_id = %s
+        """, (db_id,))
+        owners = [dict(r) for r in cursor.fetchall()]
+
+        # Fetch latest attestation
+        cursor.execute("""
+            SELECT status, attested_at, next_due, justification,
+                   (SELECT display_name FROM users WHERE id = sa.attested_by) as attester_name
+            FROM sa_attestations sa
+            WHERE identity_id = %s
+            ORDER BY attested_at DESC LIMIT 1
+        """, (identity_id,))
+        attestation = cursor.fetchone()
+        att_dict = dict(attestation) if attestation else None
+
+        # Compute risk
+        score, band, factors = _compute_governance_risk(
+            dict(identity), roles, credentials, graph_perms, att_dict,
+            identity['owner_count'], policies
+        )
+
+        is_dormant = identity.get('activity_status', '') in ('stale', 'never_used')
+        is_unowned = identity['owner_count'] == 0
+        cred_risk = identity.get('credential_risk', '')
+        is_managed = identity['identity_category'] in ('managed_identity_system', 'managed_identity_user')
+
+        rec_action, rec_detail, rec_reduction = _compute_gov_recommended_action(
+            score, band, factors, is_dormant, is_unowned, cred_risk, is_managed
+        )
+
+        gov_status, gov_issues = _compute_governance_status(dict(identity), att_dict, policies)
+
+        # Fetch recent governance decisions
+        cursor.execute("""
+            SELECT decision, reason, risk_score_snapshot, risk_band_snapshot,
+                   created_at, exception_expiry,
+                   (SELECT display_name FROM users WHERE id = gd.decided_by) as decided_by_name
+            FROM governance_decisions gd
+            WHERE identity_id = %s
+            ORDER BY created_at DESC LIMIT 10
+        """, (identity_id,))
+        decisions = []
+        for d in cursor.fetchall():
+            dd = dict(d)
+            for k in ('created_at', 'exception_expiry'):
+                if dd.get(k) and hasattr(dd[k], 'isoformat'):
+                    dd[k] = dd[k].isoformat()
+            decisions.append(dd)
+
+        # Serialize dates in credentials
+        for c in credentials:
+            for k in ('start_datetime', 'end_datetime'):
+                if c.get(k) and hasattr(c[k], 'isoformat'):
+                    c[k] = c[k].isoformat()
+
+        # Serialize dates in attestation
+        if att_dict:
+            for k in ('attested_at', 'next_due'):
+                if att_dict.get(k) and hasattr(att_dict[k], 'isoformat'):
+                    att_dict[k] = att_dict[k].isoformat()
+
+        # Category breakdown of risk factors
+        category_scores = {}
+        for f in factors:
+            cat = f.get('category', 'other')
+            category_scores[cat] = category_scores.get(cat, 0) + f['impact']
+
+        return jsonify({
+            'identity_id': identity['identity_id'],
+            'identity_db_id': db_id,
+            'display_name': identity['display_name'],
+            'identity_category': identity['identity_category'],
+            'app_id': identity.get('app_id'),
+            'risk_score': score,
+            'risk_band': band,
+            'risk_factors': factors,
+            'category_scores': category_scores,
+            'governance_status': gov_status,
+            'governance_issues': gov_issues,
+            'recommended_action': rec_action,
+            'recommended_detail': rec_detail,
+            'expected_reduction': rec_reduction,
+            'owner_count': identity['owner_count'],
+            'owners': owners,
+            'credential_risk': cred_risk,
+            'credential_count': identity.get('credential_count') or 0,
+            'credentials': credentials,
+            'activity_status': identity.get('activity_status', ''),
+            'last_sign_in': identity['last_sign_in'].isoformat() if identity.get('last_sign_in') else None,
+            'created_datetime': identity['created_datetime'].isoformat() if identity.get('created_datetime') else None,
+            'roles': roles,
+            'entra_roles': entra_roles,
+            'graph_permissions': graph_perms,
+            'attestation': att_dict,
+            'decisions': decisions,
+        })
+    finally:
+        db.close()
+
+
+def post_governance_decision(identity_id):
+    """POST /api/governance/identities/<identity_id>/decide — Submit governance decision."""
+    from app.database import _compute_governance_risk, _GOV_PRIVILEGED_ROLES
+    db = _db()
+    tid = _tenant_id()
+    user_id = _current_user_id()
+
+    try:
+        data = request.get_json(silent=True) or {}
+        decision = str(data.get('decision', '')).strip()
+        reason = str(data.get('reason', '')).strip()
+        exception_expiry = data.get('exception_expiry')
+
+        valid_decisions = ('approve', 'revoke', 'downgrade', 'rotate', 'jit_converted', 'exception')
+        if decision not in valid_decisions:
+            return jsonify({'error': f'decision must be one of: {", ".join(valid_decisions)}'}), 400
+        if not reason:
+            return jsonify({'error': 'reason is required'}), 400
+        if decision == 'exception' and not exception_expiry:
+            return jsonify({'error': 'exception_expiry is required for exception decisions'}), 400
+
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Verify identity exists
+        cursor.execute("""
+            SELECT id, identity_id, display_name, identity_category,
+                   COALESCE(risk_score, 0) as risk_score, risk_level,
+                   COALESCE(owner_count, 0) as owner_count,
+                   credential_risk, activity_status, app_type,
+                   credential_count, last_sign_in
+            FROM identities
+            WHERE identity_id = %s AND identity_category IN %s
+            ORDER BY id DESC LIMIT 1
+        """, (identity_id, SA_CATEGORIES))
+        identity = cursor.fetchone()
+        if not identity:
+            return jsonify({'error': 'Service account not found'}), 404
+
+        db_id = identity['id']
+        policies = _load_sa_gov_policies(db, tid)
+
+        # Fetch roles + creds + perms for risk computation
+        cursor.execute("SELECT role_name, scope, scope_type FROM role_assignments WHERE identity_db_id = %s", (db_id,))
+        roles = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("SELECT credential_type, start_datetime, end_datetime FROM credentials WHERE identity_db_id = %s", (db_id,))
+        creds = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("SELECT permission_name FROM graph_api_permissions WHERE identity_db_id = %s", (db_id,))
+        perms = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT status, attested_at, next_due FROM sa_attestations
+            WHERE identity_id = %s ORDER BY attested_at DESC LIMIT 1
+        """, (identity_id,))
+        att = cursor.fetchone()
+        att_dict = dict(att) if att else None
+
+        # Compute current risk
+        score, band, factors = _compute_governance_risk(
+            dict(identity), roles, creds, perms, att_dict,
+            identity['owner_count'], policies
+        )
+
+        # Build access snapshot
+        access_snapshot = [{'role': r.get('role_name', ''), 'scope': r.get('scope', '')} for r in roles[:10]]
+
+        # Parse exception_expiry
+        exp_dt = None
+        if exception_expiry:
+            try:
+                from dateutil.parser import parse as dtparse
+                exp_dt = dtparse(str(exception_expiry))
+            except Exception:
+                pass
+
+        result = db.create_governance_decision(
+            identity_id=identity_id,
+            identity_db_id=db_id,
+            decision=decision,
+            reason=reason,
+            risk_score=score,
+            risk_band=band,
+            risk_factors=factors[:10],
+            access_snapshot=access_snapshot,
+            decided_by=user_id,
+            exception_expiry=exp_dt,
+            tenant_id=tid,
+        )
+
+        _log(db, 'governance_decision', f"{decision} on {identity['display_name']}: {reason}",
+             {'identity_id': identity_id, 'decision': decision, 'risk_score': score, 'risk_band': band})
+
+        # Serialize datetimes
+        for k in ('created_at', 'exception_expiry'):
+            if result.get(k) and hasattr(result[k], 'isoformat'):
+                result[k] = result[k].isoformat()
+
+        return jsonify(result), 201
+    finally:
+        db.close()
+
+
+def get_governance_stats():
+    """GET /api/governance/stats — Summary with risk distribution + governance breakdown."""
+    from app.database import _compute_governance_risk, _compute_gov_recommended_action
+    db = _db()
+    tid = _tenant_id()
+
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        run_id = _latest_run_query(cursor, tid)
+        if not run_id:
+            return jsonify({
+                'total': 0, 'risk_distribution': {}, 'governance_breakdown': {},
+                'action_summary': {}, 'top_risk': []
+            })
+
+        policies = _load_sa_gov_policies(db, tid)
+
+        # Fetch all SAs
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   COALESCE(i.risk_score, 0) as risk_score,
+                   COALESCE(i.owner_count, 0) as owner_count,
+                   i.credential_risk, i.activity_status, i.app_type,
+                   i.credential_count, i.last_sign_in
+            FROM identities i
+            WHERE i.discovery_run_id = %s AND i.identity_category IN %s
+        """, (run_id, SA_CATEGORIES))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        if not rows:
+            return jsonify({
+                'total': 0, 'risk_distribution': {}, 'governance_breakdown': {},
+                'action_summary': {}, 'top_risk': []
+            })
+
+        # Batch fetch attestations
+        all_ids = [r['identity_id'] for r in rows]
+        cursor.execute("""
+            SELECT DISTINCT ON (identity_id) identity_id, status, attested_at, next_due
+            FROM sa_attestations WHERE identity_id = ANY(%s)
+            ORDER BY identity_id, attested_at DESC
+        """, (all_ids,))
+        att_map = {}
+        for ar in cursor.fetchall():
+            att_map[ar['identity_id']] = dict(ar)
+
+        # Batch fetch roles
+        db_ids = [r['id'] for r in rows]
+        role_map = {}
+        if db_ids:
+            cursor.execute("""
+                SELECT identity_db_id, role_name, scope, scope_type
+                FROM role_assignments WHERE identity_db_id = ANY(%s)
+            """, (db_ids,))
+            for rr in cursor.fetchall():
+                role_map.setdefault(rr['identity_db_id'], []).append(dict(rr))
+
+        # Batch fetch credentials
+        cred_map = {}
+        if db_ids:
+            cursor.execute("""
+                SELECT identity_db_id, credential_type, start_datetime, end_datetime
+                FROM credentials WHERE identity_db_id = ANY(%s)
+            """, (db_ids,))
+            for cr in cursor.fetchall():
+                cred_map.setdefault(cr['identity_db_id'], []).append(dict(cr))
+
+        # Batch fetch graph perms
+        perm_map = {}
+        if db_ids:
+            cursor.execute("""
+                SELECT identity_db_id, permission_name
+                FROM graph_api_permissions WHERE identity_db_id = ANY(%s)
+            """, (db_ids,))
+            for pr in cursor.fetchall():
+                perm_map.setdefault(pr['identity_db_id'], []).append(dict(pr))
+
+        # Compute stats
+        risk_dist = {'Critical': 0, 'High': 0, 'Medium': 0, 'Low': 0}
+        gov_breakdown = {'compliant': 0, 'needs_attention': 0, 'non_compliant': 0}
+        action_summary = {}
+        scored_items = []
+
+        for r in rows:
+            att = att_map.get(r['identity_id'])
+            roles = role_map.get(r['id'], [])
+            creds = cred_map.get(r['id'], [])
+            perms = perm_map.get(r['id'], [])
+
+            score, band, factors = _compute_governance_risk(
+                r, roles, creds, perms, att, r['owner_count'], policies
+            )
+
+            risk_dist[band] = risk_dist.get(band, 0) + 1
+
+            gov_status, _ = _compute_governance_status(r, att, policies)
+            gov_breakdown[gov_status] = gov_breakdown.get(gov_status, 0) + 1
+
+            is_dormant = r.get('activity_status', '') in ('stale', 'never_used')
+            is_unowned = r['owner_count'] == 0
+            is_managed = r['identity_category'] in ('managed_identity_system', 'managed_identity_user')
+
+            rec_action, _, _ = _compute_gov_recommended_action(
+                score, band, factors, is_dormant, is_unowned,
+                r.get('credential_risk', ''), is_managed
+            )
+            action_summary[rec_action] = action_summary.get(rec_action, 0) + 1
+
+            scored_items.append({
+                'identity_id': r['identity_id'],
+                'display_name': r['display_name'],
+                'risk_score': score,
+                'risk_band': band,
+                'recommended_action': rec_action,
+            })
+
+        # Top 5 risk
+        scored_items.sort(key=lambda x: x['risk_score'], reverse=True)
+        top_risk = scored_items[:5]
+
+        # Recent decisions count (last 30 days)
+        cursor.execute("""
+            SELECT COUNT(*) as cnt FROM governance_decisions
+            WHERE created_at > NOW() - INTERVAL '30 days'
+        """)
+        recent_decisions = cursor.fetchone()['cnt']
+
+        return jsonify({
+            'total': len(rows),
+            'risk_distribution': risk_dist,
+            'governance_breakdown': gov_breakdown,
+            'action_summary': action_summary,
+            'top_risk': top_risk,
+            'recent_decisions': recent_decisions,
+        })
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Phase 68: Real-Time Monitoring & Health
 # ---------------------------------------------------------------------------
 

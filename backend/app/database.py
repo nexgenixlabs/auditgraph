@@ -6559,6 +6559,77 @@ class Database:
         cursor.close()
         return [dict(r) for r in rows]
 
+    # ── Identity Governance V2: Decisions Table ──────────────────────
+
+    _governance_decisions_ensured = False
+
+    def _ensure_governance_decisions_table(self):
+        if Database._governance_decisions_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS governance_decisions (
+                id SERIAL PRIMARY KEY,
+                identity_db_id INTEGER NOT NULL,
+                identity_id TEXT NOT NULL,
+                decision VARCHAR(50) NOT NULL,
+                reason TEXT,
+                risk_score_snapshot INTEGER,
+                risk_band_snapshot VARCHAR(20),
+                risk_factors_snapshot JSONB DEFAULT '[]',
+                access_snapshot JSONB DEFAULT '[]',
+                decided_by INTEGER NOT NULL REFERENCES users(id),
+                exception_expiry TIMESTAMPTZ,
+                tenant_id INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_identity ON governance_decisions(identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_tenant ON governance_decisions(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_created ON governance_decisions(created_at DESC)")
+        self.conn.commit()
+        cursor.close()
+        Database._governance_decisions_ensured = True
+
+    def create_governance_decision(self, identity_id, identity_db_id, decision, reason,
+                                   risk_score, risk_band, risk_factors, access_snapshot,
+                                   decided_by, exception_expiry=None, tenant_id=None):
+        self._ensure_governance_decisions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO governance_decisions
+                (identity_id, identity_db_id, decision, reason,
+                 risk_score_snapshot, risk_band_snapshot, risk_factors_snapshot,
+                 access_snapshot, decided_by, exception_expiry, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (identity_id, identity_db_id, decision, reason,
+              risk_score, risk_band, json.dumps(risk_factors),
+              json.dumps(access_snapshot), decided_by, exception_expiry, tenant_id))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_latest_governance_decision(self, identity_id, tenant_id=None):
+        self._ensure_governance_decisions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        sql = """
+            SELECT gd.*, u.display_name as reviewer_name
+            FROM governance_decisions gd
+            LEFT JOIN users u ON u.id = gd.decided_by
+            WHERE gd.identity_id = %s
+        """
+        params = [identity_id]
+        if tenant_id is not None:
+            sql += " AND gd.tenant_id = %s"
+            params.append(tenant_id)
+        sql += " ORDER BY gd.created_at DESC LIMIT 1"
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
     # ── Phase 72: Data Retention & Archival ───────────────────────────
 
     def cleanup_old_discovery_runs(self, days=90) -> dict:
@@ -7179,3 +7250,224 @@ def _generate_ai_recommendation(risk_score, risk_factors, identity_type, last_us
         return 'Approve', 'Low risk, appropriately scoped.'
 
     return 'Downgrade', 'Consider reducing privilege level.'
+
+
+# ── Identity Governance V2: Risk Scoring Engine ──────────────────
+
+_GOV_PRIVILEGED_ROLES = {
+    'Owner': 30, 'User Access Administrator': 25, 'Contributor': 20,
+    'Key Vault Administrator': 20, 'Key Vault Secrets Officer': 20,
+    'Global Administrator': 30, 'Privileged Role Administrator': 25,
+    'Application Administrator': 20, 'Cloud Application Administrator': 18,
+}
+
+_GOV_RISKY_PERMS = {
+    'Application.ReadWrite.All': 10, 'Directory.ReadWrite.All': 12,
+    'RoleManagement.ReadWrite.Directory': 12, 'AppRoleAssignment.ReadWrite.All': 10,
+    'Mail.ReadWrite': 8, 'Sites.ReadWrite.All': 8, 'Files.ReadWrite.All': 8,
+    'User.ReadWrite.All': 10, 'Group.ReadWrite.All': 10,
+}
+
+
+def _compute_governance_risk(identity, roles, credentials, graph_perms, attestation,
+                             owner_count, policies):
+    """Deterministic governance-aware risk scoring (0-100) with 5 signal categories.
+
+    Returns: (score, band, factors_list)
+    """
+    factors = []
+    raw = 0
+
+    # ── 1. PRIVILEGE (max 35) ──
+    priv_score = 0
+    seen_roles = set()
+    has_contributor = False
+    has_uaa = False
+    for r in (roles or []):
+        rn = r.get('role_name', '')
+        scope_type = r.get('scope_type', 'resource')
+        pts = _GOV_PRIVILEGED_ROLES.get(rn, 0)
+        if pts > 0 and rn not in seen_roles:
+            seen_roles.add(rn)
+            scope_label = r.get('scope', scope_type)
+            # Scale: subscription-level is full points, rg is 75%, resource is 50%
+            if scope_type == 'subscription':
+                factor_pts = pts
+            elif scope_type in ('resourceGroup', 'resource_group'):
+                factor_pts = int(pts * 0.75)
+            else:
+                factor_pts = int(pts * 0.5)
+            priv_score += factor_pts
+            factors.append({'factor': f'{rn} role on {scope_label}', 'impact': factor_pts, 'category': 'privilege'})
+            if rn == 'Contributor':
+                has_contributor = True
+            if rn == 'User Access Administrator':
+                has_uaa = True
+
+    # Toxic combination
+    if has_contributor and has_uaa:
+        factors.append({'factor': 'Toxic combination: Contributor + User Access Administrator', 'impact': 10, 'category': 'privilege'})
+        priv_score += 10
+
+    # Reader-only deduction
+    if roles and priv_score == 0:
+        has_reader = any(r.get('role_name', '') == 'Reader' for r in roles)
+        if has_reader:
+            factors.append({'factor': 'Reader-only access', 'impact': -5, 'category': 'privilege'})
+            priv_score -= 5
+
+    # Graph API permissions
+    perm_pts = 0
+    for perm in (graph_perms or []):
+        pname = perm if isinstance(perm, str) else perm.get('permission_name', '')
+        pts = _GOV_RISKY_PERMS.get(pname, 0)
+        if pts > 0:
+            perm_pts += pts
+            factors.append({'factor': f'API permission: {pname}', 'impact': pts, 'category': 'privilege'})
+    priv_score += perm_pts
+    raw += min(priv_score, 35)
+
+    # ── 2. GOVERNANCE (max 25) ──
+    gov_score = 0
+    if (owner_count or 0) == 0:
+        gov_score += 20
+        factors.append({'factor': 'No assigned owner — accountability gap', 'impact': 20, 'category': 'governance'})
+
+    if attestation is None:
+        gov_score += 12
+        factors.append({'factor': 'Never attested — no review on record', 'impact': 12, 'category': 'governance'})
+    else:
+        from datetime import datetime, timezone
+        next_due = attestation.get('next_due')
+        is_overdue = False
+        if next_due:
+            nd = next_due if hasattr(next_due, 'replace') else None
+            if nd and nd.replace(tzinfo=None) < datetime.utcnow():
+                is_overdue = True
+        if is_overdue:
+            gov_score += 10
+            factors.append({'factor': 'Attestation overdue (>90 days)', 'impact': 10, 'category': 'governance'})
+        else:
+            gov_score -= 8
+            factors.append({'factor': 'Recently attested with known owner', 'impact': -8, 'category': 'governance'})
+    raw += min(max(gov_score, 0), 25)
+
+    # ── 3. USAGE (max 20) ──
+    usage_score = 0
+    act_status = identity.get('activity_status', '')
+    last_sign_in = identity.get('last_sign_in')
+    is_dormant = act_status in ('stale', 'never_used')
+
+    if act_status == 'never_used':
+        usage_score += 12
+        factors.append({'factor': 'Never used — no sign-in record', 'impact': 12, 'category': 'usage'})
+    elif is_dormant:
+        if priv_score > 0:
+            usage_score += 15
+            factors.append({'factor': 'Dormant 90+ days with active privileges', 'impact': 15, 'category': 'usage'})
+        else:
+            usage_score += 8
+            factors.append({'factor': 'Dormant 90+ days (reader only)', 'impact': 8, 'category': 'usage'})
+    elif act_status == 'active':
+        usage_score -= 5
+        factors.append({'factor': 'Actively used (within 30 days)', 'impact': -5, 'category': 'usage'})
+    elif act_status == 'inactive':
+        usage_score += 5
+        factors.append({'factor': 'Low frequency usage (30-90 days)', 'impact': 5, 'category': 'usage'})
+    raw += min(max(usage_score, 0), 20)
+
+    # ── 4. CREDENTIAL (max 15) ──
+    cred_score = 0
+    cat = identity.get('identity_category', '')
+    is_managed = cat in ('managed_identity_system', 'managed_identity_user')
+
+    if is_managed:
+        cred_score -= 10
+        factors.append({'factor': 'Platform-managed identity (no user credentials)', 'impact': -10, 'category': 'credential'})
+    elif not credentials:
+        cred_score += 10
+        factors.append({'factor': 'No credentials found — possible orphan', 'impact': 10, 'category': 'credential'})
+    else:
+        cred_risk = identity.get('credential_risk', '')
+        if cred_risk == 'expired':
+            cred_score += 10
+            factors.append({'factor': 'Expired credential still present', 'impact': 10, 'category': 'credential'})
+        elif cred_risk == 'expiring_soon':
+            cred_score += 15
+            factors.append({'factor': 'Credential expiring within 30 days', 'impact': 15, 'category': 'credential'})
+
+        # Check for old credentials
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        for c in (credentials if isinstance(credentials, list) else [credentials]):
+            start = c.get('start_datetime')
+            if start and hasattr(start, 'replace'):
+                age = (now - (start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start)).days
+                if age > 365:
+                    cred_score += 10
+                    factors.append({'factor': f'Credential age {age}d — not rotated', 'impact': 10, 'category': 'credential'})
+                    break
+
+        # Multiple secrets
+        cred_count = identity.get('credential_count', 0) or 0
+        if cred_count > 2:
+            cred_score += 5
+            factors.append({'factor': f'{cred_count} credentials — more than needed', 'impact': 5, 'category': 'credential'})
+
+    raw += min(max(cred_score, 0), 15)
+
+    # ── 5. EXPOSURE (max 10) ──
+    exposure_score = 0
+    app_type = identity.get('app_type', '') or ''
+    if 'multi' in app_type.lower() or 'external' in app_type.lower():
+        exposure_score += 10
+        factors.append({'factor': 'External/third-party application', 'impact': 10, 'category': 'exposure'})
+    elif app_type:
+        exposure_score -= 3
+        factors.append({'factor': 'Internal application only', 'impact': -3, 'category': 'exposure'})
+    raw += min(max(exposure_score, 0), 10)
+
+    # Clamp and band
+    score = max(0, min(100, raw))
+    if score >= 76:
+        band = 'Critical'
+    elif score >= 51:
+        band = 'High'
+    elif score >= 26:
+        band = 'Medium'
+    else:
+        band = 'Low'
+
+    # Sort factors by absolute impact DESC
+    factors.sort(key=lambda f: abs(f['impact']), reverse=True)
+
+    return score, band, factors
+
+
+def _compute_gov_recommended_action(score, band, factors, is_dormant, is_unowned, cred_risk, is_managed):
+    """Compute recommended governance action and expected risk reduction."""
+    if is_dormant and score >= 50:
+        reduction = min(score, 45)
+        return 'Revoke', f'Remove all access — dormant with elevated risk', reduction
+    if is_unowned and score >= 40:
+        return 'Assign Owner', 'Assign accountability before next review', 20
+    if band == 'Critical':
+        return 'Revoke', 'Remove or disable — critical risk', min(score, 50)
+    if band == 'High' and is_dormant:
+        return 'Revoke', 'Dormant with high risk — recommend removal', min(score, 40)
+    if cred_risk == 'expired':
+        return 'Rotate', 'Rotate expired credentials immediately', 10
+    if cred_risk == 'expiring_soon':
+        return 'Rotate', 'Rotate credentials before expiry', 15
+    if band == 'High':
+        has_priv = any(f['category'] == 'privilege' and f['impact'] >= 20 for f in factors)
+        if has_priv:
+            return 'Downgrade', 'Reduce privilege level', 20
+        return 'Re-attest', 'Review and certify access', 10
+    if band == 'Medium':
+        if is_unowned:
+            return 'Assign Owner', 'Assign owner for accountability', 15
+        return 'Re-attest', 'Periodic review recommended', 8
+    if is_managed:
+        return 'None', 'Low-risk managed identity', 0
+    return 'Approve', 'Low risk — approve current access', 0
