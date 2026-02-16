@@ -12841,7 +12841,7 @@ def activate_subscription():
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
-        result = db.activate_cloud_subscription(sub_id, user_id)
+        result = db.activate_cloud_subscription(sub_id, user_id, tenant_id=_tenant_id())
         if not result:
             return jsonify({'error': 'Subscription not found'}), 404
 
@@ -12855,7 +12855,7 @@ def deactivate_subscription(sub_id):
     """PUT /api/subscriptions/<id>/deactivate — stop monitoring."""
     db = _db()
     try:
-        result = db.deactivate_cloud_subscription(sub_id)
+        result = db.deactivate_cloud_subscription(sub_id, tenant_id=_tenant_id())
         if not result:
             return jsonify({'error': 'Subscription not found'}), 404
 

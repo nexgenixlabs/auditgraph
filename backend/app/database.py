@@ -6942,11 +6942,15 @@ class Database:
         cursor.close()
 
     def get_cloud_subscriptions(self, tenant_id, cloud=None):
-        """List cloud subscriptions for a tenant."""
+        """List cloud subscriptions for a tenant. None = superadmin (all)."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        query = "SELECT * FROM cloud_subscriptions WHERE tenant_id = %s"
-        params = [tenant_id]
+        if tenant_id is not None:
+            query = "SELECT * FROM cloud_subscriptions WHERE tenant_id = %s"
+            params = [tenant_id]
+        else:
+            query = "SELECT * FROM cloud_subscriptions WHERE 1=1"
+            params = []
         if cloud:
             query += " AND cloud = %s"
             params.append(cloud)
@@ -6961,32 +6965,50 @@ class Database:
         return rows
 
     def get_subscription_stats(self, tenant_id):
-        """Summary counts for cloud subscriptions."""
+        """Summary counts for cloud subscriptions. None = superadmin (all)."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE monitored = true) as active,
-                COUNT(*) FILTER (WHERE monitored = false) as discovered,
-                COUNT(DISTINCT cloud) as clouds
-            FROM cloud_subscriptions
-            WHERE tenant_id = %s
-        """, (tenant_id,))
+        if tenant_id is not None:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE monitored = true) as active,
+                    COUNT(*) FILTER (WHERE monitored = false) as discovered,
+                    COUNT(DISTINCT cloud) as clouds
+                FROM cloud_subscriptions
+                WHERE tenant_id = %s
+            """, (tenant_id,))
+        else:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE monitored = true) as active,
+                    COUNT(*) FILTER (WHERE monitored = false) as discovered,
+                    COUNT(DISTINCT cloud) as clouds
+                FROM cloud_subscriptions
+            """)
         row = dict(cursor.fetchone())
         cursor.close()
         return row
 
-    def activate_cloud_subscription(self, sub_id, user_id):
-        """Activate a subscription for monitoring."""
+    def activate_cloud_subscription(self, sub_id, user_id, tenant_id=None):
+        """Activate a subscription for monitoring, scoped by tenant."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            UPDATE cloud_subscriptions
-            SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-            WHERE id = %s
-            RETURNING *
-        """, (user_id, sub_id))
+        if tenant_id is not None:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
+                WHERE id = %s AND tenant_id = %s
+                RETURNING *
+            """, (user_id, sub_id, tenant_id))
+        else:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
+                WHERE id = %s
+                RETURNING *
+            """, (user_id, sub_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -6998,16 +7020,24 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def deactivate_cloud_subscription(self, sub_id):
-        """Stop monitoring a subscription."""
+    def deactivate_cloud_subscription(self, sub_id, tenant_id=None):
+        """Stop monitoring a subscription, scoped by tenant."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            UPDATE cloud_subscriptions
-            SET monitored = false, status = 'inactive'
-            WHERE id = %s
-            RETURNING *
-        """, (sub_id,))
+        if tenant_id is not None:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET monitored = false, status = 'inactive'
+                WHERE id = %s AND tenant_id = %s
+                RETURNING *
+            """, (sub_id, tenant_id))
+        else:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET monitored = false, status = 'inactive'
+                WHERE id = %s
+                RETURNING *
+            """, (sub_id,))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
