@@ -6941,9 +6941,103 @@ class Database:
         self.conn.commit()
         cursor.close()
 
+    def sync_cloud_subscriptions(self, tenant_id=None):
+        """Backfill cloud_subscriptions from discovery data if empty.
+
+        Sources: identity_subscription_access (individual rows) and
+        discovery_runs (comma-separated fallback). Only runs when the
+        table has no rows for the given tenant.
+        """
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor()
+
+        # Check if any records already exist
+        if tenant_id is not None and tenant_id > 0:
+            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE tenant_id = %s", (tenant_id,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions")
+        if cursor.fetchone()[0] > 0:
+            cursor.close()
+            return  # Already populated
+
+        # Source 1: identity_subscription_access (clean individual records)
+        if tenant_id is not None and tenant_id > 0:
+            cursor.execute("""
+                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.tenant_id
+                FROM identity_subscription_access isa
+                JOIN discovery_runs dr ON dr.id = isa.discovery_run_id
+                WHERE dr.tenant_id = %s
+                  AND isa.subscription_id IS NOT NULL AND isa.subscription_id != ''
+            """, (tenant_id,))
+        else:
+            cursor.execute("""
+                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.tenant_id
+                FROM identity_subscription_access isa
+                JOIN discovery_runs dr ON dr.id = isa.discovery_run_id
+                WHERE isa.subscription_id IS NOT NULL AND isa.subscription_id != ''
+            """)
+        isa_rows = cursor.fetchall()
+
+        inserted = set()
+        for row in isa_rows:
+            sub_id, sub_name, run_tid = row[0], row[1], row[2]
+            effective_tid = run_tid or (tenant_id if tenant_id and tenant_id > 0 else 1)
+            key = (effective_tid, sub_id)
+            if key in inserted:
+                continue
+            try:
+                cursor.execute("""
+                    INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                    VALUES (%s, 'azure', %s, %s, 'discovered')
+                    ON CONFLICT (tenant_id, cloud, account_id) DO NOTHING
+                """, (effective_tid, sub_id, sub_name or sub_id))
+                inserted.add(key)
+            except Exception:
+                self.conn.rollback()
+
+        # Source 2: discovery_runs fallback (comma-separated subscription_ids)
+        if not inserted:
+            if tenant_id is not None and tenant_id > 0:
+                cursor.execute("""
+                    SELECT DISTINCT subscription_id, subscription_name, tenant_id
+                    FROM discovery_runs
+                    WHERE tenant_id = %s AND subscription_id IS NOT NULL AND subscription_id != ''
+                """, (tenant_id,))
+            else:
+                cursor.execute("""
+                    SELECT DISTINCT subscription_id, subscription_name, tenant_id
+                    FROM discovery_runs
+                    WHERE subscription_id IS NOT NULL AND subscription_id != ''
+                """)
+            for row in cursor.fetchall():
+                sub_ids = row[0].split(',')
+                sub_names = (row[1] or '').split(', ')
+                run_tid = row[2] or (tenant_id if tenant_id and tenant_id > 0 else 1)
+                for i, sid in enumerate(sub_ids):
+                    sid = sid.strip()
+                    if not sid:
+                        continue
+                    sname = sub_names[i].strip() if i < len(sub_names) else sid
+                    key = (run_tid, sid)
+                    if key in inserted:
+                        continue
+                    try:
+                        cursor.execute("""
+                            INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                            VALUES (%s, 'azure', %s, %s, 'discovered')
+                            ON CONFLICT (tenant_id, cloud, account_id) DO NOTHING
+                        """, (run_tid, sid, sname))
+                        inserted.add(key)
+                    except Exception:
+                        self.conn.rollback()
+
+        self.conn.commit()
+        cursor.close()
+
     def get_cloud_subscriptions(self, tenant_id, cloud=None):
         """List cloud subscriptions for a tenant. None = superadmin (all)."""
         self._ensure_cloud_subscriptions_table()
+        self.sync_cloud_subscriptions(tenant_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if tenant_id is not None:
             query = "SELECT * FROM cloud_subscriptions WHERE tenant_id = %s"
@@ -6967,6 +7061,7 @@ class Database:
     def get_subscription_stats(self, tenant_id):
         """Summary counts for cloud subscriptions. None = superadmin (all)."""
         self._ensure_cloud_subscriptions_table()
+        self.sync_cloud_subscriptions(tenant_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if tenant_id is not None:
             cursor.execute("""

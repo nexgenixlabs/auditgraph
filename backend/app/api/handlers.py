@@ -942,15 +942,10 @@ def get_app_settings():
     try:
         settings = db.get_settings(tenant_id=_tenant_id())
 
-        # Backfill Azure credentials from env vars if DB settings are empty
-        env_creds = {
-            'azure_tenant_id': os.getenv('AZURE_TENANT_ID', ''),
-            'azure_client_id': os.getenv('AZURE_CLIENT_ID', ''),
-            'azure_client_secret': os.getenv('AZURE_CLIENT_SECRET', ''),
-        }
-        for key, env_val in env_creds.items():
-            if not settings.get(key) and env_val:
-                settings[key] = env_val
+        # SECURITY: Never backfill env var credentials into tenant-scoped responses.
+        # Env vars are for the scheduler (system-level). Each tenant must configure
+        # their own credentials via the Settings UI. Backfilling would leak one
+        # tenant's credentials to every other tenant that hasn't configured their own.
 
         # Mask secrets for API response
         if settings.get('azure_client_secret'):
@@ -958,7 +953,7 @@ def get_app_settings():
         if settings.get('copilot_api_key'):
             settings['copilot_api_key'] = '********'
 
-        # Check Azure credential configuration (env vars OR DB settings)
+        # Check Azure credential configuration (tenant's own DB settings only)
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
@@ -8230,14 +8225,12 @@ def get_onboarding_status():
         tid = _tenant_id()
         settings = db.get_settings(tenant_id=tid)
         completed = settings.get('onboarding_completed', 'false') == 'true'
+        # SECURITY: Only check tenant's own DB settings, never env vars.
+        # Env vars are for the system scheduler, not tenant-scoped status.
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
-        ]) or all([
-            os.getenv('AZURE_TENANT_ID'),
-            os.getenv('AZURE_CLIENT_ID'),
-            os.getenv('AZURE_CLIENT_SECRET'),
         ])
         return jsonify({
             'onboarding_completed': completed,

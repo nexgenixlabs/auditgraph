@@ -326,6 +326,26 @@ class AzureDiscoveryEngine:
             critical_count, high_count, medium_count, low_count
         )
         print(f"  ✓ Discovery run completed")
+
+        # Sync discovered subscriptions into cloud_subscriptions registry
+        try:
+            for sub in self.subscriptions:
+                cursor = self.db.conn.cursor()
+                # Use tenant_id from the discovery run
+                cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (run_id,))
+                run_row = cursor.fetchone()
+                run_tenant_id = run_row[0] if run_row and run_row[0] else 1
+                cursor.execute("""
+                    INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                    VALUES (%s, 'azure', %s, %s, 'discovered')
+                    ON CONFLICT (tenant_id, cloud, account_id) DO UPDATE
+                    SET account_name = EXCLUDED.account_name
+                """, (run_tenant_id, sub['id'], sub['name']))
+                self.db.conn.commit()
+                cursor.close()
+            print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
+        except Exception as e:
+            print(f"  ⚠️ Subscription sync warning: {e}")
         
         # Create result object
         # result = self._create_result(final_identities, role_assignments, run_id)
