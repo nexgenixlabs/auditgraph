@@ -1765,11 +1765,12 @@ class Database:
         'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
         'scheduler_interval_hours', 'org_name',
         'slack_webhook_url', 'teams_webhook_url', 'slack_events', 'teams_events',
+        'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
     ])
 
     def get_system_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Read a system-level operational setting (tenant_id IS NULL).
-        Only allowed for keys in the allowlist — never for credentials."""
+        Only allowed for keys in the allowlist."""
         if key not in self._SYSTEM_SETTING_ALLOWLIST:
             import logging
             logging.getLogger('tenant_isolation').warning(
@@ -1783,7 +1784,7 @@ class Database:
 
     def get_system_settings(self) -> Dict[str, str]:
         """Read all system-level operational settings (tenant_id IS NULL).
-        Filters to allowlisted keys only — never returns credentials."""
+        Filters to allowlisted keys only."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT key, value FROM settings WHERE tenant_id IS NULL ORDER BY key")
         result = {row[0]: row[1] for row in cursor.fetchall()
