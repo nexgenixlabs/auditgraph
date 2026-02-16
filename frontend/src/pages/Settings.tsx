@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { getTermLabel, getTermDiscount, ACCOUNT_TIER_LABELS } from '../constants/pricing';
+import { maskCredential } from '../utils/maskCredential';
 
 interface CloudProviderConfig {
   enabled: boolean;
@@ -167,6 +168,7 @@ export default function Settings() {
   const [cloudConfig, setCloudConfig] = useState<TenantCloudConfig | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<{ status: 'success' | 'error'; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
+  const [maskCredentials, setMaskCredentials] = useState(true);
   const cloudSectionRef = useRef<HTMLDivElement>(null);
   const isAdmin = user?.role === 'admin';
 
@@ -1621,7 +1623,7 @@ export default function Settings() {
                       <label className="block text-sm font-medium text-gray-700 mb-1">Azure Tenant ID</label>
                       <input
                         type="text"
-                        value={settings?.azure_tenant_id || ''}
+                        value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_tenant_id || '') : (settings?.azure_tenant_id || '')}
                         onChange={e => update('azure_tenant_id' as keyof SettingsData, e.target.value)}
                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                         className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
@@ -1631,7 +1633,7 @@ export default function Settings() {
                       <label className="block text-sm font-medium text-gray-700 mb-1">Application (Client) ID</label>
                       <input
                         type="text"
-                        value={settings?.azure_client_id || ''}
+                        value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_client_id || '') : (settings?.azure_client_id || '')}
                         onChange={e => update('azure_client_id' as keyof SettingsData, e.target.value)}
                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                         className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
@@ -1648,6 +1650,15 @@ export default function Settings() {
                       />
                       <p className="text-[10px] text-gray-400 mt-1">Secret is masked after saving. Clear and re-enter to change.</p>
                     </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={maskCredentials}
+                        onChange={e => setMaskCredentials(e.target.checked)}
+                        className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                      />
+                      <span className="text-xs text-gray-500">Mask credential IDs (recommended)</span>
+                    </label>
 
                     <div className="flex items-center gap-3 pt-1">
                       <button
@@ -2484,10 +2495,11 @@ export default function Settings() {
                           {u.display_name}
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
                             u.role === 'admin' ? 'bg-red-50 text-red-700' :
-                            u.role === 'reader' ? 'bg-blue-50 text-blue-700' :
-                            'bg-gray-100 text-gray-600'
+                            u.role === 'security_admin' ? 'bg-amber-50 text-amber-700' :
+                            u.role === 'compliance' ? 'bg-green-50 text-green-700' :
+                            'bg-blue-50 text-blue-700'
                           }`}>
-                            {u.role}
+                            {u.role === 'security_admin' ? 'Security Admin' : u.role}
                           </span>
                           {!u.enabled && (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
@@ -2596,10 +2608,11 @@ export default function Settings() {
                           {k.name}
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
                             k.role === 'admin' ? 'bg-red-50 text-red-700' :
-                            k.role === 'reader' ? 'bg-blue-50 text-blue-700' :
-                            'bg-gray-100 text-gray-600'
+                            k.role === 'security_admin' ? 'bg-amber-50 text-amber-700' :
+                            k.role === 'compliance' ? 'bg-green-50 text-green-700' :
+                            'bg-blue-50 text-blue-700'
                           }`}>
-                            {k.role}
+                            {k.role === 'security_admin' ? 'Security Admin' : k.role}
                           </span>
                           {!k.enabled && (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
@@ -3785,25 +3798,27 @@ export default function Settings() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
               <div className="flex gap-2">
-                {['admin', 'reader', 'compliance'].map(role => (
+                {['admin', 'security_admin', 'compliance', 'reader'].map(role => (
                   <button
                     key={role}
                     onClick={() => setUserForm(prev => ({ ...prev, role }))}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                    className={`px-3 py-2 rounded-lg text-sm font-medium border transition ${
                       userForm.role === role
                         ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
-                          : role === 'reader' ? 'bg-blue-600 text-white border-blue-600'
-                          : 'bg-gray-600 text-white border-gray-600'
+                          : role === 'security_admin' ? 'bg-amber-600 text-white border-amber-600'
+                          : role === 'compliance' ? 'bg-green-600 text-white border-green-600'
+                          : 'bg-blue-600 text-white border-blue-600'
                         : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                     }`}
                   >
-                    {role.charAt(0).toUpperCase() + role.slice(1)}
+                    {role === 'security_admin' ? 'Security Admin' : role.charAt(0).toUpperCase() + role.slice(1)}
                   </button>
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-1">
-                {userForm.role === 'admin' ? 'Full access: settings, users, discovery, webhooks, rules'
-                  : userForm.role === 'reader' ? 'Read + remediation actions, exports, reports'
+                {userForm.role === 'admin' ? 'Full access: settings, users, billing, discovery, rules'
+                  : userForm.role === 'security_admin' ? 'Activate subscriptions, manage cloud connections, run scans'
+                  : userForm.role === 'compliance' ? 'Read-only + compliance reports and access reviews'
                   : 'Read-only: view dashboards, identities, reports'}
               </p>
             </div>
@@ -3919,19 +3934,20 @@ export default function Settings() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
                   <div className="flex gap-2">
-                    {['admin', 'reader', 'compliance'].map(role => (
+                    {['admin', 'security_admin', 'compliance', 'reader'].map(role => (
                       <button
                         key={role}
                         onClick={() => setApiKeyForm(prev => ({ ...prev, role }))}
-                        className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+                        className={`px-3 py-2 rounded-lg text-sm font-medium border transition ${
                           apiKeyForm.role === role
                             ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
-                              : role === 'reader' ? 'bg-blue-600 text-white border-blue-600'
-                              : 'bg-gray-600 text-white border-gray-600'
+                              : role === 'security_admin' ? 'bg-amber-600 text-white border-amber-600'
+                              : role === 'compliance' ? 'bg-green-600 text-white border-green-600'
+                              : 'bg-blue-600 text-white border-blue-600'
                             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                         }`}
                       >
-                        {role.charAt(0).toUpperCase() + role.slice(1)}
+                        {role === 'security_admin' ? 'Security Admin' : role.charAt(0).toUpperCase() + role.slice(1)}
                       </button>
                     ))}
                   </div>

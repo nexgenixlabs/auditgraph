@@ -25,6 +25,7 @@ interface IdentityData {
   identity_category: string;
   risk_level: string;
   credential_status: string;
+  change_reason?: string;
 }
 
 interface FullDriftReport {
@@ -38,17 +39,22 @@ interface FullDriftReport {
       identity: IdentityData;
       added_roles: string[];
       removed_roles: string[];
+      change_reason?: string;
     }>;
     risk_changes: Array<{
       identity: IdentityData;
       previous_risk: string;
       current_risk: string;
+      previous_score?: number;
+      current_score?: number;
       severity: 'escalation' | 'de-escalation' | 'unchanged';
+      change_reason?: string;
     }>;
     credential_changes: Array<{
       identity: IdentityData;
       previous_status: string;
       current_status: string;
+      change_reason?: string;
     }>;
   };
 }
@@ -502,12 +508,17 @@ function NewIdentitiesSection({ items }: { items: IdentityData[] }) {
   return (
     <div className="space-y-2">
       {items.map((item, i) => (
-        <div key={item.identity_id || i} className="flex items-center gap-3 text-sm">
-          <span className="text-green-600 font-mono font-bold">+</span>
-          <IdentityLink identity={item} />
-          <span className="text-gray-400">·</span>
-          <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
-          {riskBadge(item.risk_level)}
+        <div key={item.identity_id || i}>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-green-600 font-mono font-bold">+</span>
+            <IdentityLink identity={item} />
+            <span className="text-gray-400">·</span>
+            <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
+            {riskBadge(item.risk_level)}
+          </div>
+          {!!item.change_reason && (
+            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
+          )}
         </div>
       ))}
     </div>
@@ -518,11 +529,16 @@ function RemovedIdentitiesSection({ items }: { items: IdentityData[] }) {
   return (
     <div className="space-y-2">
       {items.map((item, i) => (
-        <div key={item.identity_id || i} className="flex items-center gap-3 text-sm">
-          <span className="text-red-600 font-mono font-bold">-</span>
-          <span className="font-medium text-gray-700">{item.display_name || item.identity_id}</span>
-          <span className="text-gray-400">·</span>
-          <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
+        <div key={item.identity_id || i}>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-red-600 font-mono font-bold">-</span>
+            <span className="font-medium text-gray-700">{item.display_name || item.identity_id}</span>
+            <span className="text-gray-400">·</span>
+            <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
+          </div>
+          {!!item.change_reason && (
+            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
+          )}
         </div>
       ))}
     </div>
@@ -561,15 +577,19 @@ function RiskChangesSection({ items }: { items: FullDriftReport['changes']['risk
   return (
     <div className="space-y-2">
       {items.map((item, i) => (
-        <div key={item.identity?.identity_id || i} className="flex items-center gap-3 text-sm">
-          <span className={item.severity === 'escalation' ? 'text-red-500' : 'text-green-500'}>
-            {item.severity === 'escalation' ? '\u2191' : '\u2193'}
-          </span>
-          <IdentityLink identity={item.identity} />
-          <span className="text-gray-400">\u2192</span>
-          {riskBadge(item.previous_risk)}
-          <span className="text-gray-400">\u2192</span>
-          {riskBadge(item.current_risk)}
+        <div key={item.identity?.identity_id || i}>
+          <div className="flex items-center gap-3 text-sm">
+            <span className={item.severity === 'escalation' ? 'text-red-500' : 'text-green-500'}>
+              {item.severity === 'escalation' ? '\u2191' : '\u2193'}
+            </span>
+            <IdentityLink identity={item.identity} />
+            {riskBadge(item.previous_risk)}
+            <span className="text-gray-400">{'\u2192'}</span>
+            {riskBadge(item.current_risk)}
+          </div>
+          {!!item.change_reason && (
+            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
+          )}
         </div>
       ))}
     </div>
@@ -580,12 +600,17 @@ function CredentialChangesSection({ items }: { items: FullDriftReport['changes']
   return (
     <div className="space-y-2">
       {items.map((item, i) => (
-        <div key={item.identity?.identity_id || i} className="flex items-center gap-3 text-sm">
-          <span className="text-yellow-600">*</span>
-          <IdentityLink identity={item.identity} />
-          <span className="text-xs text-gray-500">{item.previous_status}</span>
-          <span className="text-gray-400">\u2192</span>
-          <span className="text-xs font-medium text-yellow-700">{item.current_status}</span>
+        <div key={item.identity?.identity_id || i}>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-yellow-600">*</span>
+            <IdentityLink identity={item.identity} />
+            <span className="text-xs text-gray-500">{item.previous_status}</span>
+            <span className="text-gray-400">{'\u2192'}</span>
+            <span className="text-xs font-medium text-yellow-700">{item.current_status}</span>
+          </div>
+          {!!item.change_reason && (
+            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
+          )}
         </div>
       ))}
     </div>

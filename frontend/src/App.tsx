@@ -49,6 +49,7 @@ import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
+import Subscriptions from './pages/Subscriptions';
 import {
   GlobalRiskCards,
   CloudComparison,
@@ -313,7 +314,7 @@ function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode;
 }
 
 function AppContent() {
-  const { user, loading, isAdmin, isSuperAdmin } = useAuth();
+  const { user, loading, isAdmin, isSuperAdmin, canManageConnections } = useAuth();
   const { loading: tenantLoading, error: tenantError } = useTenant();
   const location = useLocation();
   const [searchOpen, setSearchOpen] = useState(false);
@@ -447,7 +448,7 @@ function AppContent() {
               <TopBar dark={dark} onToggleTheme={toggleTheme} onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
               {/* Left Sidebar */}
-              <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} />
+              <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} canManageConnections={canManageConnections} />
 
               {/* Global Search Modal */}
               <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
@@ -483,6 +484,7 @@ function AppContent() {
                   <Route path="/app-registrations" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
+                  <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><Settings /></ErrorBoundary>

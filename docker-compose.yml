@@ -1,20 +1,73 @@
 services:
-  postgres:
-    image: postgres:16
-    container_name: auditgraph-postgres
-    environment:
-      POSTGRES_DB: auditgraph
-      POSTGRES_USER: auditgraph
-      POSTGRES_PASSWORD: auditgraph
+  # ─── Backend (Flask API) ───────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
-      - "5432:5432"
+      - "5000:5000"
+    env_file:
+      - ./backend/.env.local
+    environment:
+      - FLASK_APP=app.main:create_app()
+      - FLASK_ENV=development
     volumes:
-      - auditgraph_pgdata:/var/lib/postgresql/data
+      # Mount source code for hot reload in development
+      - ./backend:/app
+    command: ["python", "-m", "flask", "run", "--host=0.0.0.0", "--port=5000", "--reload"]
+    networks:
+      - auditgraph-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U auditgraph -d auditgraph"]
-      interval: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 3
 
-volumes:
-  auditgraph_pgdata:
+  # ─── Frontend (React + Nginx) ──────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      # Override prod nginx config with local dev config (has backend proxy)
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - auditgraph-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── Local Postgres (optional — for offline dev) ─
+  # Uncomment if you want a local DB instead of Azure
+  # postgres:
+  #   image: postgres:16
+  #   container_name: auditgraph-postgres
+  #   environment:
+  #     POSTGRES_DB: auditgraph
+  #     POSTGRES_USER: auditgraph
+  #     POSTGRES_PASSWORD: auditgraph
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - auditgraph_pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U auditgraph -d auditgraph"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 20
+  #   networks:
+  #     - auditgraph-net
+
+networks:
+  auditgraph-net:
+    driver: bridge
+
+# volumes:
+#   auditgraph_pgdata:

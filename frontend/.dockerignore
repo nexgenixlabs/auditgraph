@@ -1,0 +1,8 @@
+node_modules/
+build/
+dist/
+.git/
+*.md
+.env
+.env.local
+.env.production

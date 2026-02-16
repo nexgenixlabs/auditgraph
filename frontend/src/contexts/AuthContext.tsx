@@ -4,7 +4,7 @@ interface User {
   id: number;
   username: string;
   display_name: string;
-  role: 'admin' | 'reader' | 'compliance';
+  role: 'admin' | 'security_admin' | 'compliance' | 'reader';
   tenant_id?: number;
   tenant_name?: string;
   is_superadmin?: boolean;
@@ -23,7 +23,12 @@ interface AuthContextValue {
   logout: () => Promise<void>;
   isAdmin: boolean;
   isReader: boolean;
+  isSecurityAdmin: boolean;
   isSuperAdmin: boolean;
+  canActivateSubscriptions: boolean;
+  canSeePricing: boolean;
+  canManageConnections: boolean;
+  canManageUsers: boolean;
   activeTenantId: number | null;
   activeTenantName: string | null;
   switchTenant: (tenantId: number | null, tenantName?: string) => void;
@@ -275,15 +280,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  const role = user?.role;
   const value: AuthContextValue = {
     user,
     loading,
     login,
     loginWithSsoCode,
     logout,
-    isAdmin: user?.role === 'admin',
-    isReader: user?.role === 'reader' || user?.role === 'admin',
+    isAdmin: role === 'admin',
+    isReader: role === 'reader' || role === 'admin',
+    isSecurityAdmin: role === 'security_admin',
     isSuperAdmin: user?.is_superadmin === true,
+    canActivateSubscriptions: role === 'admin' || role === 'security_admin',
+    canSeePricing: role === 'admin',
+    canManageConnections: role === 'admin' || role === 'security_admin',
+    canManageUsers: role === 'admin',
     activeTenantId,
     activeTenantName,
     switchTenant,

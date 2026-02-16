@@ -1,0 +1,90 @@
+name: Build & Deploy AuditGraph (Container Apps)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  RESOURCE_GROUP: auditgraph-dev-rg
+
+jobs:
+  # ─── Build & Push Backend ─────────────────────
+  build-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-backend:${{ github.sha }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-backend:latest
+
+  # ─── Build & Push Frontend ────────────────────
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-frontend:${{ github.sha }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-frontend:latest
+
+  # ─── Deploy to Azure Container Apps ───────────
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend]
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy backend
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          containerAppName: auditgraph-api
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-backend:${{ github.sha }}
+
+      - name: Deploy frontend
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          containerAppName: auditgraph-web
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-frontend:${{ github.sha }}
+
+      - name: Verify backend health
+        run: |
+          sleep 30
+          BACKEND_URL=$(az containerapp show --name auditgraph-api --resource-group ${{ env.RESOURCE_GROUP }} --query properties.configuration.ingress.fqdn -o tsv)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$BACKEND_URL/api/health")
+          if [ "$STATUS" != "200" ]; then
+            echo "Backend health check failed (HTTP $STATUS)"
+            exit 1
+          fi
+          echo "Backend healthy"
