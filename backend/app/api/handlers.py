@@ -8232,6 +8232,20 @@ def get_onboarding_status():
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
         ])
+
+        # If tenant has existing discovery runs, treat as already onboarded
+        # even if onboarding_completed was never explicitly set in DB.
+        if not completed and not azure_configured:
+            cursor = db.conn.cursor()
+            if tid and tid > 0:
+                cursor.execute("SELECT COUNT(*) FROM discovery_runs WHERE tenant_id = %s", (tid,))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM discovery_runs")
+            has_runs = cursor.fetchone()[0] > 0
+            cursor.close()
+            if has_runs:
+                completed = True
+
         return jsonify({
             'onboarding_completed': completed,
             'azure_configured': azure_configured,
