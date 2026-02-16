@@ -88,6 +88,8 @@ from app.api.handlers import (
     delete_access_review,
     update_review_decision,
     bulk_review_decisions,
+    get_campaign_metrics_handler,
+    get_campaign_audit_log_handler,
     get_groups_list,
     create_group_handler,
     get_group_detail,
@@ -983,6 +985,14 @@ def create_app():
     @require_role('auditor', 'admin')
     def review_bulk_decision(campaign_id):
         return bulk_review_decisions(campaign_id)
+
+    @app.get("/api/access-reviews/metrics")
+    def access_reviews_metrics():
+        return get_campaign_metrics_handler()
+
+    @app.get("/api/access-reviews/<int:campaign_id>/audit-log")
+    def access_reviews_audit_log(campaign_id):
+        return get_campaign_audit_log_handler(campaign_id)
 
     # -----------------------
     # Identity Groups (Phase 38)

@@ -6455,7 +6455,7 @@ def get_access_reviews_list():
 
 
 def create_access_review():
-    """Create a new access review campaign and populate review items."""
+    """Create a new access review campaign and populate review items (V2)."""
     db = _db()
     try:
         user = g.current_user
@@ -6480,12 +6480,26 @@ def create_access_review():
         if not has_criteria:
             return jsonify({'error': 'At least one scope criteria is required (risk_levels, identity_categories, or identity_ids)'}), 400
 
-        campaign = db.create_campaign(name, description, scope, deadline, user['id'])
-        review_count = db.populate_campaign_reviews(campaign['id'], scope, user['id'])
+        # V2 fields
+        campaign_type = body.get('campaign_type', 'general')
+        scope_clouds = body.get('scope_clouds')
+        scope_description = body.get('scope_description', '')
+        risk_focus = body.get('risk_focus')
+        tenant_id = _tenant_id()
+
+        campaign = db.create_campaign(name, description, scope, deadline, user['id'],
+                                      campaign_type=campaign_type, scope_clouds=scope_clouds,
+                                      scope_description=scope_description, risk_focus=risk_focus,
+                                      tenant_id=tenant_id)
+        review_count = db.populate_campaign_reviews(campaign['id'], scope, user['id'], deadline=deadline)
+
+        # Audit log
+        db.log_campaign_audit(campaign['id'], None, 'campaign_created', user['id'],
+                              metadata={'review_count': review_count, 'scope': scope, 'campaign_type': campaign_type})
 
         _log(db,'campaign_created',
                         f'Access review campaign "{name}" created with {review_count} identities',
-                        {'campaign_id': campaign['id'], 'review_count': review_count})
+                        {'campaign_id': campaign['id'], 'review_count': review_count, 'campaign_type': campaign_type})
 
         try:
             db.create_notification('access_review', 'access_review', 'info',
@@ -6502,14 +6516,27 @@ def create_access_review():
 
 
 def get_access_review_detail(campaign_id):
-    """Get a single campaign with all its review items."""
+    """Get a single campaign with paginated, filtered, sorted review items (V2)."""
     db = _db()
     try:
         campaign = db.get_campaign(campaign_id)
         if not campaign:
             return jsonify({'error': 'Campaign not found'}), 404
-        reviews = db.get_campaign_reviews(campaign_id)
-        return jsonify({'campaign': campaign, 'reviews': reviews})
+
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        sort_by = request.args.get('sort_by', 'risk_score')
+        sort_dir = request.args.get('sort_dir', 'desc')
+        status_filter = request.args.get('status')
+        risk_filter = request.args.get('risk_level')
+        type_filter = request.args.get('identity_type')
+        search = request.args.get('search')
+
+        result = db.get_campaign_reviews_v2(campaign_id, limit=limit, offset=offset,
+                                            sort_by=sort_by, sort_dir=sort_dir,
+                                            status_filter=status_filter, risk_filter=risk_filter,
+                                            type_filter=type_filter, search=search)
+        return jsonify({'campaign': campaign, **result})
     finally:
         db.close()
 
@@ -6587,7 +6614,7 @@ def delete_access_review(campaign_id):
 
 
 def update_review_decision(campaign_id, review_id):
-    """Set a decision on a single review item."""
+    """Set a decision on a single review item with audit trail."""
     db = _db()
     try:
         user = g.current_user
@@ -6602,13 +6629,28 @@ def update_review_decision(campaign_id, review_id):
             return jsonify({'error': 'Request body required'}), 400
 
         decision = body.get('decision')
-        if decision not in ('approve', 'revoke', 'flag'):
-            return jsonify({'error': 'decision must be one of: approve, revoke, flag'}), 400
+        if decision not in ('approve', 'revoke', 'flag', 'downgrade', 'convert_pim', 'rotate_secret'):
+            return jsonify({'error': 'decision must be one of: approve, revoke, flag, downgrade, convert_pim, rotate_secret'}), 400
 
         notes = body.get('notes')
+
+        # Capture old decision for audit
+        old_reviews = db.get_campaign_reviews(campaign_id)
+        old_decision = None
+        for r in old_reviews:
+            if r['id'] == review_id:
+                old_decision = r.get('decision')
+                break
+
         result = db.update_campaign_review(review_id, decision, notes, user['id'])
         if not result:
             return jsonify({'error': 'Review not found'}), 404
+
+        # Audit log
+        db.log_campaign_audit(campaign_id, review_id, 'decision_made', user['id'],
+                              old_value=old_decision, new_value=decision,
+                              metadata={'identity': result.get('identity_display_name', ''),
+                                        'notes': notes, 'reviewer': user['username']})
 
         _log(db,'review_decided',
                         f'Review decision: {decision} for {result.get("identity_display_name", "")}',
@@ -6621,7 +6663,7 @@ def update_review_decision(campaign_id, review_id):
 
 
 def bulk_review_decisions(campaign_id):
-    """Bulk set decision on multiple review items."""
+    """Bulk set decision on multiple review items with audit trail."""
     db = _db()
     try:
         user = g.current_user
@@ -6642,11 +6684,17 @@ def bulk_review_decisions(campaign_id):
             return jsonify({'error': 'Maximum 100 reviews per bulk action'}), 400
 
         decision = body.get('decision')
-        if decision not in ('approve', 'revoke', 'flag'):
-            return jsonify({'error': 'decision must be one of: approve, revoke, flag'}), 400
+        if decision not in ('approve', 'revoke', 'flag', 'downgrade', 'convert_pim', 'rotate_secret'):
+            return jsonify({'error': 'decision must be one of: approve, revoke, flag, downgrade, convert_pim, rotate_secret'}), 400
 
         notes = body.get('notes')
         count = db.bulk_update_campaign_reviews(review_ids, decision, notes, user['id'])
+
+        # Audit log for bulk action
+        db.log_campaign_audit(campaign_id, None, 'bulk_decision', user['id'],
+                              new_value=decision,
+                              metadata={'review_ids': review_ids, 'count': count,
+                                        'notes': notes, 'reviewer': user['username']})
 
         _log(db,'review_bulk_decided',
                         f'Bulk {decision}: {count} reviews in campaign "{campaign["name"]}"',
@@ -6654,6 +6702,31 @@ def bulk_review_decisions(campaign_id):
                          'count': count, 'reviewer': user['username']})
 
         return jsonify({'updated_count': count})
+    finally:
+        db.close()
+
+
+def get_campaign_metrics_handler():
+    """Return campaign dashboard KPIs."""
+    db = _db()
+    try:
+        metrics = db.get_campaign_metrics()
+        return jsonify(metrics)
+    finally:
+        db.close()
+
+
+def get_campaign_audit_log_handler(campaign_id):
+    """Return audit trail for a campaign."""
+    db = _db()
+    try:
+        campaign = db.get_campaign(campaign_id)
+        if not campaign:
+            return jsonify({'error': 'Campaign not found'}), 404
+        limit = min(int(request.args.get('limit', 100)), 500)
+        offset = int(request.args.get('offset', 0))
+        result = db.get_campaign_audit_log(campaign_id, limit=limit, offset=offset)
+        return jsonify(result)
     finally:
         db.close()
 

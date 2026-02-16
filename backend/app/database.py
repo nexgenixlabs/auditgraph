@@ -4437,7 +4437,7 @@ class Database:
     # ===================================================================
 
     def _ensure_access_review_tables(self):
-        """Create access_review_campaigns and campaign_reviews tables."""
+        """Create access_review_campaigns, campaign_reviews, and campaign_audit_log tables."""
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS access_review_campaigns (
@@ -4455,6 +4455,15 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_status ON access_review_campaigns(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_created_by ON access_review_campaigns(created_by)")
+        # V2 columns on campaigns
+        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS campaign_type VARCHAR(100) DEFAULT 'general'")
+        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS scope_clouds TEXT[]")
+        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS scope_description VARCHAR(500)")
+        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS risk_focus VARCHAR(100)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON access_review_campaigns(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_type ON access_review_campaigns(campaign_type)")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS campaign_reviews (
                 id SERIAL PRIMARY KEY,
@@ -4473,6 +4482,42 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_campaign ON campaign_reviews(campaign_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_identity ON campaign_reviews(identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_decision ON campaign_reviews(decision)")
+        # V2 columns on reviews
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS identity_db_id INTEGER")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS identity_type VARCHAR(100)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS access_role VARCHAR(255)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS access_scope VARCHAR(500)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS cloud_provider VARCHAR(50)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS risk_score INTEGER")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS risk_factors JSONB DEFAULT '[]'")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS last_used_date TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS last_used_days INTEGER")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS privilege_level VARCHAR(50)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS credential_risk VARCHAR(255)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS credential_risk_level VARCHAR(50)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS ai_recommendation VARCHAR(100)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS ai_recommendation_reason TEXT")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS decision_by INTEGER REFERENCES users(id)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS review_due_date TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_risk ON campaign_reviews(risk_score DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaign_reviews_reviewer ON campaign_reviews(reviewer_id)")
+
+        # V2: Campaign audit log
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS campaign_audit_log (
+                id SERIAL PRIMARY KEY,
+                campaign_id INTEGER NOT NULL REFERENCES access_review_campaigns(id) ON DELETE CASCADE,
+                review_id INTEGER REFERENCES campaign_reviews(id) ON DELETE SET NULL,
+                action VARCHAR(100) NOT NULL,
+                actor_id INTEGER REFERENCES users(id),
+                old_value TEXT,
+                new_value TEXT,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_campaign ON campaign_audit_log(campaign_id)")
         self.conn.commit()
         cursor.close()
 
@@ -4531,15 +4576,19 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def create_campaign(self, name: str, description: str, scope_filters: dict, deadline: str, created_by: int) -> dict:
-        """Create a new access review campaign."""
+    def create_campaign(self, name: str, description: str, scope_filters: dict, deadline: str, created_by: int,
+                        campaign_type: str = 'general', scope_clouds: list = None,
+                        scope_description: str = None, risk_focus: str = None, tenant_id: int = None) -> dict:
+        """Create a new access review campaign with V2 fields."""
         self._ensure_access_review_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO access_review_campaigns (name, description, scope_filters, deadline, created_by)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO access_review_campaigns (name, description, scope_filters, deadline, created_by,
+                campaign_type, scope_clouds, scope_description, risk_focus, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
-        """, (name, description, json.dumps(scope_filters) if scope_filters else '{}', deadline, created_by))
+        """, (name, description, json.dumps(scope_filters) if scope_filters else '{}', deadline, created_by,
+              campaign_type, scope_clouds, scope_description, risk_focus, tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -4592,8 +4641,8 @@ class Database:
         cursor.close()
         return deleted
 
-    def populate_campaign_reviews(self, campaign_id: int, scope_filters: dict, reviewer_id: int) -> int:
-        """Populate campaign_reviews from identities matching scope_filters."""
+    def populate_campaign_reviews(self, campaign_id: int, scope_filters: dict, reviewer_id: int, deadline=None) -> int:
+        """Populate campaign_reviews from identities with V2 risk scoring and AI recommendations."""
         self._ensure_access_review_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -4629,27 +4678,195 @@ class Database:
 
         where_clause = " AND ".join(where_parts)
         cursor.execute(f"""
-            SELECT i.identity_id, i.display_name, i.risk_level,
-                   COALESCE(i.identity_category, '') as identity_category
+            SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                   COALESCE(i.identity_category, '') as identity_category,
+                   i.activity_status, i.last_sign_in,
+                   i.credential_status, i.credential_expiration,
+                   COALESCE(i.risk_score, 0) as existing_risk_score,
+                   COALESCE(i.ca_mfa_enforced, false) as mfa_enforced,
+                   COALESCE(i.owner_count, 0) as owner_count
             FROM identities i
             WHERE {where_clause}
-            ORDER BY i.display_name
+            ORDER BY COALESCE(i.risk_score, 0) DESC, i.display_name
         """, params)
         identities = cursor.fetchall()
 
+        # Pre-fetch role assignments and credentials for all identities
+        id_list = [ident['id'] for ident in identities]
+        roles_map = {}
+        cred_map = {}
+        graph_perms_map = {}
+        pim_map = {}
+
+        if id_list:
+            ph = ','.join(['%s'] * len(id_list))
+            # Top role per identity (highest privilege)
+            cursor.execute(f"""
+                SELECT ra.identity_db_id, ra.role_name, ra.scope, ra.scope_type
+                FROM role_assignments ra WHERE ra.identity_db_id IN ({ph})
+                ORDER BY ra.identity_db_id
+            """, id_list)
+            for r in cursor.fetchall():
+                dbid = r['identity_db_id']
+                if dbid not in roles_map:
+                    roles_map[dbid] = []
+                roles_map[dbid].append(r)
+
+            # Entra roles
+            cursor.execute(f"""
+                SELECT era.identity_db_id, era.role_name
+                FROM entra_role_assignments era WHERE era.identity_db_id IN ({ph})
+            """, id_list)
+            for r in cursor.fetchall():
+                dbid = r['identity_db_id']
+                if dbid not in roles_map:
+                    roles_map[dbid] = []
+                roles_map[dbid].append({'role_name': r['role_name'], 'scope': None, 'scope_type': 'tenant'})
+
+            # Credentials
+            cursor.execute(f"""
+                SELECT c.identity_db_id, c.end_datetime, c.start_datetime, c.credential_type
+                FROM credentials c WHERE c.identity_db_id IN ({ph})
+                ORDER BY c.end_datetime ASC NULLS LAST
+            """, id_list)
+            for r in cursor.fetchall():
+                dbid = r['identity_db_id']
+                if dbid not in cred_map:
+                    cred_map[dbid] = r
+
+            # Graph API permissions
+            cursor.execute(f"""
+                SELECT g.identity_db_id, g.permission_name
+                FROM graph_api_permissions g WHERE g.identity_db_id IN ({ph})
+            """, id_list)
+            for r in cursor.fetchall():
+                dbid = r['identity_db_id']
+                if dbid not in graph_perms_map:
+                    graph_perms_map[dbid] = []
+                graph_perms_map[dbid].append(r['permission_name'])
+
+            # PIM eligibility
+            cursor.execute(f"""
+                SELECT pe.identity_db_id FROM pim_eligible_assignments pe
+                WHERE pe.identity_db_id IN ({ph})
+            """, id_list)
+            for r in cursor.fetchall():
+                pim_map[r['identity_db_id']] = True
+
         count = 0
         for ident in identities:
+            dbid = ident['id']
+            roles = roles_map.get(dbid, [])
+            cred = cred_map.get(dbid)
+            graph_perms = graph_perms_map.get(dbid, [])
+            is_pim = pim_map.get(dbid, False)
+
+            # Compute V2 fields
+            top_role = _pick_top_role(roles) if roles else None
+            access_role = top_role['role_name'] if top_role else None
+            scope_type = top_role.get('scope_type', 'resource') if top_role else None
+            access_scope = _format_scope(top_role.get('scope')) if top_role else None
+            cloud_provider = 'Azure'  # Default; multi-cloud when engines exist
+
+            # Identity type mapping
+            cat = ident['identity_category']
+            type_map = {'service_principal': 'service_principal', 'managed_identity_system': 'managed_identity',
+                        'managed_identity_user': 'managed_identity', 'human_user': 'human', 'guest': 'human'}
+            identity_type = type_map.get(cat, cat or 'unknown')
+
+            # Usage
+            last_used_days = None
+            if ident.get('last_sign_in'):
+                from datetime import datetime, timezone
+                try:
+                    delta = datetime.now(timezone.utc) - ident['last_sign_in'].replace(tzinfo=timezone.utc) if ident['last_sign_in'].tzinfo is None else datetime.now(timezone.utc) - ident['last_sign_in']
+                    last_used_days = delta.days
+                except Exception:
+                    pass
+
+            # Risk scoring
+            risk_score, risk_factors = _compute_review_risk(
+                access_role, scope_type, last_used_days, cred, graph_perms,
+                is_pim, ident.get('mfa_enforced', False)
+            )
+
+            # Privilege level
+            privilege_level = _compute_privilege_level(access_role, is_pim)
+
+            # Credential risk
+            cred_risk, cred_risk_level = _compute_credential_risk(cred)
+
+            # AI recommendation
+            ai_rec, ai_reason = _generate_ai_recommendation(
+                risk_score, risk_factors, identity_type, last_used_days, cred_risk
+            )
+
             cursor.execute("""
                 INSERT INTO campaign_reviews (campaign_id, identity_id, identity_display_name,
-                    identity_risk_level, identity_category, reviewer_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    identity_risk_level, identity_category, reviewer_id,
+                    identity_db_id, identity_type, access_role, access_scope, cloud_provider,
+                    risk_score, risk_factors, last_used_date, last_used_days, privilege_level,
+                    credential_risk, credential_risk_level, ai_recommendation, ai_recommendation_reason,
+                    review_due_date)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (campaign_id, ident['identity_id'], ident['display_name'],
-                  ident['risk_level'], ident['identity_category'], reviewer_id))
+                  ident['risk_level'], cat, reviewer_id,
+                  dbid, identity_type, access_role, access_scope, cloud_provider,
+                  risk_score, json.dumps(risk_factors), ident.get('last_sign_in'), last_used_days,
+                  privilege_level, cred_risk, cred_risk_level, ai_rec, ai_reason, deadline))
             count += 1
 
         self.conn.commit()
         cursor.close()
         return count
+
+    def log_campaign_audit(self, campaign_id, review_id, action, actor_id, old_value=None, new_value=None, metadata=None):
+        """Write to campaign_audit_log."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO campaign_audit_log (campaign_id, review_id, action, actor_id, old_value, new_value, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (campaign_id, review_id, action, actor_id, old_value, new_value,
+              json.dumps(metadata) if metadata else '{}'))
+        self.conn.commit()
+        cursor.close()
+
+    def get_campaign_metrics(self):
+        """Compute dashboard KPIs across all campaigns."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE c.status = 'active') as active_count,
+                COUNT(*) FILTER (WHERE c.status = 'active' AND c.deadline < NOW()) as overdue_count
+            FROM access_review_campaigns c
+        """)
+        camp = dict(cursor.fetchone())
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE cr.decision IS NOT NULL) as decided,
+                COUNT(*) FILTER (WHERE cr.decision = 'revoke') as revoked,
+                COUNT(*) FILTER (WHERE cr.decision IS NULL AND UPPER(cr.identity_risk_level) IN ('CRITICAL','HIGH')) as high_risk_pending,
+                COUNT(*) FILTER (WHERE cr.identity_type IN ('service_principal','managed_identity','aws_iam_role','gcp_service_account')) as nhi_count
+            FROM campaign_reviews cr
+            JOIN access_review_campaigns c ON c.id = cr.campaign_id AND c.status = 'active'
+        """)
+        rev = dict(cursor.fetchone())
+        cursor.close()
+        total = rev['total'] or 0
+        decided = rev['decided'] or 0
+        revoked = rev['revoked'] or 0
+        return {
+            'active_count': camp['active_count'],
+            'overdue_count': camp['overdue_count'],
+            'completion_rate': round(decided / total * 100) if total else 0,
+            'high_risk_pending': rev['high_risk_pending'],
+            'revocation_rate': round(revoked / decided * 100) if decided else 0,
+            'risk_reduction': 0,
+            'nhi_percentage': round(rev['nhi_count'] / total * 100) if total else 0,
+        }
 
     def get_campaign_reviews(self, campaign_id: int) -> list:
         """Get all reviews for a campaign, pending first."""
@@ -4706,6 +4923,100 @@ class Database:
         self.conn.commit()
         cursor.close()
         return count
+
+    def get_campaign_reviews_v2(self, campaign_id: int, limit: int = 50, offset: int = 0,
+                               sort_by: str = 'risk_score', sort_dir: str = 'desc',
+                               status_filter: str = None, risk_filter: str = None,
+                               type_filter: str = None, search: str = None) -> dict:
+        """Get paginated, filtered, sorted reviews for a campaign (V2)."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        where_parts = ["cr.campaign_id = %s"]
+        params = [campaign_id]
+
+        if status_filter == 'pending':
+            where_parts.append("cr.decision IS NULL")
+        elif status_filter == 'decided':
+            where_parts.append("cr.decision IS NOT NULL")
+        elif status_filter in ('approve', 'revoke', 'flag'):
+            where_parts.append("cr.decision = %s")
+            params.append(status_filter)
+
+        if risk_filter:
+            where_parts.append("UPPER(cr.identity_risk_level) = %s")
+            params.append(risk_filter.upper())
+
+        if type_filter:
+            where_parts.append("cr.identity_type = %s")
+            params.append(type_filter)
+
+        if search:
+            where_parts.append("(cr.identity_display_name ILIKE %s OR cr.identity_id ILIKE %s OR cr.access_role ILIKE %s)")
+            s = f'%{search}%'
+            params.extend([s, s, s])
+
+        where_clause = " AND ".join(where_parts)
+
+        # Count
+        cursor.execute(f"SELECT COUNT(*) as cnt FROM campaign_reviews cr WHERE {where_clause}", params)
+        total = cursor.fetchone()['cnt']
+
+        # Sort
+        allowed_sorts = {
+            'risk_score': 'cr.risk_score', 'identity_display_name': 'cr.identity_display_name',
+            'decision': 'cr.decision', 'identity_risk_level': 'cr.identity_risk_level',
+            'last_used_days': 'cr.last_used_days', 'privilege_level': 'cr.privilege_level',
+            'ai_recommendation': 'cr.ai_recommendation', 'credential_risk_level': 'cr.credential_risk_level',
+        }
+        order_col = allowed_sorts.get(sort_by, 'cr.risk_score')
+        direction = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+
+        cursor.execute(f"""
+            SELECT cr.*, u.display_name as reviewer_name
+            FROM campaign_reviews cr
+            LEFT JOIN users u ON u.id = cr.reviewer_id
+            WHERE {where_clause}
+            ORDER BY {order_col} {direction} NULLS LAST, cr.id
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts in ('decided_at', 'created_at', 'last_used_date', 'review_due_date', 'updated_at'):
+                if r.get(ts) and hasattr(r[ts], 'isoformat'):
+                    r[ts] = r[ts].isoformat()
+            if isinstance(r.get('risk_factors'), str):
+                try:
+                    r['risk_factors'] = json.loads(r['risk_factors'])
+                except Exception:
+                    pass
+        return {'reviews': rows, 'total': total, 'limit': limit, 'offset': offset}
+
+    def get_campaign_audit_log(self, campaign_id: int, limit: int = 100, offset: int = 0) -> dict:
+        """Get audit log for a campaign."""
+        self._ensure_access_review_tables()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT COUNT(*) as cnt FROM campaign_audit_log WHERE campaign_id = %s", (campaign_id,))
+        total = cursor.fetchone()['cnt']
+        cursor.execute("""
+            SELECT cal.*, u.display_name as actor_name, u.username as actor_username
+            FROM campaign_audit_log cal
+            LEFT JOIN users u ON u.id = cal.actor_id
+            WHERE cal.campaign_id = %s
+            ORDER BY cal.created_at DESC
+            LIMIT %s OFFSET %s
+        """, (campaign_id, limit, offset))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('created_at') and hasattr(r['created_at'], 'isoformat'):
+                r['created_at'] = r['created_at'].isoformat()
+            if isinstance(r.get('metadata'), str):
+                try:
+                    r['metadata'] = json.loads(r['metadata'])
+                except Exception:
+                    pass
+        return {'entries': rows, 'total': total}
 
     # ---------------------------------------------------------------
     # Identity Groups (Phase 38)
@@ -6693,3 +7004,178 @@ class Database:
         ids = [row[0] for row in cursor.fetchall()]
         cursor.close()
         return ids
+
+
+# ─── Access Review V2 Helper Functions ────────────────────────────────
+
+_PRIVILEGED_ROLES = {
+    'Global Administrator': 35, 'Owner': 30, 'User Access Administrator': 25,
+    'Privileged Role Administrator': 30, 'Privileged Authentication Administrator': 25,
+    'Application Administrator': 20, 'Cloud Application Administrator': 20,
+    'Key Vault Secrets Officer': 25, 'Contributor': 15,
+    'Hybrid Identity Administrator': 20,
+}
+
+_DANGEROUS_GRAPH_PERMS = {
+    'Directory.ReadWrite.All', 'Application.ReadWrite.All',
+    'RoleManagement.ReadWrite.Directory', 'Mail.ReadWrite',
+    'AppRoleAssignment.ReadWrite.All', 'GroupMember.ReadWrite.All',
+}
+
+
+def _pick_top_role(roles):
+    """Pick the highest-privilege role from a list."""
+    if not roles:
+        return None
+    best = roles[0]
+    best_score = _PRIVILEGED_ROLES.get(best['role_name'], 5)
+    for r in roles[1:]:
+        s = _PRIVILEGED_ROLES.get(r['role_name'], 5)
+        if s > best_score:
+            best = r
+            best_score = s
+    return best
+
+
+def _format_scope(scope):
+    """Format ARM scope into readable string."""
+    if not scope:
+        return None
+    parts = scope.strip('/').split('/')
+    if len(parts) >= 2 and parts[0].lower() == 'subscriptions':
+        sub = parts[1][:12]
+        if len(parts) >= 4 and parts[2].lower() == 'resourcegroups':
+            return f"RG: {parts[3]}"
+        return f"Sub: {sub}"
+    if scope == '/' or scope == '':
+        return 'Tenant Root'
+    return scope[:60]
+
+
+def _compute_review_risk(role_name, scope_type, last_used_days, cred, graph_perms, is_pim, mfa_enforced):
+    """Composite risk scoring 0-100."""
+    score = 0
+    factors = []
+
+    # 1. Role privilege
+    rp = _PRIVILEGED_ROLES.get(role_name, 5) if role_name else 5
+    score += rp
+    factors.append({'factor': f'Role: {role_name or "None"}', 'points': rp})
+
+    # 2. Scope level
+    scope_points = {'tenant': 20, 'subscription': 15, 'resource_group': 8, 'resource': 5}
+    sp = scope_points.get(scope_type, 5) if scope_type else 5
+    score += sp
+    factors.append({'factor': f'Scope: {scope_type or "unknown"}', 'points': sp})
+
+    # 3. Usage dormancy
+    if last_used_days is None or last_used_days > 180:
+        dp = 25
+        label = f'Dormant ({last_used_days or "Never"}d)'
+    elif last_used_days > 90:
+        dp = 15
+        label = f'Inactive ({last_used_days}d)'
+    elif last_used_days > 30:
+        dp = 5
+        label = f'Low activity ({last_used_days}d)'
+    else:
+        dp = -5
+        label = 'Active usage (mitigating)'
+    score += dp
+    factors.append({'factor': label, 'points': dp})
+
+    # 4. Credential risk
+    if cred and cred.get('end_datetime'):
+        from datetime import datetime, timezone
+        try:
+            exp = cred['end_datetime']
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            days_left = (exp - datetime.now(timezone.utc)).days
+            if days_left <= 0:
+                score += 20
+                factors.append({'factor': 'Secret/cert EXPIRED', 'points': 20})
+            elif days_left <= 7:
+                score += 15
+                factors.append({'factor': f'Secret expiring in {days_left}d', 'points': 15})
+            elif days_left <= 30:
+                score += 8
+                factors.append({'factor': f'Secret expiring in {days_left}d', 'points': 8})
+        except Exception:
+            pass
+
+    # 5. Dangerous Graph API perms
+    if graph_perms:
+        gp = sum(7 for p in graph_perms if p in _DANGEROUS_GRAPH_PERMS)
+        gp = min(gp, 15)
+        if gp > 0:
+            score += gp
+            factors.append({'factor': 'Dangerous Graph API permissions', 'points': gp})
+
+    # 6. Mitigations
+    if is_pim:
+        score -= 5
+        factors.append({'factor': 'PIM eligible (mitigating)', 'points': -5})
+    if mfa_enforced:
+        score -= 7
+        factors.append({'factor': 'MFA enforced (mitigating)', 'points': -7})
+
+    return min(max(score, 0), 100), factors
+
+
+def _compute_privilege_level(role_name, is_pim):
+    """Compute privilege level badge."""
+    if not role_name:
+        return 'Standard'
+    score = _PRIVILEGED_ROLES.get(role_name, 0)
+    if is_pim:
+        return 'PIM Eligible'
+    if score >= 25:
+        return 'Privileged'
+    if score >= 15:
+        return 'Elevated'
+    return 'Standard'
+
+
+def _compute_credential_risk(cred):
+    """Compute credential risk string and level."""
+    if not cred or not cred.get('end_datetime'):
+        return None, 'na'
+    from datetime import datetime, timezone
+    try:
+        exp = cred['end_datetime']
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        days_left = (exp - datetime.now(timezone.utc)).days
+        if days_left <= 0:
+            return 'Secret EXPIRED', 'critical'
+        if days_left <= 7:
+            return f'Secret expiring {days_left}d', 'critical'
+        if days_left <= 30:
+            return f'Secret expiring {days_left}d', 'warning'
+        if days_left <= 90:
+            return f'Expires in {days_left}d', 'ok'
+        return f'Valid ({days_left}d)', 'ok'
+    except Exception:
+        return None, 'na'
+
+
+def _generate_ai_recommendation(risk_score, risk_factors, identity_type, last_used_days, credential_risk):
+    """Rule-based AI recommendations."""
+    if last_used_days is not None and last_used_days > 90 and risk_score >= 40:
+        return 'Revoke', f'Unused {last_used_days}d with risk score {risk_score}. Recommend removal.'
+
+    has_priv_role = any('Owner' in f['factor'] or 'Global Admin' in f['factor'] or 'Privileged' in f['factor']
+                        for f in risk_factors if f['points'] >= 25)
+    if has_priv_role:
+        if last_used_days is not None and last_used_days <= 30:
+            return 'Convert to PIM', 'Active privileged identity — convert to PIM for JIT activation.'
+        return 'Downgrade', f'Privileged role unused {last_used_days or "unknown"}d. Consider lower privilege.'
+
+    if credential_risk and ('expir' in credential_risk.lower() or 'expired' in credential_risk.lower()):
+        return 'Rotate Secret', f'Credential risk: {credential_risk}'
+
+    if risk_score <= 30:
+        return 'Approve', 'Low risk, appropriately scoped.'
+
+    return 'Downgrade', 'Consider reducing privilege level.'
