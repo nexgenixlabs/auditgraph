@@ -2559,6 +2559,177 @@ def get_overview_insights():
         db.close()
 
 
+def get_attack_surface_score():
+    """
+    Compute the 6-pillar Identity Attack Surface Score (0-100).
+
+    Pillars:
+      P1 Effective Privilege (30%) — % of identities at T0/T1
+      P2 Credential Risk     (20%) — % with expired/expiring creds
+      P3 Trust & Federation  (20%) — % guest/external with privileged roles
+      P4 Usage Dormancy      (10%) — % stale/never_used
+      P5 Ownership Gov       (10%) — % SPNs without owners
+      P6 External Exposure   (10%) — % with tenant-wide scope
+
+    Higher score = worse posture (more exposed).
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        latest_run = _latest_run_query(cursor, _tenant_id())
+        if not latest_run:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        cursor.execute("""
+            SELECT
+                -- totals
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') NOT IN ('microsoft_internal')) as total_excl_msft,
+
+                -- P1: Privilege (T0/T1 via subquery)
+                COUNT(*) FILTER (WHERE (
+                    EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator','privileged role administrator',
+                            'privileged authentication administrator',
+                            'application administrator','cloud application administrator',
+                            'hybrid identity administrator','domain name administrator',
+                            'external identity provider administrator'
+                        ))
+                    OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner','user access administrator')
+                        AND (ra.scope IS NULL OR ra.scope = '/' OR (ra.scope LIKE '/subscriptions/%%'
+                             AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')))
+                )) as t0_count,
+
+                COUNT(*) FILTER (WHERE (
+                    EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'user administrator','exchange administrator',
+                            'sharepoint administrator','teams administrator',
+                            'security administrator','conditional access administrator',
+                            'authentication administrator','helpdesk administrator'
+                        ))
+                    OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator'))
+                )) as t0t1_count,
+
+                -- P2: Credential risk
+                COUNT(*) FILTER (WHERE credential_count > 0) as has_creds,
+                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
+                    AND credential_expiration < NOW()) as expired_creds,
+                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
+                    AND credential_expiration >= NOW()
+                    AND credential_expiration < NOW() + INTERVAL '30 days') as expiring_creds,
+
+                -- P3: Trust (guest/external with roles)
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest') as guest_count,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest' AND (
+                    EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+                    OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                )) as guest_with_roles,
+                COUNT(*) FILTER (WHERE COALESCE(is_federated, false) = true) as federated_count,
+
+                -- P4: Usage dormancy
+                COUNT(*) FILTER (WHERE activity_status IN ('stale', 'never_used')) as dormant_count,
+
+                -- P5: Ownership (SPNs without owners)
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_user')
+                    AND (owner_count = 0 OR owner_count IS NULL)) as unowned_spns,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_user')) as total_spns,
+
+                -- P6: External exposure (tenant-wide scope)
+                COUNT(*) FILTER (WHERE (
+                    EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND (era.directory_scope IS NULL OR era.directory_scope = '/'))
+                    OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND ra.scope_type = 'tenant')
+                )) as tenant_scope_count
+
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+        """, (latest_run,))
+
+        r = cursor.fetchone()
+        total = max(r[0] or 1, 1)
+        total_excl = max(r[1] or 1, 1)
+        t0_count = r[2] or 0
+        t0t1_count = r[3] or 0
+        has_creds = max(r[4] or 1, 1)
+        expired_creds = r[5] or 0
+        expiring_creds = r[6] or 0
+        guest_count = r[7] or 0
+        guest_with_roles = r[8] or 0
+        federated_count = r[9] or 0
+        dormant_count = r[10] or 0
+        unowned_spns = r[11] or 0
+        total_spns = max(r[12] or 1, 1)
+        tenant_scope = r[13] or 0
+
+        # P1: Effective Privilege — target < 1% at T0
+        priv_pct = (t0t1_count / total_excl) * 100
+        p1 = min(priv_pct * 10, 100)  # 10% T0/T1 → score 100
+
+        # P2: Credential Risk — expired + expiring as % of those with creds
+        cred_risk_pct = ((expired_creds + expiring_creds) / has_creds) * 100
+        p2 = min(cred_risk_pct * 2, 100)  # 50% bad creds → score 100
+
+        # P3: Trust & Federation — guest/external with roles
+        trust_risk = 0
+        if guest_count > 0:
+            trust_risk = (guest_with_roles / max(guest_count, 1)) * 60
+        trust_risk += min((federated_count / total_excl) * 200, 40)
+        p3 = min(trust_risk, 100)
+
+        # P4: Usage Dormancy — stale/never_used identities
+        dormant_pct = (dormant_count / total_excl) * 100
+        p4 = min(dormant_pct * 2, 100)  # 50% dormant → score 100
+
+        # P5: Ownership Governance — unowned SPNs
+        unowned_pct = (unowned_spns / total_spns) * 100
+        p5 = min(unowned_pct * 1.5, 100)  # ~67% unowned → score 100
+
+        # P6: External Exposure — tenant-wide scope
+        scope_pct = (tenant_scope / total_excl) * 100
+        p6 = min(scope_pct * 5, 100)  # 20% tenant-wide → score 100
+
+        # Weighted composite
+        score = round(
+            p1 * 0.30 + p2 * 0.20 + p3 * 0.20 +
+            p4 * 0.10 + p5 * 0.10 + p6 * 0.10, 1
+        )
+
+        # Grade thresholds
+        if score <= 20:
+            grade, severity = 'A', 'low'
+        elif score <= 40:
+            grade, severity = 'B', 'moderate'
+        elif score <= 60:
+            grade, severity = 'C', 'high'
+        elif score <= 80:
+            grade, severity = 'D', 'very_high'
+        else:
+            grade, severity = 'F', 'critical'
+
+        return jsonify({
+            "score": score,
+            "grade": grade,
+            "severity": severity,
+            "pillars": {
+                "effective_privilege": {"score": round(p1, 1), "weight": 30, "detail": {"t0": t0_count, "t0t1": t0t1_count, "total": total_excl}},
+                "credential_risk": {"score": round(p2, 1), "weight": 20, "detail": {"expired": expired_creds, "expiring": expiring_creds, "with_creds": has_creds}},
+                "trust_federation": {"score": round(p3, 1), "weight": 20, "detail": {"guests": guest_count, "guest_with_roles": guest_with_roles, "federated": federated_count}},
+                "usage_dormancy": {"score": round(p4, 1), "weight": 10, "detail": {"dormant": dormant_count, "total": total_excl}},
+                "ownership_governance": {"score": round(p5, 1), "weight": 10, "detail": {"unowned_spns": unowned_spns, "total_spns": total_spns}},
+                "external_exposure": {"score": round(p6, 1), "weight": 10, "detail": {"tenant_scope": tenant_scope, "total": total_excl}},
+            },
+            "total_identities": r[0] or 0,
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
 def _compute_compliance_metrics(cursor, latest_run):
     """Compute all compliance metrics from identity posture data."""
     # T0 count
@@ -3296,6 +3467,185 @@ def get_dashboard_posture():
             "expiring_credentials_count": credential_health["expiring_soon"],
         })
 
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_trust_dashboard():
+    """
+    Trust & Federation data for the Dashboard Trust tab.
+    Returns: external identity breakdown, trust path summary, cross-tenant access.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        latest_run = _latest_run_query(cursor, _tenant_id())
+        if not latest_run:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        # External identity breakdown
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest') as guests,
+                COUNT(*) FILTER (WHERE COALESCE(is_federated, false) = true) as federated,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest'
+                    AND (EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+                         OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id))
+                ) as guests_with_roles,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest'
+                    AND EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator','privileged role administrator',
+                            'application administrator','user administrator','security administrator'
+                        ))
+                ) as guest_admins,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'service_principal'
+                    AND COALESCE(service_principal_type, '') = 'Application'
+                    AND app_owner_organization_id IS NOT NULL
+                    AND app_owner_organization_id != ''
+                ) as multi_tenant_apps,
+                COUNT(*) FILTER (WHERE tenant_or_org_id IS NOT NULL AND tenant_or_org_id != '') as cross_tenant
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+        """, (latest_run,))
+        r = cursor.fetchone()
+        external = {
+            "total_identities": r[0] or 0,
+            "guests": r[1] or 0,
+            "federated": r[2] or 0,
+            "guests_with_roles": r[3] or 0,
+            "guest_admins": r[4] or 0,
+            "multi_tenant_apps": r[5] or 0,
+            "cross_tenant": r[6] or 0,
+        }
+
+        # Top external organizations (by tenant_or_org_id)
+        cursor.execute("""
+            SELECT tenant_or_org_id, COUNT(*) as cnt,
+                   COUNT(*) FILTER (WHERE risk_level IN ('critical', 'high')) as high_risk
+            FROM identities
+            WHERE discovery_run_id = %s
+              AND tenant_or_org_id IS NOT NULL AND tenant_or_org_id != ''
+            GROUP BY tenant_or_org_id
+            ORDER BY cnt DESC
+            LIMIT 10
+        """, (latest_run,))
+        orgs = [{"org_id": row[0], "identity_count": row[1], "high_risk_count": row[2]} for row in cursor.fetchall()]
+
+        # Guest identities list (top 10 by risk)
+        cursor.execute("""
+            SELECT identity_id, display_name, risk_level, COALESCE(risk_score, 0),
+                   activity_status, tenant_or_org_id
+            FROM identities
+            WHERE discovery_run_id = %s AND COALESCE(identity_category, '') = 'guest'
+            ORDER BY COALESCE(risk_score, 0) DESC
+            LIMIT 10
+        """, (latest_run,))
+        top_guests = [{
+            "identity_id": row[0], "display_name": row[1], "risk_level": row[2],
+            "risk_score": row[3], "activity_status": row[4], "org_id": row[5],
+        } for row in cursor.fetchall()]
+
+        return jsonify({
+            "external_summary": external,
+            "top_organizations": orgs,
+            "top_risk_guests": top_guests,
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_credential_intelligence():
+    """
+    Credential Intelligence data for the Dashboard Credential tab.
+    Returns: secret age distribution, auth method breakdown, rotation compliance.
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        latest_run = _latest_run_query(cursor, _tenant_id())
+        if not latest_run:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        # Secret age distribution — buckets by age of oldest credential
+        cursor.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE c.age_days IS NOT NULL AND c.age_days < 30) as age_lt_30,
+                COUNT(*) FILTER (WHERE c.age_days >= 30 AND c.age_days < 90) as age_30_90,
+                COUNT(*) FILTER (WHERE c.age_days >= 90 AND c.age_days < 180) as age_90_180,
+                COUNT(*) FILTER (WHERE c.age_days >= 180 AND c.age_days < 365) as age_180_365,
+                COUNT(*) FILTER (WHERE c.age_days >= 365) as age_gt_365
+            FROM (
+                SELECT i.id,
+                    EXTRACT(EPOCH FROM (NOW() - MIN(cr.start_date))) / 86400 as age_days
+                FROM identities i
+                JOIN credentials cr ON cr.identity_db_id = i.id
+                WHERE i.discovery_run_id = %s
+                GROUP BY i.id
+            ) c
+        """, (latest_run,))
+        age_row = cursor.fetchone()
+        secret_age = {
+            "<30d": age_row[0] or 0,
+            "30-90d": age_row[1] or 0,
+            "90-180d": age_row[2] or 0,
+            "180-365d": age_row[3] or 0,
+            ">365d": age_row[4] or 0,
+        }
+
+        # Auth method breakdown — credential types
+        cursor.execute("""
+            SELECT
+                COALESCE(cr.credential_type, 'unknown') as ctype,
+                COUNT(DISTINCT cr.identity_db_id) as identity_count
+            FROM credentials cr
+            JOIN identities i ON i.id = cr.identity_db_id
+            WHERE i.discovery_run_id = %s
+            GROUP BY ctype
+            ORDER BY identity_count DESC
+        """, (latest_run,))
+        auth_methods = {}
+        for row in cursor.fetchall():
+            auth_methods[row[0]] = row[1]
+
+        # Rotation compliance — identities with creds needing rotation
+        cursor.execute("""
+            SELECT
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL AND cr.end_date < NOW()) as rotation_overdue,
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL
+                    AND cr.end_date >= NOW()
+                    AND cr.end_date < NOW() + INTERVAL '30 days') as rotation_soon,
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL
+                    AND cr.end_date >= NOW() + INTERVAL '30 days') as rotation_ok,
+                COUNT(DISTINCT i.id) as total_with_creds,
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.credential_type = 'password'
+                    AND EXTRACT(EPOCH FROM (NOW() - cr.start_date)) / 86400 > 90) as stale_passwords,
+                COUNT(DISTINCT i.id) FILTER (WHERE (
+                    SELECT COUNT(*) FROM credentials c2
+                    WHERE c2.identity_db_id = i.id AND (c2.end_date IS NULL OR c2.end_date > NOW())
+                ) > 1) as multi_active
+            FROM identities i
+            JOIN credentials cr ON cr.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+        """, (latest_run,))
+        rot_row = cursor.fetchone()
+        rotation = {
+            "overdue": rot_row[0] or 0,
+            "due_soon": rot_row[1] or 0,
+            "compliant": rot_row[2] or 0,
+            "total_with_creds": rot_row[3] or 0,
+            "stale_passwords": rot_row[4] or 0,
+            "multi_active_secrets": rot_row[5] or 0,
+        }
+
+        return jsonify({
+            "secret_age_distribution": secret_age,
+            "auth_method_breakdown": auth_methods,
+            "rotation_compliance": rotation,
+        })
     finally:
         cursor.close()
         db.close()

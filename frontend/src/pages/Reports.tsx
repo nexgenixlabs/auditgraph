@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { generateReport, generateExecutiveReport } from '../utils/pdfGenerator';
+import { generateReport, generateExecutiveReport, generateComplianceReport } from '../utils/pdfGenerator';
 import { useToast } from '../components/ToastProvider';
 
-type ReportType = 'full' | 'executive';
+type ReportType = 'full' | 'executive' | 'compliance';
 
 export default function Reports() {
   const { addToast } = useToast();
@@ -23,6 +23,10 @@ export default function Reports() {
       setPreviewData(data);
       if (reportType === 'executive') {
         generateExecutiveReport(data, clientName || undefined);
+      } else if (reportType === 'compliance') {
+        let asData = null;
+        try { const r = await fetch('/api/overview/attack-surface-score'); if (r.ok) asData = await r.json(); } catch {}
+        generateComplianceReport(data, asData, clientName || undefined);
       } else {
         generateReport(data, clientName || undefined);
       }
@@ -65,16 +69,29 @@ export default function Reports() {
         >
           Executive Summary
         </button>
+        <button
+          onClick={() => setReportType('compliance')}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+            reportType === 'compliance' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          }`}
+        >
+          Compliance Report
+        </button>
       </div>
 
       {/* Report Configuration */}
       <div className="bg-white rounded-xl border shadow-sm p-6 space-y-6">
         <div className="text-lg font-semibold text-gray-900">
-          {reportType === 'executive' ? 'Executive Posture Report' : 'Generate Security Report'}
+          {reportType === 'executive' ? 'Executive Posture Report' : reportType === 'compliance' ? 'Compliance Report' : 'Generate Security Report'}
         </div>
         {reportType === 'executive' && (
           <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3 text-xs text-indigo-700">
             One-page landscape PDF for board presentations with posture score, key metrics, and trend summary.
+          </div>
+        )}
+        {reportType === 'compliance' && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-xs text-emerald-700">
+            Multi-page PDF with attack surface score breakdown, SOC2/CIS/HIPAA/NIST framework mapping, credential health, and top risk identities.
           </div>
         )}
 
