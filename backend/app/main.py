@@ -17,6 +17,9 @@ from app.api.handlers import (
     get_dashboard_posture,
     get_dashboard_compliance,
     get_overview_insights,
+    get_attack_surface_score,
+    get_credential_intelligence,
+    get_trust_dashboard,
     get_identity_graph_data,
     get_identity_pim_data,
     get_identity_usage,
@@ -576,6 +579,14 @@ def create_app():
     def dashboard_posture():
         return get_dashboard_posture()
 
+    @app.get("/api/dashboard/credential-intelligence")
+    def dashboard_credential_intelligence():
+        return get_credential_intelligence()
+
+    @app.get("/api/dashboard/trust")
+    def dashboard_trust():
+        return get_trust_dashboard()
+
     # -----------------------
     # Dashboard compliance scorecard
     # -----------------------
@@ -611,6 +622,10 @@ def create_app():
     @app.get("/api/overview/insights")
     def overview_insights():
         return get_overview_insights()
+
+    @app.get("/api/overview/attack-surface-score")
+    def overview_attack_surface():
+        return get_attack_surface_score()
 
     # -----------------------
     # Risks (Dashboard needs it)

@@ -689,3 +689,197 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
 
   doc.save(`executive-posture-report-${new Date().toISOString().split('T')[0]}.pdf`);
 }
+
+/**
+ * Generate a compliance-focused PDF report with framework mappings,
+ * attack surface score breakdown, and risk driver summaries.
+ */
+export function generateComplianceReport(data: ReportData, attackSurface: any, clientName?: string): void {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 15;
+
+  // ── Page 1: Cover ────────────────────────────────────────────
+  fill(doc, [30, 58, 95]); // brand dark
+  doc.rect(0, 0, pageWidth, 60, 'F');
+  doc.setFontSize(22);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(255, 255, 255);
+  doc.text('Identity Compliance Report', margin, 30);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'normal');
+  doc.text(clientName || 'AuditGraph', margin, 42);
+  doc.text(new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), margin, 50);
+
+  let y = 72;
+
+  // Attack Surface Score summary
+  if (attackSurface) {
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    txt(doc, DARK);
+    doc.text('Attack Surface Score', margin, y);
+    y += 8;
+
+    const score = attackSurface.score ?? 0;
+    const grade = attackSurface.grade ?? '—';
+    const scoreClr: RGB = score <= 20 ? GREEN : score <= 40 ? [37, 99, 235] : score <= 60 ? [202, 138, 4] : score <= 80 ? ORANGE : RED;
+
+    doc.setFontSize(28);
+    doc.setFont('helvetica', 'bold');
+    txt(doc, scoreClr);
+    doc.text(`${Math.round(score)} / 100`, margin, y + 8);
+
+    doc.setFontSize(12);
+    doc.text(`Grade: ${grade}`, margin + 50, y + 8);
+
+    y += 20;
+
+    // Pillar breakdown table
+    const pillarRows = [
+      ['Effective Privilege', `${attackSurface.pillars?.effective_privilege?.score?.toFixed(1) ?? '—'}`, '30%'],
+      ['Credential Risk', `${attackSurface.pillars?.credential_risk?.score?.toFixed(1) ?? '—'}`, '20%'],
+      ['Trust & Federation', `${attackSurface.pillars?.trust_federation?.score?.toFixed(1) ?? '—'}`, '20%'],
+      ['Usage Dormancy', `${attackSurface.pillars?.usage_dormancy?.score?.toFixed(1) ?? '—'}`, '10%'],
+      ['Ownership Governance', `${attackSurface.pillars?.ownership_governance?.score?.toFixed(1) ?? '—'}`, '10%'],
+      ['External Exposure', `${attackSurface.pillars?.external_exposure?.score?.toFixed(1) ?? '—'}`, '10%'],
+    ];
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Pillar', 'Score (0-100)', 'Weight']],
+      body: pillarRows,
+      theme: 'striped',
+      headStyles: { fillColor: [30, 58, 95], fontSize: 9 },
+      bodyStyles: { fontSize: 9 },
+      margin: { left: margin, right: margin },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  }
+
+  // Risk summary section
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Risk Distribution', margin, y);
+  y += 8;
+
+  const riskRows = [
+    ['Critical', String(data.stats.critical), `${((data.stats.critical / Math.max(data.stats.total_identities, 1)) * 100).toFixed(1)}%`],
+    ['High', String(data.stats.high), `${((data.stats.high / Math.max(data.stats.total_identities, 1)) * 100).toFixed(1)}%`],
+    ['Medium', String(data.stats.medium), `${((data.stats.medium / Math.max(data.stats.total_identities, 1)) * 100).toFixed(1)}%`],
+    ['Low', String(data.stats.low), `${((data.stats.low / Math.max(data.stats.total_identities, 1)) * 100).toFixed(1)}%`],
+  ];
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Risk Level', 'Count', '% of Total']],
+    body: riskRows,
+    theme: 'striped',
+    headStyles: { fillColor: [30, 58, 95], fontSize: 9 },
+    bodyStyles: { fontSize: 9 },
+    margin: { left: margin, right: margin },
+  });
+  y = doc.lastAutoTable.finalY + 10;
+
+  // Compliance framework mapping
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Compliance Framework Mapping', margin, y);
+  y += 8;
+
+  const frameworkRows = [
+    ['SOC2 CC6.1', 'Logical Access Controls', 'Identity privilege, MFA, credential rotation'],
+    ['SOC2 CC6.3', 'Role-Based Access', 'Least privilege, dormant privileged identities'],
+    ['CIS 1.1', 'Privileged Access', 'Global admin monitoring, T0/T1 surface'],
+    ['CIS 1.4', 'Credential Management', 'Expiring/expired secret monitoring'],
+    ['HIPAA 164.312(a)(1)', 'Access Control', 'Identity ownership, external access'],
+    ['HIPAA 164.312(d)', 'Authentication', 'MFA enforcement, credential hygiene'],
+    ['NIST AC-2', 'Account Management', 'Lifecycle, dormancy, ownership'],
+    ['NIST AC-6', 'Least Privilege', 'Excessive privilege detection'],
+    ['NIST IA-5', 'Authenticator Management', 'Secret rotation, credential health'],
+  ];
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Control', 'Domain', 'AuditGraph Coverage']],
+    body: frameworkRows,
+    theme: 'striped',
+    headStyles: { fillColor: [30, 58, 95], fontSize: 8 },
+    bodyStyles: { fontSize: 8 },
+    margin: { left: margin, right: margin },
+    columnStyles: { 2: { cellWidth: 65 } },
+  });
+  y = doc.lastAutoTable.finalY + 10;
+
+  // Credential health
+  if (y > 230) { doc.addPage(); y = 20; }
+
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Credential Health', margin, y);
+  y += 8;
+
+  const ch = data.credential_health;
+  const credRows = [
+    ['Expired', String(ch.expired), ch.expired > 0 ? 'ACTION REQUIRED' : 'OK'],
+    ['Expiring Soon (<30d)', String(ch.expiring_soon), ch.expiring_soon > 0 ? 'MONITOR' : 'OK'],
+    ['Healthy', String(ch.healthy), 'OK'],
+    ['No Credentials', String(ch.unknown), 'N/A'],
+  ];
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Status', 'Count', 'Action']],
+    body: credRows,
+    theme: 'striped',
+    headStyles: { fillColor: [30, 58, 95], fontSize: 9 },
+    bodyStyles: { fontSize: 9 },
+    margin: { left: margin, right: margin },
+  });
+  y = doc.lastAutoTable.finalY + 10;
+
+  // Top risks
+  if (data.top_risks && data.top_risks.length > 0) {
+    if (y > 200) { doc.addPage(); y = 20; }
+
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    txt(doc, DARK);
+    doc.text('Top Risk Identities', margin, y);
+    y += 8;
+
+    const topRows = data.top_risks.slice(0, 10).map(r => [
+      r.display_name || r.identity_id || '',
+      (r.risk_level || 'unknown').toUpperCase(),
+      String(r.risk_score || 0),
+      r.identity_category || '',
+    ]);
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Identity', 'Risk Level', 'Score', 'Category']],
+      body: topRows,
+      theme: 'striped',
+      headStyles: { fillColor: [30, 58, 95], fontSize: 8 },
+      bodyStyles: { fontSize: 8 },
+      margin: { left: margin, right: margin },
+    });
+  }
+
+  // Footer on all pages
+  const totalPages = doc.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7);
+    txt(doc, GRAY);
+    doc.text(
+      `AuditGraph Compliance Report | Confidential | Page ${i} of ${totalPages} | ${new Date().toLocaleDateString()}`,
+      pageWidth / 2, doc.internal.pageSize.getHeight() - 8, { align: 'center' }
+    );
+  }
+
+  doc.save(`compliance-report-${new Date().toISOString().split('T')[0]}.pdf`);
+}
