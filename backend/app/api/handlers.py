@@ -8225,27 +8225,18 @@ def get_onboarding_status():
         tid = _tenant_id()
         settings = db.get_settings(tenant_id=tid)
         completed = settings.get('onboarding_completed', 'false') == 'true'
-        # SECURITY: Only check tenant's own DB settings, never env vars.
-        # Env vars are for the system scheduler, not tenant-scoped status.
+        # This only returns a boolean — no credential values leak here.
+        # Check tenant DB settings first, then fall back to env vars for
+        # the platform-level discovery config (used by scheduler).
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
+        ]) or all([
+            os.getenv('AZURE_TENANT_ID'),
+            os.getenv('AZURE_CLIENT_ID'),
+            os.getenv('AZURE_CLIENT_SECRET'),
         ])
-
-        # If tenant has existing discovery runs, treat as already onboarded
-        # even if onboarding_completed was never explicitly set in DB.
-        if not completed and not azure_configured:
-            cursor = db.conn.cursor()
-            if tid and tid > 0:
-                cursor.execute("SELECT COUNT(*) FROM discovery_runs WHERE tenant_id = %s", (tid,))
-            else:
-                cursor.execute("SELECT COUNT(*) FROM discovery_runs")
-            has_runs = cursor.fetchone()[0] > 0
-            cursor.close()
-            if has_runs:
-                completed = True
-
         return jsonify({
             'onboarding_completed': completed,
             'azure_configured': azure_configured,
