@@ -232,9 +232,10 @@ class AzureDiscoveryEngine:
         # Step 3.10: Discover Conditional Access Policies
         ca_policies = await self._discover_conditional_access()
 
-        # Step 4: Discover ALL users from Entra ID (Graph API)
-        print("\n👥 Discovering Entra ID Users...")
+        # Step 4: Discover users who have Azure RBAC OR Entra roles
+        print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
+        print(f"  Found {len(users)} users with role assignments")
         
         # Step 5: Discover Managed Identities
         print("\n🔐 Discovering Managed Identities...")
@@ -1086,10 +1087,9 @@ class AzureDiscoveryEngine:
     
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
         """
-        Discover ALL human users from Entra ID via Graph API.
-        Uses Directory.Read.All permission — no ARM/RBAC access needed.
+        Discover human users who have Azure RBAC or Entra ID roles.
+        Users without roles are NOT discovered - this is by design for security posture focus.
         Handles pagination to fetch all users (not just first page).
-        Users with RBAC/Entra roles are tagged with has_roles=True for risk scoring.
         """
         try:
             from msgraph.generated.users.users_request_builder import UsersRequestBuilder
@@ -1130,11 +1130,12 @@ class AzureDiscoveryEngine:
                     all_users.extend(users_response.value)
 
             identities = []
-            role_count = 0
             for user in all_users:
-                has_roles = user.id in principal_ids_with_roles
-                if has_roles:
-                    role_count += 1
+                # Only include users who have roles (Azure RBAC or Entra ID)
+                if user.id not in principal_ids_with_roles:
+                    continue
+
+                print(f"    ✓ {user.display_name} ({user.user_principal_name})")
 
                 created = None
                 if hasattr(user, 'created_date_time') and user.created_date_time:
@@ -1166,7 +1167,6 @@ class AzureDiscoveryEngine:
                     'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
                     'created_datetime': created,
                     'last_sign_in': last_sign_in,
-                    'has_roles': has_roles,
                     # Multi-cloud normalized fields
                     'cloud': 'azure',
                     'tenant_id': self.tenant_id,
@@ -1174,7 +1174,6 @@ class AzureDiscoveryEngine:
                     'is_federated': is_guest,  # Guest users are federated
                 })
 
-            print(f"  ✓ Found {len(identities)} users ({role_count} with roles, {len(identities) - role_count} without)")
             return identities
         except Exception as e:
             print(f"  ❌ Error discovering users: {e}")
