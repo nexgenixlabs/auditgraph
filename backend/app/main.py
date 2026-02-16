@@ -505,7 +505,7 @@ def create_app():
         return get_sa_governance_list()
 
     @app.post("/api/service-accounts/<identity_id>/attest")
-    @require_role('admin', 'security_admin', 'reader')
+    @require_role('admin', 'security_admin', 'auditor')
     def sa_gov_attest_route(identity_id):
         return post_sa_attestation(identity_id)
 
@@ -653,7 +653,7 @@ def create_app():
     # Risk Simulation (Phase 49)
     # -----------------------
     @app.post("/api/identities/<identity_id>/simulate")
-    @require_role('admin', 'security_admin', 'reader')
+    @require_role('admin', 'security_admin', 'auditor')
     def identity_simulate(identity_id):
         return simulate_risk(identity_id)
 
@@ -776,7 +776,7 @@ def create_app():
         return get_remediation_status(identity_id)
 
     @app.post("/api/identities/<identity_id>/remediation-action")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def identity_remediation_action(identity_id):
         return post_remediation_action(identity_id)
 
@@ -788,7 +788,7 @@ def create_app():
     # Bulk Operations (Phase 25)
     # -----------------------
     @app.post("/api/bulk/remediation")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def bulk_remediation():
         return post_bulk_remediation()
 
@@ -954,12 +954,12 @@ def create_app():
         return delete_access_review(campaign_id)
 
     @app.patch("/api/access-reviews/<int:campaign_id>/reviews/<int:review_id>")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def review_decision(campaign_id, review_id):
         return update_review_decision(campaign_id, review_id)
 
     @app.post("/api/access-reviews/<int:campaign_id>/reviews/bulk")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def review_bulk_decision(campaign_id):
         return bulk_review_decisions(campaign_id)
 
@@ -971,7 +971,7 @@ def create_app():
         return get_groups_list()
 
     @app.post("/api/groups")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def groups_create():
         return create_group_handler()
 
@@ -984,7 +984,7 @@ def create_app():
         return get_group_detail(group_id)
 
     @app.put("/api/groups/<int:group_id>")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def groups_update(group_id):
         return update_group_handler(group_id)
 
@@ -994,12 +994,12 @@ def create_app():
         return delete_group_handler(group_id)
 
     @app.post("/api/groups/<int:group_id>/members")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def groups_add_members(group_id):
         return add_group_members_handler(group_id)
 
     @app.delete("/api/groups/<int:group_id>/members")
-    @require_role('reader', 'admin')
+    @require_role('auditor', 'admin')
     def groups_remove_members(group_id):
         return remove_group_members_handler(group_id)
 
