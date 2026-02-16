@@ -144,10 +144,10 @@ class NotificationDispatcher:
             return
 
         try:
-            slack_url = db.get_setting('slack_webhook_url', '')
-            teams_url = db.get_setting('teams_webhook_url', '')
-            slack_events = json.loads(db.get_setting('slack_events', '[]'))
-            teams_events = json.loads(db.get_setting('teams_events', '[]'))
+            slack_url = db.get_system_setting('slack_webhook_url', '')
+            teams_url = db.get_system_setting('teams_webhook_url', '')
+            slack_events = json.loads(db.get_system_setting('slack_events', '[]'))
+            teams_events = json.loads(db.get_system_setting('teams_events', '[]'))
 
             payload = {
                 'event_type': event_type,

@@ -28,9 +28,24 @@ def _db() -> Database:
 
 
 def _tenant_id():
-    """Get tenant_id from current authenticated user context."""
+    """Get tenant_id from current authenticated user context.
+
+    Returns:
+        int: The user's tenant_id if assigned.
+        -1:  Sentinel for non-superadmin users without a tenant (matches nothing in DB).
+        None: Only for superadmins without a tenant override (permits unscoped queries).
+    """
     user = getattr(g, 'current_user', None)
-    return user.get('tenant_id') if user else None
+    if not user:
+        return -1  # No auth context — return sentinel, never allow unscoped
+    tid = user.get('tenant_id')
+    if tid:
+        return tid
+    # User has no tenant_id assigned
+    if user.get('is_superadmin'):
+        return None  # Superadmins intentionally see all data
+    # Non-superadmin with no tenant — sentinel prevents cross-tenant leakage
+    return -1
 
 
 def _current_user_id():
@@ -48,10 +63,18 @@ def _log(db, action_type, description, metadata=None):
 
 
 def _latest_run_query(cursor, tenant_id=None):
-    """Get latest completed discovery run ID, optionally scoped by tenant."""
-    if tenant_id:
+    """Get latest completed discovery run ID, scoped by tenant.
+
+    tenant_id=None is only safe for superadmins (unscoped). The -1 sentinel
+    from _tenant_id() will match nothing, preventing cross-tenant leakage.
+    """
+    if tenant_id is not None:  # Includes -1 sentinel — always scope
         cursor.execute("SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (tenant_id,))
     else:
+        # Belt-and-suspenders: verify caller is superadmin before unscoped query
+        user = getattr(g, 'current_user', None)
+        if not user or not user.get('is_superadmin'):
+            return None  # Safety: non-superadmin without tenant sees nothing
         cursor.execute("SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed'")
     row = cursor.fetchone()
     if not row:
@@ -7130,10 +7153,11 @@ def get_dashboard_anomalies():
 # ── Phase 42: API Key Management ─────────────────────────────────
 
 def get_api_keys_list():
-    """GET /api/api-keys — list all API keys (admin only). Never returns hashes."""
+    """GET /api/api-keys — list all API keys (admin only). Scoped by tenant."""
+    tid = _tenant_id()
     db = _db()
     try:
-        keys = db.get_api_keys()
+        keys = db.get_api_keys(tenant_id=tid)
         return jsonify({'api_keys': keys})
     finally:
         db.close()
@@ -7167,6 +7191,7 @@ def create_api_key_handler():
 
     current_user = getattr(g, 'current_user', None)
     created_by = current_user['id'] if current_user else None
+    tid = _tenant_id()
 
     db = _db()
     try:
@@ -7178,6 +7203,7 @@ def create_api_key_handler():
             role=role,
             created_by=created_by,
             expires_at=expires_at,
+            tenant_id=tid,
         )
 
         try:
@@ -7198,11 +7224,12 @@ def create_api_key_handler():
 
 
 def update_api_key_handler(key_id):
-    """PUT /api/api-keys/<id> — update an API key (admin only)."""
+    """PUT /api/api-keys/<id> — update an API key (admin only). Scoped by tenant."""
     data = request.get_json(silent=True) or {}
+    tid = _tenant_id()
     db = _db()
     try:
-        existing = db.get_api_key_by_id(key_id)
+        existing = db.get_api_key_by_id(key_id, tenant_id=tid)
         if not existing:
             return jsonify({'error': 'API key not found'}), 404
 
@@ -7234,7 +7261,7 @@ def update_api_key_handler(key_id):
         if not updates:
             return jsonify({'api_key': existing, 'message': 'No changes'})
 
-        api_key = db.update_api_key(key_id, **updates)
+        api_key = db.update_api_key(key_id, tenant_id=tid, **updates)
 
         try:
             _log(db,'api_key_updated',
@@ -7249,14 +7276,15 @@ def update_api_key_handler(key_id):
 
 
 def delete_api_key_handler(key_id):
-    """DELETE /api/api-keys/<id> — delete an API key (admin only)."""
+    """DELETE /api/api-keys/<id> — delete an API key (admin only). Scoped by tenant."""
+    tid = _tenant_id()
     db = _db()
     try:
-        existing = db.get_api_key_by_id(key_id)
+        existing = db.get_api_key_by_id(key_id, tenant_id=tid)
         if not existing:
             return jsonify({'error': 'API key not found'}), 404
 
-        db.delete_api_key(key_id)
+        db.delete_api_key(key_id, tenant_id=tid)
 
         current_user = getattr(g, 'current_user', None)
         try:
@@ -8548,8 +8576,11 @@ def get_resources():
                 WHERE discovery_run_id = %s
             """)
             params.append(run_id)
-            if tenant_id:
+            if tenant_id and tenant_id > 0:
                 parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
+                params.append(tenant_id)
+            elif tenant_id is not None:
+                parts[-1] += " AND tenant_id = %s"
                 params.append(tenant_id)
 
         if resource_type != 'storage_account':
@@ -8571,8 +8602,11 @@ def get_resources():
                 WHERE discovery_run_id = %s
             """)
             params.append(run_id)
-            if tenant_id:
+            if tenant_id and tenant_id > 0:
                 parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
+                params.append(tenant_id)
+            elif tenant_id is not None:
+                parts[-1] += " AND tenant_id = %s"
                 params.append(tenant_id)
 
         if not parts:
@@ -8656,8 +8690,11 @@ def get_resource_stats():
 
         tenant_filter = ""
         params = [run_id]
-        if tenant_id:
+        if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+        elif tenant_id is not None:
+            tenant_filter = " AND tenant_id = %s"
             params.append(tenant_id)
 
         include_sa = resource_type != 'key_vault'
@@ -8797,8 +8834,11 @@ def get_resource_detail(resource_id):
 
         tenant_filter = ""
         params = [run_id, resource_id]
-        if tenant_id:
+        if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+        elif tenant_id is not None:
+            tenant_filter = " AND tenant_id = %s"
             params.append(tenant_id)
 
         # Try storage account first
@@ -8954,13 +8994,18 @@ def get_resource_access(resource_id):
         # Key Vault access policy cross-reference
         policy_access = []
         kv_params = [run_id, resource_id]
-        if tenant_id:
+        kv_tenant_clause = ""
+        if tenant_id and tenant_id > 0:
+            kv_tenant_clause = "AND (tenant_id = %s OR tenant_id IS NULL)"
+            kv_params.append(tenant_id)
+        elif tenant_id is not None:
+            kv_tenant_clause = "AND tenant_id = %s"
             kv_params.append(tenant_id)
         cursor.execute(f"""
             SELECT access_policies
             FROM azure_key_vaults
             WHERE discovery_run_id = %s AND resource_id = %s
-            {'AND (tenant_id = %s OR tenant_id IS NULL)' if tenant_id else ''}
+            {kv_tenant_clause}
         """, kv_params)
         kv_row = cursor.fetchone()
         policy_identity_ids = set()
@@ -9036,8 +9081,11 @@ def get_resource_expiry_summary():
 
         tenant_filter = ""
         params = [run_id]
-        if tenant_id:
+        if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+        elif tenant_id is not None:
+            tenant_filter = " AND tenant_id = %s"
             params.append(tenant_id)
 
         cursor.execute(f"""
@@ -9125,8 +9173,11 @@ def get_resource_compliance_summary():
 
         tenant_filter = ""
         params = [run_id]
-        if tenant_id:
+        if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+        elif tenant_id is not None:
+            tenant_filter = " AND tenant_id = %s"
             params.append(tenant_id)
 
         # Storage compliance
@@ -11980,7 +12031,7 @@ def copilot_chat():
 
     db = _db()
     try:
-        api_key = db.get_setting('copilot_api_key', '')
+        api_key = db.get_setting('copilot_api_key', '', tenant_id=_tenant_id())
         if not api_key:
             return jsonify({
                 'error': 'not_configured',
@@ -12047,7 +12098,7 @@ def copilot_suggestions():
     """GET /api/copilot/suggestions — contextual quick-ask chips."""
     db = _db()
     try:
-        api_key = db.get_setting('copilot_api_key', '')
+        api_key = db.get_setting('copilot_api_key', '', tenant_id=_tenant_id())
         if not api_key:
             return jsonify({'suggestions': [], 'configured': False})
 
@@ -12642,10 +12693,11 @@ def get_integration_settings():
     """GET /api/settings/integrations — return webhook URLs (masked) + event config."""
     db = _db()
     try:
-        slack_url = db.get_setting('slack_webhook_url', '')
-        teams_url = db.get_setting('teams_webhook_url', '')
-        slack_events = db.get_setting('slack_events', '[]')
-        teams_events = db.get_setting('teams_events', '[]')
+        tid = _tenant_id()
+        slack_url = db.get_setting('slack_webhook_url', '', tenant_id=tid)
+        teams_url = db.get_setting('teams_webhook_url', '', tenant_id=tid)
+        slack_events = db.get_setting('slack_events', '[]', tenant_id=tid)
+        teams_events = db.get_setting('teams_events', '[]', tenant_id=tid)
 
         def mask_url(url):
             if not url or len(url) < 20:

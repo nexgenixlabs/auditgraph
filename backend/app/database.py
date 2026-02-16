@@ -1702,45 +1702,94 @@ class Database:
     # ========================================================================
 
     def get_settings(self, tenant_id=None) -> Dict[str, str]:
-        """Returns all settings as a key-value dict, optionally scoped by tenant."""
+        """Returns all settings as a key-value dict, scoped by tenant.
+        SECURITY: Returns empty dict when tenant_id is None to prevent cross-tenant data leak."""
+        if tenant_id is None:
+            import logging
+            logging.getLogger('tenant_isolation').warning(
+                'get_settings() called with tenant_id=None — returning empty dict')
+            return {}
         cursor = self.conn.cursor()
-        if tenant_id is not None:
-            cursor.execute("SELECT key, value FROM settings WHERE tenant_id = %s ORDER BY key", (tenant_id,))
-        else:
-            cursor.execute("SELECT key, value FROM settings ORDER BY key")
+        cursor.execute("SELECT key, value FROM settings WHERE tenant_id = %s ORDER BY key", (tenant_id,))
         result = {row[0]: row[1] for row in cursor.fetchall()}
         cursor.close()
         return result
 
     def get_setting(self, key: str, default: Optional[str] = None, tenant_id=None) -> Optional[str]:
-        """Returns a single setting value, or default if not found."""
+        """Returns a single setting value, or default if not found.
+        SECURITY: Returns default when tenant_id is None to prevent cross-tenant data leak."""
+        if tenant_id is None:
+            import logging
+            logging.getLogger('tenant_isolation').warning(
+                f'get_setting({key}) called with tenant_id=None — returning default')
+            return default
         cursor = self.conn.cursor()
-        if tenant_id is not None:
-            cursor.execute("SELECT value FROM settings WHERE key = %s AND tenant_id = %s", (key, tenant_id))
-        else:
-            cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
+        cursor.execute("SELECT value FROM settings WHERE key = %s AND tenant_id = %s", (key, tenant_id))
         row = cursor.fetchone()
         cursor.close()
         return row[0] if row else default
 
     def save_settings(self, settings_dict: Dict[str, str], tenant_id=None) -> None:
-        """Upsert multiple settings in one call, optionally scoped by tenant."""
+        """Upsert multiple settings in one call, scoped by tenant.
+        SECURITY: Rejects writes when tenant_id is None to prevent cross-tenant data leak."""
+        if tenant_id is None:
+            import logging
+            logging.getLogger('tenant_isolation').warning(
+                'save_settings() called with tenant_id=None — rejecting write')
+            return
         cursor = self.conn.cursor()
         for key, value in settings_dict.items():
-            if tenant_id is not None:
-                cursor.execute("""
-                    INSERT INTO settings (key, value, tenant_id, updated_at)
-                    VALUES (%s, %s, %s, NOW())
-                    ON CONFLICT (tenant_id, key) DO UPDATE SET
-                        value = EXCLUDED.value,
-                        updated_at = NOW()
-                """, (key, value, tenant_id))
-            else:
-                # No tenant context — ON CONFLICT won't match NULLs, so DELETE+INSERT
-                cursor.execute("DELETE FROM settings WHERE key = %s AND tenant_id IS NULL", (key,))
-                cursor.execute("INSERT INTO settings (key, value, updated_at) VALUES (%s, %s, NOW())", (key, value))
+            cursor.execute("""
+                INSERT INTO settings (key, value, tenant_id, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (tenant_id, key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = NOW()
+            """, (key, value, tenant_id))
         self.conn.commit()
         cursor.close()
+
+    # ── System-level setting accessors (for scheduler/background services ONLY) ──
+    # These read from tenant_id IS NULL rows (system-wide operational settings).
+    # NEVER use these in request-scoped handlers — use get_setting(tenant_id=...) instead.
+
+    _SYSTEM_SETTING_ALLOWLIST = frozenset([
+        'email_enabled', 'email_provider', 'email_to',
+        'email_notify_scan_complete', 'email_notify_new_risks', 'email_notify_credential_expiry',
+        'email_notify_drift', 'email_notify_compliance',
+        'notify_new_identities', 'notify_removed_identities', 'notify_permission_changes',
+        'notify_risk_changes', 'notify_credential_changes',
+        'retention_enabled', 'retention_discovery_days', 'retention_drift_days',
+        'retention_activity_days', 'retention_anomalies_days', 'retention_soar_days',
+        'retention_notifications_days',
+        'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
+        'scheduler_interval_hours', 'org_name',
+        'slack_webhook_url', 'teams_webhook_url', 'slack_events', 'teams_events',
+    ])
+
+    def get_system_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Read a system-level operational setting (tenant_id IS NULL).
+        Only allowed for keys in the allowlist — never for credentials."""
+        if key not in self._SYSTEM_SETTING_ALLOWLIST:
+            import logging
+            logging.getLogger('tenant_isolation').warning(
+                f'get_system_setting() blocked for non-allowlisted key: {key}')
+            return default
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = %s AND tenant_id IS NULL", (key,))
+        row = cursor.fetchone()
+        cursor.close()
+        return row[0] if row else default
+
+    def get_system_settings(self) -> Dict[str, str]:
+        """Read all system-level operational settings (tenant_id IS NULL).
+        Filters to allowlisted keys only — never returns credentials."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT key, value FROM settings WHERE tenant_id IS NULL ORDER BY key")
+        result = {row[0]: row[1] for row in cursor.fetchall()
+                  if row[0] in self._SYSTEM_SETTING_ALLOWLIST}
+        cursor.close()
+        return result
 
     # ========================================================================
     # Phase 17: Activity Log & Audit Trail
@@ -5656,19 +5705,22 @@ class Database:
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix)")
+        # P0 tenant isolation: add tenant_id column
+        cursor.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id)")
         self.conn.commit()
         cursor.close()
 
-    def create_api_key(self, key_prefix, key_hash, name, description, role, created_by, expires_at=None):
+    def create_api_key(self, key_prefix, key_hash, name, description, role, created_by, expires_at=None, tenant_id=None):
         """Insert a new API key. Returns dict (never includes key_hash)."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO api_keys (key_prefix, key_hash, name, description, role, created_by, expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO api_keys (key_prefix, key_hash, name, description, role, created_by, expires_at, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, key_prefix, name, description, role, enabled, created_by,
-                      created_at, last_used_at, expires_at, usage_count
-        """, (key_prefix, key_hash, name, description, role, created_by, expires_at))
+                      created_at, last_used_at, expires_at, usage_count, tenant_id
+        """, (key_prefix, key_hash, name, description, role, created_by, expires_at, tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -5677,18 +5729,29 @@ class Database:
                 row[ts] = row[ts].isoformat()
         return row
 
-    def get_api_keys(self):
-        """List all API keys with creator name. Never returns key_hash."""
+    def get_api_keys(self, tenant_id=None):
+        """List API keys scoped by tenant. Never returns key_hash."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT ak.id, ak.key_prefix, ak.name, ak.description, ak.role,
-                   ak.enabled, ak.created_by, u.display_name as created_by_name,
-                   ak.created_at, ak.last_used_at, ak.expires_at, ak.usage_count
-            FROM api_keys ak
-            LEFT JOIN users u ON u.id = ak.created_by
-            ORDER BY ak.id
-        """)
+        if tenant_id is not None:
+            cursor.execute("""
+                SELECT ak.id, ak.key_prefix, ak.name, ak.description, ak.role,
+                       ak.enabled, ak.created_by, u.display_name as created_by_name,
+                       ak.created_at, ak.last_used_at, ak.expires_at, ak.usage_count
+                FROM api_keys ak
+                LEFT JOIN users u ON u.id = ak.created_by
+                WHERE ak.tenant_id = %s
+                ORDER BY ak.id
+            """, (tenant_id,))
+        else:
+            cursor.execute("""
+                SELECT ak.id, ak.key_prefix, ak.name, ak.description, ak.role,
+                       ak.enabled, ak.created_by, u.display_name as created_by_name,
+                       ak.created_at, ak.last_used_at, ak.expires_at, ak.usage_count
+                FROM api_keys ak
+                LEFT JOIN users u ON u.id = ak.created_by
+                ORDER BY ak.id
+            """)
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -5697,15 +5760,22 @@ class Database:
                     r[ts] = r[ts].isoformat()
         return rows
 
-    def get_api_key_by_id(self, key_id):
-        """Get single API key by id. Never returns key_hash."""
+    def get_api_key_by_id(self, key_id, tenant_id=None):
+        """Get single API key by id, optionally scoped by tenant. Never returns key_hash."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT id, key_prefix, name, description, role, enabled, created_by,
-                   created_at, last_used_at, expires_at, usage_count
-            FROM api_keys WHERE id = %s
-        """, (key_id,))
+        if tenant_id is not None:
+            cursor.execute("""
+                SELECT id, key_prefix, name, description, role, enabled, created_by,
+                       created_at, last_used_at, expires_at, usage_count
+                FROM api_keys WHERE id = %s AND tenant_id = %s
+            """, (key_id, tenant_id))
+        else:
+            cursor.execute("""
+                SELECT id, key_prefix, name, description, role, enabled, created_by,
+                       created_at, last_used_at, expires_at, usage_count
+                FROM api_keys WHERE id = %s
+            """, (key_id,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -5733,23 +5803,27 @@ class Database:
         # Keep expires_at as datetime for comparison in middleware
         return result
 
-    def update_api_key(self, key_id, **kwargs):
+    def update_api_key(self, key_id, tenant_id=None, **kwargs):
         """Update API key fields. Allowed: name, description, role, enabled."""
         self._ensure_api_keys_table()
         allowed = {'name', 'description', 'role', 'enabled'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
-            return self.get_api_key_by_id(key_id)
+            return self.get_api_key_by_id(key_id, tenant_id=tenant_id)
         set_parts = []
         params = []
         for k, v in updates.items():
             set_parts.append(f"{k} = %s")
             params.append(v)
+        where = "id = %s"
         params.append(key_id)
+        if tenant_id is not None:
+            where += " AND tenant_id = %s"
+            params.append(tenant_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE api_keys SET {', '.join(set_parts)}
-            WHERE id = %s
+            WHERE {where}
             RETURNING id, key_prefix, name, description, role, enabled, created_by,
                       created_at, last_used_at, expires_at, usage_count
         """, params)
@@ -5764,11 +5838,14 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def delete_api_key(self, key_id):
-        """Delete API key. Returns True if deleted."""
+    def delete_api_key(self, key_id, tenant_id=None):
+        """Delete API key, scoped by tenant. Returns True if deleted."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM api_keys WHERE id = %s", (key_id,))
+        if tenant_id is not None:
+            cursor.execute("DELETE FROM api_keys WHERE id = %s AND tenant_id = %s", (key_id, tenant_id))
+        else:
+            cursor.execute("DELETE FROM api_keys WHERE id = %s", (key_id,))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()

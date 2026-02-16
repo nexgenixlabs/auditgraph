@@ -47,7 +47,7 @@ def get_email_service():
     try:
         from app.database import Database
         db = Database()
-        provider = db.get_setting('email_provider', 'graph')
+        provider = db.get_system_setting('email_provider', 'graph')
         db.close()
     except Exception:
         provider = 'graph'
@@ -146,7 +146,7 @@ class EmailService:
         try:
             from app.database import Database
             db = Database()
-            db_email = db.get_setting('email_to')
+            db_email = db.get_system_setting('email_to')
             if db_email and '@' in db_email:
                 to_email = db_email
             db.close()
@@ -485,7 +485,7 @@ class EmailService:
             try:
                 from app.database import Database
                 db = Database()
-                db_email = db.get_setting('email_to')
+                db_email = db.get_system_setting('email_to')
                 if db_email and '@' in db_email:
                     to_email = db_email
                 db.close()
@@ -534,13 +534,13 @@ class EmailService:
                 logger.info("No completed discovery runs - skipping scheduled report")
                 return False
 
-            to_email = db.get_setting('report_email_to') or db.get_setting('email_to') or self.to_email
+            to_email = db.get_system_setting('report_email_to') or db.get_system_setting('email_to') or self.to_email
             if not to_email or '@' not in to_email:
                 logger.warning("No valid report recipient configured")
                 return False
 
-            org_name = db.get_setting('org_name', 'Your Organization')
-            freq = db.get_setting('report_schedule_frequency', 'weekly')
+            org_name = db.get_system_setting('org_name', 'Your Organization')
+            freq = db.get_system_setting('report_schedule_frequency', 'weekly')
         finally:
             db.close()
 

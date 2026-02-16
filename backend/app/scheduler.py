@@ -111,7 +111,7 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
         if not all([tenant_id, client_id, client_secret]):
             try:
                 settings_db = Database()
-                settings = settings_db.get_settings()
+                settings = settings_db.get_system_settings()
                 tenant_id = tenant_id or settings.get('azure_tenant_id')
                 client_id = client_id or settings.get('azure_client_id')
                 client_secret = client_secret or settings.get('azure_client_secret')
@@ -223,7 +223,7 @@ def _send_change_notification_if_needed():
             )
 
             # Phase 15: Check notification settings before sending email
-            email_enabled = db.get_setting('email_enabled', 'true') == 'true'
+            email_enabled = db.get_system_setting('email_enabled', 'true') == 'true'
             if not email_enabled:
                 logger.info("Email notifications disabled in settings - skipping")
             else:
@@ -237,7 +237,7 @@ def _send_change_notification_if_needed():
                     'credential_changes': 'notify_credential_changes',
                 }
                 for change_key, setting_key in notify_map.items():
-                    if db.get_setting(setting_key, 'true') == 'true':
+                    if db.get_system_setting(setting_key, 'true') == 'true':
                         filtered_changes[change_key] = changes.get(change_key, [])
                     else:
                         filtered_changes[change_key] = []
@@ -503,7 +503,7 @@ def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Databa
         settings = {}
         for key in ('anomaly_pim_hours_start', 'anomaly_pim_hours_end',
                      'anomaly_pim_frequency_threshold', 'anomaly_risk_spike_threshold'):
-            val = db.get_setting(key, None)
+            val = db.get_system_setting(key, None)
             if val is not None:
                 settings[key] = val
 
@@ -677,7 +677,7 @@ def run_scheduled_report():
 
     try:
         db = Database()
-        enabled = db.get_setting('report_schedule_enabled', 'false')
+        enabled = db.get_system_setting('report_schedule_enabled', 'false')
         db.close()
 
         if enabled != 'true':
@@ -717,19 +717,19 @@ def run_data_retention():
 
     try:
         db = Database()
-        enabled = db.get_setting('retention_enabled', 'false')
+        enabled = db.get_system_setting('retention_enabled', 'false')
 
         if enabled != 'true':
             logger.info("Data retention disabled in settings - skipping")
             db.close()
             return
 
-        discovery_days = int(db.get_setting('retention_discovery_days', '90'))
-        drift_days = int(db.get_setting('retention_drift_days', '90'))
-        activity_days = int(db.get_setting('retention_activity_days', '180'))
-        anomalies_days = int(db.get_setting('retention_anomalies_days', '90'))
-        soar_days = int(db.get_setting('retention_soar_days', '90'))
-        notif_days = int(db.get_setting('retention_notifications_days', '90'))
+        discovery_days = int(db.get_system_setting('retention_discovery_days', '90'))
+        drift_days = int(db.get_system_setting('retention_drift_days', '90'))
+        activity_days = int(db.get_system_setting('retention_activity_days', '180'))
+        anomalies_days = int(db.get_system_setting('retention_anomalies_days', '90'))
+        soar_days = int(db.get_system_setting('retention_soar_days', '90'))
+        notif_days = int(db.get_system_setting('retention_notifications_days', '90'))
 
         results = {}
         run_counts = db.cleanup_old_discovery_runs(days=discovery_days)
@@ -803,8 +803,8 @@ def start_scheduler():
     # Phase 18: Add scheduled report job
     try:
         report_db = Database()
-        report_freq = report_db.get_setting('report_schedule_frequency', 'weekly')
-        report_enabled = report_db.get_setting('report_schedule_enabled', 'false') == 'true'
+        report_freq = report_db.get_system_setting('report_schedule_frequency', 'weekly')
+        report_enabled = report_db.get_system_setting('report_schedule_enabled', 'false') == 'true'
         report_db.close()
     except Exception:
         report_freq = 'weekly'
