@@ -136,10 +136,10 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
 
 def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep'):
     """Run discovery for a single tenant using their stored Azure credentials."""
-    # Read this tenant's settings (with RLS context)
+    # Read this tenant's settings (tenant-scoped, not system-level)
     settings_db = Database(tenant_id=db_tenant_id)
     try:
-        settings = settings_db.get_system_settings()
+        settings = settings_db.get_settings(tenant_id=db_tenant_id)
     finally:
         settings_db.close()
 
