@@ -56,39 +56,12 @@ ALTER TABLE campaign_audit_log ADD COLUMN IF NOT EXISTS tenant_id INTEGER;
 -- Order matters: parent tables first, then children.
 -- ============================================================
 
--- 2A: Tables with run_id or discovery_run_id → JOIN to discovery_runs
+-- 2A: Tables with discovery_run_id or run_id → JOIN to discovery_runs
 UPDATE identities i SET tenant_id = dr.tenant_id
 FROM discovery_runs dr WHERE i.discovery_run_id = dr.id AND i.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
 
-UPDATE role_assignments ra SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE ra.run_id = dr.id AND ra.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE entra_role_assignments era SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE era.run_id = dr.id AND era.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE credentials c SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE c.run_id = dr.id AND c.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE graph_api_permissions gap SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE gap.run_id = dr.id AND gap.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE sp_ownership spo SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE spo.run_id = dr.id AND spo.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE sp_app_roles ara SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE ara.run_id = dr.id AND ara.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE identity_roles ir SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE ir.run_id = dr.id AND ir.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE role_activity_log ral SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE ral.run_id = dr.id AND ral.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
 UPDATE ca_policies cp SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE cp.run_id = dr.id AND cp.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
-
-UPDATE ca_identity_coverage cic SET tenant_id = dr.tenant_id
-FROM discovery_runs dr WHERE cic.run_id = dr.id AND cic.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
+FROM discovery_runs dr WHERE cp.discovery_run_id = dr.id AND cp.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
 
 UPDATE drift_reports drf SET tenant_id = dr.tenant_id
 FROM discovery_runs dr WHERE drf.current_run_id = dr.id AND drf.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
@@ -102,7 +75,34 @@ FROM discovery_runs dr WHERE a.discovery_run_id = dr.id AND a.tenant_id IS NULL 
 UPDATE identity_subscription_access isa SET tenant_id = dr.tenant_id
 FROM discovery_runs dr WHERE isa.discovery_run_id = dr.id AND isa.tenant_id IS NULL AND dr.tenant_id IS NOT NULL;
 
--- 2B: Tables with identity_db_id → JOIN to identities (now backfilled)
+-- 2B: Tables with identity_db_id → JOIN to identities (now backfilled from step 2A)
+UPDATE role_assignments ra SET tenant_id = i.tenant_id
+FROM identities i WHERE ra.identity_db_id = i.id AND ra.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE entra_role_assignments era SET tenant_id = i.tenant_id
+FROM identities i WHERE era.identity_db_id = i.id AND era.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE credentials c SET tenant_id = i.tenant_id
+FROM identities i WHERE c.identity_db_id = i.id AND c.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE graph_api_permissions gap SET tenant_id = i.tenant_id
+FROM identities i WHERE gap.identity_db_id = i.id AND gap.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE sp_ownership spo SET tenant_id = i.tenant_id
+FROM identities i WHERE spo.identity_db_id = i.id AND spo.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE sp_app_roles ara SET tenant_id = i.tenant_id
+FROM identities i WHERE ara.identity_db_id = i.id AND ara.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE identity_roles ir SET tenant_id = i.tenant_id
+FROM identities i WHERE ir.identity_db_id = i.id AND ir.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE role_activity_log ral SET tenant_id = i.tenant_id
+FROM identities i WHERE ral.identity_db_id = i.id AND ral.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
+UPDATE ca_identity_coverage cic SET tenant_id = i.tenant_id
+FROM identities i WHERE cic.identity_db_id = i.id AND cic.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
+
 UPDATE pim_eligible_assignments pea SET tenant_id = i.tenant_id
 FROM identities i WHERE pea.identity_db_id = i.id AND pea.tenant_id IS NULL AND i.tenant_id IS NOT NULL;
 
@@ -111,7 +111,7 @@ FROM identities i WHERE pa.identity_db_id = i.id AND pa.tenant_id IS NULL AND i.
 
 -- 2C: Tables with user_id or created_by → JOIN to users
 UPDATE soar_playbooks sp SET tenant_id = u.tenant_id
-FROM users u WHERE sp.created_by = u.id AND sp.tenant_id IS NULL AND u.tenant_id IS NOT NULL;
+FROM users u WHERE sp.created_by = u.username AND sp.tenant_id IS NULL AND u.tenant_id IS NOT NULL;
 
 UPDATE identity_groups ig SET tenant_id = u.tenant_id
 FROM users u WHERE ig.created_by = u.id AND ig.tenant_id IS NULL AND u.tenant_id IS NOT NULL;
@@ -379,9 +379,9 @@ END $$;
 -- STEP 5: Verify RLS status
 -- ============================================================
 
-SELECT tablename, rowsecurity, forcerowsecurity
-FROM pg_tables
-WHERE schemaname = 'public'
-ORDER BY tablename;
+SELECT c.relname AS tablename, c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind = 'r'
+ORDER BY c.relname;
 
 COMMIT;
