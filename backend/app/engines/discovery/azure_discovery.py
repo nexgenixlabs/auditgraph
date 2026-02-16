@@ -142,7 +142,11 @@ class AzureDiscoveryEngine:
         print(f"✓ Discovery Engine initialized for {len(self.subscriptions)} subscription(s): {', '.join(sub_names) or 'none'}")
     
     def _discover_subscriptions(self) -> List[Dict[str, str]]:
-        """Auto-discover all Azure subscriptions accessible to the service principal."""
+        """Auto-discover all Azure subscriptions accessible to the service principal.
+
+        IMPORTANT: Never falls back to env vars in multi-tenant mode — each tenant's
+        SPN must have RBAC access to their own subscriptions.
+        """
         try:
             sub_client = SubscriptionClient(self.credential)
             subs = []
@@ -153,17 +157,10 @@ class AzureDiscoveryEngine:
                         'name': sub.display_name or sub.subscription_id,
                     })
             if not subs:
-                # Fallback to env var if SDK returns nothing
-                env_sub = os.getenv('AZURE_SUBSCRIPTION_ID')
-                if env_sub:
-                    subs.append({'id': env_sub, 'name': os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')})
+                print("  ⚠️ No Azure subscriptions found — SPN needs Reader RBAC on at least one subscription")
             return subs
         except Exception as e:
             print(f"  ⚠️ Subscription discovery failed: {e}")
-            # Fallback to env var
-            env_sub = os.getenv('AZURE_SUBSCRIPTION_ID')
-            if env_sub:
-                return [{'id': env_sub, 'name': os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')}]
             return []
 
     def run_discovery(self) -> DiscoveryResult:
