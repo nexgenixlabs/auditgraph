@@ -10090,6 +10090,7 @@ def get_governance_identities():
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
     tid = _tenant_id()
+    db._ensure_governance_decisions_table()
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -10154,7 +10155,7 @@ def get_governance_identities():
                    COALESCE(i.owner_count, 0) as owner_count, i.owner_display_name,
                    i.credential_risk, i.credential_count, i.credential_expiration,
                    i.next_expiry, i.activity_status, i.last_sign_in, i.created_datetime,
-                   i.app_type
+                   i.service_principal_type
             FROM identities i
             WHERE {where_sql}
             ORDER BY {order_col} {order_dir} NULLS LAST
@@ -10326,7 +10327,7 @@ def get_governance_identity_detail(identity_id):
                    COALESCE(i.owner_count, 0) as owner_count, i.owner_display_name,
                    i.credential_risk, i.credential_count, i.credential_expiration,
                    i.next_expiry, i.activity_status, i.last_sign_in, i.created_datetime,
-                   i.app_type, i.app_id
+                   i.service_principal_type, i.app_id
             FROM identities i
             WHERE i.identity_id = %s AND i.identity_category IN %s
             ORDER BY i.id DESC LIMIT 1
@@ -10498,7 +10499,7 @@ def post_governance_decision(identity_id):
             SELECT id, identity_id, display_name, identity_category,
                    COALESCE(risk_score, 0) as risk_score, risk_level,
                    COALESCE(owner_count, 0) as owner_count,
-                   credential_risk, activity_status, app_type,
+                   credential_risk, activity_status, service_principal_type,
                    credential_count, last_sign_in
             FROM identities
             WHERE identity_id = %s AND identity_category IN %s
@@ -10578,6 +10579,7 @@ def get_governance_stats():
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
     tid = _tenant_id()
+    db._ensure_governance_decisions_table()
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -10597,7 +10599,7 @@ def get_governance_stats():
             SELECT i.id, i.identity_id, i.display_name, i.identity_category,
                    COALESCE(i.risk_score, 0) as risk_score,
                    COALESCE(i.owner_count, 0) as owner_count,
-                   i.credential_risk, i.activity_status, i.app_type,
+                   i.credential_risk, i.activity_status, i.service_principal_type,
                    i.credential_count, i.last_sign_in
             FROM identities i
             WHERE i.discovery_run_id = %s AND i.identity_category IN %s

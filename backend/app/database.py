@@ -7418,11 +7418,12 @@ def _compute_governance_risk(identity, roles, credentials, graph_perms, attestat
 
     # ── 5. EXPOSURE (max 10) ──
     exposure_score = 0
-    app_type = identity.get('app_type', '') or ''
-    if 'multi' in app_type.lower() or 'external' in app_type.lower():
+    sp_type = identity.get('service_principal_type', '') or ''
+    is_federated = identity.get('is_federated', False)
+    if is_federated or sp_type.lower() == 'socialidp':
         exposure_score += 10
         factors.append({'factor': 'External/third-party application', 'impact': 10, 'category': 'exposure'})
-    elif app_type:
+    elif sp_type.lower() in ('application', 'managedidentity'):
         exposure_score -= 3
         factors.append({'factor': 'Internal application only', 'impact': -3, 'category': 'exposure'})
     raw += min(max(exposure_score, 0), 10)
