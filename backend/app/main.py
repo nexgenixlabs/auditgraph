@@ -73,6 +73,7 @@ from app.api.handlers import (
     toggle_compliance_framework_handler,
     get_compliance_gap_analysis,
     get_compliance_trends_handler,
+    get_compliance_intelligence,
     export_data,
     get_saved_views_list,
     create_saved_view_handler,
@@ -615,6 +616,11 @@ def create_app():
     @require_role('admin', 'security_admin', 'compliance', 'reader')
     def compliance_trends():
         return get_compliance_trends_handler()
+
+    @app.get("/api/compliance/intelligence")
+    @require_role('admin', 'security_admin', 'compliance', 'reader')
+    def compliance_intelligence():
+        return get_compliance_intelligence()
 
     # -----------------------
     # Overview insights (tier distribution, action items)
@@ -1241,6 +1247,8 @@ def create_app():
     try:
         db.ensure_default_admin()
         db.seed_compliance_frameworks()
+        db.seed_compliance_root_causes()
+        db._migrate_compliance_controls_v2()
         db.seed_auto_groups()
     finally:
         db.close()

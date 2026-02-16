@@ -3462,6 +3462,24 @@ class Database:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_controls_framework ON compliance_controls(framework_id)")
+        # V2 columns
+        cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS severity VARCHAR(20) DEFAULT 'medium'")
+        cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS weight INTEGER DEFAULT 5")
+        cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS cloud VARCHAR(20) DEFAULT 'azure'")
+        cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS pillar VARCHAR(50)")
+        cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS root_cause_id INTEGER")
+        # Root causes table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS compliance_root_causes (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                description TEXT,
+                category VARCHAR(50),
+                recommendation TEXT,
+                display_order INT DEFAULT 100
+            )
+        """)
         self.conn.commit()
         cursor.close()
 
@@ -4165,6 +4183,112 @@ class Database:
                          warn_operator, warn_value, drilldown_url, display_order)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (fw_id, control_id, name, metric, pass_op, pass_val, warn_op, warn_val, drilldown, (j + 1) * 10))
+
+        self.conn.commit()
+        cursor.close()
+
+    def seed_compliance_root_causes(self):
+        """Insert 7 root causes if the table is empty."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM compliance_root_causes")
+        if cursor.fetchone()[0] > 0:
+            cursor.close()
+            return
+        causes = [
+            ('excessive_standing_privilege', 'Excessive Standing Privileges',
+             'Identities hold persistent high-privilege roles without time-bound elevation, expanding blast radius.',
+             'privilege', 'Implement PIM/JIT for all T0 roles; enforce least-privilege baseline.', 10),
+            ('credential_lifecycle_gaps', 'Credential Lifecycle Gaps',
+             'Expired, unrotated, or long-lived credentials create persistent attack surface.',
+             'credential', 'Enforce 90-day credential rotation; alert on expiring creds at 30 days.', 20),
+            ('orphaned_identities', 'Orphaned & Ownerless Identities',
+             'Service principals and app registrations without owners lack accountability and review.',
+             'governance', 'Assign owners to all SPNs; enforce attestation cycles.', 30),
+            ('dormant_access_accumulation', 'Dormant Access Accumulation',
+             'Stale accounts retain active role assignments, creating latent privilege risk.',
+             'usage', 'Revoke roles from accounts inactive >90 days; automate access reviews.', 40),
+            ('weak_authentication', 'Weak Authentication Controls',
+             'Users without MFA or conditional-access coverage are vulnerable to credential theft.',
+             'authentication', 'Enforce MFA for all human users; close CA policy gaps.', 50),
+            ('excessive_permissions_spread', 'Excessive Permission Spread',
+             'Identities accumulate roles beyond operational need, violating least privilege.',
+             'privilege', 'Cap role assignments per identity; run role-mining to consolidate.', 60),
+            ('external_trust_exposure', 'External Trust Exposure',
+             'Guest accounts and multi-tenant apps extend trust boundaries beyond the organization.',
+             'trust', 'Review guest accounts quarterly; restrict multi-tenant app registrations.', 70),
+        ]
+        for code, title, desc, cat, rec, order in causes:
+            cursor.execute("""
+                INSERT INTO compliance_root_causes (code, title, description, category, recommendation, display_order)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (code, title, desc, cat, rec, order))
+        self.conn.commit()
+        cursor.close()
+
+    def _migrate_compliance_controls_v2(self):
+        """Idempotently update controls with severity, weight, pillar, root_cause_id."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor()
+        # Build root_cause code → id map
+        cursor.execute("SELECT id, code FROM compliance_root_causes")
+        rc_map = {row[1]: row[0] for row in cursor.fetchall()}
+        if not rc_map:
+            cursor.close()
+            return
+
+        # Check if migration already ran (any control has non-null pillar)
+        cursor.execute("SELECT COUNT(*) FROM compliance_controls WHERE pillar IS NOT NULL")
+        if cursor.fetchone()[0] > 0:
+            cursor.close()
+            return
+
+        # Map (framework_key, control_id) → (severity, weight, pillar, root_cause_code)
+        mappings = {
+            # SOC2
+            ('soc2', 'CC6.1'): ('critical', 9, 'privilege', 'excessive_standing_privilege'),
+            ('soc2', 'CC6.2'): ('high', 7, 'credential', 'credential_lifecycle_gaps'),
+            ('soc2', 'CC6.3'): ('high', 7, 'governance', 'orphaned_identities'),
+            ('soc2', 'CC7.2'): ('medium', 6, 'usage', 'dormant_access_accumulation'),
+            ('soc2', 'CC8.1'): ('high', 7, 'privilege', 'excessive_permissions_spread'),
+            # HIPAA
+            ('hipaa', '§164.312(a)'): ('critical', 9, 'privilege', 'excessive_standing_privilege'),
+            ('hipaa', '§164.312(d)'): ('critical', 9, 'credential', 'credential_lifecycle_gaps'),
+            ('hipaa', '§164.308(a)(3)'): ('high', 8, 'governance', 'orphaned_identities'),
+            ('hipaa', '§164.308(a)(4)'): ('high', 7, 'usage', 'dormant_access_accumulation'),
+            ('hipaa', '§164.312(c)'): ('medium', 5, 'privilege', 'excessive_permissions_spread'),
+            # PCI-DSS
+            ('pci_dss', '7.1'): ('critical', 9, 'privilege', 'excessive_standing_privilege'),
+            ('pci_dss', '7.2.1'): ('high', 8, 'credential', 'credential_lifecycle_gaps'),
+            ('pci_dss', '8.3.6'): ('critical', 9, 'authentication', 'weak_authentication'),
+            ('pci_dss', '8.6'): ('high', 7, 'governance', 'orphaned_identities'),
+            # NIST
+            ('nist_800_53', 'AC-2'): ('high', 8, 'usage', 'dormant_access_accumulation'),
+            ('nist_800_53', 'AC-6'): ('critical', 9, 'privilege', 'excessive_standing_privilege'),
+            ('nist_800_53', 'IA-5'): ('critical', 9, 'credential', 'credential_lifecycle_gaps'),
+            ('nist_800_53', 'AC-17'): ('high', 7, 'authentication', 'weak_authentication'),
+            ('nist_800_53', 'AU-6'): ('medium', 6, 'usage', 'dormant_access_accumulation'),
+            # CIS Azure
+            ('cis_azure', '1.1'): ('critical', 9, 'privilege', 'excessive_standing_privilege'),
+            ('cis_azure', '1.2'): ('high', 8, 'usage', 'dormant_access_accumulation'),
+            ('cis_azure', '1.3'): ('critical', 9, 'authentication', 'weak_authentication'),
+            ('cis_azure', '1.4'): ('high', 7, 'usage', 'dormant_access_accumulation'),
+            ('cis_azure', '1.5'): ('medium', 6, 'governance', 'orphaned_identities'),
+            # ISO 27001
+            ('iso_27001', 'A.5.15'): ('high', 8, 'privilege', 'excessive_standing_privilege'),
+            ('iso_27001', 'A.5.16'): ('high', 7, 'usage', 'dormant_access_accumulation'),
+            ('iso_27001', 'A.5.17'): ('critical', 9, 'credential', 'credential_lifecycle_gaps'),
+            ('iso_27001', 'A.8.2'): ('high', 7, 'privilege', 'excessive_permissions_spread'),
+            ('iso_27001', 'A.8.5'): ('medium', 6, 'authentication', 'weak_authentication'),
+        }
+
+        for (fw_key, ctrl_id), (sev, wt, pillar, rc_code) in mappings.items():
+            rc_id = rc_map.get(rc_code)
+            cursor.execute("""
+                UPDATE compliance_controls cc SET severity = %s, weight = %s, pillar = %s, root_cause_id = %s
+                FROM compliance_frameworks cf
+                WHERE cc.framework_id = cf.id AND cf.key = %s AND cc.control_id = %s
+            """, (sev, wt, pillar, rc_id, fw_key, ctrl_id))
 
         self.conn.commit()
         cursor.close()

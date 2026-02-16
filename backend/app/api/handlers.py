@@ -3346,6 +3346,239 @@ def get_compliance_gap_analysis():
         db.close()
 
 
+def get_compliance_intelligence():
+    """
+    GET /api/compliance/intelligence
+    Returns risk-weighted compliance scoring, root cause clustering,
+    cloud failure counts, top risk drivers, and trend mini.
+    """
+    from datetime import datetime, timezone
+    from psycopg2.extras import RealDictCursor
+
+    SEVERITY_MULT = {'critical': 2.0, 'high': 1.5, 'medium': 1.0, 'low': 0.8}
+    SEVERITY_RANK = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+
+    db = _db()
+    cursor = db.conn.cursor()
+    rc_cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        latest_run = _latest_run_query(cursor, _tenant_id())
+        if not latest_run:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        metrics = _compute_compliance_metrics(cursor, latest_run)
+        frameworks = db.get_compliance_frameworks(enabled_only=True)
+
+        # Fetch root causes
+        rc_cursor.execute("SELECT * FROM compliance_root_causes ORDER BY display_order")
+        root_causes_rows = [dict(r) for r in rc_cursor.fetchall()]
+        rc_by_id = {rc['id']: rc for rc in root_causes_rows}
+
+        # Evaluate all controls
+        total_controls = 0
+        total_passing = 0
+        total_warnings = 0
+        total_failing = 0
+        total_weighted_max = 0.0
+        total_weighted_pass = 0.0
+        cloud_failures = {}
+        all_failing_controls = []
+        needed_metrics = set()
+        fw_results = {}
+
+        for fw in frameworks:
+            fw_pass = 0
+            fw_warn = 0
+            fw_fail = 0
+            fw_weighted_max = 0.0
+            fw_weighted_pass = 0.0
+            controls_out = []
+
+            for ctrl in fw['controls']:
+                status, value = _evaluate_control(ctrl, metrics)
+                label = _format_metric_label(ctrl['metric'])
+                severity = ctrl.get('severity', 'medium')
+                weight = ctrl.get('weight', 5)
+                cloud = ctrl.get('cloud', 'azure')
+                mult = SEVERITY_MULT.get(severity, 1.0)
+                w_score = weight * mult
+
+                fw_weighted_max += w_score
+                total_weighted_max += w_score
+
+                if status == 'pass':
+                    detail = f"{value} {label} — within limits"
+                    fw_pass += 1
+                    total_passing += 1
+                    fw_weighted_pass += w_score
+                    total_weighted_pass += w_score
+                elif status == 'warn':
+                    detail = f"{value} {label} — approaching threshold"
+                    fw_warn += 1
+                    total_warnings += 1
+                    needed_metrics.add(ctrl['metric'])
+                else:
+                    detail = f"{value} {label} — exceeds acceptable limit (target: {ctrl['pass_operator']}{int(ctrl['pass_value'])})"
+                    fw_fail += 1
+                    total_failing += 1
+                    needed_metrics.add(ctrl['metric'])
+                    # Cloud failure tracking
+                    cloud_failures[cloud] = cloud_failures.get(cloud, 0) + 1
+                    all_failing_controls.append({
+                        'control_id': ctrl['control_id'],
+                        'name': ctrl['name'],
+                        'framework': fw['name'],
+                        'framework_key': fw['key'],
+                        'severity': severity,
+                        'weight': weight,
+                        'value': value,
+                        'root_cause_id': ctrl.get('root_cause_id'),
+                    })
+
+                total_controls += 1
+                controls_out.append({
+                    'control_id': ctrl['control_id'],
+                    'name': ctrl['name'],
+                    'status': status,
+                    'metric': ctrl['metric'],
+                    'value': value,
+                    'pass_threshold': f"{ctrl['pass_operator']}{int(ctrl['pass_value'])}",
+                    'detail': detail,
+                    'drilldown_url': ctrl.get('drilldown_url'),
+                    'severity': severity,
+                    'weight': weight,
+                    'cloud': cloud,
+                    'pillar': ctrl.get('pillar'),
+                    'root_cause_id': ctrl.get('root_cause_id'),
+                })
+
+            n = len(fw['controls'])
+            fw_score = round(fw_pass / n * 100) if n else 0
+            fw_rw_score = round(fw_weighted_pass / fw_weighted_max * 100) if fw_weighted_max else 0
+            fw_results[fw['key']] = {
+                'name': fw['name'],
+                'version': fw.get('version'),
+                'score': fw_score,
+                'risk_weighted_score': fw_rw_score,
+                'pass_count': fw_pass,
+                'warn_count': fw_warn,
+                'fail_count': fw_fail,
+                'total_controls': n,
+                'controls': controls_out,
+            }
+
+        overall_score = round(total_passing / total_controls * 100) if total_controls else 0
+        risk_weighted_score = round(total_weighted_pass / total_weighted_max * 100) if total_weighted_max else 0
+
+        # Top risk drivers — top 3 failing controls by severity rank then weight DESC
+        all_failing_controls.sort(key=lambda c: (SEVERITY_RANK.get(c['severity'], 9), -c['weight']))
+        top_risk_drivers = all_failing_controls[:3]
+
+        # Root cause clusters
+        rc_clusters = {}
+        for ctrl in all_failing_controls:
+            rc_id = ctrl.get('root_cause_id')
+            if not rc_id or rc_id not in rc_by_id:
+                continue
+            if rc_id not in rc_clusters:
+                rc = rc_by_id[rc_id]
+                rc_clusters[rc_id] = {
+                    'id': rc_id,
+                    'code': rc['code'],
+                    'title': rc['title'],
+                    'description': rc.get('description'),
+                    'category': rc.get('category'),
+                    'recommendation': rc.get('recommendation'),
+                    'linked_controls': [],
+                    'frameworks_impacted': set(),
+                    'total_weight': 0,
+                    'affected_entities': 0,
+                }
+            cluster = rc_clusters[rc_id]
+            cluster['linked_controls'].append({
+                'control_id': ctrl['control_id'],
+                'name': ctrl['name'],
+                'framework': ctrl['framework'],
+                'severity': ctrl['severity'],
+            })
+            cluster['frameworks_impacted'].add(ctrl['framework_key'])
+            cluster['total_weight'] += ctrl['weight']
+            cluster['affected_entities'] += ctrl.get('value', 0)
+
+        # Compute impact scores and format
+        max_raw = max((c['total_weight'] * len(c['frameworks_impacted']) * max(c['affected_entities'], 1) for c in rc_clusters.values()), default=1)
+        root_causes_out = []
+        for rc in rc_clusters.values():
+            raw = rc['total_weight'] * len(rc['frameworks_impacted']) * max(rc['affected_entities'], 1)
+            impact = round(raw / max_raw * 100) if max_raw else 0
+            root_causes_out.append({
+                'id': rc['id'],
+                'code': rc['code'],
+                'title': rc['title'],
+                'description': rc['description'],
+                'category': rc['category'],
+                'recommendation': rc['recommendation'],
+                'impact_score': impact,
+                'linked_controls': rc['linked_controls'],
+                'frameworks_impacted': len(rc['frameworks_impacted']),
+                'affected_entities': rc['affected_entities'],
+            })
+        root_causes_out.sort(key=lambda x: -x['impact_score'])
+
+        # Trend mini — last 6 snapshots
+        trend_mini = []
+        try:
+            cursor.execute("""
+                SELECT DISTINCT ON (cs.run_id) cs.run_id,
+                    dr.completed_at,
+                    ROUND(AVG(cs.score) OVER (PARTITION BY cs.run_id)) as overall_score
+                FROM compliance_snapshots cs
+                JOIN discovery_runs dr ON dr.id = cs.run_id
+                ORDER BY cs.run_id DESC
+                LIMIT 6
+            """)
+            for row in cursor.fetchall():
+                trend_mini.append({
+                    'run_id': row[0],
+                    'date': row[1].isoformat() if row[1] else None,
+                    'overall_score': int(row[2]) if row[2] else 0,
+                })
+            trend_mini.reverse()
+        except Exception:
+            pass
+
+        # Batch-fetch evidence for non-passing controls
+        evidence = _compute_compliance_evidence(cursor, latest_run, needed_metrics) if needed_metrics else {}
+        # Attach evidence to controls in fw_results
+        for fw_key, fw_data in fw_results.items():
+            for ctrl in fw_data['controls']:
+                if ctrl['status'] == 'pass':
+                    ctrl['evidence_identities'] = []
+                    ctrl['evidence_count'] = 0
+                else:
+                    ctrl['evidence_identities'] = evidence.get(ctrl['metric'], [])
+                    ctrl['evidence_count'] = ctrl['value']
+
+        return jsonify({
+            'overall_score': overall_score,
+            'risk_weighted_score': risk_weighted_score,
+            'total_controls': total_controls,
+            'passing': total_passing,
+            'warnings': total_warnings,
+            'failing': total_failing,
+            'cloud_failures': cloud_failures,
+            'top_risk_drivers': top_risk_drivers,
+            'frameworks': fw_results,
+            'root_causes': root_causes_out,
+            'trend_mini': trend_mini,
+            'generated_at': datetime.now(timezone.utc).isoformat(),
+        })
+    finally:
+        rc_cursor.close()
+        cursor.close()
+        db.close()
+
+
 def get_dashboard_posture():
     """
     Dashboard posture data: credential health, dormant counts, posture score,
