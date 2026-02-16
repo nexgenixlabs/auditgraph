@@ -254,35 +254,6 @@ def create_app():
     def system_health():
         return get_system_health()
 
-    # TEMPORARY DEBUG: verify RLS context
-    @app.get("/api/debug/rls")
-    def debug_rls():
-        from app.api.handlers import _db, _tenant_id
-        user = getattr(g, 'current_user', None)
-        tid = _tenant_id()
-        db = _db()
-        try:
-            cur = db.conn.cursor()
-            cur.execute("SELECT current_setting('app.current_tenant_id', true) as ctx")
-            ctx = cur.fetchone()[0]
-            cur.execute("SELECT current_user as u")
-            db_user = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM anomalies")
-            anom_count = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM identities")
-            id_count = cur.fetchone()[0]
-            cur.close()
-            return jsonify({
-                'jwt_user': user,
-                'tenant_id_from_helper': tid,
-                'db_session_context': ctx,
-                'db_user': db_user,
-                'anomalies_visible': anom_count,
-                'identities_visible': id_count,
-            })
-        finally:
-            db.close()
-
     # -----------------------
     # Authentication (Phase 31)
     # -----------------------
