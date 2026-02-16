@@ -40,10 +40,18 @@ load_dotenv()
 class Database:
     """PostgreSQL database handler"""
 
-    def __init__(self):
-        """Initialize database connection"""
+    def __init__(self, tenant_id=None):
+        """Initialize database connection.
+
+        Args:
+            tenant_id: If provided, sets PostgreSQL RLS tenant context on this
+                       connection. None = no context (superadmin/startup).
+        """
         self.conn = None
+        self._tenant_id = tenant_id
         self.connect()
+        if tenant_id is not None:
+            self.set_tenant_context(tenant_id)
 
     def connect(self):
         """Connect to PostgreSQL database"""
@@ -60,6 +68,21 @@ class Database:
         except Exception as e:
             print(f"✗ Database connection failed: {e}")
             raise
+
+    def set_tenant_context(self, tenant_id):
+        """Set PostgreSQL session variable for RLS tenant isolation.
+
+        Uses set_config with is_local=FALSE so the setting persists for
+        the entire connection lifetime (not just the current transaction).
+        Since each request creates a new Database(), this is safe.
+        """
+        if tenant_id is not None and self.conn:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT set_config('app.current_tenant_id', %s, FALSE)",
+                (str(tenant_id),)
+            )
+            cursor.close()
 
     def create_discovery_run(self, subscription_id: str, subscription_name: str, tenant_id=None) -> int:
         """
@@ -2036,6 +2059,7 @@ class Database:
                 cursor.execute(f"ALTER TABLE remediation_actions ADD COLUMN IF NOT EXISTS {col} {typedef}")
             except Exception:
                 self.conn.rollback()
+        cursor.execute("ALTER TABLE remediation_actions ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -2538,6 +2562,8 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id)")
+        cursor.execute("ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -2717,6 +2743,7 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        cursor.execute("ALTER TABLE custom_risk_rules ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -3530,6 +3557,16 @@ class Database:
                 display_order INT DEFAULT 100
             )
         """)
+        # RLS: Add tenant_id to core discovery tables
+        for core_tbl in ['identities', 'role_assignments', 'entra_role_assignments',
+                         'credentials', 'graph_api_permissions', 'sp_ownership',
+                         'sp_app_roles', 'identity_roles', 'role_activity_log',
+                         'ca_policies', 'ca_identity_coverage', 'drift_reports']:
+            try:
+                cursor.execute(f"ALTER TABLE {core_tbl} ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
         self.conn.commit()
         cursor.close()
 
@@ -3620,6 +3657,7 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_snapshots_run ON compliance_snapshots(run_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_snapshots_fw ON compliance_snapshots(framework_key)")
+        cursor.execute("ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -4364,6 +4402,7 @@ class Database:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_views_user ON saved_views(user_id)")
+        cursor.execute("ALTER TABLE saved_views ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -4568,6 +4607,8 @@ class Database:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_campaign ON campaign_audit_log(campaign_id)")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE campaign_audit_log ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -5099,6 +5140,8 @@ class Database:
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON identity_group_members(group_id, identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_members_identity ON identity_group_members(identity_id)")
+        cursor.execute("ALTER TABLE identity_groups ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE identity_group_members ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -5508,6 +5551,7 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_identity ON anomalies(identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_created ON anomalies(created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_resolved ON anomalies(resolved)")
+        cursor.execute("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -5909,6 +5953,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_status ON soar_actions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_created ON soar_actions(created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_identity ON soar_actions(identity_id)")
+        cursor.execute("ALTER TABLE soar_playbooks ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -6139,6 +6185,7 @@ class Database:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_prefs_user
             ON dashboard_preferences(user_id)
         """)
+        cursor.execute("ALTER TABLE dashboard_preferences ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -7186,6 +7233,7 @@ class Database:
                 cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col} {coltype}")
             except Exception:
                 pass
+        cursor.execute("ALTER TABLE identity_subscription_access ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
         self.conn.commit()
         cursor.close()
         Database._isa_ensured = True

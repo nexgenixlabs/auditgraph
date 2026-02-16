@@ -24,7 +24,14 @@ load_dotenv()
 
 
 def _db() -> Database:
-    return Database()
+    """Create a Database connection with RLS tenant context from JWT.
+
+    - Normal tenant user (tid=5): sets context, RLS filters to tenant 5
+    - Sentinel (tid=-1): sets context, RLS matches nothing (safe)
+    - Superadmin (tid=None): no context set, RLS NULL bypass → all rows
+    """
+    tid = _tenant_id()
+    return Database(tenant_id=tid)
 
 
 def _tenant_id():
