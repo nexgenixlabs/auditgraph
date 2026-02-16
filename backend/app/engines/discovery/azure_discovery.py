@@ -232,10 +232,9 @@ class AzureDiscoveryEngine:
         # Step 3.10: Discover Conditional Access Policies
         ca_policies = await self._discover_conditional_access()
 
-        # Step 4: Discover users who have Azure RBAC OR Entra roles
-        print("\n👥 Discovering Users with Roles...")
+        # Step 4: Discover ALL users from Entra ID (Graph API)
+        print("\n👥 Discovering Entra ID Users...")
         users = await self._discover_users_with_roles(all_principal_ids)
-        print(f"  Found {len(users)} users with Azure RBAC assignments")
         
         # Step 5: Discover Managed Identities
         print("\n🔐 Discovering Managed Identities...")
@@ -1087,18 +1086,20 @@ class AzureDiscoveryEngine:
     
     async def _discover_users_with_roles(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
         """
-        Discover human users who have Azure RBAC or Entra ID roles.
-        Users without roles are NOT discovered - this is by design for security posture focus.
+        Discover ALL human users from Entra ID via Graph API.
+        Uses Directory.Read.All permission — no ARM/RBAC access needed.
+        Handles pagination to fetch all users (not just first page).
+        Users with RBAC/Entra roles are tagged with has_roles=True for risk scoring.
         """
         try:
             from msgraph.generated.users.users_request_builder import UsersRequestBuilder
 
             # Try with signInActivity first (requires Premium license)
             # Fall back to basic fields if not available
+            select_fields = ['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType']
             try:
                 query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
-                    select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType',
-                            'signInActivity']
+                    select=select_fields + ['signInActivity']
                 )
                 request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
                     query_parameters=query_params
@@ -1109,7 +1110,7 @@ class AzureDiscoveryEngine:
                 if '403' in str(e) or 'premium' in str(e).lower():
                     print("  ⚠️  Sign-in activity requires Premium license - using basic user data")
                     query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
-                        select=['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType']
+                        select=select_fields
                     )
                     request_config = UsersRequestBuilder.UsersRequestBuilderGetRequestConfiguration(
                         query_parameters=query_params
@@ -1118,52 +1119,65 @@ class AzureDiscoveryEngine:
                 else:
                     raise e
 
+            # Collect all users with pagination
+            all_users = []
+            if users_response and users_response.value:
+                all_users.extend(users_response.value)
+            # Follow @odata.nextLink for pagination
+            while users_response and hasattr(users_response, 'odata_next_link') and users_response.odata_next_link:
+                users_response = await self.graph_client.users.with_url(users_response.odata_next_link).get()
+                if users_response and users_response.value:
+                    all_users.extend(users_response.value)
+
             identities = []
-            for user in users_response.value:
-                # Only include users who have roles (Azure RBAC or Entra ID)
-                if user.id in principal_ids_with_roles:
-                    print(f"    ✓ {user.display_name} ({user.user_principal_name})")
+            role_count = 0
+            for user in all_users:
+                has_roles = user.id in principal_ids_with_roles
+                if has_roles:
+                    role_count += 1
 
-                    created = None
-                    if hasattr(user, 'created_date_time') and user.created_date_time:
-                        created = user.created_date_time.isoformat()
-                    elif hasattr(user, 'created_datetime') and user.created_datetime:
-                        created = user.created_datetime.isoformat()
+                created = None
+                if hasattr(user, 'created_date_time') and user.created_date_time:
+                    created = user.created_date_time.isoformat()
+                elif hasattr(user, 'created_datetime') and user.created_datetime:
+                    created = user.created_datetime.isoformat()
 
-                    # Determine if guest user
-                    user_type = getattr(user, 'user_type', None) or ''
-                    is_guest = user_type.lower() == 'guest' if user_type else False
+                # Determine if guest user
+                user_type = getattr(user, 'user_type', None) or ''
+                is_guest = user_type.lower() == 'guest' if user_type else False
 
-                    # Extract sign-in activity if available
-                    last_sign_in = None
-                    if hasattr(user, 'sign_in_activity') and user.sign_in_activity:
-                        sia = user.sign_in_activity
-                        if hasattr(sia, 'last_sign_in_date_time') and sia.last_sign_in_date_time:
-                            last_sign_in = sia.last_sign_in_date_time.isoformat()
-                        elif hasattr(sia, 'last_non_interactive_sign_in_date_time') and sia.last_non_interactive_sign_in_date_time:
-                            last_sign_in = sia.last_non_interactive_sign_in_date_time.isoformat()
+                # Extract sign-in activity if available
+                last_sign_in = None
+                if hasattr(user, 'sign_in_activity') and user.sign_in_activity:
+                    sia = user.sign_in_activity
+                    if hasattr(sia, 'last_sign_in_date_time') and sia.last_sign_in_date_time:
+                        last_sign_in = sia.last_sign_in_date_time.isoformat()
+                    elif hasattr(sia, 'last_non_interactive_sign_in_date_time') and sia.last_non_interactive_sign_in_date_time:
+                        last_sign_in = sia.last_non_interactive_sign_in_date_time.isoformat()
 
-                    identities.append({
-                        'identity_id': user.id,
-                        'object_id': user.id,
-                        'app_id': None,
-                        'display_name': user.display_name,
-                        'user_principal_name': user.user_principal_name,
-                        'identity_type': 'user',
-                        'identity_category': 'guest' if is_guest else 'human_user',
-                        'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
-                        'created_datetime': created,
-                        'last_sign_in': last_sign_in,
-                        # Multi-cloud normalized fields
-                        'cloud': 'azure',
-                        'tenant_id': self.tenant_id,
-                        'source': 'entra',
-                        'is_federated': is_guest,  # Guest users are federated
-                    })
+                identities.append({
+                    'identity_id': user.id,
+                    'object_id': user.id,
+                    'app_id': None,
+                    'display_name': user.display_name,
+                    'user_principal_name': user.user_principal_name,
+                    'identity_type': 'user',
+                    'identity_category': 'guest' if is_guest else 'human_user',
+                    'enabled': user.account_enabled if hasattr(user, 'account_enabled') and user.account_enabled is not None else True,
+                    'created_datetime': created,
+                    'last_sign_in': last_sign_in,
+                    'has_roles': has_roles,
+                    # Multi-cloud normalized fields
+                    'cloud': 'azure',
+                    'tenant_id': self.tenant_id,
+                    'source': 'entra',
+                    'is_federated': is_guest,  # Guest users are federated
+                })
 
+            print(f"  ✓ Found {len(identities)} users ({role_count} with roles, {len(identities) - role_count} without)")
             return identities
         except Exception as e:
-            print(f"  ❌ Error: {e}")
+            print(f"  ❌ Error discovering users: {e}")
             return []
     
     def _discover_role_assignments(self) -> List[Dict[str, Any]]:
