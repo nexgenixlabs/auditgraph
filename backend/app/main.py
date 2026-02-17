@@ -1289,7 +1289,7 @@ def create_app():
         db.seed_compliance_frameworks()
         db.seed_compliance_root_causes()
         db._migrate_compliance_controls_v2()
-        db.seed_auto_groups()
+        db.deduplicate_auto_groups()
     finally:
         db.close()
 

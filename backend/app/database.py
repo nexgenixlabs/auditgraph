@@ -5539,29 +5539,34 @@ class Database:
         cursor.close()
         return auto + custom
 
-    def seed_auto_groups(self):
-        """Create default auto groups on startup if they don't exist."""
+    def deduplicate_auto_groups(self):
+        """Remove duplicate auto groups created by old startup seeder.
+
+        Keeps only the lowest-id auto group per (name, tenant_id) and
+        deletes orphan groups with NULL tenant_id.
+        """
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM identity_groups WHERE group_type = 'auto'")
-        count = cursor.fetchone()[0]
-        if count > 0:
-            cursor.close()
-            return
-
-        auto_groups = [
-            ('All Service Principals', '#6366F1', {'identity_category': 'service_principal'}),
-            ('All Human Users', '#3B82F6', {'identity_category': 'human_user'}),
-            ('All Managed Identities', '#8B5CF6', {'identity_category': ['managed_identity_system', 'managed_identity_user']}),
-            ('All Guest Users', '#F59E0B', {'identity_category': 'guest'}),
-        ]
-        for name, color, criteria in auto_groups:
+        try:
+            # Delete auto groups with NULL tenant_id (created by old startup seeder)
+            cursor.execute("DELETE FROM identity_groups WHERE group_type = 'auto' AND tenant_id IS NULL")
+            # Delete duplicate auto groups per tenant, keeping the lowest id
             cursor.execute("""
-                INSERT INTO identity_groups (name, color, group_type, auto_criteria)
-                VALUES (%s, %s, 'auto', %s)
-            """, (name, color, json.dumps(criteria)))
-        self.conn.commit()
-        cursor.close()
+                DELETE FROM identity_groups
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY name, tenant_id ORDER BY id) AS rn
+                        FROM identity_groups
+                        WHERE group_type = 'auto'
+                    ) ranked
+                    WHERE rn > 1
+                )
+            """)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+        finally:
+            cursor.close()
 
     def seed_auto_groups_for_tenant(self, tenant_id):
         """Create default auto groups for a specific tenant if they don't exist.
@@ -5571,14 +5576,12 @@ class Database:
         """
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM identity_groups WHERE group_type = 'auto' AND tenant_id = %s",
-            (tenant_id,),
-        )
-        count = cursor.fetchone()[0]
-        if count > 0:
-            cursor.close()
-            return
+        # Ensure unique index exists for idempotent inserts
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_groups_auto_name_tenant
+            ON identity_groups (name, tenant_id) WHERE group_type = 'auto'
+        """)
+        self.conn.commit()
 
         auto_groups = [
             ('All Service Principals', '#6366F1', {'identity_category': 'service_principal'}),
@@ -5590,7 +5593,7 @@ class Database:
             cursor.execute("""
                 INSERT INTO identity_groups (name, color, group_type, auto_criteria, tenant_id)
                 VALUES (%s, %s, 'auto', %s, %s)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (name, tenant_id) WHERE group_type = 'auto' DO NOTHING
             """, (name, color, json.dumps(criteria), tenant_id))
         self.conn.commit()
         cursor.close()

@@ -8314,6 +8314,8 @@ def test_azure_connection():
                     """, (tid, s['id'], s['name']))
                 admin_db.conn.commit()
                 cursor.close()
+                # Seed auto identity groups for this tenant
+                admin_db.seed_auto_groups_for_tenant(tid)
             finally:
                 admin_db.close()
 
