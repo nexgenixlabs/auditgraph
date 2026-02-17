@@ -5100,7 +5100,8 @@ def auth_login():
     # Phase 68 fix: Close DB connection BEFORE token generation to avoid
     # deadlock between this connection's implicit transaction and the new
     # connection opened by generate_refresh_token() → _ensure_users_table() DDL.
-    db = _db()
+    # Login is pre-auth (no g.current_user), so use admin DB to bypass RLS.
+    db = Database()
     try:
         user = db.get_user_by_username(username)
 
@@ -5205,7 +5206,8 @@ def auth_refresh():
 
     # Phase 68 fix: Close DB connection BEFORE token generation to avoid deadlock
     # (same pattern as auth_login fix)
-    db = _db()
+    # Refresh is pre-auth (public path), so use admin DB to bypass RLS.
+    db = Database()
     try:
         token_hash = hash_refresh_token(raw_refresh)
         token_record = db.get_refresh_token(token_hash)
@@ -7908,7 +7910,7 @@ def get_tenant_branding():
     slug = request.args.get('slug', '').strip().lower()
     if not slug:
         return jsonify({'error': 'slug parameter required'}), 400
-    db = _db()
+    db = Database()  # Public endpoint — bypass RLS
     try:
         tenant = db.get_tenant_by_slug(slug)
         if not tenant:
@@ -9287,7 +9289,7 @@ def get_resource_compliance_summary():
 
 def get_tenant_by_slug_public(slug):
     """GET /api/tenants/by-slug/<slug> — Public (no auth). Returns limited tenant info."""
-    db = _db()
+    db = Database()  # Public endpoint — bypass RLS
     try:
         tenant = db.get_tenant_by_slug(slug)
         if not tenant:
@@ -9399,7 +9401,7 @@ def sso_status():
     slug = request.args.get('tenant_slug', '').strip()
     if not slug:
         return jsonify({'sso_enabled': False})
-    db = _db()
+    db = Database()  # Public endpoint — bypass RLS
     try:
         tenant = db.get_tenant_by_slug(slug)
         if not tenant or not tenant.get('enabled'):
@@ -9420,7 +9422,7 @@ def saml_metadata():
     slug = request.args.get('tenant_slug', '').strip()
     if not slug:
         return jsonify({'error': 'tenant_slug is required'}), 400
-    db = _db()
+    db = Database()  # Public endpoint — bypass RLS
     try:
         tenant = db.get_tenant_by_slug(slug)
         if not tenant:
@@ -9450,7 +9452,7 @@ def saml_login():
     slug = request.args.get('tenant_slug', '').strip()
     if not slug:
         return jsonify({'error': 'tenant_slug is required'}), 400
-    db = _db()
+    db = Database()  # Public endpoint — bypass RLS
     try:
         tenant = db.get_tenant_by_slug(slug)
         if not tenant:
@@ -9478,7 +9480,7 @@ def saml_acs():
     if not slug:
         return jsonify({'error': 'Missing RelayState (tenant slug)'}), 400
 
-    db = _db()
+    db = Database()  # Public SAML callback — bypass RLS
     try:
         tenant = db.get_tenant_by_slug(slug)
         if not tenant:
@@ -9564,7 +9566,7 @@ def saml_token_exchange():
     if not code:
         return jsonify({'error': 'Missing code'}), 400
 
-    db = _db()
+    db = Database()  # Public endpoint — bypass RLS
     try:
         result = db.consume_sso_auth_code(code)
         if not result:
