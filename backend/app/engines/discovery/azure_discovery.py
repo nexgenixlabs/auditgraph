@@ -1873,6 +1873,9 @@ class AzureDiscoveryEngine:
         app_owner_org = identity.get('app_owner_organization_id') or identity.get('appOwnerOrganizationId')
         if app_owner_org == MICROSOFT_TENANT_ID:
             return True
+        # If app_owner_organization_id is set and is NOT Microsoft, it's customer-owned
+        if app_owner_org and app_owner_org != MICROSOFT_TENANT_ID:
+            return False
 
         # Check 2: Publisher name indicates Microsoft
         publisher = (identity.get('publisher_name') or identity.get('publisherName') or '').lower()
