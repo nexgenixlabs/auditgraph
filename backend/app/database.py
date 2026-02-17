@@ -5540,10 +5540,11 @@ class Database:
         return auto + custom
 
     def deduplicate_auto_groups(self):
-        """Remove duplicate auto groups created by old startup seeder.
+        """Clean up auto groups and ensure every tenant has them.
 
-        Keeps only the lowest-id auto group per (name, tenant_id) and
-        deletes orphan groups with NULL tenant_id.
+        1. Deletes orphan groups with NULL tenant_id
+        2. Removes duplicates per (name, tenant_id)
+        3. Seeds auto groups for any tenant that doesn't have them
         """
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor()
@@ -5563,10 +5564,18 @@ class Database:
                 )
             """)
             self.conn.commit()
+            # Seed auto groups for all tenants that don't have them yet
+            cursor.execute("SELECT id FROM tenants WHERE enabled = true")
+            tenant_ids = [r[0] for r in cursor.fetchall()]
+            cursor.close()
+            for tid in tenant_ids:
+                self.seed_auto_groups_for_tenant(tid)
         except Exception:
             self.conn.rollback()
-        finally:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
     def seed_auto_groups_for_tenant(self, tenant_id):
         """Create default auto groups for a specific tenant if they don't exist.
