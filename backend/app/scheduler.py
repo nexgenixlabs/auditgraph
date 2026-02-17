@@ -127,7 +127,7 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
                 'title': f'Discovery Scan Failed — {tenant_name}',
                 'description': f'Discovery failed for tenant {tenant_name}: {str(e)[:200]}',
                 'severity': 'critical',
-            })
+            }, db_tenant_id=db_tenant_id)
 
     logger.info("=" * 70)
     logger.info("SCHEDULED DISCOVERY COMPLETED (all tenants)")
@@ -176,23 +176,23 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
         pass
 
     # Check for identity changes and send email notification
-    _send_change_notification_if_needed()
+    _send_change_notification_if_needed(db_tenant_id=db_tenant_id)
 
     # Phase 83: Dispatch scan_complete notification
     _dispatch_notification('scan_complete', {
         'title': f'Discovery Scan Complete — {tenant_name}',
         'description': f'Scheduled discovery run completed for {tenant_name}.',
         'severity': 'info',
-    })
+    }, db_tenant_id=db_tenant_id)
 
 
-def _send_change_notification_if_needed():
+def _send_change_notification_if_needed(db_tenant_id: int = None):
     """
     Compare the two most recent discovery runs and send email if changes detected.
     Called after each successful discovery run.
     """
     try:
-        db = Database()
+        db = Database(tenant_id=db_tenant_id)
 
         # Get the two most recent completed runs
         cursor = db.conn.cursor()
@@ -285,7 +285,7 @@ def _send_change_notification_if_needed():
                 'title': f'{total_changes} Changes Detected in Discovery',
                 'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
                 'severity': 'high' if new_count + removed_count > 0 else 'medium',
-            })
+            }, db_tenant_id=db_tenant_id)
 
         # Phase 43: SOAR evaluation for drift and change events
         _evaluate_soar_triggers_for_changes(changes, db)
@@ -309,11 +309,11 @@ def _send_change_notification_if_needed():
         logger.exception(e)
 
 
-def _dispatch_notification(event_type: str, event_data: dict):
+def _dispatch_notification(event_type: str, event_data: dict, db_tenant_id: int = None):
     """Phase 83: Dispatch notification to Slack/Teams if configured."""
     try:
         from app.services.notification_dispatcher import NotificationDispatcher
-        db = Database()
+        db = Database(tenant_id=db_tenant_id)
         dispatcher = NotificationDispatcher()
         dispatcher.dispatch(event_type, event_data, db)
         db.close()
@@ -538,7 +538,7 @@ def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Databa
                     'title': f'{len(critical_anomalies)} Critical/High Anomalies Detected',
                     'description': f'Run #{current_run_id}: {", ".join(a["title"] for a in critical_anomalies[:3])}',
                     'severity': critical_anomalies[0].get('severity', 'high'),
-                })
+                }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
         else:
             logger.info(f"Anomaly detection: no anomalies found for run #{current_run_id}")
 
@@ -684,6 +684,7 @@ def run_scheduled_report():
     """
     Send the scheduled executive summary report email.
     Called by the scheduler on the configured cadence.
+    Loops per-tenant so each tenant's settings and data are scoped.
     """
     logger.info("=" * 70)
     logger.info("SCHEDULED REPORT EMAIL STARTED")
@@ -691,29 +692,41 @@ def run_scheduled_report():
     logger.info("=" * 70)
 
     try:
-        db = Database()
-        enabled = db.get_system_setting('report_schedule_enabled', 'false')
-        db.close()
+        # Get tenant list (tenants table has no RLS)
+        admin_db = Database()
+        cursor = admin_db.conn.cursor()
+        cursor.execute("SELECT id, name FROM tenants WHERE enabled = TRUE ORDER BY id")
+        tenants = cursor.fetchall()
+        cursor.close()
+        admin_db.close()
 
-        if enabled != 'true':
-            logger.info("Scheduled reports disabled in settings - skipping")
-            return
+        for db_tenant_id, tenant_name in tenants:
+            try:
+                db = Database(tenant_id=db_tenant_id)
+                enabled = db.get_system_setting('report_schedule_enabled', 'false')
 
-        email_service = EmailService()
-        if not email_service.credentials_configured:
-            logger.warning("Azure credentials not configured - skipping scheduled report")
-            return
+                if enabled != 'true':
+                    logger.info(f"Scheduled reports disabled for {tenant_name} - skipping")
+                    db.close()
+                    continue
 
-        success = email_service.send_scheduled_report()
+                email_service = EmailService()
+                if not email_service.credentials_configured:
+                    logger.warning(f"Azure credentials not configured for {tenant_name} - skipping")
+                    db.close()
+                    continue
 
-        act_db = Database()
-        if success:
-            act_db.log_activity('report_emailed', 'Scheduled executive summary report sent')
-            logger.info("✅ Scheduled report email sent successfully")
-        else:
-            act_db.log_activity('report_email_failed', 'Scheduled report email failed to send')
-            logger.warning("Failed to send scheduled report email")
-        act_db.close()
+                success = email_service.send_scheduled_report()
+
+                if success:
+                    db.log_activity('report_emailed', f'Scheduled executive summary report sent for {tenant_name}')
+                    logger.info(f"✅ Scheduled report email sent for {tenant_name}")
+                else:
+                    db.log_activity('report_email_failed', f'Scheduled report email failed for {tenant_name}')
+                    logger.warning(f"Failed to send scheduled report email for {tenant_name}")
+                db.close()
+            except Exception as e:
+                logger.error(f"Scheduled report failed for {tenant_name}: {e}")
 
     except Exception as e:
         logger.error(f"Scheduled report failed: {e}")
@@ -724,6 +737,7 @@ def run_data_retention():
     """
     Run data retention cleanup based on configured policies.
     Called daily by the scheduler at 03:00 UTC.
+    Loops per-tenant so each tenant's retention settings are respected.
     """
     logger.info("=" * 70)
     logger.info("DATA RETENTION CLEANUP STARTED")
@@ -731,43 +745,55 @@ def run_data_retention():
     logger.info("=" * 70)
 
     try:
-        db = Database()
-        enabled = db.get_system_setting('retention_enabled', 'false')
+        # Get tenant list (tenants table has no RLS)
+        admin_db = Database()
+        cursor = admin_db.conn.cursor()
+        cursor.execute("SELECT id, name FROM tenants WHERE enabled = TRUE ORDER BY id")
+        tenants = cursor.fetchall()
+        cursor.close()
+        admin_db.close()
 
-        if enabled != 'true':
-            logger.info("Data retention disabled in settings - skipping")
-            db.close()
-            return
+        for db_tenant_id, tenant_name in tenants:
+            try:
+                db = Database(tenant_id=db_tenant_id)
+                enabled = db.get_system_setting('retention_enabled', 'false')
 
-        discovery_days = int(db.get_system_setting('retention_discovery_days', '90'))
-        drift_days = int(db.get_system_setting('retention_drift_days', '90'))
-        activity_days = int(db.get_system_setting('retention_activity_days', '180'))
-        anomalies_days = int(db.get_system_setting('retention_anomalies_days', '90'))
-        soar_days = int(db.get_system_setting('retention_soar_days', '90'))
-        notif_days = int(db.get_system_setting('retention_notifications_days', '90'))
+                if enabled != 'true':
+                    logger.info(f"Data retention disabled for {tenant_name} - skipping")
+                    db.close()
+                    continue
 
-        results = {}
-        run_counts = db.cleanup_old_discovery_runs(days=discovery_days)
-        results['discovery_runs'] = run_counts.get('discovery_runs', 0)
-        results['risk_scores'] = run_counts.get('risk_scores', 0)
-        results['drift_reports'] = db.cleanup_old_drift_reports(days=drift_days)
-        results['activity_log'] = db.cleanup_old_activity_log(days=activity_days)
-        results['anomalies'] = db.cleanup_old_anomalies(days=anomalies_days)
-        results['soar_actions'] = db.cleanup_old_soar_actions(days=soar_days)
-        results['notifications'] = db.cleanup_old_notifications(days=notif_days)
+                discovery_days = int(db.get_system_setting('retention_discovery_days', '90'))
+                drift_days = int(db.get_system_setting('retention_drift_days', '90'))
+                activity_days = int(db.get_system_setting('retention_activity_days', '180'))
+                anomalies_days = int(db.get_system_setting('retention_anomalies_days', '90'))
+                soar_days = int(db.get_system_setting('retention_soar_days', '90'))
+                notif_days = int(db.get_system_setting('retention_notifications_days', '90'))
 
-        total = sum(results.values())
-        if total > 0:
-            db.log_activity('data_retention', f'Scheduled cleanup: {total} records deleted',
-                            json.dumps(results))
-            logger.info(f"✅ Data retention: {total} records deleted")
-            for table, count in results.items():
-                if count > 0:
-                    logger.info(f"   {table}: {count} deleted")
-        else:
-            logger.info("Data retention: no records to clean up")
+                results = {}
+                run_counts = db.cleanup_old_discovery_runs(days=discovery_days)
+                results['discovery_runs'] = run_counts.get('discovery_runs', 0)
+                results['risk_scores'] = run_counts.get('risk_scores', 0)
+                results['drift_reports'] = db.cleanup_old_drift_reports(days=drift_days)
+                results['activity_log'] = db.cleanup_old_activity_log(days=activity_days)
+                results['anomalies'] = db.cleanup_old_anomalies(days=anomalies_days)
+                results['soar_actions'] = db.cleanup_old_soar_actions(days=soar_days)
+                results['notifications'] = db.cleanup_old_notifications(days=notif_days)
 
-        db.close()
+                total = sum(results.values())
+                if total > 0:
+                    db.log_activity('data_retention', f'Scheduled cleanup for {tenant_name}: {total} records deleted',
+                                    json.dumps(results))
+                    logger.info(f"✅ Data retention for {tenant_name}: {total} records deleted")
+                    for table, count in results.items():
+                        if count > 0:
+                            logger.info(f"   {table}: {count} deleted")
+                else:
+                    logger.info(f"Data retention for {tenant_name}: no records to clean up")
+
+                db.close()
+            except Exception as e:
+                logger.error(f"Data retention failed for {tenant_name}: {e}")
 
     except Exception as e:
         logger.error(f"Data retention failed: {e}")
@@ -816,14 +842,9 @@ def start_scheduler():
     )
     
     # Phase 18: Add scheduled report job
-    try:
-        report_db = Database()
-        report_freq = report_db.get_system_setting('report_schedule_frequency', 'weekly')
-        report_enabled = report_db.get_system_setting('report_schedule_enabled', 'false') == 'true'
-        report_db.close()
-    except Exception:
-        report_freq = 'weekly'
-        report_enabled = False
+    # Use defaults — actual per-tenant behavior is in run_scheduled_report()
+    report_freq = 'weekly'
+    report_enabled = True  # Always schedule; per-tenant check at execution time
 
     if report_freq == 'monthly':
         report_trigger = CronTrigger(day=1, hour=8, minute=0, timezone="UTC")

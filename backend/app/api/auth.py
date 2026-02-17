@@ -183,6 +183,35 @@ def auth_middleware():
         except (ValueError, TypeError):
             pass
 
+    # Phase 87: Host↔Tenant guard — prevent cross-subdomain token reuse
+    # If request comes from a tenant subdomain (e.g., aglabs.auditgraph.ai),
+    # verify the JWT's tenant matches that subdomain.
+    # Superadmins bypass (they legitimately access all tenants).
+    if not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
+        host = request.host.split(':')[0]  # strip port
+        parts = host.split('.')
+        # Only enforce for subdomain patterns like <slug>.auditgraph.ai
+        if len(parts) >= 3 and parts[-2] in ('auditgraph',):
+            host_slug = parts[0]
+            # Skip for common non-tenant subdomains
+            if host_slug not in ('app', 'api', 'admin', 'www', 'localhost'):
+                user_tenant_name = (g.current_user.get('tenant_name') or '').lower().replace(' ', '')
+                # Look up slug from DB if needed
+                try:
+                    db = Database()
+                    cursor = db.conn.cursor()
+                    cursor.execute("SELECT id, slug FROM tenants WHERE slug = %s", (host_slug,))
+                    tenant_row = cursor.fetchone()
+                    cursor.close()
+                    db.close()
+                    if tenant_row:
+                        host_tenant_id = tenant_row[0]
+                        jwt_tenant_id = g.current_user.get('tenant_id')
+                        if jwt_tenant_id and jwt_tenant_id != host_tenant_id:
+                            return jsonify({'error': 'Token does not match this tenant'}), 403
+                except Exception:
+                    pass  # Don't block on lookup failure
+
     return None
 
 

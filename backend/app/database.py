@@ -38,14 +38,21 @@ load_dotenv()
 
 
 class Database:
-    """PostgreSQL database handler"""
+    """PostgreSQL database handler.
+
+    Connection strategy (Phase 87 — RLS enforcement):
+      - tenant_id=N   → connects as DB_USER (auditgraph_app, NOBYPASSRLS),
+                         sets RLS context to tenant N. Only sees tenant N data.
+      - tenant_id=None → connects as DB_ADMIN_USER (auditgraph_admin, BYPASSRLS).
+                         Sees all data. Used for superadmin/system/startup ops.
+    """
 
     def __init__(self, tenant_id=None):
         """Initialize database connection.
 
         Args:
-            tenant_id: If provided, sets PostgreSQL RLS tenant context on this
-                       connection. None = no context (superadmin/startup).
+            tenant_id: If provided, connects as RLS-enforcing user and sets
+                       tenant context. None = superadmin/startup (bypasses RLS).
         """
         self.conn = None
         self._tenant_id = tenant_id
@@ -54,17 +61,29 @@ class Database:
             self.set_tenant_context(tenant_id)
 
     def connect(self):
-        """Connect to PostgreSQL database"""
+        """Connect to PostgreSQL database.
+
+        Uses DB_USER (auditgraph_app, NOBYPASSRLS) for tenant-scoped connections,
+        and DB_ADMIN_USER (auditgraph_admin, BYPASSRLS) for system/superadmin ops.
+        """
         try:
+            if self._tenant_id is not None:
+                # Tenant-scoped: use RLS-enforcing user
+                db_user = os.getenv("DB_USER", "auditgraph_app")
+                db_password = os.getenv("DB_PASSWORD")
+            else:
+                # System/superadmin: use BYPASSRLS admin user
+                db_user = os.getenv("DB_ADMIN_USER", os.getenv("DB_USER", "auditgraph_admin"))
+                db_password = os.getenv("DB_ADMIN_PASSWORD", os.getenv("DB_PASSWORD"))
+
             self.conn = psycopg2.connect(
                 host=os.getenv("DB_HOST"),
                 port=os.getenv("DB_PORT"),
                 database=os.getenv("DB_NAME"),
-                user=os.getenv("DB_USER"),
-                password=os.getenv("DB_PASSWORD"),
+                user=db_user,
+                password=db_password,
                 sslmode=os.getenv("DB_SSLMODE", "require"),
             )
-            print("✓ Connected to database")
         except Exception as e:
             print(f"✗ Database connection failed: {e}")
             raise
@@ -217,7 +236,9 @@ class Database:
                 source_normalized,
                 is_federated,
                 status,
-                last_seen_auth
+                last_seen_auth,
+
+                tenant_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -228,7 +249,8 @@ class Database:
                 %s, %s,
                 %s, %s,
                 %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -322,6 +344,8 @@ class Database:
                 is_federated,
                 status,
                 identity_data.get("last_sign_in"),  # last_seen_auth = last_sign_in
+
+                self._tenant_id,
             ),
         )
 
@@ -365,8 +389,9 @@ class Database:
                 -- Usage intelligence fields
                 scope_exists, usage_status, days_since_assigned,
                 redundant_with, role_type, risk_level, why_critical,
-                resource_type, resource_name
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                resource_type, resource_name,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
                 identity_db_id,
@@ -386,6 +411,7 @@ class Database:
                 role_data.get("why_critical"),
                 role_data.get("resource_type"),
                 role_data.get("resource_name"),
+                self._tenant_id,
             ),
         )
         self.conn.commit()
@@ -400,8 +426,9 @@ class Database:
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 -- Usage intelligence fields
                 usage_status, assigned_on, days_since_assigned,
-                redundant_with, role_type, risk_level, why_critical
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                redundant_with, role_type, risk_level, why_critical,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
                 identity_db_id,
@@ -416,6 +443,7 @@ class Database:
                 entra_role_data.get("role_type", "entra"),
                 entra_role_data.get("risk_level"),
                 entra_role_data.get("why_critical"),
+                self._tenant_id,
             ),
         )
         self.conn.commit()
@@ -593,14 +621,14 @@ class Database:
             cursor.execute(
                 """
                 INSERT INTO graph_api_permissions
-                (identity_db_id, permission_name, permission_description, risk_level)
-                VALUES (%s, %s, %s, %s)
+                (identity_db_id, permission_name, permission_description, risk_level, tenant_id)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (identity_db_id, permission_name) DO UPDATE
                 SET permission_description = EXCLUDED.permission_description,
                     risk_level = EXCLUDED.risk_level,
                     discovered_at = CURRENT_TIMESTAMP
             """,
-                (identity_db_id, perm_name, perm_desc, risk),
+                (identity_db_id, perm_name, perm_desc, risk, self._tenant_id),
             )
 
         self.conn.commit()
@@ -630,8 +658,9 @@ class Database:
                         resource_display_name,
                         principal_display_name,
                         created_date_time,
-                        risk_level
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        risk_level,
+                        tenant_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (identity_db_id, app_role_id, resource_id)
                     DO UPDATE SET
                         resource_display_name = EXCLUDED.resource_display_name,
@@ -646,6 +675,7 @@ class Database:
                         role.get("principal_display_name"),
                         role.get("created_date_time"),
                         risk_level,
+                        self._tenant_id,
                     ),
                 )
             except Exception as e:
@@ -771,8 +801,9 @@ class Database:
                     owner_upn,
                     owner_type,
                     ownership_type,
-                    is_primary_owner
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    is_primary_owner,
+                    tenant_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (identity_db_id, owner_object_id)
                 DO UPDATE SET
                     owner_display_name = EXCLUDED.owner_display_name,
@@ -789,6 +820,7 @@ class Database:
                     owner.get("owner_type", "user"),
                     owner.get("ownership_type", "application"),
                     owner.get("is_primary_owner", False),
+                    self._tenant_id,
                 ),
             )
 
@@ -858,8 +890,9 @@ class Database:
             """
             INSERT INTO pim_eligible_assignments (
                 identity_db_id, role_name, role_definition_id, directory_scope,
-                assignment_type, start_datetime, end_datetime, member_type
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                assignment_type, start_datetime, end_datetime, member_type,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id, role_definition_id, directory_scope)
             DO UPDATE SET
                 role_name = EXCLUDED.role_name,
@@ -878,6 +911,7 @@ class Database:
                 data.get("start_datetime"),
                 data.get("end_datetime"),
                 data.get("member_type"),
+                self._tenant_id,
             ),
         )
         self.conn.commit()
@@ -892,8 +926,9 @@ class Database:
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 status, activation_start, activation_end,
                 justification, ticket_number, ticket_system,
-                is_approval_required, created_datetime
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                is_approval_required, created_datetime,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
                 identity_db_id,
@@ -908,6 +943,7 @@ class Database:
                 data.get("ticket_system"),
                 data.get("is_approval_required", False),
                 data.get("created_datetime"),
+                self._tenant_id,
             ),
         )
         self.conn.commit()
@@ -1023,8 +1059,9 @@ class Database:
                 include_users, exclude_users, include_applications,
                 client_app_types, grant_controls, session_controls,
                 requires_mfa, targets_all_users, has_exclusions,
-                allows_legacy_auth, modified_datetime
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                allows_legacy_auth, modified_datetime,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (discovery_run_id, policy_id)
             DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -1057,6 +1094,7 @@ class Database:
                 policy.get("has_exclusions", False),
                 policy.get("allows_legacy_auth", False),
                 policy.get("modified_datetime"),
+                self._tenant_id,
             ),
         )
         self.conn.commit()
@@ -1069,8 +1107,9 @@ class Database:
             """
             INSERT INTO ca_identity_coverage (
                 identity_db_id, coverage_status, mfa_enforced,
-                applicable_policy_count, excluded_from_count, risk_flags
-            ) VALUES (%s, %s, %s, %s, %s, %s)
+                applicable_policy_count, excluded_from_count, risk_flags,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id)
             DO UPDATE SET
                 coverage_status = EXCLUDED.coverage_status,
@@ -1086,6 +1125,7 @@ class Database:
                 coverage.get("applicable_policy_count", 0),
                 coverage.get("excluded_from_count", 0),
                 json.dumps(coverage.get("risk_flags", [])),
+                self._tenant_id,
             ),
         )
         # Also update denormalized fields on identity
@@ -1645,8 +1685,8 @@ class Database:
                 new_identities_count, removed_identities_count,
                 permission_changes_count, risk_changes_count,
                 credential_changes_count, total_changes,
-                changes
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                changes, tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (current_run_id, previous_run_id) DO UPDATE SET
                 new_identities_count = EXCLUDED.new_identities_count,
                 removed_identities_count = EXCLUDED.removed_identities_count,
@@ -1660,7 +1700,7 @@ class Database:
         """, (
             current_run_id, previous_run_id,
             new_count, removed_count, perm_count, risk_count, cred_count, total,
-            json.dumps(changes, default=str)
+            json.dumps(changes, default=str), self._tenant_id
         ))
 
         report_id = cursor.fetchone()[0]
@@ -1919,8 +1959,9 @@ class Database:
             """
             INSERT INTO credentials (
                 identity_db_id, credential_type, key_id, display_name,
-                start_datetime, end_datetime, thumbprint, issuer, subject
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                start_datetime, end_datetime, thumbprint, issuer, subject,
+                tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id, key_id)
             DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -1942,6 +1983,7 @@ class Database:
                 credential.get("thumbprint"),
                 credential.get("issuer"),
                 credential.get("subject"),
+                self._tenant_id,
             ),
         )
 
@@ -2271,7 +2313,7 @@ class Database:
                    ra.executed_at, ra.updated_at
             FROM remediation_actions ra
             JOIN identities i ON i.identity_id = ra.identity_id
-                AND i.discovery_run_id = (SELECT MAX(discovery_run_id) FROM identities)
+                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
             JOIN remediation_playbooks rp ON rp.id = ra.playbook_id
             WHERE 1=1
         """
@@ -2303,7 +2345,7 @@ class Database:
     def get_role_usage_stats(self):
         """Aggregate usage_status and risk_level counts across all role assignments from latest run."""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT MAX(discovery_run_id) FROM identities")
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
         row = cursor.fetchone()
         latest_run = row['max'] if row else None
         if not latest_run:
@@ -2374,7 +2416,7 @@ class Database:
         """Compute role mining & optimization insights from latest discovery run."""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        cursor.execute("SELECT MAX(discovery_run_id) as max FROM identities")
+        cursor.execute("SELECT MAX(id) as max FROM discovery_runs WHERE status = 'completed'")
         row = cursor.fetchone()
         latest_run = row['max'] if row else None
         if not latest_run:
@@ -2606,10 +2648,10 @@ class Database:
         self._ensure_webhook_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO webhooks (name, url, secret, event_types, headers, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            INSERT INTO webhooks (name, url, secret, event_types, headers, created_at, updated_at, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), %s)
             RETURNING *
-        """, (name, url, secret or None, event_types, json.dumps(headers) if headers else None))
+        """, (name, url, secret or None, event_types, json.dumps(headers) if headers else None, self._tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3666,14 +3708,14 @@ class Database:
         self._ensure_compliance_snapshots_table()
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO compliance_snapshots (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, metrics)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO compliance_snapshots (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, metrics, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (run_id, framework_key) DO UPDATE SET
                 score = EXCLUDED.score, pass_count = EXCLUDED.pass_count,
                 warn_count = EXCLUDED.warn_count, fail_count = EXCLUDED.fail_count,
                 total_controls = EXCLUDED.total_controls, metrics = EXCLUDED.metrics
             RETURNING id
-        """, (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, json.dumps(metrics)))
+        """, (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, json.dumps(metrics), self._tenant_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -3918,7 +3960,7 @@ class Database:
             data.get('sas_expiration_period'),
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('tags', {})), data.get('tenant_id')
+            json.dumps(data.get('tags', {})), data.get('tenant_id') or self._tenant_id
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -4006,7 +4048,7 @@ class Database:
             json.dumps(data.get('certs_detail', [])),
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('tags', {})), data.get('tenant_id')
+            json.dumps(data.get('tags', {})), data.get('tenant_id') or self._tenant_id
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -4164,7 +4206,7 @@ class Database:
             data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
             data.get('approval_status', 'unknown'),
-            data.get('tenant_id'),
+            data.get('tenant_id') or self._tenant_id,
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -5565,13 +5607,14 @@ class Database:
             cursor.execute("""
                 INSERT INTO anomalies
                     (discovery_run_id, anomaly_type, severity, identity_id, identity_name,
-                     title, description, details)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     title, description, details, tenant_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 run_id, a['anomaly_type'], a.get('severity', 'medium'),
                 a.get('identity_id'), a.get('identity_name'),
                 a['title'], a['description'],
                 json.dumps(a['details']) if a.get('details') else None,
+                self._tenant_id,
             ))
         self.conn.commit()
         cursor.close()
@@ -5993,11 +6036,11 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO soar_playbooks (name, description, trigger_type, trigger_conditions,
-                action_type, action_config, integration, cooldown_minutes, created_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                action_type, action_config, integration, cooldown_minutes, created_by, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (name, description, trigger_type, json.dumps(trigger_conditions),
-              action_type, json.dumps(action_config), integration, cooldown_minutes, created_by))
+              action_type, json.dumps(action_config), integration, cooldown_minutes, created_by, self._tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -6080,12 +6123,12 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO soar_actions (playbook_id, identity_id, anomaly_id, trigger_event,
-                action_type, integration, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+                action_type, integration, status, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
             RETURNING id
         """, (playbook_id, identity_id, anomaly_id,
               json.dumps(trigger_event) if trigger_event else None,
-              action_type, integration))
+              action_type, integration, self._tenant_id))
         action_id = cursor.fetchone()[0]
         self.conn.commit()
         cursor.close()
@@ -7245,8 +7288,9 @@ class Database:
         cursor.execute("""
             INSERT INTO identity_subscription_access
                 (identity_db_id, identity_id, subscription_id, subscription_name,
-                 rbac_role, scope, scope_type, risk_level, discovery_run_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 rbac_role, scope, scope_type, risk_level, discovery_run_id,
+                 tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id, subscription_id, rbac_role, scope) DO UPDATE
             SET risk_level = EXCLUDED.risk_level,
                 subscription_name = EXCLUDED.subscription_name,
@@ -7259,6 +7303,7 @@ class Database:
             role_assignment.get('scope_type', 'subscription'),
             role_assignment.get('risk_level', 'info'),
             run_id,
+            self._tenant_id,
         ))
         self.conn.commit()
         cursor.close()
