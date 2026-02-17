@@ -5563,6 +5563,38 @@ class Database:
         self.conn.commit()
         cursor.close()
 
+    def seed_auto_groups_for_tenant(self, tenant_id):
+        """Create default auto groups for a specific tenant if they don't exist.
+
+        Called after discovery completes to ensure each tenant has their own
+        auto-groups with the correct tenant_id for RLS visibility.
+        """
+        self._ensure_identity_group_tables()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM identity_groups WHERE group_type = 'auto' AND tenant_id = %s",
+            (tenant_id,),
+        )
+        count = cursor.fetchone()[0]
+        if count > 0:
+            cursor.close()
+            return
+
+        auto_groups = [
+            ('All Service Principals', '#6366F1', {'identity_category': 'service_principal'}),
+            ('All Human Users', '#3B82F6', {'identity_category': 'human_user'}),
+            ('All Managed Identities', '#8B5CF6', {'identity_category': ['managed_identity_system', 'managed_identity_user']}),
+            ('All Guest Users', '#F59E0B', {'identity_category': 'guest'}),
+        ]
+        for name, color, criteria in auto_groups:
+            cursor.execute("""
+                INSERT INTO identity_groups (name, color, group_type, auto_criteria, tenant_id)
+                VALUES (%s, %s, 'auto', %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (name, color, json.dumps(criteria), tenant_id))
+        self.conn.commit()
+        cursor.close()
+
     # ================================================================
     # Phase 40: Anomaly Detection
     # ================================================================
@@ -7281,6 +7313,33 @@ class Database:
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
+
+    def activate_all_cloud_subscriptions(self, user_id, tenant_id=None):
+        """Activate all discovered (unmonitored) subscriptions for a tenant."""
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if tenant_id is not None:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
+                WHERE tenant_id = %s AND monitored = false
+                RETURNING *
+            """, (user_id, tenant_id))
+        else:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
+                WHERE monitored = false
+                RETURNING *
+            """, (user_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        self.conn.commit()
+        cursor.close()
+        for r in rows:
+            for ts in ('activated_at', 'created_at'):
+                if r.get(ts):
+                    r[ts] = r[ts].isoformat()
+        return rows
 
     def deactivate_cloud_subscription(self, sub_id, tenant_id=None):
         """Stop monitoring a subscription, scoped by tenant."""

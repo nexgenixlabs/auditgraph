@@ -116,6 +116,7 @@ function AppContent() {
   }, [user, loading]);
 
   // Phase 85: Fetch tenant onboarding stage (non-superadmin only)
+  // Re-fetch on route change so navigating away from Settings picks up stage updates
   useEffect(() => {
     if (!user || loading || user.is_superadmin) return;
     fetch('/api/tenant/stage')
@@ -124,7 +125,7 @@ function AppContent() {
         if (data?.stage) setTenantStage(data.stage);
       })
       .catch(() => {});
-  }, [user, loading]);
+  }, [user, loading, location.pathname]);
 
   // Phase 53: Tenant resolution loading
   if (tenantLoading) {

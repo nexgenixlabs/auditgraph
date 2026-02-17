@@ -200,6 +200,7 @@ from app.api.handlers import (
     get_subscriptions_list,
     get_subscriptions_stats,
     activate_subscription,
+    activate_all_subscriptions,
     deactivate_subscription,
     get_subscriptions_distinct,
     get_identity_subscriptions,
@@ -1253,6 +1254,11 @@ def create_app():
     @require_role('admin', 'security_admin')
     def subscriptions_activate():
         return activate_subscription()
+
+    @app.post("/api/subscriptions/activate-all")
+    @require_role('admin', 'security_admin')
+    def subscriptions_activate_all():
+        return activate_all_subscriptions()
 
     @app.put("/api/subscriptions/<int:sub_id>/deactivate")
     @require_role('admin', 'security_admin')

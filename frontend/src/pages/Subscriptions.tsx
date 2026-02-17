@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { maskCredential } from '../utils/maskCredential';
-import { ACCOUNT_PRICING } from '../constants/pricing';
+import { ACCOUNT_PRICING, PLATFORM_FEE } from '../constants/pricing';
 
 interface CloudSubscription {
   id: number;
@@ -75,7 +75,9 @@ export default function Subscriptions() {
   };
 
   const unmonitored = subs.filter(s => !s.monitored);
-  const monthlyCost = (stats?.active || 0) * ACCOUNT_PRICING.direct;
+  const accountCost = (stats?.active || 0) * ACCOUNT_PRICING.direct;
+  const platformFee = (stats?.active || 0) > 0 ? PLATFORM_FEE.direct : 0;
+  const monthlyCost = accountCost + platformFee;
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
@@ -118,9 +120,26 @@ export default function Subscriptions() {
           <div className="bg-white border rounded-xl p-4 shadow-sm">
             <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">Monthly Cost</div>
             <div className="text-2xl font-bold text-gray-900 mt-1">${monthlyCost.toLocaleString()}/mo</div>
+            {platformFee > 0 && (
+              <div className="text-[10px] text-gray-400 mt-0.5">
+                ${PLATFORM_FEE.direct} platform + ${accountCost} ({stats?.active} x ${ACCOUNT_PRICING.direct})
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Platform fee notice */}
+      {canSeePricing && (stats?.active || 0) === 0 && subs.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="text-sm font-semibold text-blue-800 mb-1">Pricing</div>
+          <p className="text-xs text-blue-700">
+            Platform base fee: <span className="font-semibold">${PLATFORM_FEE.direct}/mo</span> +{' '}
+            <span className="font-semibold">${ACCOUNT_PRICING.direct}/mo</span> per monitored subscription.
+            Activate subscriptions below to begin identity monitoring.
+          </p>
+        </div>
+      )}
 
       {/* Info box */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">

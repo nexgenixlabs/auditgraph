@@ -224,12 +224,16 @@ export default function Settings() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ stage: 'active' }),
       });
-      // 4. Trigger first discovery
+      // 4. Auto-activate all discovered subscriptions
+      try {
+        await fetch('/api/subscriptions/activate-all', { method: 'POST' });
+      } catch { /* ignore */ }
+      // 5. Trigger first discovery
       try {
         await fetch('/api/runs/trigger', { method: 'POST' });
       } catch { /* ignore */ }
-      // 5. Navigate to overview
-      navigate('/');
+      // 6. Navigate to subscriptions so user sees activated subs + pricing
+      navigate('/subscriptions');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to save and unlock');
     } finally {

@@ -345,7 +345,19 @@ class AzureDiscoveryEngine:
             print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
         except Exception as e:
             print(f"  ⚠️ Subscription sync warning: {e}")
-        
+
+        # Seed auto identity groups for this tenant (Phase 38 + RLS fix)
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (run_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0]:
+                self.db.seed_auto_groups_for_tenant(row[0])
+                print(f"  ✓ Auto identity groups seeded for tenant {row[0]}")
+        except Exception as e:
+            print(f"  ⚠️ Auto groups seed warning: {e}")
+
         # Create result object
         # result = self._create_result(final_identities, role_assignments, run_id)
         # self._save_results_to_json(result)

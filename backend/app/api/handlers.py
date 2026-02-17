@@ -959,15 +959,13 @@ def get_app_settings():
         if settings.get('copilot_api_key'):
             settings['copilot_api_key'] = '********'
 
-        # Check Azure credential configuration (env vars OR DB settings)
+        # Check Azure credential configuration — tenant's own DB settings only.
+        # Do NOT fall back to env vars; those are the system/admin credentials,
+        # not this tenant's connection.
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
-        ]) or all([
-            os.getenv('AZURE_TENANT_ID'),
-            os.getenv('AZURE_CLIENT_ID'),
-            os.getenv('AZURE_CLIENT_SECRET'),
         ])
 
         # Check scheduler state
@@ -8253,17 +8251,11 @@ def get_onboarding_status():
         tid = _tenant_id()
         settings = db.get_settings(tenant_id=tid)
         completed = settings.get('onboarding_completed', 'false') == 'true'
-        # This only returns a boolean — no credential values leak here.
-        # Check tenant DB settings first, then fall back to env vars for
-        # the platform-level discovery config (used by scheduler).
+        # Only check tenant's own DB settings — env vars are system credentials.
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
-        ]) or all([
-            os.getenv('AZURE_TENANT_ID'),
-            os.getenv('AZURE_CLIENT_ID'),
-            os.getenv('AZURE_CLIENT_SECRET'),
         ])
         return jsonify({
             'onboarding_completed': completed,
@@ -8304,6 +8296,27 @@ def test_azure_connection():
                     'id': sub.subscription_id,
                     'name': sub.display_name or sub.subscription_id,
                 })
+
+        # Auto-advance onboarding stage to 'active' and insert discovered subs
+        tid = _tenant_id()
+        if tid:
+            from app.database import Database
+            admin_db = Database()
+            try:
+                admin_db.update_tenant(tid, onboarding_stage='active')
+                admin_db._ensure_cloud_subscriptions_table()
+                cursor = admin_db.conn.cursor()
+                for s in subs:
+                    cursor.execute("""
+                        INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                        VALUES (%s, 'azure', %s, %s, 'discovered')
+                        ON CONFLICT (tenant_id, cloud, account_id) DO NOTHING
+                    """, (tid, s['id'], s['name']))
+                admin_db.conn.commit()
+                cursor.close()
+            finally:
+                admin_db.close()
+
         return jsonify({
             'status': 'success',
             'subscriptions': subs,
@@ -12873,6 +12886,21 @@ def activate_subscription():
 
         _log(db, 'subscription_activated', f"Activated subscription {result.get('account_id')}", {'subscription_id': sub_id})
         return jsonify(result)
+    finally:
+        db.close()
+
+
+def activate_all_subscriptions():
+    """POST /api/subscriptions/activate-all — activate all discovered subscriptions for monitoring."""
+    db = _db()
+    try:
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        tid = _tenant_id()
+        activated = db.activate_all_cloud_subscriptions(user_id, tenant_id=tid)
+        if activated:
+            _log(db, 'subscriptions_bulk_activated', f"Bulk activated {len(activated)} subscription(s)", {'count': len(activated)})
+        return jsonify({'activated': len(activated), 'subscriptions': activated})
     finally:
         db.close()
 
