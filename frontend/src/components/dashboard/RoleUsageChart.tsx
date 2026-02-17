@@ -1,9 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
   PieChart, Pie,
 } from 'recharts';
-import { useTheme } from '../../hooks/useTheme';
 
 interface RoleUsageChartProps {
   statuses: Record<string, number>;
@@ -57,8 +56,20 @@ function CustomTooltip({ active, payload }: any) {
   );
 }
 
+function useChartColors() {
+  const [colors, setColors] = useState({ grid: '#21262D', tick: '#8B949E' });
+  useEffect(() => {
+    const style = getComputedStyle(document.documentElement);
+    setColors({
+      grid: style.getPropertyValue('--chart-grid').trim() || '#21262D',
+      tick: style.getPropertyValue('--chart-tick').trim() || '#8B949E',
+    });
+  }, []);
+  return colors;
+}
+
 export default function RoleUsageChart({ statuses, byRisk, total }: RoleUsageChartProps) {
-  const { dark } = useTheme();
+  const { grid: cursorFill, tick: tickFill } = useChartColors();
 
   const barData = useMemo(() => {
     return USAGE_ORDER
@@ -107,14 +118,14 @@ export default function RoleUsageChart({ statuses, byRisk, total }: RoleUsageCha
       {/* Horizontal bar chart */}
       <ResponsiveContainer width="100%" height={barData.length * 36 + 10}>
         <BarChart data={barData} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
-          <XAxis type="number" tick={{ fontSize: 10, fill: dark ? '#9ca3af' : '#9ca3af' }} allowDecimals={false} />
+          <XAxis type="number" tick={{ fontSize: 10, fill: tickFill }} allowDecimals={false} />
           <YAxis
             type="category"
             dataKey="label"
-            tick={{ fontSize: 11, fill: dark ? '#d1d5db' : '#6b7280' }}
+            tick={{ fontSize: 11, fill: tickFill }}
             width={100}
           />
-          <Tooltip content={<CustomTooltip />} cursor={{ fill: dark ? '#374151' : '#f9fafb' }} />
+          <Tooltip content={<CustomTooltip />} cursor={{ fill: cursorFill }} />
           <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={20}>
             {barData.map((entry) => (
               <Cell key={entry.key} fill={entry.fill} />

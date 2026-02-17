@@ -58,7 +58,7 @@ import TopBar from './components/layout/TopBar';
 import CopilotPanel from './components/CopilotPanel';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { TenantProvider, useTenant } from './contexts/TenantContext';
-import { useTheme } from './hooks/useTheme';
+import { ThemeProvider } from './contexts/ThemeContext';
 
 function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode; requiredRole?: string }) {
   const { user, loading } = useAuth();
@@ -88,7 +88,6 @@ function AppContent() {
   const location = useLocation();
   const [searchOpen, setSearchOpen] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(false);
-  const { dark, toggle: toggleTheme } = useTheme();
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [tenantStage, setTenantStage] = useState<string>('active');
 
@@ -214,7 +213,7 @@ function AppContent() {
           <ProtectedRoute>
             <div className="min-h-screen bg-gray-50 dark:bg-slate-950">
               {/* Top Bar */}
-              <TopBar dark={dark} onToggleTheme={toggleTheme} onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
+              <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
               {/* Left Sidebar */}
               <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} canManageConnections={canManageConnections} />
@@ -274,13 +273,15 @@ function AppContent() {
 
 function App() {
   return (
-    <Router>
-      <TenantProvider>
-        <AuthProvider>
-          <AppContent />
-        </AuthProvider>
-      </TenantProvider>
-    </Router>
+    <ThemeProvider>
+      <Router>
+        <TenantProvider>
+          <AuthProvider>
+            <AppContent />
+          </AuthProvider>
+        </TenantProvider>
+      </Router>
+    </ThemeProvider>
   );
 }
 

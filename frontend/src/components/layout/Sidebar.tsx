@@ -368,7 +368,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked, canMan
   };
 
   return (
-    <aside className="fixed left-0 top-14 bottom-0 w-60 bg-white dark:bg-slate-950 border-r border-gray-200 dark:border-slate-700 overflow-y-auto z-30">
+    <aside className="fixed left-0 top-14 bottom-0 w-60 border-r border-gray-200 overflow-y-auto z-30" style={{ backgroundColor: 'var(--bg-sidebar)' }}>
       <nav className="py-4 px-3 space-y-5">
         {navGroups.map(group => {
           if (group.adminOnly && !isAdmin) return null;

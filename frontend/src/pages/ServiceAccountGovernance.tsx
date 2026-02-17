@@ -2,25 +2,25 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
-// ─── Dark theme constants (page-scoped) ───
+// ─── Theme-aware constants (page-scoped) ───
 const G = {
-  bg: '#0b0f14',
-  surface: 'rgba(255,255,255,0.025)',
-  surfaceBorder: 'rgba(255,255,255,0.06)',
-  surfaceHover: 'rgba(255,255,255,0.04)',
-  text: '#ffffff',
-  textSecondary: 'rgba(255,255,255,0.7)',
-  textMuted: 'rgba(255,255,255,0.4)',
+  bg: 'var(--bg-primary)',
+  surface: 'var(--bg-secondary)',
+  surfaceBorder: 'var(--border-default)',
+  surfaceHover: 'var(--bg-hover)',
+  text: 'var(--text-primary)',
+  textSecondary: 'var(--text-secondary)',
+  textMuted: 'var(--text-tertiary)',
   band: { Critical: '#FF1744', High: '#FF6D00', Medium: '#FFB300', Low: '#4ADE80' } as Record<string, string>,
   bandBg: { Critical: 'rgba(255,23,68,0.12)', High: 'rgba(255,109,0,0.12)', Medium: 'rgba(255,179,0,0.12)', Low: 'rgba(74,222,128,0.12)' } as Record<string, string>,
   govStatus: { compliant: '#4ADE80', needs_attention: '#FFB300', non_compliant: '#FF1744' } as Record<string, string>,
-  cred: { expired: '#FF1744', expiring_soon: '#FFB300', healthy: '#4ADE80', unknown: 'rgba(255,255,255,0.3)' } as Record<string, string>,
+  cred: { expired: '#FF1744', expiring_soon: '#FFB300', healthy: '#4ADE80', unknown: 'var(--text-tertiary)' } as Record<string, string>,
   accent: '#8B5CF6',
   mono: "'JetBrains Mono', monospace",
   action: {
     Revoke: '#FF1744', Downgrade: '#FF6D00', Rotate: '#FFB300',
     'Re-attest': '#42A5F5', 'Assign Owner': '#AB47BC', Approve: '#4ADE80',
-    None: 'rgba(255,255,255,0.3)', 'JIT Convert': '#26C6DA',
+    None: 'var(--text-tertiary)', 'JIT Convert': '#26C6DA',
   } as Record<string, string>,
 };
 

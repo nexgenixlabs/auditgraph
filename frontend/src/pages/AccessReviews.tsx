@@ -72,13 +72,13 @@ interface Metrics {
 /* ------------------------------------------------------------------ */
 
 const AR = {
-  bg: '#090B10',
-  surface: 'rgba(255,255,255,0.02)',
-  surfaceBorder: 'rgba(255,255,255,0.06)',
-  surfaceHover: 'rgba(255,255,255,0.04)',
-  text: '#ffffff',
-  textSecondary: 'rgba(255,255,255,0.7)',
-  textMuted: 'rgba(255,255,255,0.4)',
+  bg: 'var(--bg-primary)',
+  surface: 'var(--bg-secondary)',
+  surfaceBorder: 'var(--border-default)',
+  surfaceHover: 'var(--bg-hover)',
+  text: 'var(--text-primary)',
+  textSecondary: 'var(--text-secondary)',
+  textMuted: 'var(--text-tertiary)',
   severity: { critical: '#FF1744', high: '#FF6D00', medium: '#FFB300', low: '#42A5F5' } as Record<string, string>,
   decision: {
     approve: { bg: 'rgba(74,222,128,0.12)', text: '#4ADE80', label: 'Approved' },

@@ -1,8 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
-import { useTheme } from '../../hooks/useTheme';
 
 interface TrendPoint {
   date: string | null;
@@ -66,8 +65,20 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
+function useChartColors() {
+  const [colors, setColors] = useState({ grid: '#21262D', tick: '#8B949E' });
+  useEffect(() => {
+    const style = getComputedStyle(document.documentElement);
+    setColors({
+      grid: style.getPropertyValue('--chart-grid').trim() || '#21262D',
+      tick: style.getPropertyValue('--chart-tick').trim() || '#8B949E',
+    });
+  }, []);
+  return colors;
+}
+
 export default function RiskTrendChart({ data }: RiskTrendChartProps) {
-  const { dark } = useTheme();
+  const { grid: gridStroke, tick: tickFill } = useChartColors();
 
   const chartData = useMemo(() =>
     data.map(d => ({
@@ -77,10 +88,6 @@ export default function RiskTrendChart({ data }: RiskTrendChartProps) {
   [data]);
 
   if (data.length < 2) return null;
-
-  const tickFill = dark ? '#9ca3af' : '#9ca3af';
-  const gridStroke = dark ? '#374151' : '#f3f4f6';
-  const legendColor = dark ? '#d1d5db' : undefined;
 
   return (
     <div className="bg-white border rounded-xl p-5">
@@ -118,7 +125,7 @@ export default function RiskTrendChart({ data }: RiskTrendChartProps) {
           <Legend
             iconType="circle"
             iconSize={8}
-            wrapperStyle={{ fontSize: 11, paddingTop: 8, color: legendColor }}
+            wrapperStyle={{ fontSize: 11, paddingTop: 8, color: tickFill }}
           />
           <Area
             type="monotone"

@@ -212,7 +212,7 @@ export default function Overview() {
       {/* ── Block 1: Attack Surface Score Hero ─────────────────────── */}
       <div
         className="rounded-2xl p-8 mb-5 flex items-center gap-10"
-        style={{ background: 'linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #1E3A5F 100%)', minHeight: 180 }}
+        style={{ background: 'var(--gradient-hero)', minHeight: 180 }}
       >
         {/* Arc Gauge */}
         <div className="flex-shrink-0">

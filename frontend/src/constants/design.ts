@@ -7,22 +7,22 @@
 
 export const COLORS = {
   brand: '#1E3A5F',
-  brandLight: '#2563EB',
-  background: '#F8FAFC',
-  card: '#FFFFFF',
-  textPrimary: '#0F172A',
-  textSecondary: '#64748B',
-  textMuted: '#94A3B8',
-  border: '#E2E8F0',
-  borderLight: '#F1F5F9',
+  brandLight: 'var(--accent-primary)',
+  background: 'var(--bg-primary)',
+  card: 'var(--bg-secondary)',
+  textPrimary: 'var(--text-primary)',
+  textSecondary: 'var(--text-secondary)',
+  textMuted: 'var(--text-tertiary)',
+  border: 'var(--border-default)',
+  borderLight: 'var(--border-subtle)',
 } as const;
 
 export const RISK_COLORS = {
-  critical:   { color: '#DC2626', bg: '#FEF2F2' },
-  high:       { color: '#F97316', bg: '#FFF7ED' },
-  medium:     { color: '#FACC15', bg: '#FEFCE8' },
-  low:        { color: '#22C55E', bg: '#F0FDF4' },
-  info:       { color: '#3B82F6', bg: '#EFF6FF' },
+  critical:   { color: '#DC2626', bg: 'var(--tint-red)' },
+  high:       { color: '#F97316', bg: 'var(--tint-orange)' },
+  medium:     { color: '#FACC15', bg: 'var(--tint-yellow)' },
+  low:        { color: '#22C55E', bg: 'var(--tint-green)' },
+  info:       { color: '#3B82F6', bg: 'var(--tint-blue)' },
 } as const;
 
 export const FRAMEWORK_COLORS = {
