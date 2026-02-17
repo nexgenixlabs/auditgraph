@@ -116,8 +116,8 @@ function StatCard({ label, value, color, subtitle, onClick, active }: {
       className={`border rounded-lg p-3 ${colorMap[color] || colorMap.blue} ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''} ${active ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}
     >
       <div className="text-2xl font-bold">{value}</div>
-      <div className="text-xs font-medium opacity-80">{label}</div>
-      {subtitle && <div className="text-[10px] opacity-60 mt-0.5">{subtitle}</div>}
+      <div className="text-xs font-medium text-gray-600">{label}</div>
+      {subtitle && <div className="text-[10px] text-gray-500 mt-0.5">{subtitle}</div>}
     </div>
   );
 }

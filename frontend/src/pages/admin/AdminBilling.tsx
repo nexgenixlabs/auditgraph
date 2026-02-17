@@ -72,11 +72,27 @@ function eventTypeLabel(type: string): { text: string; color: string; bg: string
   }
 }
 
+interface TenantBillingDetail {
+  billing: {
+    platform_fee_cents: number;
+    subscription_total_cents: number;
+    gross_monthly_cents: number;
+    discount_pct: number;
+    net_monthly_cents: number;
+    active_count: number;
+    subscriptions_by_cloud: Record<string, { count: number; revenue_cents: number }>;
+    line_items: Array<{ label: string; amount_cents: number; type: string }>;
+  };
+}
+
 export default function AdminBilling() {
   const [summary, setSummary] = useState<BillingSummary | null>(null);
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [events, setEvents] = useState<BillingEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedTenant, setExpandedTenant] = useState<number | null>(null);
+  const [expandedBilling, setExpandedBilling] = useState<TenantBillingDetail | null>(null);
+  const [expandLoading, setExpandLoading] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -92,6 +108,22 @@ export default function AdminBilling() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
+
+  function toggleTenantExpand(tenantId: number) {
+    if (expandedTenant === tenantId) {
+      setExpandedTenant(null);
+      setExpandedBilling(null);
+      return;
+    }
+    setExpandedTenant(tenantId);
+    setExpandedBilling(null);
+    setExpandLoading(true);
+    fetch(`/api/admin/tenants/${tenantId}/billing`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setExpandedBilling(data); })
+      .catch(() => {})
+      .finally(() => setExpandLoading(false));
+  }
 
   const totalMrr = summary?.total_mrr_cents ?? 0;
   const projectedArr = summary?.projected_arr_cents ?? 0;
@@ -240,36 +272,110 @@ export default function AdminBilling() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {tenants.map(t => {
-              const tenantBilling = summary?.tenants?.find(tb => tb.tenant_id === t.id);
-              const mrr = tenantBilling?.net_monthly_cents ?? 0;
-              const activeSubs = tenantBilling?.active_subs ?? 0;
+              const tb = summary?.tenants?.find(tb => tb.tenant_id === t.id);
+              const mrr = tb?.net_monthly_cents ?? 0;
+              const activeSubs = tb?.active_subs ?? 0;
               const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
               const ls = licenseLabel(t);
+              const isExpanded = expandedTenant === t.id;
               return (
-                <tr key={t.id} className="hover:bg-gray-50/60">
-                  <td className="px-4 py-2.5 font-medium text-gray-900">{t.name}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${planCfg.bg} ${planCfg.color}`}>{planCfg.label}</span>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-semibold ${(t.subscription_term || 0) > 0 ? 'text-blue-600' : 'text-gray-400'}`}>
-                      {getTermLabel(t.subscription_term || 0)}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-gray-700">{activeSubs}</td>
-                  <td className="px-4 py-2.5 text-gray-700">{t.user_count}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-semibold ${ls.color}`}>{ls.text}</span>
-                  </td>
-                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
-                  <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_expires_at)}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-semibold ${t.enabled ? 'text-green-600' : 'text-red-500'}`}>
-                      {t.enabled ? 'Active' : 'Disabled'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatCents(mrr)}</td>
-                </tr>
+                <React.Fragment key={t.id}>
+                  <tr
+                    className={`hover:bg-gray-50/60 cursor-pointer ${isExpanded ? 'bg-blue-50/40' : ''}`}
+                    onClick={() => toggleTenantExpand(t.id)}
+                  >
+                    <td className="px-4 py-2.5 font-medium text-gray-900">
+                      <div className="flex items-center gap-1.5">
+                        <svg className={`w-3 h-3 text-gray-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                        {t.name}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${planCfg.bg} ${planCfg.color}`}>{planCfg.label}</span>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-[10px] font-semibold ${(t.subscription_term || 0) > 0 ? 'text-blue-600' : 'text-gray-400'}`}>
+                        {getTermLabel(t.subscription_term || 0)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-700">{activeSubs}</td>
+                    <td className="px-4 py-2.5 text-gray-700">{t.user_count}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-[10px] font-semibold ${ls.color}`}>{ls.text}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
+                    <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_expires_at)}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-[10px] font-semibold ${t.enabled ? 'text-green-600' : 'text-red-500'}`}>
+                        {t.enabled ? 'Active' : 'Disabled'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatCents(mrr)}</td>
+                  </tr>
+                  {isExpanded && (
+                    <tr>
+                      <td colSpan={10} className="px-4 py-3 bg-gray-50/80 border-t border-b border-gray-200">
+                        {expandLoading ? (
+                          <div className="text-xs text-gray-400 py-2">Loading billing breakdown...</div>
+                        ) : expandedBilling ? (
+                          <div className="grid grid-cols-3 gap-4 max-w-2xl">
+                            <div>
+                              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Breakdown</div>
+                              <div className="space-y-1">
+                                {expandedBilling.billing.line_items.map((item, i) => (
+                                  <div key={i} className="flex items-center justify-between text-xs">
+                                    <span className="text-gray-600">{item.label}</span>
+                                    <span className={`font-semibold ${item.amount_cents < 0 ? 'text-green-700' : 'text-gray-900'}`}>
+                                      {item.amount_cents < 0 ? '-' : ''}{formatCents(Math.abs(item.amount_cents))}
+                                    </span>
+                                  </div>
+                                ))}
+                                <div className="border-t border-gray-200 pt-1 mt-1 flex items-center justify-between text-xs">
+                                  <span className="font-semibold text-gray-700">Net Monthly</span>
+                                  <span className="font-bold text-gray-900">{formatCents(expandedBilling.billing.net_monthly_cents)}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">By Cloud</div>
+                              <div className="space-y-1">
+                                {Object.entries(expandedBilling.billing.subscriptions_by_cloud).map(([cloud, data]) => {
+                                  const meta = CLOUD_LABELS[cloud];
+                                  return (
+                                    <div key={cloud} className="flex items-center justify-between text-xs">
+                                      <span className="flex items-center gap-1.5">
+                                        {meta && <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${meta.bg} ${meta.color}`}>{meta.label}</span>}
+                                        <span className="text-gray-500">{data.count} sub{data.count !== 1 ? 's' : ''}</span>
+                                      </span>
+                                      <span className="font-semibold text-gray-900">{formatCents(data.revenue_cents)}</span>
+                                    </div>
+                                  );
+                                })}
+                                {Object.keys(expandedBilling.billing.subscriptions_by_cloud).length === 0 && (
+                                  <div className="text-[10px] text-gray-400">No active subscriptions</div>
+                                )}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Summary</div>
+                              <div className="space-y-1 text-xs">
+                                <div className="flex justify-between"><span className="text-gray-500">Platform Fee</span><span className="text-gray-700">{formatCents(expandedBilling.billing.platform_fee_cents)}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-500">Sub Revenue</span><span className="text-gray-700">{formatCents(expandedBilling.billing.subscription_total_cents)}</span></div>
+                                {expandedBilling.billing.discount_pct > 0 && (
+                                  <div className="flex justify-between"><span className="text-gray-500">Discount</span><span className="text-green-600">-{expandedBilling.billing.discount_pct}%</span></div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-xs text-gray-400 py-2">Failed to load billing details</div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               );
             })}
           </tbody>

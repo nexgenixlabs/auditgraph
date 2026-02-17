@@ -27,10 +27,10 @@
   --border-default: #30363D;
   --border-subtle: #21262D;
 
-  /* Text */
-  --text-primary: #E6EDF3;
-  --text-secondary: #8B949E;
-  --text-tertiary: #484F58;
+  /* Text — WCAG AA contrast on #0D1117 */
+  --text-primary: #E6EDF3;        /* ~18:1 — headings, names, values */
+  --text-secondary: #9CA3AF;      /* ~5.3:1 — descriptions, subtitles, metadata */
+  --text-tertiary: #7D8590;       /* ~3.9:1 — timestamps, fine print, de-emphasized */
 
   /* Accents */
   --accent-primary: #58A6FF;
@@ -74,7 +74,7 @@
 
   /* Charts */
   --chart-grid: #21262D;
-  --chart-tick: #8B949E;
+  --chart-tick: #9CA3AF;
 
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
@@ -88,13 +88,13 @@
   --input-bg: #0D1117;
   --input-border: #30363D;
   --input-text: #E6EDF3;
-  --input-placeholder: #484F58;
+  --input-placeholder: #7D8590;
   --input-focus-border: #58A6FF;
 
   /* Scrollbar */
   --scrollbar-track: #161B22;
   --scrollbar-thumb: #30363D;
-  --scrollbar-thumb-hover: #484F58;
+  --scrollbar-thumb-hover: #7D8590;
 
   /* Dividers */
   --divide-color: #21262D;
@@ -115,10 +115,10 @@
   --border-default: #2E2E32;
   --border-subtle: #232326;
 
-  /* Text */
-  --text-primary: #FAFAF9;
-  --text-secondary: #A1A1AA;
-  --text-tertiary: #52525B;
+  /* Text — WCAG AA contrast on #111113 */
+  --text-primary: #FAFAF9;        /* ~19:1 — headings, names, values */
+  --text-secondary: #B0B0B9;      /* ~6.0:1 — descriptions, subtitles, metadata */
+  --text-tertiary: #71717A;       /* ~3.4:1 — timestamps, fine print, de-emphasized */
 
   /* Accents */
   --accent-primary: #22D3EE;
@@ -162,7 +162,7 @@
 
   /* Charts */
   --chart-grid: #27272A;
-  --chart-tick: #A1A1AA;
+  --chart-tick: #B0B0B9;
 
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
@@ -176,13 +176,13 @@
   --input-bg: #111113;
   --input-border: #2E2E32;
   --input-text: #FAFAF9;
-  --input-placeholder: #52525B;
+  --input-placeholder: #71717A;
   --input-focus-border: #22D3EE;
 
   /* Scrollbar */
   --scrollbar-track: #19191B;
   --scrollbar-thumb: #2E2E32;
-  --scrollbar-thumb-hover: #52525B;
+  --scrollbar-thumb-hover: #71717A;
 
   /* Dividers */
   --divide-color: #232326;
@@ -325,6 +325,51 @@
 [data-theme] .text-slate-500 {
   color: var(--text-tertiary);
 }
+
+/* Colored text — remap dark shades (600/700/800) to bright equivalents */
+/* These classes are nearly invisible on dark backgrounds without overrides */
+
+/* Blue */
+[data-theme] .text-blue-600 { color: #60A5FA; }
+[data-theme] .text-blue-700 { color: #60A5FA; }
+[data-theme] .text-blue-800 { color: #60A5FA; }
+
+/* Red */
+[data-theme] .text-red-600 { color: #F87171; }
+[data-theme] .text-red-700 { color: #F87171; }
+[data-theme] .text-red-800 { color: #F87171; }
+
+/* Green */
+[data-theme] .text-green-600 { color: #4ADE80; }
+[data-theme] .text-green-700 { color: #4ADE80; }
+[data-theme] .text-green-800 { color: #4ADE80; }
+
+/* Purple */
+[data-theme] .text-purple-600 { color: #A78BFA; }
+[data-theme] .text-purple-700 { color: #A78BFA; }
+
+/* Orange */
+[data-theme] .text-orange-600 { color: #FB923C; }
+[data-theme] .text-orange-700 { color: #FB923C; }
+
+/* Yellow */
+[data-theme] .text-yellow-600 { color: #FACC15; }
+[data-theme] .text-yellow-700 { color: #FACC15; }
+
+/* Amber */
+[data-theme] .text-amber-600 { color: #FBBF24; }
+[data-theme] .text-amber-700 { color: #FBBF24; }
+[data-theme] .text-amber-800 { color: #FBBF24; }
+
+/* Indigo */
+[data-theme] .text-indigo-600 { color: #818CF8; }
+[data-theme] .text-indigo-700 { color: #818CF8; }
+
+/* Emerald */
+[data-theme] .text-emerald-700 { color: #34D399; }
+
+/* Cyan */
+[data-theme] .text-cyan-700 { color: #22D3EE; }
 
 /* --- Borders -------------------------------------------------------- */
 

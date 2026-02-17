@@ -13058,6 +13058,11 @@ def update_admin_tenant_plan(tenant_id):
             return jsonify({'error': 'Tenant not found'}), 404
 
         old_plan = tenant.get('plan')
+
+        # No-op guard: skip if plan hasn't changed
+        if old_plan == new_plan:
+            return jsonify({'tenant': tenant, 'message': f'Plan already set to {new_plan}'})
+
         new_fee = get_default_platform_fee(new_plan)
 
         user = getattr(g, 'current_user', None)

@@ -782,9 +782,9 @@ function SummaryCard({ label, value, bg, text, border, sub }: {
 }) {
   return (
     <div className={`${bg} border ${border || 'border-gray-200'} rounded-xl p-4`}>
-      <div className={`text-xs font-medium ${text} opacity-70`}>{label}</div>
+      <div className={`text-xs font-medium ${text}`}>{label}</div>
       <div className={`text-2xl font-bold ${text} mt-1`}>{value}</div>
-      {sub && <div className={`text-[10px] ${text} opacity-50 mt-0.5`}>{sub}</div>}
+      {sub && <div className={`text-[10px] text-gray-500 mt-0.5`}>{sub}</div>}
     </div>
   );
 }

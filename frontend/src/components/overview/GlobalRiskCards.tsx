@@ -108,14 +108,14 @@ export default function GlobalRiskCards({ counts, onCardClick, trends }: GlobalR
         >
           <div className="flex items-center justify-between">
             <div>
-              <div className={`text-sm font-medium ${card.textColor} opacity-80`}>{card.label}</div>
+              <div className={`text-sm font-medium ${card.textColor}`}>{card.label}</div>
               <div className={`text-3xl font-bold ${card.textColor} mt-1`}>{card.count}</div>
             </div>
             <div className={`${card.iconBg} p-3 rounded-full group-hover:scale-110 transition`}>
               {card.icon}
             </div>
           </div>
-          <div className={`text-xs ${card.textColor} opacity-60 mt-2`}>
+          <div className={`text-xs text-gray-500 mt-2`}>
             {((card.count / (counts.total || 1)) * 100).toFixed(1)}% of total
           </div>
           {trends && trends[card.level as keyof typeof trends] && trends[card.level as keyof typeof trends].length >= 2 && (

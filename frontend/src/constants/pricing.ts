@@ -12,15 +12,19 @@ export const ENTERPRISE_BASE = 2499;
 
 // ── Paid Add-Ons (Pro tier only — Enterprise includes everything) ───────────
 export const ADDON_PRICING: Record<string, { label: string; price: number; description: string }> = {
-  ai_copilot:            { label: 'AI Security Copilot',                price: 149, description: 'AI-powered security assistant using live AuditGraph data' },
-  extended_retention:     { label: 'Extended Retention (365 days)',      price: 249, description: 'Extend data retention from 90 to 365 days' },
+  extended_retention:     { label: 'Extended Retention (365 days)',      price: 149, description: 'Extend data retention from 90 to 365 days' },
   additional_users_5pack: { label: 'Additional Portal Users (5-pack)',  price: 49,  description: '+5 additional portal user seats' },
 };
 
 // ── Base Features (included with Pro/Enterprise/Trial — not Free) ───────────
 export const BASE_FEATURES: Record<string, { label: string; description: string }> = {
-  secret_monitoring:  { label: 'Secret Expiry Monitoring',       description: 'Continuous secret & credential expiry monitoring & notifications' },
-  audit_reports:      { label: 'Audit-Ready PDF Reports',        description: 'SOC2, HIPAA, and PCI compliance audit reports' },
+  secret_monitoring:     { label: 'Secret Expiry Monitoring',       description: 'Continuous secret & credential expiry monitoring & notifications' },
+  audit_reports:         { label: 'Audit-Ready PDF Reports',        description: 'SOC2, HIPAA, and PCI compliance audit reports' },
+  ai_copilot:            { label: 'AI Security Copilot',            description: 'AI-powered security assistant using live AuditGraph data' },
+  drift_detection:       { label: 'Drift Detection & Alerts',       description: 'Detect configuration drift and identity changes between scans' },
+  soar_integration:      { label: 'SOAR Playbooks',                 description: 'Automated response playbooks with condition-based triggers' },
+  compliance_frameworks: { label: 'Compliance Frameworks',           description: 'SOC2, HIPAA, PCI, CIS benchmark compliance tracking' },
+  identity_governance:   { label: 'Identity Governance',             description: 'Service account attestation and lifecycle management' },
 };
 
 // ── Coming Soon Features (visible but disabled) ─────────────────────────────

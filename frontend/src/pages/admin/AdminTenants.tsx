@@ -1,12 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  CLOUD_PRICING, ENTERPRISE_BASE, ENTERPRISE_BUNDLES,
-  ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
+  ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES, ENTERPRISE_BUNDLES,
   CLOUD_LABELS, ACCOUNT_TIER_LABELS,
   SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
-  calculateMonthlyTotal, calculateCloudBaseTotal, calculateAddonTotal, calculateDiscountedMonthly,
-  getEnabledClouds, getCloudPrice,
+  SUB_RATES_CENTS,
   formatCents,
   type CloudConfig,
 } from '../../constants/pricing';
@@ -325,12 +323,7 @@ export default function AdminTenants() {
 
   const configPlan = showConfigure?.plan || 'pro';
   const isEnterprise = configPlan === 'enterprise';
-  const monthlyTotal = calculateMonthlyTotal(configForm, configPlan);
-  const cloudBase = calculateCloudBaseTotal(configForm, configPlan);
-  const addonBase = calculateAddonTotal(configForm, configPlan);
   const termDiscount = getTermDiscount(configTerm);
-  const discountedMonthly = calculateDiscountedMonthly(configForm, configTerm, configPlan);
-  const termSavingsMonthly = monthlyTotal - discountedMonthly;
   const enterpriseBundles = ENTERPRISE_BUNDLES[configTerm] || [];
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading tenants...</div>;
@@ -501,12 +494,17 @@ export default function AdminTenants() {
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isEnterprise ? 'bg-purple-500/20 text-purple-300' : 'bg-blue-500/20 text-blue-300'}`}>
                   {configPlan.toUpperCase()}
                 </span>
-                <span className="text-lg font-bold text-white">${monthlyTotal.toLocaleString()}<span className="text-xs font-normal text-slate-400">/mo</span></span>
+                <span className="text-lg font-bold text-white">
+                  {tenantBilling ? formatCents(tenantBilling.billing.net_monthly_cents) : '$0'}
+                  <span className="text-xs font-normal text-slate-400">/mo</span>
+                </span>
               </div>
-              {isEnterprise ? (
-                <div className="text-[10px] text-slate-400">All clouds & add-ons included</div>
+              {tenantBilling ? (
+                <div className="text-[10px] text-slate-400">
+                  {formatCents(tenantBilling.billing.platform_fee_cents)} platform + {tenantBilling.billing.active_count} sub{tenantBilling.billing.active_count !== 1 ? 's' : ''}
+                </div>
               ) : (
-                <div className="text-[10px] text-slate-400">Clouds: ${cloudBase.toLocaleString()} + Add-ons: ${addonBase.toLocaleString()}</div>
+                <div className="text-[10px] text-slate-400">Loading billing...</div>
               )}
             </div>
             <button onClick={() => setShowConfigure(null)} className="text-slate-400 hover:text-white text-lg leading-none ml-4">&times;</button>
@@ -519,7 +517,8 @@ export default function AdminTenants() {
               <div className="space-y-3">
                 {Object.entries(CLOUD_LABELS).map(([key, meta]) => {
                   const cfg = configForm.cloud_providers[key] || { enabled: false, plan: null };
-                  const perCloudPrice = CLOUD_PRICING[key]?.pro || 0;
+                  const cloudBillingData = tenantBilling?.billing.subscriptions_by_cloud[key];
+                  const subCount = cloudBillingData?.count ?? 0;
                   return (
                     <div key={key} className={`border-2 rounded-xl p-4 transition ${cfg.enabled ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200 bg-gray-50/30'}`}>
                       <div className="flex items-center justify-between">
@@ -544,8 +543,11 @@ export default function AdminTenants() {
                               </>
                             ) : (
                               <>
-                                <span className="text-xs font-semibold text-blue-700">Pro</span>
-                                <span className="text-xs font-bold text-blue-700">${perCloudPrice}/mo <span className="text-[10px] font-normal text-gray-400">excl. tax</span></span>
+                                <span className="text-xs font-semibold text-blue-700">{subCount} subscription{subCount !== 1 ? 's' : ''} monitored</span>
+                                <span className="text-xs font-bold text-blue-700">
+                                  {cloudBillingData ? formatCents(cloudBillingData.revenue_cents) : '$0'}/mo
+                                  <span className="text-[10px] font-normal text-gray-400"> @ {formatCents(SUB_RATES_CENTS[key] ?? 6900)}/sub</span>
+                                </span>
                               </>
                             )}
                           </div>
@@ -717,24 +719,20 @@ export default function AdminTenants() {
 
           {/* Dark Billing Summary Card */}
           <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
-            {/* Line items */}
+            {/* Line items from billing API */}
             <div className="space-y-1.5 mb-3">
-              {isEnterprise ? (
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-300">Enterprise Base (all clouds & add-ons)</span>
-                  <span className="text-white font-semibold">${ENTERPRISE_BASE.toLocaleString()}/mo</span>
-                </div>
-              ) : (
+              {tenantBilling ? (
                 <>
-                  {getEnabledClouds(configForm).map(key => {
-                    const price = CLOUD_PRICING[key]?.pro || 0;
-                    return (
-                      <div key={key} className="flex items-center justify-between text-xs">
-                        <span className="text-slate-300">{CLOUD_LABELS[key]?.label}</span>
-                        <span className="text-white font-semibold">${price.toLocaleString()}/mo</span>
-                      </div>
-                    );
-                  })}
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-300">Platform Fee ({configPlan})</span>
+                    <span className="text-white font-semibold">{formatCents(tenantBilling.billing.platform_fee_cents)}/mo</span>
+                  </div>
+                  {Object.entries(tenantBilling.billing.subscriptions_by_cloud).map(([cloud, data]) => (
+                    <div key={cloud} className="flex items-center justify-between text-xs">
+                      <span className="text-slate-300">{CLOUD_LABELS[cloud]?.label || cloud.toUpperCase()} ({data.count} sub{data.count !== 1 ? 's' : ''})</span>
+                      <span className="text-white font-semibold">{formatCents(data.revenue_cents)}/mo</span>
+                    </div>
+                  ))}
                   {Object.entries(configForm.addons).map(([key, enabled]) => {
                     if (!enabled) return null;
                     const addon = ADDON_PRICING[key];
@@ -747,44 +745,54 @@ export default function AdminTenants() {
                     );
                   })}
                 </>
+              ) : (
+                <div className="text-xs text-slate-400">Loading billing data...</div>
               )}
             </div>
 
             <div className="border-t border-slate-700 pt-3 space-y-2">
               {configTerm === 0 ? (
-                <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold text-white">Monthly Total</span>
-                    <div className="text-right">
-                      <span className="text-xl font-extrabold text-white">${monthlyTotal.toLocaleString()}/mo</span>
-                      <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
-                    </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-bold text-white">Monthly Total</span>
+                  <div className="text-right">
+                    <span className="text-xl font-extrabold text-white">
+                      {tenantBilling ? formatCents(tenantBilling.billing.net_monthly_cents) : '$0'}/mo
+                    </span>
+                    <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
                   </div>
-                </>
+                </div>
               ) : (
                 <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">Base Monthly</span>
-                    <span className="text-xs text-slate-400 line-through">${monthlyTotal.toLocaleString()}/mo</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-300">Discounted Monthly <span className="text-green-400">({termDiscount * 100}% off)</span></span>
-                    <span className="text-sm font-semibold text-white">${discountedMonthly.toLocaleString()}/mo</span>
-                  </div>
-                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-700">
-                    <div>
-                      <span className="text-sm font-bold text-white">{getTermLabel(configTerm)} Contract</span>
-                      <div className="text-[10px] text-slate-400">{configTerm * 12} months</div>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-xl font-extrabold text-cyan-400">${(discountedMonthly * configTerm * 12).toLocaleString()}</span>
-                      <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">Total savings over {configTerm}yr{configTerm > 1 ? 's' : ''}</span>
-                    <span className="text-xs font-semibold text-green-400">${(termSavingsMonthly * configTerm * 12).toLocaleString()}</span>
-                  </div>
+                  {tenantBilling && (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-slate-400">Gross Monthly</span>
+                        <span className="text-xs text-slate-400 line-through">{formatCents(tenantBilling.billing.net_monthly_cents)}/mo</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-slate-300">Discounted <span className="text-green-400">({termDiscount * 100}% off)</span></span>
+                        <span className="text-sm font-semibold text-white">{formatCents(Math.round(tenantBilling.billing.net_monthly_cents * (1 - termDiscount)))}/mo</span>
+                      </div>
+                      <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-700">
+                        <div>
+                          <span className="text-sm font-bold text-white">{getTermLabel(configTerm)} Contract</span>
+                          <div className="text-[10px] text-slate-400">{configTerm * 12} months</div>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xl font-extrabold text-cyan-400">
+                            {formatCents(Math.round(tenantBilling.billing.net_monthly_cents * (1 - termDiscount)) * configTerm * 12)}
+                          </span>
+                          <div className="text-[10px] text-slate-400">excl. applicable taxes</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-slate-400">Total savings over {configTerm}yr{configTerm > 1 ? 's' : ''}</span>
+                        <span className="text-xs font-semibold text-green-400">
+                          {formatCents(Math.round(tenantBilling.billing.net_monthly_cents * termDiscount) * configTerm * 12)}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
             </div>
