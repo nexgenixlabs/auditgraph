@@ -7681,7 +7681,8 @@ def create_tenant_handler():
     if primary_cloud and primary_cloud not in ('azure', 'aws', 'gcp'):
         return jsonify({'error': 'primary_cloud must be azure, aws, or gcp'}), 400
 
-    db = _db()
+    # Use admin DB (no RLS) — creates user in a different tenant than caller's context
+    db = Database()
     try:
         existing = db.get_tenant_by_slug(slug)
         if existing:
