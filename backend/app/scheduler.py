@@ -175,6 +175,17 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
     except Exception:
         pass
 
+    # Auto-advance onboarding stage to 'active' after first successful discovery
+    try:
+        admin_db = Database()
+        tenant = admin_db.get_tenant_by_id(db_tenant_id)
+        if tenant and tenant.get('onboarding_stage') in ('locked', 'authenticating', 'password_change'):
+            admin_db.update_tenant(db_tenant_id, onboarding_stage='active')
+            logger.info(f"  ✓ Tenant {tenant_name} onboarding stage advanced to 'active'")
+        admin_db.close()
+    except Exception as e:
+        logger.warning(f"  ⚠ Failed to advance onboarding stage for {tenant_name}: {e}")
+
     # Check for identity changes and send email notification
     _send_change_notification_if_needed(db_tenant_id=db_tenant_id)
 

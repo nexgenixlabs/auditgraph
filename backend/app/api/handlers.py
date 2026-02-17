@@ -1086,6 +1086,16 @@ def save_app_settings():
             if new_name:
                 db.update_tenant(tid, name=new_name)
 
+        # Advance onboarding stage when cloud credentials are saved
+        cloud_keys = {'azure_tenant_id', 'azure_client_id', 'azure_client_secret'}
+        if tid and cloud_keys & set(updates.keys()):
+            try:
+                tenant = db.get_tenant_by_id(tid)
+                if tenant and tenant.get('onboarding_stage') == 'locked':
+                    db.update_tenant(tid, onboarding_stage='authenticating')
+            except Exception:
+                pass
+
         settings = db.get_settings(tenant_id=tid)
         _log(db,'settings_updated', f'Settings updated: {", ".join(updates.keys())}', {
             'updated_keys': list(updates.keys()),

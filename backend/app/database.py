@@ -6321,6 +6321,7 @@ class Database:
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS industry VARCHAR(100)")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS compliance_framework VARCHAR(100)")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS onboarding_stage VARCHAR(20) NOT NULL DEFAULT 'active'")
         # Phase 78: Migrate growth→pro plan + API key role renames
         cursor.execute("UPDATE tenants SET plan = 'pro' WHERE plan = 'growth'")
         cursor.execute("UPDATE api_keys SET role = 'reader' WHERE role = 'auditor'")
@@ -6498,7 +6499,8 @@ class Database:
         """Update tenant fields."""
         self._ensure_tenants_table()
         allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at',
-                   'subscription_term', 'primary_cloud', 'industry', 'compliance_framework', 'status'}
+                   'subscription_term', 'primary_cloud', 'industry', 'compliance_framework', 'status',
+                   'onboarding_stage'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_tenant_by_id(tenant_id)
@@ -6526,16 +6528,90 @@ class Database:
         return result
 
     def delete_tenant(self, tenant_id):
-        """Delete a tenant and all associated data. Returns True if deleted."""
+        """Delete a tenant and all associated data using 7-tier cascade.
+
+        Tier 1: Tables with non-CASCADE FK to users (created_by, attested_by, etc.)
+        Tier 2: Tables with FK to playbooks/webhooks
+        Tier 3: Standalone tenant-scoped tables (no cross-table FK)
+        Tier 4: risk_scores (FK to discovery_runs)
+        Tier 5: discovery_runs — CASCADE auto-deletes identities + 11 children,
+                 compliance_snapshots, azure_storage_accounts, azure_key_vaults,
+                 app_registrations, anomalies, drift_reports, identity_subscription_access,
+                 ca_policies
+        Tier 6: users — CASCADE auto-deletes refresh_tokens, sso_auth_codes,
+                 dashboard_preferences, saved_views
+        Tier 7: settings, activity_log, tenants
+        """
         self._ensure_tenants_table()
         cursor = self.conn.cursor()
-        # Remove dependent records first (users FK has no CASCADE)
-        cursor.execute("DELETE FROM users WHERE tenant_id = %s", (tenant_id,))
+
+        # Tier 1 — tables with non-CASCADE FK to users
+        tier1_tables = [
+            'campaign_audit_log', 'campaign_reviews', 'access_review_campaigns',
+            'sa_attestations', 'governance_decisions', 'identity_group_members',
+            'identity_groups', 'api_keys',
+        ]
+        for tbl in tier1_tables:
+            try:
+                cursor.execute(f"SAVEPOINT sp_{tbl}")
+                cursor.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s", (tenant_id,))
+                cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
+            except Exception:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
+
+        # Tier 2 — tables with FK to playbooks/webhooks
+        tier2_tables = [
+            'soar_actions', 'soar_playbooks', 'webhook_deliveries', 'webhooks',
+        ]
+        for tbl in tier2_tables:
+            try:
+                cursor.execute(f"SAVEPOINT sp_{tbl}")
+                cursor.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s", (tenant_id,))
+                cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
+            except Exception:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
+
+        # Tier 3 — standalone tenant-scoped tables
+        tier3_tables = [
+            'notifications', 'custom_risk_rules', 'copilot_conversations',
+            'remediation_actions', 'ca_policies', 'drift_reports',
+            'cloud_subscriptions',
+        ]
+        for tbl in tier3_tables:
+            try:
+                cursor.execute(f"SAVEPOINT sp_{tbl}")
+                cursor.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s", (tenant_id,))
+                cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
+            except Exception:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
+
+        # Tier 4 — risk_scores (may not exist; keyed by run_id)
+        try:
+            cursor.execute("SAVEPOINT sp_risk_scores")
+            cursor.execute("""
+                DELETE FROM risk_scores
+                WHERE run_id IN (SELECT id FROM discovery_runs WHERE tenant_id = %s)
+            """, (tenant_id,))
+            cursor.execute("RELEASE SAVEPOINT sp_risk_scores")
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT sp_risk_scores")
+
+        # Tier 5 — discovery_runs (CASCADE deletes identities + 11 children,
+        #           compliance_snapshots, azure_storage_accounts, azure_key_vaults,
+        #           app_registrations, anomalies, drift_reports, identity_subscription_access,
+        #           ca_policies)
         cursor.execute("DELETE FROM discovery_runs WHERE tenant_id = %s", (tenant_id,))
+
+        # Tier 6 — users (CASCADE deletes refresh_tokens, sso_auth_codes,
+        #           dashboard_preferences, saved_views)
+        cursor.execute("DELETE FROM users WHERE tenant_id = %s", (tenant_id,))
+
+        # Tier 7 — settings, activity_log, tenants
         cursor.execute("DELETE FROM settings WHERE tenant_id = %s", (tenant_id,))
         cursor.execute("DELETE FROM activity_log WHERE tenant_id = %s", (tenant_id,))
         cursor.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
         deleted = cursor.rowcount > 0
+
         self.conn.commit()
         cursor.close()
         return deleted
