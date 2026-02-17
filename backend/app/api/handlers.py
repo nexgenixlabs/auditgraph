@@ -7849,7 +7849,8 @@ def update_tenant_handler(tenant_id):
 
 def delete_tenant_handler(tenant_id):
     """DELETE /api/tenants/<id> — delete a tenant (superadmin only)."""
-    db = _db()
+    # Use admin DB (no RLS) so cascade can delete across tenant boundaries
+    db = Database()
     try:
         existing = db.get_tenant_by_id(tenant_id)
         if not existing:
@@ -7860,7 +7861,8 @@ def delete_tenant_handler(tenant_id):
         try:
             db.delete_tenant(tenant_id)
         except Exception as e:
-            logger.error(f"Failed to delete tenant {tenant_id}: {e}")
+            import logging
+            logging.getLogger(__name__).error(f"Failed to delete tenant {tenant_id}: {e}")
             return jsonify({'error': f'Failed to delete tenant: {str(e)}'}), 500
 
         try:
