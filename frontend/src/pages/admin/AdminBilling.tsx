@@ -1,13 +1,39 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  CLOUD_PRICING, ENTERPRISE_BASE,
-  ADDON_PRICING, CLOUD_LABELS,
-  ACCOUNT_TIER_LABELS, calculateMonthlyTotal, getEnabledClouds, getCloudPrice,
-  getTermDiscount, getTermLabel, SUBSCRIPTION_TERMS,
-  type CloudConfig,
+  CLOUD_LABELS,
+  ACCOUNT_TIER_LABELS,
+  getTermLabel,
+  formatCents,
 } from '../../constants/pricing';
 
-interface TenantBilling {
+interface BillingSummary {
+  total_mrr_cents: number;
+  projected_arr_cents: number;
+  total_tenants: number;
+  active_tenants: number;
+  by_plan: Record<string, { count: number; mrr_cents: number }>;
+  by_cloud: Record<string, { count: number; revenue_cents: number }>;
+  tenants: Array<{
+    tenant_id: number;
+    tenant_name: string;
+    plan: string;
+    active_subs: number;
+    net_monthly_cents: number;
+  }>;
+}
+
+interface BillingEvent {
+  id: number;
+  tenant_id: number;
+  tenant_name: string;
+  event_type: string;
+  field_changed: string | null;
+  old_value: string | null;
+  new_value: string | null;
+  created_at: string;
+}
+
+interface TenantRow {
   id: number;
   name: string;
   slug: string;
@@ -17,37 +43,16 @@ interface TenantBilling {
   license_activated_at: string | null;
   license_expires_at: string | null;
   subscription_term: number;
-  settings?: Record<string, unknown>;
 }
 
 const PLAN_LABELS = ACCOUNT_TIER_LABELS;
-
-function getTenantConfig(t: TenantBilling): CloudConfig {
-  const settings = (t.settings || {}) as Record<string, unknown>;
-  return {
-    cloud_providers: (settings.cloud_providers || {
-      azure: { enabled: true, plan: 'pro' },
-      aws: { enabled: false, plan: null },
-      gcp: { enabled: false, plan: null },
-    }) as CloudConfig['cloud_providers'],
-    addons: (settings.addons || {}) as CloudConfig['addons'],
-  };
-}
-
-function getTenantMrr(t: TenantBilling): number {
-  if (!t.enabled) return 0;
-  if (t.plan === 'free' || t.plan === 'trial') return 0;
-  const base = calculateMonthlyTotal(getTenantConfig(t), t.plan);
-  const discount = getTermDiscount(t.subscription_term || 0);
-  return Math.round(base * (1 - discount));
-}
 
 function formatDate(iso: string | null): string {
   if (!iso) return '\u2014';
   return new Date(iso).toLocaleDateString();
 }
 
-function licenseLabel(t: TenantBilling): { text: string; color: string } {
+function licenseLabel(t: TenantRow): { text: string; color: string } {
   if (!t.license_activated_at) return { text: 'Not Activated', color: 'text-gray-400' };
   if (t.license_expires_at) {
     const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
@@ -57,73 +62,45 @@ function licenseLabel(t: TenantBilling): { text: string; color: string } {
   return { text: 'Active', color: 'text-green-600' };
 }
 
+function eventTypeLabel(type: string): { text: string; color: string; bg: string } {
+  switch (type) {
+    case 'plan_change': return { text: 'Plan Change', color: 'text-blue-700', bg: 'bg-blue-100' };
+    case 'commitment_change': return { text: 'Commitment', color: 'text-purple-700', bg: 'bg-purple-100' };
+    case 'platform_fee_override': return { text: 'Fee Override', color: 'text-orange-700', bg: 'bg-orange-100' };
+    case 'rate_override': return { text: 'Rate Override', color: 'text-cyan-700', bg: 'bg-cyan-100' };
+    default: return { text: type, color: 'text-gray-700', bg: 'bg-gray-100' };
+  }
+}
+
 export default function AdminBilling() {
-  const [tenants, setTenants] = useState<TenantBilling[]>([]);
+  const [summary, setSummary] = useState<BillingSummary | null>(null);
+  const [tenants, setTenants] = useState<TenantRow[]>([]);
+  const [events, setEvents] = useState<BillingEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/tenants')
-      .then(r => r.ok ? r.json() : { tenants: [] })
-      .then(d => setTenants(d.tenants || []))
+    Promise.all([
+      fetch('/api/admin/billing/summary').then(r => r.ok ? r.json() : null),
+      fetch('/api/tenants').then(r => r.ok ? r.json() : { tenants: [] }),
+      fetch('/api/admin/billing/events?limit=20').then(r => r.ok ? r.json() : { events: [] }),
+    ])
+      .then(([summaryData, tenantsData, eventsData]) => {
+        if (summaryData) setSummary(summaryData);
+        setTenants(tenantsData.tenants || []);
+        setEvents(eventsData.events || []);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
-  const planCounts = tenants.reduce<Record<string, number>>((acc, t) => {
-    acc[t.plan] = (acc[t.plan] || 0) + 1;
-    return acc;
-  }, {});
-
+  const totalMrr = summary?.total_mrr_cents ?? 0;
+  const projectedArr = summary?.projected_arr_cents ?? 0;
   const totalUsers = tenants.reduce((sum, t) => sum + t.user_count, 0);
 
-  const totalMrr = useMemo(() => tenants.reduce((sum, t) => sum + getTenantMrr(t), 0), [tenants]);
-  const projectedArr = totalMrr * 12;
-
-  // Revenue by cloud provider (per-cloud pricing model)
-  const revenueByCloud = useMemo(() => {
-    const result: Record<string, number> = { azure: 0, aws: 0, gcp: 0 };
-    for (const t of tenants) {
-      if (!t.enabled || t.plan === 'free' || t.plan === 'trial') continue;
-      const cfg = getTenantConfig(t);
-      const enabled = getEnabledClouds(cfg);
-      if (t.plan === 'enterprise') {
-        // Enterprise: distribute base evenly across enabled clouds for display
-        if (enabled.length > 0) {
-          const perCloud = Math.round(ENTERPRISE_BASE / enabled.length);
-          for (const provider of enabled) {
-            result[provider] = (result[provider] || 0) + perCloud;
-          }
-        }
-      } else {
-        // Pro: per-cloud pricing
-        for (const provider of enabled) {
-          result[provider] = (result[provider] || 0) + getCloudPrice(cfg, provider);
-        }
-      }
-    }
-    return result;
-  }, [tenants]);
-
-  // Revenue by add-on (Pro only — Enterprise includes all)
-  const revenueByAddon = useMemo(() => {
-    const result: Record<string, { revenue: number; count: number }> = {};
-    for (const key of Object.keys(ADDON_PRICING)) {
-      result[key] = { revenue: 0, count: 0 };
-    }
-    for (const t of tenants) {
-      if (!t.enabled || t.plan !== 'pro') continue;
-      const cfg = getTenantConfig(t);
-      for (const [addon, enabled] of Object.entries(cfg.addons)) {
-        if (enabled && ADDON_PRICING[addon]) {
-          result[addon] = {
-            revenue: (result[addon]?.revenue || 0) + ADDON_PRICING[addon].price,
-            count: (result[addon]?.count || 0) + 1,
-          };
-        }
-      }
-    }
-    return result;
-  }, [tenants]);
+  const planCounts: Record<string, number> = {};
+  for (const t of tenants) {
+    planCounts[t.plan] = (planCounts[t.plan] || 0) + 1;
+  }
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading billing data...</div>;
 
@@ -131,13 +108,13 @@ export default function AdminBilling() {
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Billing & Revenue</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Revenue tracking, plan distribution, and licensing</p>
+        <p className="text-sm text-gray-500 mt-0.5">Per-subscription billing model &mdash; platform fee + per-sub rates</p>
       </div>
 
       {/* Summary cards */}
       <div className="grid grid-cols-6 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-gray-900">{tenants.length}</div>
+          <div className="text-2xl font-bold text-gray-900">{summary?.total_tenants ?? tenants.length}</div>
           <div className="text-xs text-gray-500 mt-1">Total Organizations</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -145,7 +122,7 @@ export default function AdminBilling() {
           <div className="text-xs text-gray-500 mt-1">Total Users</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-gray-900">{tenants.filter(t => t.enabled).length}</div>
+          <div className="text-2xl font-bold text-gray-900">{summary?.active_tenants ?? tenants.filter(t => t.enabled).length}</div>
           <div className="text-xs text-gray-500 mt-1">Active Tenants</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -153,11 +130,11 @@ export default function AdminBilling() {
           <div className="text-xs text-gray-500 mt-1">Enterprise Licenses</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-green-700">${totalMrr.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-green-700">{formatCents(totalMrr)}</div>
           <div className="text-xs text-gray-500 mt-1">Total MRR <span className="text-[10px] text-gray-400">excl. tax</span></div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-blue-700">${Math.round(projectedArr).toLocaleString()}</div>
+          <div className="text-2xl font-bold text-blue-700">{formatCents(projectedArr)}</div>
           <div className="text-xs text-gray-500 mt-1">Projected ARR <span className="text-[10px] text-gray-400">excl. tax</span></div>
         </div>
       </div>
@@ -171,6 +148,7 @@ export default function AdminBilling() {
             const pct = tenants.length > 0 ? Math.round((count / tenants.length) * 100) : 0;
             const cfg = PLAN_LABELS[plan] || PLAN_LABELS.free;
             const barColor = plan === 'enterprise' ? 'bg-purple-500' : plan === 'pro' ? 'bg-blue-500' : plan === 'trial' ? 'bg-amber-500' : 'bg-gray-400';
+            const planMrr = summary?.by_plan?.[plan]?.mrr_cents ?? 0;
             return (
               <div key={plan} className="flex-1">
                 <div className="flex items-center justify-between mb-2">
@@ -178,12 +156,9 @@ export default function AdminBilling() {
                   <span className="text-sm font-bold text-gray-900">{count}</span>
                 </div>
                 <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${barColor}`}
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                 </div>
-                <div className="text-[10px] text-gray-400 mt-1">{pct}% of tenants</div>
+                <div className="text-[10px] text-gray-400 mt-1">{pct}% of tenants &middot; {formatCents(planMrr)}/mo</div>
               </div>
             );
           })}
@@ -203,10 +178,7 @@ export default function AdminBilling() {
                 <div className="w-32 text-xs font-medium text-gray-700 truncate">{t.name}</div>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${planCfg.bg} ${planCfg.color}`}>{planCfg.label}</span>
                 <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 rounded-full transition-all"
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
                 </div>
                 <span className="text-xs font-bold text-gray-800 w-8 text-right">{t.user_count}</span>
               </div>
@@ -215,57 +187,34 @@ export default function AdminBilling() {
         </div>
       </div>
 
-      {/* Revenue breakdowns */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* Revenue by Cloud */}
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Revenue by Cloud Provider</h3>
-          <div className="space-y-3">
-            {Object.entries(CLOUD_LABELS).map(([key, meta]) => {
-              const revenue = revenueByCloud[key] || 0;
-              const pct = totalMrr > 0 ? Math.round((revenue / totalMrr) * 100) : 0;
-              return (
-                <div key={key}>
-                  <div className="flex items-center justify-between mb-1">
+      {/* Revenue by Cloud (per-subscription model) */}
+      <div className="bg-white border border-gray-200 rounded-lg p-6">
+        <h3 className="text-sm font-semibold text-gray-800 mb-4">Revenue by Cloud Provider</h3>
+        <div className="space-y-3">
+          {Object.entries(CLOUD_LABELS).map(([key, meta]) => {
+            const cloudData = summary?.by_cloud?.[key];
+            const revenue = cloudData?.revenue_cents ?? 0;
+            const subCount = cloudData?.count ?? 0;
+            const pct = totalMrr > 0 ? Math.round((revenue / totalMrr) * 100) : 0;
+            return (
+              <div key={key}>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
                     <span className={`px-2 py-0.5 rounded text-xs font-semibold ${meta.bg} ${meta.color}`}>{meta.label}</span>
-                    <span className="text-sm font-bold text-gray-900">${revenue.toLocaleString()}/mo</span>
+                    <span className="text-[10px] text-gray-400">{subCount} sub{subCount !== 1 ? 's' : ''}</span>
                   </div>
-                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full transition-all ${key === 'azure' ? 'bg-blue-500' : key === 'aws' ? 'bg-orange-500' : 'bg-red-500'}`}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">{pct}% of MRR</div>
+                  <span className="text-sm font-bold text-gray-900">{formatCents(revenue)}/mo</span>
                 </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Revenue by Add-on */}
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Add-on Revenue</h3>
-          <div className="space-y-3">
-            {Object.entries(ADDON_PRICING).map(([key, addon]) => {
-              const data = revenueByAddon[key] || { revenue: 0, count: 0 };
-              return (
-                <div key={key} className="flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-medium text-gray-800">{addon.label}</div>
-                    <div className="text-[10px] text-gray-400">{data.count} tenant{data.count !== 1 ? 's' : ''}</div>
-                  </div>
-                  <span className="text-sm font-bold text-gray-900">${data.revenue.toLocaleString()}/mo</span>
+                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${key === 'azure' ? 'bg-blue-500' : key === 'aws' ? 'bg-orange-500' : 'bg-red-500'}`}
+                    style={{ width: `${pct}%` }}
+                  />
                 </div>
-              );
-            })}
-            <div className="border-t border-gray-200 pt-2 mt-2 flex items-center justify-between">
-              <span className="text-xs font-semibold text-gray-700">Total Add-on Revenue</span>
-              <span className="text-sm font-bold text-green-700">
-                ${Object.values(revenueByAddon).reduce((s, d) => s + d.revenue, 0).toLocaleString()}/mo
-              </span>
-            </div>
-          </div>
+                <div className="text-[10px] text-gray-400 mt-0.5">{pct}% of MRR</div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -280,8 +229,7 @@ export default function AdminBilling() {
               <th className="px-4 py-2.5">Organization</th>
               <th className="px-4 py-2.5">Plan</th>
               <th className="px-4 py-2.5">Term</th>
-              <th className="px-4 py-2.5">Clouds</th>
-              <th className="px-4 py-2.5">Add-ons</th>
+              <th className="px-4 py-2.5">Active Subs</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">License Status</th>
               <th className="px-4 py-2.5">Activated</th>
@@ -292,11 +240,9 @@ export default function AdminBilling() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {tenants.map(t => {
-              const cfg = getTenantConfig(t);
-              const enabledClouds = Object.entries(cfg.cloud_providers).filter(([, v]) => v.enabled).map(([k]) => k);
-              const cloudsToShow = enabledClouds.length > 0 ? enabledClouds : ['azure'];
-              const addonCount = t.plan === 'enterprise' ? Object.keys(ADDON_PRICING).length : Object.values(cfg.addons).filter(Boolean).length;
-              const mrr = getTenantMrr(t);
+              const tenantBilling = summary?.tenants?.find(tb => tb.tenant_id === t.id);
+              const mrr = tenantBilling?.net_monthly_cents ?? 0;
+              const activeSubs = tenantBilling?.active_subs ?? 0;
               const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
               const ls = licenseLabel(t);
               return (
@@ -308,30 +254,9 @@ export default function AdminBilling() {
                   <td className="px-4 py-2.5">
                     <span className={`text-[10px] font-semibold ${(t.subscription_term || 0) > 0 ? 'text-blue-600' : 'text-gray-400'}`}>
                       {getTermLabel(t.subscription_term || 0)}
-                      {getTermDiscount(t.subscription_term || 0) > 0 && (
-                        <span className="ml-1 text-green-600">({getTermDiscount(t.subscription_term || 0) * 100}%)</span>
-                      )}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex gap-1 flex-wrap">
-                      {cloudsToShow.map(cloud => {
-                        const meta = CLOUD_LABELS[cloud];
-                        return meta ? (
-                          <span key={cloud} className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${meta.bg} ${meta.color}`}>{meta.label}</span>
-                        ) : null;
-                      })}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5 text-gray-700">
-                    {addonCount > 0 ? (
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">
-                        {t.plan === 'enterprise' ? 'All included' : `${addonCount} add-on${addonCount !== 1 ? 's' : ''}`}
-                      </span>
-                    ) : (
-                      <span className="text-gray-400">&mdash;</span>
-                    )}
-                  </td>
+                  <td className="px-4 py-2.5 text-gray-700">{activeSubs}</td>
                   <td className="px-4 py-2.5 text-gray-700">{t.user_count}</td>
                   <td className="px-4 py-2.5">
                     <span className={`text-[10px] font-semibold ${ls.color}`}>{ls.text}</span>
@@ -343,13 +268,56 @@ export default function AdminBilling() {
                       {t.enabled ? 'Active' : 'Disabled'}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 text-right font-semibold text-gray-900">${mrr.toLocaleString()}</td>
+                  <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatCents(mrr)}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+
+      {/* Billing Events */}
+      {events.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <h3 className="text-sm font-semibold text-gray-800">Recent Billing Events</h3>
+          </div>
+          <table className="min-w-full text-left text-xs">
+            <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase tracking-wider font-medium">
+              <tr>
+                <th className="px-4 py-2.5">Event</th>
+                <th className="px-4 py-2.5">Organization</th>
+                <th className="px-4 py-2.5">Field</th>
+                <th className="px-4 py-2.5">Change</th>
+                <th className="px-4 py-2.5">Date</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {events.map(ev => {
+                const badge = eventTypeLabel(ev.event_type);
+                return (
+                  <tr key={ev.id} className="hover:bg-gray-50/60">
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${badge.bg} ${badge.color}`}>{badge.text}</span>
+                    </td>
+                    <td className="px-4 py-2.5 font-medium text-gray-900">{ev.tenant_name}</td>
+                    <td className="px-4 py-2.5 text-gray-600 font-mono">{ev.field_changed || '\u2014'}</td>
+                    <td className="px-4 py-2.5">
+                      {ev.old_value || ev.new_value ? (
+                        <span className="text-gray-700">
+                          {ev.old_value && <span className="line-through text-red-500 mr-1">{ev.old_value}</span>}
+                          {ev.new_value && <span className="text-green-700">{ev.new_value}</span>}
+                        </span>
+                      ) : '\u2014'}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500">{formatDate(ev.created_at)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Tax disclaimer */}
       <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-xs text-gray-500">

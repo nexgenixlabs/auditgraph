@@ -204,6 +204,14 @@ from app.api.handlers import (
     deactivate_subscription,
     get_subscriptions_distinct,
     get_identity_subscriptions,
+    get_admin_tenant_billing,
+    update_admin_tenant_plan,
+    update_admin_tenant_commitment,
+    update_admin_tenant_platform_fee,
+    update_admin_cloud_rate,
+    get_admin_billing_summary,
+    get_admin_billing_events,
+    get_client_billing_summary,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -419,6 +427,49 @@ def create_app():
     @require_superadmin()
     def tenants_delete(tenant_id):
         return delete_tenant_handler(tenant_id)
+
+    # -----------------------
+    # Admin Billing API
+    # -----------------------
+    @app.get("/api/admin/tenants/<int:tenant_id>/billing")
+    @require_portal_access()
+    def admin_tenant_billing(tenant_id):
+        return get_admin_tenant_billing(tenant_id)
+
+    @app.put("/api/admin/tenants/<int:tenant_id>/plan")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_plan(tenant_id):
+        return update_admin_tenant_plan(tenant_id)
+
+    @app.put("/api/admin/tenants/<int:tenant_id>/commitment")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_commitment(tenant_id):
+        return update_admin_tenant_commitment(tenant_id)
+
+    @app.put("/api/admin/tenants/<int:tenant_id>/platform-fee")
+    @require_superadmin()
+    def admin_tenant_platform_fee(tenant_id):
+        return update_admin_tenant_platform_fee(tenant_id)
+
+    @app.put("/api/admin/tenants/<int:tenant_id>/clouds/<cloud>/rate")
+    @require_superadmin()
+    def admin_cloud_rate(tenant_id, cloud):
+        return update_admin_cloud_rate(tenant_id, cloud)
+
+    @app.get("/api/admin/billing/summary")
+    @require_portal_access()
+    def admin_billing_summary():
+        return get_admin_billing_summary()
+
+    @app.get("/api/admin/billing/events")
+    @require_portal_access()
+    def admin_billing_events():
+        return get_admin_billing_events()
+
+    @app.get("/api/client/billing/summary")
+    @require_role('admin', 'security_admin')
+    def client_billing_summary():
+        return get_client_billing_summary()
 
     @app.get("/api/tenant")
     def tenant_current():

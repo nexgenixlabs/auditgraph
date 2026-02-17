@@ -7,6 +7,7 @@ import {
   SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
   calculateMonthlyTotal, calculateCloudBaseTotal, calculateAddonTotal, calculateDiscountedMonthly,
   getEnabledClouds, getCloudPrice,
+  formatCents,
   type CloudConfig,
 } from '../../constants/pricing';
 
@@ -80,6 +81,10 @@ export default function AdminTenants() {
   const [configForm, setConfigForm] = useState<CloudConfig>(DEFAULT_CLOUD_CONFIG);
   const [configTerm, setConfigTerm] = useState(0);
   const [configSaving, setConfigSaving] = useState(false);
+  const [tenantBilling, setTenantBilling] = useState<{
+    billing: { platform_fee_cents: number; subscription_total_cents: number; net_monthly_cents: number; active_count: number; subscriptions_by_cloud: Record<string, { count: number; revenue_cents: number }> };
+    subscriptions: Array<{ cloud: string; rate_cents: number; monitored: boolean }>;
+  } | null>(null);
 
   const fetchTenants = useCallback(() => {
     fetch('/api/tenants')
@@ -126,14 +131,10 @@ export default function AdminTenants() {
 
   async function changePlan(t: Tenant, plan: string) {
     try {
-      const payload: Record<string, unknown> = { plan };
-      if ((plan === 'pro' || plan === 'enterprise' || plan === 'trial') && !t.license_activated_at) {
-        payload.license_activated_at = new Date().toISOString();
-      }
-      await fetch(`/api/tenants/${t.id}`, {
+      await fetch(`/api/admin/tenants/${t.id}/plan`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ plan }),
       });
       fetchTenants();
     } catch { /* ignore */ }
@@ -243,6 +244,12 @@ export default function AdminTenants() {
     setConfigForm({ cloud_providers: { ...DEFAULT_CLOUD_CONFIG.cloud_providers, ...cp }, addons: { ...DEFAULT_CLOUD_CONFIG.addons, ...addons } });
     setConfigTerm(t.subscription_term || 0);
     setShowConfigure(t);
+    setTenantBilling(null);
+    // Fetch billing data for this tenant
+    fetch(`/api/admin/tenants/${t.id}/billing`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setTenantBilling(data); })
+      .catch(() => {});
   }
 
   async function handleSaveConfig() {
@@ -681,6 +688,32 @@ export default function AdminTenants() {
               </div>
             )}
           </div>
+
+          {/* Per-Subscription Billing Summary */}
+          {!!tenantBilling && (
+            <div className="px-6 pb-4">
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Subscription Billing</h4>
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-600">Platform Fee</span>
+                  <span className="font-semibold text-gray-900">{formatCents(tenantBilling.billing.platform_fee_cents)}/mo</span>
+                </div>
+                {Object.entries(tenantBilling.billing.subscriptions_by_cloud).map(([cloud, data]) => (
+                  <div key={cloud} className="flex items-center justify-between text-xs">
+                    <span className="text-gray-600">{cloud.toUpperCase()} ({data.count} sub{data.count !== 1 ? 's' : ''})</span>
+                    <span className="font-semibold text-gray-900">{formatCents(data.revenue_cents)}/mo</span>
+                  </div>
+                ))}
+                {tenantBilling.billing.active_count === 0 && (
+                  <div className="text-[10px] text-gray-400">No active subscriptions</div>
+                )}
+                <div className="border-t border-gray-200 pt-2 mt-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-700">Net Monthly</span>
+                  <span className="text-sm font-bold text-gray-900">{formatCents(tenantBilling.billing.net_monthly_cents)}/mo</span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Dark Billing Summary Card */}
           <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">

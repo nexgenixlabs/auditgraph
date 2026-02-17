@@ -12851,12 +12851,30 @@ def check_feature_gate(feature_name):
 # ================================================================
 
 def get_subscriptions_list():
-    """GET /api/subscriptions — list cloud subscriptions for current tenant."""
+    """GET /api/subscriptions — list cloud subscriptions for current tenant.
+    For admin users, includes billing breakdown.
+    """
     db = _db()
     try:
         cloud = request.args.get('cloud')
-        subs = db.get_cloud_subscriptions(_tenant_id(), cloud=cloud)
-        return jsonify({'subscriptions': subs})
+        tid = _tenant_id()
+        subs = db.get_cloud_subscriptions(tid, cloud=cloud)
+        result = {'subscriptions': subs}
+
+        # Include billing for admin users
+        user = getattr(g, 'current_user', None)
+        role = user.get('role', '') if user else ''
+        if role in ('admin', 'security_admin'):
+            from app.pricing import calculate_billing
+            admin_db = Database()
+            try:
+                tenant = admin_db.get_tenant_by_id(tid)
+                if tenant:
+                    result['billing'] = calculate_billing(tenant, subs)
+            finally:
+                admin_db.close()
+
+        return jsonify(result)
     finally:
         db.close()
 
@@ -12880,9 +12898,24 @@ def activate_subscription():
         if not sub_id:
             return jsonify({'error': 'Subscription id is required'}), 400
 
+        tid = _tenant_id()
+
+        # Check plan limits before activation
+        from app.pricing import can_activate_subscription
+        admin_db = Database()
+        try:
+            tenant = admin_db.get_tenant_by_id(tid)
+            if tenant:
+                stats = db.get_subscription_stats(tid)
+                allowed, err_msg = can_activate_subscription(tenant, stats.get('active', 0))
+                if not allowed:
+                    return jsonify({'error': err_msg, 'upgrade_required': True}), 403
+        finally:
+            admin_db.close()
+
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
-        result = db.activate_cloud_subscription(sub_id, user_id, tenant_id=_tenant_id())
+        result = db.activate_cloud_subscription(sub_id, user_id, tenant_id=tid)
         if not result:
             return jsonify({'error': 'Subscription not found'}), 404
 
@@ -12981,5 +13014,261 @@ def get_identity_subscriptions(identity_id):
         return jsonify({'subscriptions': result, 'count': len(result)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+# ================================================================
+# Admin Billing API
+# ================================================================
+
+def get_admin_tenant_billing(tenant_id):
+    """GET /api/admin/tenants/<id>/billing — full billing breakdown for a tenant."""
+    from app.pricing import calculate_billing
+    db = Database()
+    try:
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+        subs = db.get_cloud_subscriptions(tenant_id)
+        billing = calculate_billing(tenant, subs)
+        events = db.get_billing_events(tenant_id=tenant_id, limit=20)
+        return jsonify({
+            'tenant': tenant,
+            'billing': billing,
+            'subscriptions': subs,
+            'recent_events': events,
+        })
+    finally:
+        db.close()
+
+
+def update_admin_tenant_plan(tenant_id):
+    """PUT /api/admin/tenants/<id>/plan — change plan and auto-set platform fee."""
+    from app.pricing import get_default_platform_fee
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        new_plan = data.get('plan')
+        if new_plan not in ('free', 'trial', 'pro', 'enterprise'):
+            return jsonify({'error': 'Invalid plan. Must be free, trial, pro, or enterprise.'}), 400
+
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        old_plan = tenant.get('plan')
+        new_fee = get_default_platform_fee(new_plan)
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+
+        updated = db.update_tenant(tenant_id, plan=new_plan, platform_fee_cents=new_fee)
+
+        db.log_billing_event(tenant_id, 'plan_change', 'plan',
+                             old_plan, new_plan, user_id,
+                             {'old_fee': tenant.get('platform_fee_cents'), 'new_fee': new_fee})
+
+        return jsonify({'tenant': updated, 'message': f'Plan updated to {new_plan}'})
+    finally:
+        db.close()
+
+
+def update_admin_tenant_commitment(tenant_id):
+    """PUT /api/admin/tenants/<id>/commitment — set commitment term and auto-set discount."""
+    from app.pricing import COMMITMENT_DISCOUNTS
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        term = data.get('subscription_term')
+        if term not in (0, 1, 3, 5):
+            return jsonify({'error': 'Invalid term. Must be 0, 1, 3, or 5.'}), 400
+
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        old_term = tenant.get('subscription_term', 0)
+        discount_pct = COMMITMENT_DISCOUNTS.get(term, 0) * 100  # store as percentage
+
+        updates = {
+            'subscription_term': term,
+            'discount_pct': discount_pct,
+        }
+
+        # Auto-set license dates for commitment terms
+        if term > 0:
+            if not tenant.get('license_activated_at'):
+                updates['license_activated_at'] = datetime.now(timezone.utc).isoformat()
+            activated = tenant.get('license_activated_at') or datetime.now(timezone.utc).isoformat()
+            if isinstance(activated, str):
+                activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
+            # Add years by replacing year (handles leap years gracefully)
+            try:
+                expires = activated.replace(year=activated.year + term)
+            except ValueError:
+                # Feb 29 edge case — fall back to Feb 28
+                expires = activated.replace(year=activated.year + term, day=28)
+            updates['license_expires_at'] = expires.isoformat()
+        else:
+            updates['license_expires_at'] = None
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+
+        updated = db.update_tenant(tenant_id, **updates)
+
+        db.log_billing_event(tenant_id, 'commitment_change', 'subscription_term',
+                             old_term, term, user_id,
+                             {'old_discount': tenant.get('discount_pct'), 'new_discount': discount_pct})
+
+        return jsonify({'tenant': updated, 'message': f'Commitment updated to {term}-year term'})
+    finally:
+        db.close()
+
+
+def update_admin_tenant_platform_fee(tenant_id):
+    """PUT /api/admin/tenants/<id>/platform-fee — enterprise custom fee override."""
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        fee_cents = data.get('platform_fee_cents')
+        if not isinstance(fee_cents, int) or fee_cents < 0:
+            return jsonify({'error': 'platform_fee_cents must be a non-negative integer'}), 400
+
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        old_fee = tenant.get('platform_fee_cents')
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+
+        updated = db.update_tenant(tenant_id, platform_fee_cents=fee_cents)
+
+        db.log_billing_event(tenant_id, 'platform_fee_override', 'platform_fee_cents',
+                             old_fee, fee_cents, user_id)
+
+        return jsonify({'tenant': updated, 'message': 'Platform fee updated'})
+    finally:
+        db.close()
+
+
+def update_admin_cloud_rate(tenant_id, cloud):
+    """PUT /api/admin/tenants/<id>/clouds/<cloud>/rate — override per-sub rate."""
+    db = Database()
+    try:
+        if cloud not in ('azure', 'aws', 'gcp'):
+            return jsonify({'error': 'Invalid cloud. Must be azure, aws, or gcp.'}), 400
+
+        data = request.get_json(silent=True) or {}
+        rate_cents = data.get('rate_cents')
+        if not isinstance(rate_cents, int) or rate_cents < 0:
+            return jsonify({'error': 'rate_cents must be a non-negative integer'}), 400
+
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+
+        updated_count = db.update_cloud_subscription_rate(tenant_id, cloud, rate_cents)
+
+        db.log_billing_event(tenant_id, 'rate_override', f'{cloud}_rate_cents',
+                             None, rate_cents, user_id,
+                             {'cloud': cloud, 'updated_subscriptions': updated_count})
+
+        return jsonify({'updated': updated_count, 'message': f'{cloud} rate updated to {rate_cents} cents'})
+    finally:
+        db.close()
+
+
+def get_admin_billing_summary():
+    """GET /api/admin/billing/summary — aggregate billing across all tenants."""
+    from app.pricing import calculate_billing
+    db = Database()
+    try:
+        tenants = db.get_tenants()
+        total_mrr = 0
+        by_plan = {}
+        by_cloud = {}
+        tenant_billings = []
+
+        for t in tenants:
+            subs = db.get_cloud_subscriptions(t['id'])
+            billing = calculate_billing(t, subs)
+            net = billing['net_monthly_cents']
+            total_mrr += net
+
+            plan = t.get('plan', 'free')
+            if plan not in by_plan:
+                by_plan[plan] = {'count': 0, 'mrr_cents': 0}
+            by_plan[plan]['count'] += 1
+            by_plan[plan]['mrr_cents'] += net
+
+            for cloud_key, cloud_data in billing['subscriptions_by_cloud'].items():
+                if cloud_key not in by_cloud:
+                    by_cloud[cloud_key] = {'count': 0, 'revenue_cents': 0}
+                by_cloud[cloud_key]['count'] += cloud_data['count']
+                by_cloud[cloud_key]['revenue_cents'] += cloud_data['revenue_cents']
+
+            tenant_billings.append({
+                'tenant_id': t['id'],
+                'tenant_name': t.get('name'),
+                'plan': plan,
+                'active_subs': billing['active_count'],
+                'net_monthly_cents': net,
+            })
+
+        active_tenants = sum(1 for t in tenants if t.get('enabled'))
+
+        return jsonify({
+            'total_mrr_cents': total_mrr,
+            'projected_arr_cents': total_mrr * 12,
+            'total_tenants': len(tenants),
+            'active_tenants': active_tenants,
+            'by_plan': by_plan,
+            'by_cloud': by_cloud,
+            'tenants': tenant_billings,
+        })
+    finally:
+        db.close()
+
+
+def get_admin_billing_events():
+    """GET /api/admin/billing/events — paginated billing event audit trail."""
+    db = Database()
+    try:
+        tenant_id = request.args.get('tenant_id', type=int)
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        events = db.get_billing_events(tenant_id=tenant_id, limit=min(limit, 200), offset=offset)
+        return jsonify({'events': events})
+    finally:
+        db.close()
+
+
+def get_client_billing_summary():
+    """GET /api/client/billing/summary — read-only billing for client portal."""
+    from app.pricing import calculate_billing
+    tid = _tenant_id()
+    # Use admin DB for tenant lookup (tenants table has no RLS)
+    admin_db = Database()
+    try:
+        tenant = admin_db.get_tenant_by_id(tid)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+    finally:
+        admin_db.close()
+    # Use tenant-scoped DB for subscriptions
+    db = _db()
+    try:
+        subs = db.get_cloud_subscriptions(tid)
+        billing = calculate_billing(tenant, subs)
+        return jsonify({
+            'plan': tenant.get('plan'),
+            'billing': billing,
+        })
     finally:
         db.close()

@@ -6366,6 +6366,13 @@ class Database:
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS compliance_framework VARCHAR(100)")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS onboarding_stage VARCHAR(20) NOT NULL DEFAULT 'active'")
+        # Billing columns
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS platform_fee_cents INTEGER NOT NULL DEFAULT 20000")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_status VARCHAR(20) NOT NULL DEFAULT 'active'")
+        # Backfill: free/trial tenants get 0 platform fee
+        cursor.execute("UPDATE tenants SET platform_fee_cents = 0 WHERE plan IN ('free', 'trial') AND platform_fee_cents != 0")
         # Phase 78: Migrate growth→pro plan + API key role renames
         cursor.execute("UPDATE tenants SET plan = 'pro' WHERE plan = 'growth'")
         cursor.execute("UPDATE api_keys SET role = 'reader' WHERE role = 'auditor'")
@@ -6544,7 +6551,8 @@ class Database:
         self._ensure_tenants_table()
         allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at',
                    'subscription_term', 'primary_cloud', 'industry', 'compliance_framework', 'status',
-                   'onboarding_stage'}
+                   'onboarding_stage', 'platform_fee_cents', 'discount_pct', 'trial_expires_at',
+                   'billing_status'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_tenant_by_id(tenant_id)
@@ -6566,7 +6574,7 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
+        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at', 'trial_expires_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
@@ -6619,7 +6627,7 @@ class Database:
         tier3_tables = [
             'notifications', 'custom_risk_rules', 'copilot_conversations',
             'remediation_actions', 'ca_policies', 'drift_reports',
-            'cloud_subscriptions',
+            'cloud_subscriptions', 'billing_events',
         ]
         for tbl in tier3_tables:
             try:
@@ -7129,8 +7137,12 @@ class Database:
     # Cloud Subscriptions (per-account monitoring)
     # ================================================================
 
+    _cloud_subscriptions_ensured = False
+
     def _ensure_cloud_subscriptions_table(self):
         """Create cloud_subscriptions table if it doesn't exist."""
+        if Database._cloud_subscriptions_ensured:
+            return
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cloud_subscriptions (
@@ -7149,8 +7161,15 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_tenant ON cloud_subscriptions(tenant_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_cloud ON cloud_subscriptions(cloud)")
+        # Billing columns
+        cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS rate_cents INTEGER NOT NULL DEFAULT 6900")
+        cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS discovered_at TIMESTAMPTZ DEFAULT NOW()")
+        # Backfill rates by cloud
+        cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7900 WHERE cloud = 'aws' AND rate_cents = 6900")
+        cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7400 WHERE cloud = 'gcp' AND rate_cents = 6900")
         self.conn.commit()
         cursor.close()
+        Database._cloud_subscriptions_ensured = True
 
     def sync_cloud_subscriptions(self, tenant_id=None):
         """Backfill cloud_subscriptions from discovery data if empty.
@@ -7264,7 +7283,7 @@ class Database:
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
-            for ts in ('activated_at', 'created_at'):
+            for ts in ('activated_at', 'created_at', 'discovered_at'):
                 if r.get(ts):
                     r[ts] = r[ts].isoformat()
         return rows
@@ -7381,6 +7400,93 @@ class Database:
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
+
+    # ================================================================
+    # Billing Events (audit trail for billing changes)
+    # ================================================================
+
+    _billing_events_ensured = False
+
+    def _ensure_billing_events_table(self):
+        """Create billing_events table if it doesn't exist."""
+        if Database._billing_events_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS billing_events (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                event_type VARCHAR(50) NOT NULL,
+                field_changed VARCHAR(50),
+                old_value TEXT,
+                new_value TEXT,
+                changed_by INTEGER,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_events_tenant ON billing_events(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_events_created ON billing_events(created_at DESC)")
+        self.conn.commit()
+        cursor.close()
+        Database._billing_events_ensured = True
+
+    def log_billing_event(self, tenant_id, event_type, field_changed=None,
+                          old_value=None, new_value=None, changed_by=None, metadata=None):
+        """Insert a billing event and return it."""
+        self._ensure_billing_events_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO billing_events (tenant_id, event_type, field_changed, old_value, new_value, changed_by, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (tenant_id, event_type, field_changed,
+              str(old_value) if old_value is not None else None,
+              str(new_value) if new_value is not None else None,
+              changed_by, json.dumps(metadata or {})))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        if row.get('created_at'):
+            row['created_at'] = row['created_at'].isoformat()
+        return row
+
+    def get_billing_events(self, tenant_id=None, limit=50, offset=0):
+        """Get billing events with tenant name JOIN. Optionally filter by tenant_id."""
+        self._ensure_billing_events_table()
+        self._ensure_tenants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        query = """
+            SELECT be.*, t.name as tenant_name
+            FROM billing_events be
+            JOIN tenants t ON t.id = be.tenant_id
+        """
+        params = []
+        if tenant_id is not None:
+            query += " WHERE be.tenant_id = %s"
+            params.append(tenant_id)
+        query += " ORDER BY be.created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
+    def update_cloud_subscription_rate(self, tenant_id, cloud, rate_cents):
+        """Update per-subscription rate for all subs of a given cloud for a tenant."""
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE cloud_subscriptions SET rate_cents = %s
+            WHERE tenant_id = %s AND cloud = %s
+        """, (rate_cents, tenant_id, cloud))
+        updated = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return updated
 
     # ================================================================
     # Identity ↔ Subscription Access (multi-subscription model)
