@@ -227,6 +227,10 @@ from app.api.handlers import (
     delete_client_connection,
     test_client_connection,
     discover_client_connection,
+    get_rbac_hygiene_summary,
+    get_rbac_hygiene_findings,
+    run_rbac_hygiene_scan,
+    get_rbac_hygiene_history,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -1039,6 +1043,26 @@ def create_app():
     @app.get("/api/role-mining")
     def role_mining():
         return get_role_mining()
+
+    # -----------------------
+    # RBAC Hygiene (Phase 88)
+    # -----------------------
+    @app.get("/api/rbac-hygiene/summary")
+    def rbac_hygiene_summary():
+        return get_rbac_hygiene_summary()
+
+    @app.get("/api/rbac-hygiene/findings")
+    def rbac_hygiene_findings():
+        return get_rbac_hygiene_findings()
+
+    @app.post("/api/rbac-hygiene/scan")
+    @require_role('admin')
+    def rbac_hygiene_scan():
+        return run_rbac_hygiene_scan()
+
+    @app.get("/api/rbac-hygiene/history")
+    def rbac_hygiene_history():
+        return get_rbac_hygiene_history()
 
     # -----------------------
     # Historical Trends (Phase 20)

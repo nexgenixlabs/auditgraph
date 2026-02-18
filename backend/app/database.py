@@ -7525,6 +7525,71 @@ class Database:
         cursor.close()
         return count
 
+    # ─── RBAC Hygiene Methods ────────────────────────────────────────
+
+    def save_rbac_hygiene_scan(self, result: dict, run_id=None) -> int:
+        """Persist an RBAC hygiene scan result."""
+        _ensure_rbac_hygiene_table(self.conn)
+        cursor = self.conn.cursor()
+        import json as _json
+        summary = {
+            'by_rule': result.get('by_rule', {}),
+            'by_severity': result.get('by_severity', {}),
+            'grade': result.get('grade', 'F'),
+        }
+        cursor.execute("""
+            INSERT INTO rbac_hygiene_scans
+                (score, grade, total_assignments, total_findings, summary, findings,
+                 discovery_run_id, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            result.get('score', 0),
+            result.get('grade', 'F'),
+            result.get('total_assignments', 0),
+            result.get('total_findings', 0),
+            _json.dumps(summary),
+            _json.dumps(result.get('findings', [])),
+            run_id,
+            self._tenant_id or 0,
+        ))
+        scan_id = cursor.fetchone()[0]
+        self.conn.commit()
+        cursor.close()
+        return scan_id
+
+    def get_rbac_hygiene_latest(self) -> dict:
+        """Get the most recent RBAC hygiene scan result."""
+        _ensure_rbac_hygiene_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, score, grade, total_assignments, total_findings,
+                   summary, findings, discovery_run_id, created_at
+            FROM rbac_hygiene_scans
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return {}
+        return dict(row)
+
+    def get_rbac_hygiene_history(self, limit=10) -> list:
+        """Get RBAC hygiene scan history (summary only, no findings)."""
+        _ensure_rbac_hygiene_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, score, grade, total_assignments, total_findings,
+                   summary, created_at
+            FROM rbac_hygiene_scans
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
     def get_storage_stats(self) -> dict:
         """Return database storage statistics."""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -8978,3 +9043,34 @@ def _compute_gov_recommended_action(score, band, factors, is_dormant, is_unowned
     if is_managed:
         return 'None', 'Low-risk managed identity', 0
     return 'Approve', 'Low risk — approve current access', 0
+
+
+# ─── RBAC Hygiene Persistence ────────────────────────────────────────
+
+_rbac_hygiene_ensured = False
+
+def _ensure_rbac_hygiene_table(conn):
+    """Create rbac_hygiene_scans table for persisting hygiene analysis results."""
+    global _rbac_hygiene_ensured
+    if _rbac_hygiene_ensured:
+        return
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rbac_hygiene_scans (
+            id SERIAL PRIMARY KEY,
+            score INTEGER NOT NULL DEFAULT 0,
+            grade VARCHAR(2) NOT NULL DEFAULT 'F',
+            total_assignments INTEGER NOT NULL DEFAULT 0,
+            total_findings INTEGER NOT NULL DEFAULT 0,
+            summary JSONB NOT NULL DEFAULT '{}',
+            findings JSONB NOT NULL DEFAULT '[]',
+            discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+            tenant_id INTEGER NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rbac_hygiene_tenant ON rbac_hygiene_scans(tenant_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rbac_hygiene_created ON rbac_hygiene_scans(created_at DESC)")
+    conn.commit()
+    cursor.close()
+    _rbac_hygiene_ensured = True

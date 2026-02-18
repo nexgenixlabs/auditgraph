@@ -49,6 +49,7 @@ import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
 import Subscriptions from './pages/Subscriptions';
+import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
 import Overview from './pages/Overview';
 import SearchModal from './components/SearchModal';
@@ -256,6 +257,7 @@ function AppContent() {
                   <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
                   <Route path="/spns" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SPNDashboard /></ErrorBoundary>} />
                   <Route path="/app-registrations" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
+                  <Route path="/rbac-hygiene" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RbacHygiene /></ErrorBoundary>} />
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />

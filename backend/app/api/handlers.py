@@ -14406,3 +14406,116 @@ def get_client_invoice(invoice_id):
         return jsonify({'invoice': invoice})
     finally:
         db.close()
+
+
+# ─── RBAC Hygiene Endpoints ────────────────────────────────────────────
+
+def get_rbac_hygiene_summary():
+    """GET /api/rbac-hygiene/summary — latest hygiene scan summary + score."""
+    db = _db()
+    try:
+        latest = db.get_rbac_hygiene_latest()
+        if not latest:
+            return jsonify({
+                'score': None,
+                'grade': None,
+                'total_assignments': 0,
+                'total_findings': 0,
+                'by_rule': {},
+                'by_severity': {},
+                'analyzed_at': None,
+                'has_data': False,
+            })
+        summary = latest.get('summary', {})
+        return jsonify({
+            'score': latest['score'],
+            'grade': latest['grade'],
+            'total_assignments': latest['total_assignments'],
+            'total_findings': latest['total_findings'],
+            'by_rule': summary.get('by_rule', {}),
+            'by_severity': summary.get('by_severity', {}),
+            'analyzed_at': latest['created_at'].isoformat() if latest.get('created_at') else None,
+            'has_data': True,
+        })
+    finally:
+        db.close()
+
+
+def get_rbac_hygiene_findings():
+    """GET /api/rbac-hygiene/findings — paginated findings with filters."""
+    db = _db()
+    try:
+        latest = db.get_rbac_hygiene_latest()
+        if not latest or not latest.get('findings'):
+            return jsonify({'findings': [], 'total': 0})
+
+        findings = latest.get('findings', [])
+
+        # Apply filters
+        rule = request.args.get('rule', '')
+        severity = request.args.get('severity', '')
+        category = request.args.get('category', '')
+        search = request.args.get('search', '')
+        source = request.args.get('source', '')
+
+        if rule:
+            findings = [f for f in findings if f.get('rule') == rule]
+        if severity:
+            findings = [f for f in findings if f.get('severity') == severity]
+        if category:
+            findings = [f for f in findings if f.get('identity_category') == category]
+        if source:
+            findings = [f for f in findings if f.get('role_source') == source]
+        if search:
+            s = search.lower()
+            findings = [f for f in findings if
+                        s in (f.get('identity_name') or '').lower() or
+                        s in (f.get('role_name') or '').lower() or
+                        s in (f.get('title') or '').lower()]
+
+        total = len(findings)
+
+        # Sort by severity weight then risk_score
+        sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        findings.sort(key=lambda f: (sev_order.get(f.get('severity', 'low'), 9), -(f.get('risk_score', 0))))
+
+        # Paginate
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        findings = findings[offset:offset + limit]
+
+        return jsonify({'findings': findings, 'total': total})
+    finally:
+        db.close()
+
+
+def run_rbac_hygiene_scan():
+    """POST /api/rbac-hygiene/scan — trigger a fresh RBAC hygiene analysis."""
+    db = _db()
+    try:
+        from app.engines.rbac_hygiene import RbacHygieneEngine
+        engine = RbacHygieneEngine(db)
+        result = engine.run()
+        scan_id = db.save_rbac_hygiene_scan(result)
+        return jsonify({
+            'scan_id': scan_id,
+            'score': result['score'],
+            'grade': result['grade'],
+            'total_findings': result['total_findings'],
+            'total_assignments': result['total_assignments'],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_rbac_hygiene_history():
+    """GET /api/rbac-hygiene/history — score trend over time."""
+    db = _db()
+    try:
+        limit = min(request.args.get('limit', 10, type=int), 50)
+        history = db.get_rbac_hygiene_history(limit=limit)
+        return jsonify({'history': history})
+    finally:
+        db.close()
