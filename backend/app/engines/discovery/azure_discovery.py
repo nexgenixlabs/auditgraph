@@ -456,6 +456,7 @@ class AzureDiscoveryEngine:
                         'cloud': 'azure',
                         'tenant_id': self.tenant_id,
                         'source': 'entra',
+                        'permission_plane': 'entra_id',
                     }
 
                     # ──── STRICT DISCOVERY POLICY ────
@@ -1200,6 +1201,7 @@ class AzureDiscoveryEngine:
                     'cloud': 'azure',
                     'tenant_id': self.tenant_id,
                     'source': 'entra',
+                    'permission_plane': 'entra_id',
                     'is_federated': is_guest,  # Guest users are federated
                 })
 
@@ -2541,6 +2543,8 @@ class AzureDiscoveryEngine:
             
             # Set source for multi-cloud
             identity['source'] = 'azure'
+            if not identity.get('permission_plane'):
+                identity['permission_plane'] = 'entra_id'
             
             # For SPNs without created_datetime, calculate from roles or previous runs
             if not identity.get('created_datetime'):

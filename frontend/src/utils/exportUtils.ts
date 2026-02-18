@@ -54,6 +54,7 @@ export const IDENTITY_CSV_COLUMNS: CsvColumn[] = [
   { key: 'subscription_name', header: 'Subscription Name' },
   { key: 'subscription_id', header: 'Subscription ID' },
   { key: 'cloud', header: 'Cloud' },
+  { key: 'permission_plane', header: 'Permission Plane' },
   { key: 'risk_level', header: 'Risk Level' },
   { key: 'risk_score', header: 'Risk Score' },
   { key: 'privilege_tier', header: 'Privilege Tier' },

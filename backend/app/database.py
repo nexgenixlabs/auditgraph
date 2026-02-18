@@ -166,6 +166,7 @@ class Database:
         cursor.close()
 
     _risk_factors_col_ensured = False
+    _permission_plane_col_ensured = False
     _ms_flag_backfilled = False
 
     def backfill_microsoft_flag(self):
@@ -246,6 +247,38 @@ class Database:
             cursor.close()
         Database._ms_flag_backfilled = True
 
+    def ensure_permission_plane_column(self):
+        """Startup migration: add permission_plane column and backfill existing data."""
+        if Database._permission_plane_col_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS permission_plane VARCHAR(50)")
+            self.conn.commit()
+            # Backfill existing data
+            cursor.execute("""
+                UPDATE identities SET permission_plane = 'entra_id'
+                WHERE permission_plane IS NULL AND COALESCE(source_normalized, 'entra') = 'entra'
+            """)
+            cursor.execute("""
+                UPDATE identities SET permission_plane = 'rbac'
+                WHERE permission_plane IS NULL AND source_normalized = 'azure'
+            """)
+            cursor.execute("""
+                UPDATE identities SET permission_plane = 'entra_id'
+                WHERE permission_plane IS NULL
+            """)
+            self.conn.commit()
+            backfilled = cursor.rowcount
+            if backfilled > 0:
+                print(f"  📋 Backfilled permission_plane for existing identities")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ permission_plane migration error: {e}")
+        finally:
+            cursor.close()
+        Database._permission_plane_col_ensured = True
+
     def sweep_microsoft_flag(self, run_id: int):
         """Post-discovery sweep: mark remaining undetected Microsoft SPNs for a specific run.
 
@@ -301,6 +334,15 @@ class Database:
             except Exception:
                 self.conn.rollback()
             Database._risk_factors_col_ensured = True
+
+        # Ensure permission_plane column exists (main migration runs at startup via ensure_permission_plane_column)
+        if not Database._permission_plane_col_ensured:
+            try:
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS permission_plane VARCHAR(50)")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+            Database._permission_plane_col_ensured = True
 
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
@@ -358,6 +400,8 @@ class Database:
 
                 app_owner_org_id,
 
+                permission_plane,
+
                 tenant_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
@@ -370,6 +414,7 @@ class Database:
                 %s, %s,
                 %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s,
                 %s,
                 %s
             )
@@ -416,6 +461,8 @@ class Database:
                 last_seen_auth = EXCLUDED.last_seen_auth,
 
                 app_owner_org_id = EXCLUDED.app_owner_org_id,
+
+                permission_plane = EXCLUDED.permission_plane,
 
                 created_at = NOW()
             RETURNING id
@@ -469,6 +516,8 @@ class Database:
                 identity_data.get("last_sign_in"),  # last_seen_auth = last_sign_in
 
                 identity_data.get("app_owner_org_id"),  # appOwnerOrganizationId from Graph API
+
+                identity_data.get("permission_plane", "entra_id"),
 
                 self._tenant_id,
             ),
@@ -2640,6 +2689,7 @@ class Database:
                 'identity_category': f['identity_category'],
                 'role_name': f['role_name'],
                 'source': f['source'],
+                'permission_plane': 'rbac' if f['source'] == 'azure' else 'entra_id',
                 'type': f['finding_type'],
                 'risk_level': f['risk_level'],
                 'days_since_assigned': f['days_since_assigned'],
@@ -2649,13 +2699,15 @@ class Database:
 
         # Role frequency: top 10
         cursor.execute("""
-            SELECT role_name, source, COUNT(*) as assignment_count FROM (
-                SELECT r.role_name, 'azure' as source FROM role_assignments r
+            SELECT role_name, source, permission_plane, COUNT(*) as assignment_count FROM (
+                SELECT r.role_name, 'azure' as source, 'rbac' as permission_plane
+                FROM role_assignments r
                 JOIN identities i ON r.identity_db_id = i.id WHERE i.discovery_run_id = %s
                 UNION ALL
-                SELECT e.role_name, 'entra' as source FROM entra_role_assignments e
+                SELECT e.role_name, 'entra' as source, 'entra_id' as permission_plane
+                FROM entra_role_assignments e
                 JOIN identities i ON e.identity_db_id = i.id WHERE i.discovery_run_id = %s
-            ) combined GROUP BY role_name, source ORDER BY assignment_count DESC LIMIT 10
+            ) combined GROUP BY role_name, source, permission_plane ORDER BY assignment_count DESC LIMIT 10
         """, (latest_run, latest_run))
         role_frequency = [dict(r) for r in cursor.fetchall()]
 

@@ -113,6 +113,41 @@ export const CLOUD_BADGE: Record<string, string> = {
   gcp:   'bg-red-100 text-red-700',
 };
 
+// ── Permission Planes ────────────────────────────────────────────────
+
+export const PERMISSION_PLANE_CONFIG: Record<string, { label: string; badgeClass: string }> = {
+  rbac:       { label: 'RBAC',       badgeClass: 'border border-sky-300 text-sky-600 bg-sky-50' },
+  entra_id:   { label: 'Entra ID',   badgeClass: 'border border-indigo-300 text-indigo-600 bg-indigo-50' },
+  iam:        { label: 'IAM',        badgeClass: 'border border-orange-300 text-orange-600 bg-orange-50' },
+  org_policy: { label: 'Org Policy', badgeClass: 'border border-teal-300 text-teal-600 bg-teal-50' },
+};
+
+export const CLOUD_PERMISSION_PLANES: Record<string, string[]> = {
+  azure: ['rbac', 'entra_id'],
+  aws:   ['iam', 'org_policy'],
+  gcp:   ['iam', 'org_policy'],
+};
+
+export const PERMISSION_PLANE_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'All Planes' },
+  { value: 'rbac', label: 'RBAC' },
+  { value: 'entra_id', label: 'Entra ID' },
+  { value: 'iam', label: 'IAM' },
+  { value: 'org_policy', label: 'Org Policy' },
+];
+
+export function getPermissionPlaneLabel(plane?: string): string {
+  return PERMISSION_PLANE_CONFIG[plane || '']?.label || plane || 'Unknown';
+}
+
+/** Map legacy source values to permission plane */
+export function toPermissionPlane(source?: string, permissionPlane?: string): string {
+  if (permissionPlane) return permissionPlane;
+  if (source === 'entra') return 'entra_id';
+  if (source === 'azure') return 'rbac';
+  return source || 'unknown';
+}
+
 // ── Thresholds ───────────────────────────────────────────────────────
 
 export const THRESHOLDS = {

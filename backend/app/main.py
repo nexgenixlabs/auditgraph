@@ -259,6 +259,7 @@ def create_app():
         _db_init = _DbInit()
         _db_init._ensure_identity_subscription_access_table()
         _db_init.backfill_microsoft_flag()
+        _db_init.ensure_permission_plane_column()
         _db_init.close()
     except Exception as e:
         print(f"  ⚠️ Could not ensure tables/backfill: {e}")

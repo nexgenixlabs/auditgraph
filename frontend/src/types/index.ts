@@ -43,6 +43,7 @@ export interface Identity {
   identity_type: string;
   identity_category?: string;  // Legacy category (kept for backwards compatibility)
   source?: string;
+  permission_plane?: 'rbac' | 'entra_id' | 'iam' | 'org_policy';
   risk_level: string;
 
   // Credential fields

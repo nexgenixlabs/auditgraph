@@ -122,6 +122,7 @@ class NormalizedRole:
     scope_type: str          # "tenant", "subscription", "resource_group", "resource"
     scope_id: str
     scope_name: str
+    permission_plane: str = ""   # "rbac", "entra_id", "iam", "org_policy"
     assigned_at: Optional[datetime] = None
     days_since_assigned: Optional[int] = None
     capabilities: Set[Cap] = field(default_factory=set)
@@ -203,6 +204,7 @@ class UnusedFinding:
     assignment_method: str
     recommendation: str
     evidence: Evidence
+    permission_plane: str = ""
     blast_radius: str = "low"
 
     def to_dict(self) -> dict:
@@ -418,9 +420,9 @@ class ToxicComboEngine:
         identity_name = first.identity_name
         identity_category = first.identity_category
 
-        # Separate by source for source-specific rules
-        azure_roles = [r for r in identity_roles if r.source == "azure"]
-        entra_roles = [r for r in identity_roles if r.source == "entra"]
+        # Separate by permission plane for plane-specific rules
+        azure_roles = [r for r in identity_roles if r.permission_plane == "rbac" or r.source == "azure"]
+        entra_roles = [r for r in identity_roles if r.permission_plane == "entra_id" or r.source == "entra"]
 
         for rule in TOXIC_RULES:
             matched = self._evaluate_rule(rule, identity_roles, azure_roles, entra_roles)
@@ -482,9 +484,9 @@ class ToxicComboEngine:
         """Check if a rule matches. Returns matched role objects + scope string, or None."""
         pool = all_roles
         if rule.required_source == "azure":
-            pool = azure_roles
+            pool = [r for r in all_roles if r.permission_plane == "rbac" or r.source == "azure"]
         elif rule.required_source == "entra":
-            pool = entra_roles
+            pool = [r for r in all_roles if r.permission_plane == "entra_id" or r.source == "entra"]
 
         if not pool:
             return None
@@ -934,6 +936,7 @@ class RoleMiningEngine:
                 identity_name=name or ident_id,
                 identity_category=cat or "unknown",
                 source="azure",
+                permission_plane="rbac",
                 role_name=role_name or "",
                 role_type="rbac",
                 assignment_method="direct",
@@ -978,6 +981,7 @@ class RoleMiningEngine:
                 identity_name=name or ident_id,
                 identity_category=cat or "unknown",
                 source="entra",
+                permission_plane="entra_id",
                 role_name=role_name or "",
                 role_type="entra",
                 assignment_method="direct",
@@ -1105,6 +1109,7 @@ class RoleMiningEngine:
                     identity_category=r.identity_category,
                     role_name=r.role_name,
                     source=r.source,
+                    permission_plane=r.permission_plane or ('rbac' if r.source == 'azure' else 'entra_id'),
                     finding_type=ftype,
                     risk_level=r.risk_level,
                     scope=r.scope_id,
@@ -1137,14 +1142,15 @@ class RoleMiningEngine:
 
     def _role_frequency(self, roles_by_identity: Dict[str, List[NormalizedRole]]) -> List[Dict]:
         """Top roles by assignment count."""
-        freq: Dict[Tuple[str, str], int] = {}
+        freq: Dict[Tuple[str, str, str], int] = {}
         for roles in roles_by_identity.values():
             for r in roles:
-                key = (r.role_name, r.source)
+                pp = r.permission_plane or ('rbac' if r.source == 'azure' else 'entra_id')
+                key = (r.role_name, r.source, pp)
                 freq[key] = freq.get(key, 0) + 1
 
         sorted_freq = sorted(freq.items(), key=lambda x: -x[1])[:15]
-        return [{"role_name": k[0], "source": k[1], "assignment_count": v}
+        return [{"role_name": k[0], "source": k[1], "permission_plane": k[2], "assignment_count": v}
                 for k, v in sorted_freq]
 
     def _redundant_to_dict(self, role: NormalizedRole, superseded_by: str) -> Dict:
@@ -1156,6 +1162,7 @@ class RoleMiningEngine:
             "identity_category": role.identity_category,
             "role_name": role.role_name,
             "source": role.source,
+            "permission_plane": role.permission_plane or ('rbac' if role.source == 'azure' else 'entra_id'),
             "scope": role.scope_id,
             "scope_type": role.scope_type,
             "superseded_by": superseded_by,
@@ -1178,6 +1185,7 @@ class RoleMiningEngine:
             "identity_category": role.identity_category,
             "role_name": role.role_name,
             "source": role.source,
+            "permission_plane": role.permission_plane or ('rbac' if role.source == 'azure' else 'entra_id'),
             "scope": role.scope_id,
             "scope_type": role.scope_type,
             "reason": reason,

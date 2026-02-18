@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { toPermissionPlane, PERMISSION_PLANE_CONFIG } from '../constants/metrics';
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -51,6 +52,7 @@ interface UnusedFinding {
   identity_category: string;
   role_name: string;
   source: string;
+  permission_plane?: string;
   finding_type: string;
   risk_level: string;
   scope: string | null;
@@ -68,6 +70,7 @@ interface RedundantFinding {
   identity_category: string;
   role_name: string;
   source: string;
+  permission_plane?: string;
   scope: string | null;
   scope_type: string;
   superseded_by: string;
@@ -83,6 +86,7 @@ interface OrphanedFinding {
   identity_category: string;
   role_name: string;
   source: string;
+  permission_plane?: string;
   scope: string | null;
   scope_type: string;
   reason: string;
@@ -97,6 +101,7 @@ interface Finding {
   identity_category: string;
   role_name: string;
   source: string;
+  permission_plane?: string;
   type: string;
   risk_level: string;
   days_since_assigned: number | null;
@@ -118,6 +123,7 @@ interface RoleBundle {
 interface RoleFrequency {
   role_name: string;
   source: string;
+  permission_plane?: string;
   assignment_count: number;
 }
 
@@ -195,7 +201,7 @@ export default function RoleMining() {
   const [riskFilter, setRiskFilter] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [confidenceFilter, setConfidenceFilter] = useState('');
-  const [sourceFilter, setSourceFilter] = useState('');
+  const [planeFilter, setPlaneFilter] = useState('');
   const [assignmentMethodFilter, setAssignmentMethodFilter] = useState('');
 
   // Evidence drawer
@@ -225,7 +231,7 @@ export default function RoleMining() {
     return data.findings.filter(f => {
       if (typeFilter && f.type !== typeFilter) return false;
       if (riskFilter && f.risk_level !== riskFilter) return false;
-      if (sourceFilter && f.source !== sourceFilter) return false;
+      if (planeFilter && toPermissionPlane(f.source, f.permission_plane) !== planeFilter) return false;
       if (assignmentMethodFilter && (f.assignment_method || 'direct') !== assignmentMethodFilter) return false;
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
@@ -233,7 +239,7 @@ export default function RoleMining() {
       }
       return true;
     });
-  }, [data, typeFilter, riskFilter, sourceFilter, assignmentMethodFilter, searchTerm]);
+  }, [data, typeFilter, riskFilter, planeFilter, assignmentMethodFilter, searchTerm]);
 
   const filteredToxic = useMemo(() => {
     if (!data) return [];
@@ -465,11 +471,11 @@ export default function RoleMining() {
               <option value="medium">Medium</option>
               <option value="low">Low</option>
             </select>
-            <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}
+            <select value={planeFilter} onChange={e => setPlaneFilter(e.target.value)}
               className="px-3 py-1.5 border rounded-lg text-sm bg-white">
-              <option value="">All Sources</option>
-              <option value="azure">Azure RBAC</option>
-              <option value="entra">Entra ID</option>
+              <option value="">All Planes</option>
+              <option value="rbac">RBAC</option>
+              <option value="entra_id">Entra ID</option>
             </select>
             <select value={assignmentMethodFilter} onChange={e => setAssignmentMethodFilter(e.target.value)}
               className="px-3 py-1.5 border rounded-lg text-sm bg-white">
@@ -512,7 +518,7 @@ export default function RoleMining() {
                     <th className="px-4 py-3 font-medium text-gray-600">Identity</th>
                     <th className="px-4 py-3 font-medium text-gray-600">Category</th>
                     <th className="px-4 py-3 font-medium text-gray-600">Role</th>
-                    <th className="px-4 py-3 font-medium text-gray-600">Source</th>
+                    <th className="px-4 py-3 font-medium text-gray-600">Plane</th>
                     <th className="px-4 py-3 font-medium text-gray-600">Type</th>
                     <th className="px-4 py-3 font-medium text-gray-600">Risk</th>
                     <th className="px-4 py-3 font-medium text-gray-600">Scope</th>
@@ -527,7 +533,7 @@ export default function RoleMining() {
                     const rc = RISK_COLORS[f.risk_level] || RISK_COLORS.unknown;
                     // Find matching unused finding for evidence link
                     const unusedMatch = unused_findings.find(
-                      u => u.identity_id === f.identity_id && u.role_name === f.role_name && u.source === f.source
+                      u => u.identity_id === f.identity_id && u.role_name === f.role_name && toPermissionPlane(u.source, u.permission_plane) === toPermissionPlane(f.source, f.permission_plane)
                     );
                     return (
                       <tr key={i} className="border-b last:border-b-0 hover:bg-gray-50 transition">
@@ -541,9 +547,15 @@ export default function RoleMining() {
                         </td>
                         <td className="px-4 py-3 font-medium text-gray-900 text-xs">{f.role_name}</td>
                         <td className="px-4 py-3">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            f.source === 'entra' ? 'bg-indigo-50 text-indigo-600' : 'bg-sky-50 text-sky-600'
-                          }`}>{f.source}</span>
+                          {(() => {
+                            const plane = toPermissionPlane(f.source, f.permission_plane);
+                            const pc = PERMISSION_PLANE_CONFIG[plane];
+                            return (
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${pc?.badgeClass || 'border border-gray-300 text-gray-600 bg-gray-50'}`}>
+                                {pc?.label || plane}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className="px-4 py-3">
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${tc.bg} ${tc.text}`}>{tc.label}</span>
@@ -598,9 +610,15 @@ export default function RoleMining() {
                   return (
                     <div key={i} className="flex items-center gap-3">
                       <div className="w-40 truncate text-xs text-gray-700 font-medium" title={r.role_name}>{r.role_name}</div>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${
-                        r.source === 'entra' ? 'bg-indigo-50 text-indigo-500' : 'bg-sky-50 text-sky-500'
-                      }`}>{r.source}</span>
+                      {(() => {
+                        const plane = toPermissionPlane(r.source, r.permission_plane);
+                        const pc = PERMISSION_PLANE_CONFIG[plane];
+                        return (
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${pc?.badgeClass || 'border border-gray-300 text-gray-600 bg-gray-50'}`}>
+                            {pc?.label || plane}
+                          </span>
+                        );
+                      })()}
                       <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
                         <div className="bg-blue-500 h-full rounded-full transition-all" style={{ width: `${pct}%` }} />
                       </div>
@@ -690,9 +708,15 @@ export default function RoleMining() {
                 <div className="text-xs text-gray-500 font-medium mb-1">Role</div>
                 <div className="text-sm font-medium text-gray-900">{evidenceDrawer.role_name}</div>
                 <div className="flex items-center gap-2 mt-1">
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                    evidenceDrawer.source === 'entra' ? 'bg-indigo-50 text-indigo-600' : 'bg-sky-50 text-sky-600'
-                  }`}>{evidenceDrawer.source}</span>
+                  {(() => {
+                    const plane = toPermissionPlane(evidenceDrawer.source, evidenceDrawer.permission_plane);
+                    const pc = PERMISSION_PLANE_CONFIG[plane];
+                    return (
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${pc?.badgeClass || 'border border-gray-300 text-gray-600 bg-gray-50'}`}>
+                        {pc?.label || plane}
+                      </span>
+                    );
+                  })()}
                   <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
                     BLAST_COLORS[evidenceDrawer.blast_radius] || BLAST_COLORS.low
                   }`}>Blast: {evidenceDrawer.blast_radius}</span>

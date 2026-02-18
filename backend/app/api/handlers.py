@@ -1622,6 +1622,7 @@ QUERY_FIELD_MAP = {
     'has_permanent_assignment': "COALESCE(i.has_permanent_assignment, false)",
     'ca_coverage_status':    "i.ca_coverage_status",
     'ca_mfa_enforced':       "COALESCE(i.ca_mfa_enforced, false)",
+    'permission_plane':      "COALESCE(i.permission_plane, 'entra_id')",
 }
 
 # Computed fields that require subqueries
@@ -1927,7 +1928,8 @@ def _identity_list_select():
                 ) THEN 'directory'
                 ELSE 'none'
             END as effective_scope,
-            COALESCE(i.is_microsoft_system, false) as is_microsoft_system
+            COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
+            COALESCE(i.permission_plane, 'entra_id') as permission_plane
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -1987,6 +1989,7 @@ def _map_identity_row(row):
         "additional_subscription_count": int(row[42] or 0),
         "effective_scope": row[43] if len(row) > 43 and row[43] else "none",
         "is_microsoft_system": bool(row[44]) if len(row) > 44 and row[44] is not None else False,
+        "permission_plane": row[45] if len(row) > 45 and row[45] else "entra_id",
         "privileged_level": "privileged" if int(row[34] or 3) == 0 else "elevated" if int(row[34] or 3) == 1 else "standard",
         "credential_health": (
             "none" if int(row[5] or 0) == 0
@@ -7652,6 +7655,7 @@ def get_query_fields():
         'credential_status': ['expired', 'critical', 'warning', 'good', 'unknown'],
         'credential_risk': ['expired', 'expiring_soon', 'healthy', 'unknown'],
         'ca_coverage_status': ['covered', 'no_coverage', 'excluded'],
+        'permission_plane': ['rbac', 'entra_id', 'iam', 'org_policy'],
     }
 
     return jsonify({
