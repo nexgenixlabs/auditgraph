@@ -71,6 +71,7 @@ export default function Overview() {
   const [cloudConfig, setCloudConfig] = useState<any>(null);
   const [identitySummary, setIdentitySummary] = useState<any>(null);
   const [driftData, setDriftData] = useState<any>(null);
+  const [prevScore, setPrevScore] = useState<number | null>(null);
   const [expandedPillar, setExpandedPillar] = useState<string | null>(null);
 
   useEffect(() => { setTimeout(() => setMounted(true), 50); }, []);
@@ -98,7 +99,15 @@ export default function Overview() {
         try { const r = await fetch(withConnection('/api/identity-summary')); if (r.ok) isJ = await r.json(); } catch {}
         let dJ: any = null;
         try { const r = await fetch(withConnection('/api/drift/latest')); if (r.ok) dJ = await r.json(); } catch {}
-        if (!c) { setStats(sJ); setInsights(iJ); setAs(asJ); setCompliance(cJ); setRemSum(rJ); setCloudConfig(ccJ); setIdentitySummary(isJ); setDriftData(dJ); }
+        let trendJ: any = null;
+        try { const r = await fetch(withConnection('/api/trends?limit=2')); if (r.ok) trendJ = await r.json(); } catch {}
+        // Compute previous score delta from trend data
+        let ps: number | null = null;
+        if (trendJ?.runs?.length >= 2) {
+          const runs = trendJ.runs;
+          ps = Math.round(runs[runs.length - 1].avg_risk_score - runs[runs.length - 2].avg_risk_score);
+        }
+        if (!c) { setStats(sJ); setInsights(iJ); setAs(asJ); setCompliance(cJ); setRemSum(rJ); setCloudConfig(ccJ); setIdentitySummary(isJ); setDriftData(dJ); setPrevScore(ps); }
       } catch {}
       if (!c) setLoading(false);
     })();
@@ -123,6 +132,7 @@ export default function Overview() {
   const di = as?.data_integrity;
   const plan = insights?.risk_reduction_plan ?? [];
   const improvPot = plan.reduce((s: number, i: any) => s + (i.estimated_risk_reduction_pct ?? 0), 0);
+  const delta30d = prevScore; // null if no history, positive = worsened, negative = improved
 
   const cloudCov = useMemo(() => {
     if (!cloudConfig) return null;
@@ -183,7 +193,7 @@ export default function Overview() {
               6-pillar weighted score across privilege, credentials, trust, usage, ownership, and exposure
             </div>
             <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
-              <MetaChip label="vs 30d" value={prev ? `${score > (as?.score ?? 0) ? '+' : ''}${0}` : '—'} color={C.textTer} />
+              <MetaChip label="vs 30d" value={delta30d !== null ? `${delta30d > 0 ? '+' : ''}${delta30d}` : '—'} color={delta30d !== null ? (delta30d < 0 ? C.good : delta30d > 0 ? C.critical : C.textTer) : C.textTer} />
               <MetaChip label="Industry" value="61" color={C.textSec} />
               <MetaChip label="Target" value="75" color={C.good} />
               <MetaChip label="Potential" value={`+${improvPot}`} color={C.accent} glow />
@@ -600,7 +610,7 @@ function MiniBar({ value, color }: { value: number; color: string }) {
 function StackedBar({ segments }: { segments: { value: number; color: string; label: string }[] }) {
   const total = segments.reduce((s, seg) => s + seg.value, 0) || 1;
   return (
-    <div style={{ display: 'flex', height: 24, borderRadius: 6, overflow: 'hidden', background: C.card }}>
+    <div style={{ display: 'flex', height: 26, borderRadius: 6, overflow: 'hidden', background: C.card }}>
       {segments.filter(s => s.value > 0).map((s, i) => {
         const w = (s.value / total) * 100;
         return (

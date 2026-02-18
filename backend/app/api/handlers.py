@@ -3110,7 +3110,9 @@ def get_attack_surface_score():
         except Exception:
             pass
 
+        confidence = 'High' if data_completeness_pct >= 90 else ('Medium' if data_completeness_pct >= 60 else 'Low')
         data_integrity = {
+            "confidence": confidence,
             "last_scan": last_scan,
             "total_scanned": r[0] or 0,
             "data_completeness_pct": data_completeness_pct,
