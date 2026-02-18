@@ -2,7 +2,7 @@ name: Build & Deploy AuditGraph (Container Apps)
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
   workflow_dispatch:
 
 env:
