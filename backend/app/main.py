@@ -212,6 +212,15 @@ from app.api.handlers import (
     get_admin_billing_summary,
     get_admin_billing_events,
     get_client_billing_summary,
+    get_platform_settings,
+    update_platform_settings_handler,
+    generate_invoice,
+    get_admin_invoices,
+    get_admin_invoice,
+    update_invoice_status_handler,
+    send_invoice_email,
+    get_client_invoices,
+    get_client_invoice,
     get_client_connections,
     create_client_connection,
     update_client_connection,
@@ -526,6 +535,55 @@ def create_app():
     @require_superadmin()
     def admin_client_cloud_rate(tenant_id, cloud):
         return update_admin_cloud_rate(tenant_id, cloud)
+
+    # -----------------------
+    # Platform Settings & Invoices
+    # -----------------------
+    @app.get("/api/admin/platform-settings")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_platform_settings_get():
+        return get_platform_settings()
+
+    @app.post("/api/admin/platform-settings")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_platform_settings_update():
+        return update_platform_settings_handler()
+
+    @app.post("/api/admin/tenants/<int:tenant_id>/invoices")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_generate_invoice(tenant_id):
+        return generate_invoice(tenant_id)
+
+    @app.get("/api/admin/invoices")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_invoices_list():
+        return get_admin_invoices()
+
+    @app.get("/api/admin/invoices/<int:invoice_id>")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_invoice_detail(invoice_id):
+        return get_admin_invoice(invoice_id)
+
+    @app.patch("/api/admin/invoices/<int:invoice_id>/status")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_invoice_status(invoice_id):
+        return update_invoice_status_handler(invoice_id)
+
+    @app.post("/api/admin/invoices/<int:invoice_id>/send")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_invoice_send(invoice_id):
+        return send_invoice_email(invoice_id)
+
+    # Client Invoice Endpoints
+    @app.get("/api/client/invoices")
+    @require_role('admin', 'security_admin')
+    def client_invoices_list():
+        return get_client_invoices()
+
+    @app.get("/api/client/invoices/<int:invoice_id>")
+    @require_role('admin', 'security_admin')
+    def client_invoice_detail(invoice_id):
+        return get_client_invoice(invoice_id)
 
     @app.get("/api/tenant")
     def tenant_current():

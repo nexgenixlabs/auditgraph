@@ -127,6 +127,49 @@ def calculate_billing(tenant_dict: dict, subscription_list: list) -> dict:
     }
 
 
+def calculate_invoice(tenant_dict: dict, subscription_list: list) -> dict:
+    """Compute full invoice breakdown for a tenant including tax.
+
+    Wraps calculate_billing() and adds tax computation based on tenant config.
+
+    Returns dict with all calculate_billing() fields plus:
+        subtotal_cents, tax_label, tax_rate, tax_amount_cents, total_cents,
+        and tax line item appended to line_items.
+    """
+    billing = calculate_billing(tenant_dict, subscription_list)
+
+    tax_rate = float(tenant_dict.get('tax_rate', 0))
+    tax_exempt = tenant_dict.get('tax_exempt', False)
+    tax_label = tenant_dict.get('tax_label', 'Tax')
+
+    subtotal = billing['net_monthly_cents']
+
+    if tax_exempt or tax_rate <= 0:
+        tax_amount = 0
+    else:
+        tax_amount = int(subtotal * tax_rate / 100)
+
+    total = subtotal + tax_amount
+
+    line_items = list(billing['line_items'])
+    if tax_amount > 0:
+        line_items.append({
+            'label': f'{tax_label} ({tax_rate}%)',
+            'amount_cents': tax_amount,
+            'type': 'tax',
+        })
+
+    return {
+        **billing,
+        'subtotal_cents': subtotal,
+        'tax_label': tax_label,
+        'tax_rate': tax_rate,
+        'tax_amount_cents': tax_amount,
+        'total_cents': total,
+        'line_items': line_items,
+    }
+
+
 def can_activate_subscription(tenant_dict: dict, current_active_count: int):
     """Check if a tenant can activate another subscription.
 

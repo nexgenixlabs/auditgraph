@@ -881,6 +881,33 @@ def run_data_retention():
         logger.exception(e)
 
 
+def mark_overdue_invoices():
+    """Mark sent invoices past due_at as overdue. Runs daily at 02:00 UTC."""
+    from psycopg2.extras import RealDictCursor
+    logger.info("Checking for overdue invoices...")
+    db = Database()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE invoices SET status = 'overdue', updated_at = NOW()
+            WHERE status = 'sent' AND due_at < NOW()
+            RETURNING id, tenant_id, invoice_number
+        """)
+        rows = cursor.fetchall()
+        db.conn.commit()
+        cursor.close()
+        if rows:
+            logger.info(f"Marked {len(rows)} invoices as overdue")
+            for r in rows:
+                logger.info(f"  Invoice {r['invoice_number']} (tenant {r['tenant_id']})")
+        else:
+            logger.info("No overdue invoices found")
+    except Exception as e:
+        logger.error(f"Failed to mark overdue invoices: {e}")
+    finally:
+        db.close()
+
+
 # Global scheduler instance
 scheduler = None
 
@@ -955,6 +982,17 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Invoice auto-overdue — daily at 2:00 AM UTC
+    scheduler.add_job(
+        func=mark_overdue_invoices,
+        trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
+        id='mark_overdue_invoices',
+        name='Invoice Auto-Overdue (Daily, 02:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
 
@@ -962,6 +1000,7 @@ def start_scheduler():
     logger.info(f"📅 Discovery: Every {interval_hours} hours")
     logger.info(f"📊 Report: {report_name} (enabled={report_enabled})")
     logger.info("🗑️ Retention: Daily at 03:00 UTC")
+    logger.info("📋 Invoice overdue: Daily at 02:00 UTC")
 
     # Get next run times
     job = scheduler.get_job('scheduled_discovery')

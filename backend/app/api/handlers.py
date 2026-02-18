@@ -5304,6 +5304,17 @@ def auth_login():
                 pass
             return jsonify({'error': 'Invalid credentials'}), 401
 
+        # Portal access enforcement — runs regardless of tenant_slug
+        if portal == 'client':
+            # Block admin-portal users from client portal login
+            if user.get('is_superadmin') or user.get('portal_role') in ('superadmin', 'poweradmin', 'billing', 'reader'):
+                return jsonify({'error': 'Platform administrators must use the admin portal.'}), 403
+        elif portal == 'admin':
+            # Block client-only users from admin portal login
+            portal_role = user.get('portal_role')
+            if not user.get('is_superadmin') and portal_role not in ('superadmin', 'poweradmin', 'billing', 'reader'):
+                return jsonify({'error': 'Access denied. This portal is for platform administrators only.'}), 403
+
         # Phase 53: Tenant-scoped login enforcement
         if tenant_slug:
             target_tenant = db.get_tenant_by_slug(tenant_slug)
@@ -5311,9 +5322,6 @@ def auth_login():
                 return jsonify({'error': 'Organization not found'}), 404
             if not target_tenant.get('enabled'):
                 return jsonify({'error': 'Organization is disabled'}), 403
-            # Block superadmins from logging into client portals
-            if user.get('is_superadmin') and portal == 'client':
-                return jsonify({'error': 'Platform administrators must use the admin portal.'}), 403
             if not user.get('is_superadmin') and user.get('tenant_id') != target_tenant['id']:
                 return jsonify({'error': 'You do not belong to this organization'}), 403
 
@@ -13730,5 +13738,268 @@ def get_client_billing_summary():
             'plan': tenant.get('plan'),
             'billing': billing,
         })
+    finally:
+        db.close()
+
+
+# ─── Platform Settings ──────────────────────────────────────────────────
+
+def get_platform_settings():
+    """GET /api/admin/platform-settings — get seller/platform info."""
+    db = Database()
+    try:
+        return jsonify(db.get_platform_settings())
+    finally:
+        db.close()
+
+
+def update_platform_settings_handler():
+    """POST /api/admin/platform-settings — update seller/platform info."""
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        db.update_platform_settings(data)
+        return jsonify(db.get_platform_settings())
+    finally:
+        db.close()
+
+
+# ─── Invoice Handlers ───────────────────────────────────────────────────
+
+def generate_invoice(tenant_id):
+    """POST /api/admin/tenants/<id>/invoices — generate invoice for a billing period."""
+    from app.pricing import calculate_invoice
+    db = Database()
+    try:
+        tenant = db.get_tenant_by_id(tenant_id)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        data = request.get_json(silent=True) or {}
+        period_start = data.get('period_start')
+        period_end = data.get('period_end')
+        notes = data.get('notes', '')
+
+        if not period_start or not period_end:
+            return jsonify({'error': 'period_start and period_end are required'}), 400
+
+        subs = db.get_cloud_subscriptions(tenant_id)
+        invoice_data = calculate_invoice(tenant, subs)
+
+        platform_settings = db.get_platform_settings()
+        prefix = platform_settings.get('invoice_prefix', 'AG')
+        invoice_number = db.get_next_invoice_number(prefix)
+
+        payment_terms = tenant.get('payment_terms', 30)
+        issued_at = datetime.now(timezone.utc)
+        due_at = issued_at + timedelta(days=payment_terms)
+
+        seller_snapshot = {
+            'company_name': platform_settings.get('company_name', ''),
+            'address': platform_settings.get('company_address', ''),
+            'email': platform_settings.get('company_email', ''),
+            'phone': platform_settings.get('company_phone', ''),
+            'tax_id': platform_settings.get('company_tax_id', ''),
+        }
+        buyer_snapshot = {
+            'company_name': tenant.get('billing_company') or tenant.get('name'),
+            'address_line1': tenant.get('billing_address_line1', ''),
+            'address_line2': tenant.get('billing_address_line2', ''),
+            'city': tenant.get('billing_city', ''),
+            'state': tenant.get('billing_state', ''),
+            'postal_code': tenant.get('billing_postal_code', ''),
+            'country': tenant.get('billing_country', ''),
+            'email': tenant.get('billing_email', ''),
+            'tax_id': tenant.get('tax_id', ''),
+        }
+
+        user = getattr(g, 'current_user', None)
+        created_by = user.get('id') if user else None
+
+        discount_cents = abs(sum(
+            li['amount_cents'] for li in invoice_data['line_items'] if li.get('type') == 'discount'
+        ))
+
+        invoice = db.create_invoice(
+            tenant_id=tenant_id,
+            invoice_number=invoice_number,
+            period_start=period_start,
+            period_end=period_end,
+            subtotal_cents=invoice_data['subtotal_cents'],
+            tax_label=invoice_data['tax_label'],
+            tax_rate=invoice_data['tax_rate'],
+            tax_amount_cents=invoice_data['tax_amount_cents'],
+            discount_cents=discount_cents,
+            total_cents=invoice_data['total_cents'],
+            line_items=invoice_data['line_items'],
+            seller_snapshot=seller_snapshot,
+            buyer_snapshot=buyer_snapshot,
+            due_at=due_at.isoformat(),
+            notes=notes,
+            payment_terms=payment_terms,
+            created_by=created_by,
+        )
+
+        db.log_billing_event(tenant_id, 'invoice_generated', 'invoice',
+                             None, invoice_number, created_by,
+                             {'total_cents': invoice_data['total_cents']})
+
+        return jsonify({'invoice': invoice}), 201
+    finally:
+        db.close()
+
+
+def get_admin_invoices():
+    """GET /api/admin/invoices — all invoices with optional filters."""
+    db = Database()
+    try:
+        tenant_id = request.args.get('tenant_id', type=int)
+        status = request.args.get('status')
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        invoices = db.get_invoices(tenant_id=tenant_id, status=status, limit=limit, offset=offset)
+        return jsonify({'invoices': invoices})
+    finally:
+        db.close()
+
+
+def get_admin_invoice(invoice_id):
+    """GET /api/admin/invoices/<id> — single invoice detail."""
+    db = Database()
+    try:
+        invoice = db.get_invoice_by_id(invoice_id)
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+        return jsonify({'invoice': invoice})
+    finally:
+        db.close()
+
+
+def update_invoice_status_handler(invoice_id):
+    """PATCH /api/admin/invoices/<id>/status — mark sent/paid/void."""
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        new_status = data.get('status', '').strip()
+        valid_transitions = {
+            'draft': ['sent', 'void'],
+            'sent': ['paid', 'void'],
+            'overdue': ['paid', 'void'],
+        }
+
+        invoice = db.get_invoice_by_id(invoice_id)
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+
+        current = invoice.get('status', 'draft')
+        if new_status not in valid_transitions.get(current, []):
+            return jsonify({'error': f'Cannot transition from {current} to {new_status}'}), 400
+
+        paid_at = None
+        voided_at = None
+        if new_status == 'paid':
+            paid_at = datetime.now(timezone.utc).isoformat()
+        elif new_status == 'void':
+            voided_at = datetime.now(timezone.utc).isoformat()
+
+        updated = db.update_invoice_status(invoice_id, new_status, paid_at=paid_at, voided_at=voided_at)
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_billing_event(invoice['tenant_id'], f'invoice_{new_status}', 'invoice',
+                             current, new_status, user_id,
+                             {'invoice_number': invoice.get('invoice_number')})
+
+        return jsonify({'invoice': updated})
+    finally:
+        db.close()
+
+
+def send_invoice_email(invoice_id):
+    """POST /api/admin/invoices/<id>/send — email invoice and mark as sent."""
+    db = Database()
+    try:
+        invoice = db.get_invoice_by_id(invoice_id)
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+
+        buyer = invoice.get('buyer_snapshot', {})
+        to_email = buyer.get('email', '')
+        if not to_email:
+            return jsonify({'error': 'No billing email configured for this tenant'}), 400
+
+        # Mark as sent if still draft
+        if invoice['status'] == 'draft':
+            db.update_invoice_status(invoice_id, 'sent')
+
+        from app.services.email_service import get_email_service
+        email_svc = get_email_service()
+        inv_num = invoice.get('invoice_number', '')
+        total = invoice.get('total_cents', 0)
+        due = invoice.get('due_at', '')
+
+        subject = f'Invoice {inv_num} from AuditGraph'
+        body = f"""
+        <h2>Invoice {inv_num}</h2>
+        <p>Dear {buyer.get('company_name', 'Customer')},</p>
+        <p>Please find your invoice details below:</p>
+        <table style="border-collapse:collapse;margin:16px 0">
+            <tr><td style="padding:4px 12px;font-weight:bold">Invoice Number</td><td style="padding:4px 12px">{inv_num}</td></tr>
+            <tr><td style="padding:4px 12px;font-weight:bold">Amount Due</td><td style="padding:4px 12px">${total/100:,.2f}</td></tr>
+            <tr><td style="padding:4px 12px;font-weight:bold">Due Date</td><td style="padding:4px 12px">{due[:10] if due else 'N/A'}</td></tr>
+        </table>
+        <p>You can view and download this invoice from your AuditGraph portal.</p>
+        <p>Thank you for your business.</p>
+        """
+        try:
+            email_svc.send_email(to_email, subject, body)
+        except Exception as e:
+            return jsonify({'error': f'Failed to send email: {str(e)}'}), 500
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_billing_event(invoice['tenant_id'], 'invoice_emailed', 'invoice',
+                             None, to_email, user_id,
+                             {'invoice_number': inv_num})
+
+        return jsonify({'message': f'Invoice emailed to {to_email}', 'invoice_number': inv_num})
+    finally:
+        db.close()
+
+
+# ─── Client Invoice Endpoints ────────────────────────────────────────────
+
+def get_client_invoices():
+    """GET /api/client/invoices — invoices for current tenant."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'No tenant context'}), 403
+    db = Database()
+    try:
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        invoices = db.get_invoices(tenant_id=tid, limit=limit, offset=offset)
+        # Only show non-draft invoices to clients
+        invoices = [inv for inv in invoices if inv.get('status') != 'draft']
+        return jsonify({'invoices': invoices})
+    finally:
+        db.close()
+
+
+def get_client_invoice(invoice_id):
+    """GET /api/client/invoices/<id> — single invoice for current tenant."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'No tenant context'}), 403
+    db = Database()
+    try:
+        invoice = db.get_invoice_by_id(invoice_id)
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+        if invoice.get('tenant_id') != tid:
+            return jsonify({'error': 'Access denied'}), 403
+        if invoice.get('status') == 'draft':
+            return jsonify({'error': 'Invoice not found'}), 404
+        return jsonify({'invoice': invoice})
     finally:
         db.close()

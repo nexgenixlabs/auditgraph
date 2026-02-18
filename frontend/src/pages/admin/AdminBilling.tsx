@@ -4,7 +4,9 @@ import {
   ACCOUNT_TIER_LABELS,
   getTermLabel,
   formatCents,
+  formatCentsExact,
 } from '../../constants/pricing';
+import { generateInvoicePdf, type Invoice } from '../../utils/invoicePdfGenerator';
 
 interface BillingSummary {
   total_mrr_cents: number;
@@ -45,6 +47,18 @@ interface TenantRow {
   subscription_term: number;
 }
 
+interface PlatformSettings {
+  company_name: string;
+  company_address: string;
+  company_email: string;
+  company_phone: string;
+  company_tax_id: string;
+  invoice_prefix: string;
+  invoice_footer: string;
+  logo_url: string;
+  [key: string]: string;
+}
+
 const PLAN_LABELS = ACCOUNT_TIER_LABELS;
 
 function formatDate(iso: string | null): string {
@@ -68,6 +82,11 @@ function eventTypeLabel(type: string): { text: string; color: string; bg: string
     case 'commitment_change': return { text: 'Commitment', color: 'text-purple-700', bg: 'bg-purple-100' };
     case 'platform_fee_override': return { text: 'Fee Override', color: 'text-orange-700', bg: 'bg-orange-100' };
     case 'rate_override': return { text: 'Rate Override', color: 'text-cyan-700', bg: 'bg-cyan-100' };
+    case 'invoice_generated': return { text: 'Invoice', color: 'text-green-700', bg: 'bg-green-100' };
+    case 'invoice_sent': return { text: 'Sent', color: 'text-blue-700', bg: 'bg-blue-100' };
+    case 'invoice_paid': return { text: 'Paid', color: 'text-green-700', bg: 'bg-green-100' };
+    case 'invoice_void': return { text: 'Voided', color: 'text-red-700', bg: 'bg-red-100' };
+    case 'invoice_emailed': return { text: 'Emailed', color: 'text-indigo-700', bg: 'bg-indigo-100' };
     default: return { text: type, color: 'text-gray-700', bg: 'bg-gray-100' };
   }
 }
@@ -93,6 +112,37 @@ export default function AdminBilling() {
   const [expandedTenant, setExpandedTenant] = useState<number | null>(null);
   const [expandedBilling, setExpandedBilling] = useState<TenantBillingDetail | null>(null);
   const [expandLoading, setExpandLoading] = useState(false);
+  // Invoice state
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [invoiceFilter, setInvoiceFilter] = useState('');
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [genTenantId, setGenTenantId] = useState<number | ''>('');
+  const [genPeriodStart, setGenPeriodStart] = useState('');
+  const [genPeriodEnd, setGenPeriodEnd] = useState('');
+  const [genNotes, setGenNotes] = useState('');
+  const [generating, setGenerating] = useState(false);
+  // Platform settings state
+  const [platformSettings, setPlatformSettings] = useState<PlatformSettings | null>(null);
+  const [editingSettings, setEditingSettings] = useState(false);
+  const [settingsForm, setSettingsForm] = useState<PlatformSettings>({
+    company_name: '', company_address: '', company_email: '', company_phone: '',
+    company_tax_id: '', invoice_prefix: 'AG', invoice_footer: 'Thank you for your business.', logo_url: '',
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  function fetchInvoices() {
+    const params = new URLSearchParams();
+    if (invoiceFilter) params.set('status', invoiceFilter);
+    fetch(`/api/admin/invoices?${params}`).then(r => r.ok ? r.json() : { invoices: [] })
+      .then(d => setInvoices(d.invoices || []))
+      .catch(() => {});
+  }
+
+  function fetchPlatformSettings() {
+    fetch('/api/admin/platform-settings').then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) { setPlatformSettings(d); setSettingsForm(prev => ({ ...prev, ...d })); } })
+      .catch(() => {});
+  }
 
   useEffect(() => {
     Promise.all([
@@ -107,7 +157,72 @@ export default function AdminBilling() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
+    fetchInvoices();
+    fetchPlatformSettings();
   }, []);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchInvoices(); }, [invoiceFilter]);
+
+  async function handleGenerateInvoice() {
+    if (!genTenantId || !genPeriodStart || !genPeriodEnd) return;
+    setGenerating(true);
+    try {
+      const res = await fetch(`/api/admin/tenants/${genTenantId}/invoices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period_start: genPeriodStart, period_end: genPeriodEnd, notes: genNotes }),
+      });
+      if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
+      setShowGenerate(false);
+      setGenTenantId(''); setGenPeriodStart(''); setGenPeriodEnd(''); setGenNotes('');
+      fetchInvoices();
+    } catch {
+      // error silently handled
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleInvoiceAction(invoiceId: number, action: string) {
+    if (action === 'download') {
+      const inv = invoices.find(i => i.id === invoiceId);
+      if (inv) generateInvoicePdf(inv);
+      return;
+    }
+    if (action === 'send') {
+      await fetch(`/api/admin/invoices/${invoiceId}/send`, { method: 'POST' });
+      fetchInvoices();
+      return;
+    }
+    // status change (paid, void)
+    await fetch(`/api/admin/invoices/${invoiceId}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: action }),
+    });
+    fetchInvoices();
+  }
+
+  async function handleSavePlatformSettings() {
+    setSavingSettings(true);
+    try {
+      const res = await fetch('/api/admin/platform-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settingsForm),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setPlatformSettings(d);
+        setEditingSettings(false);
+      }
+    } catch {
+      // error silently handled
+    } finally {
+      setSavingSettings(false);
+    }
+  }
 
   function toggleTenantExpand(tenantId: number) {
     if (expandedTenant === tenantId) {
@@ -424,6 +539,202 @@ export default function AdminBilling() {
           </table>
         </div>
       )}
+
+      {/* ─── Invoices Section ─── */}
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-800">Invoices</h3>
+          <div className="flex items-center gap-2">
+            <select
+              value={invoiceFilter}
+              onChange={e => setInvoiceFilter(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1"
+            >
+              <option value="">All Statuses</option>
+              <option value="draft">Draft</option>
+              <option value="sent">Sent</option>
+              <option value="paid">Paid</option>
+              <option value="overdue">Overdue</option>
+              <option value="void">Void</option>
+            </select>
+            <button
+              onClick={() => setShowGenerate(true)}
+              className="px-3 py-1 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 transition"
+            >
+              Generate Invoice
+            </button>
+          </div>
+        </div>
+
+        {/* Generate Invoice Modal */}
+        {showGenerate && (
+          <div className="px-4 py-3 bg-blue-50 border-b border-blue-200">
+            <div className="grid grid-cols-4 gap-3 mb-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Organization</label>
+                <select
+                  value={genTenantId}
+                  onChange={e => setGenTenantId(e.target.value ? parseInt(e.target.value) : '')}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                >
+                  <option value="">Select...</option>
+                  {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Period Start</label>
+                <input type="date" value={genPeriodStart} onChange={e => setGenPeriodStart(e.target.value)} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Period End</label>
+                <input type="date" value={genPeriodEnd} onChange={e => setGenPeriodEnd(e.target.value)} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Notes</label>
+                <input type="text" value={genNotes} onChange={e => setGenNotes(e.target.value)} placeholder="Optional" className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={handleGenerateInvoice}
+                disabled={generating || !genTenantId || !genPeriodStart || !genPeriodEnd}
+                className="px-3 py-1 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 disabled:opacity-50 transition"
+              >
+                {generating ? 'Generating...' : 'Create Invoice'}
+              </button>
+              <button onClick={() => setShowGenerate(false)} className="px-3 py-1 bg-gray-200 text-gray-700 text-xs font-semibold rounded hover:bg-gray-300 transition">Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {invoices.length > 0 ? (
+          <table className="min-w-full text-left text-xs">
+            <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase tracking-wider font-medium">
+              <tr>
+                <th className="px-4 py-2.5">Invoice #</th>
+                <th className="px-4 py-2.5">Organization</th>
+                <th className="px-4 py-2.5">Period</th>
+                <th className="px-4 py-2.5 text-right">Subtotal</th>
+                <th className="px-4 py-2.5 text-right">Tax</th>
+                <th className="px-4 py-2.5 text-right">Total</th>
+                <th className="px-4 py-2.5">Status</th>
+                <th className="px-4 py-2.5">Due Date</th>
+                <th className="px-4 py-2.5">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {invoices.map(inv => {
+                const statusStyles: Record<string, string> = {
+                  draft: 'bg-gray-100 text-gray-700',
+                  sent: 'bg-blue-100 text-blue-700',
+                  paid: 'bg-green-100 text-green-700',
+                  overdue: 'bg-red-100 text-red-700',
+                  void: 'bg-gray-100 text-gray-500 line-through',
+                };
+                return (
+                  <tr key={inv.id} className="hover:bg-gray-50/60">
+                    <td className="px-4 py-2.5 font-mono font-medium text-gray-900">{inv.invoice_number}</td>
+                    <td className="px-4 py-2.5 text-gray-700">{inv.tenant_name || `Tenant #${inv.tenant_id}`}</td>
+                    <td className="px-4 py-2.5 text-gray-600">
+                      {formatDate(inv.period_start)} — {formatDate(inv.period_end)}
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-gray-700">{formatCentsExact(inv.subtotal_cents)}</td>
+                    <td className="px-4 py-2.5 text-right text-gray-500">
+                      {inv.tax_amount_cents > 0 ? formatCentsExact(inv.tax_amount_cents) : '—'}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatCentsExact(inv.total_cents)}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${statusStyles[inv.status] || 'bg-gray-100 text-gray-600'}`}>
+                        {inv.status.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500">{formatDate(inv.due_at)}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-1.5">
+                        <button onClick={() => handleInvoiceAction(inv.id, 'download')} className="text-[10px] text-blue-600 hover:text-blue-800 font-medium">PDF</button>
+                        {inv.status === 'draft' && (
+                          <button onClick={() => handleInvoiceAction(inv.id, 'send')} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium">Send</button>
+                        )}
+                        {(inv.status === 'sent' || inv.status === 'overdue') && (
+                          <button onClick={() => handleInvoiceAction(inv.id, 'paid')} className="text-[10px] text-green-600 hover:text-green-800 font-medium">Mark Paid</button>
+                        )}
+                        {inv.status !== 'paid' && inv.status !== 'void' && (
+                          <button onClick={() => handleInvoiceAction(inv.id, 'void')} className="text-[10px] text-red-500 hover:text-red-700 font-medium">Void</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <div className="px-4 py-8 text-center text-xs text-gray-400">No invoices found. Click &quot;Generate Invoice&quot; to create one.</div>
+        )}
+      </div>
+
+      {/* ─── Platform Settings ─── */}
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-800">Platform Settings (Seller Info)</h3>
+          {!editingSettings && (
+            <button onClick={() => setEditingSettings(true)} className="text-[10px] text-blue-600 hover:text-blue-800 font-semibold">Edit</button>
+          )}
+        </div>
+        {editingSettings ? (
+          <div className="px-4 py-4 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Company Name</label>
+                <input type="text" value={settingsForm.company_name} onChange={e => setSettingsForm(p => ({ ...p, company_name: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Company Email</label>
+                <input type="email" value={settingsForm.company_email} onChange={e => setSettingsForm(p => ({ ...p, company_email: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Company Address</label>
+                <input type="text" value={settingsForm.company_address} onChange={e => setSettingsForm(p => ({ ...p, company_address: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Company Phone</label>
+                <input type="text" value={settingsForm.company_phone} onChange={e => setSettingsForm(p => ({ ...p, company_phone: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Tax ID</label>
+                <input type="text" value={settingsForm.company_tax_id} onChange={e => setSettingsForm(p => ({ ...p, company_tax_id: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Invoice Prefix</label>
+                <input type="text" value={settingsForm.invoice_prefix} onChange={e => setSettingsForm(p => ({ ...p, invoice_prefix: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Invoice Footer</label>
+                <input type="text" value={settingsForm.invoice_footer} onChange={e => setSettingsForm(p => ({ ...p, invoice_footer: e.target.value }))} className="w-full text-xs border border-gray-200 rounded px-2 py-1.5" />
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button onClick={handleSavePlatformSettings} disabled={savingSettings} className="px-3 py-1 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 disabled:opacity-50 transition">
+                {savingSettings ? 'Saving...' : 'Save Settings'}
+              </button>
+              <button onClick={() => setEditingSettings(false)} className="px-3 py-1 bg-gray-200 text-gray-700 text-xs font-semibold rounded hover:bg-gray-300 transition">Cancel</button>
+            </div>
+          </div>
+        ) : platformSettings ? (
+          <div className="px-4 py-3 grid grid-cols-4 gap-3 text-xs">
+            <div><span className="text-gray-500">Company</span><div className="font-medium text-gray-900">{platformSettings.company_name || '—'}</div></div>
+            <div><span className="text-gray-500">Email</span><div className="font-medium text-gray-900">{platformSettings.company_email || '—'}</div></div>
+            <div><span className="text-gray-500">Tax ID</span><div className="font-medium text-gray-900">{platformSettings.company_tax_id || '—'}</div></div>
+            <div><span className="text-gray-500">Prefix</span><div className="font-medium text-gray-900">{platformSettings.invoice_prefix || 'AG'}</div></div>
+          </div>
+        ) : (
+          <div className="px-4 py-3 text-xs text-gray-400">Loading platform settings...</div>
+        )}
+      </div>
 
       {/* Tax disclaimer */}
       <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-xs text-gray-500">

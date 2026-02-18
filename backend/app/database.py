@@ -6509,6 +6509,22 @@ class Database:
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMPTZ")
         cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_status VARCHAR(20) NOT NULL DEFAULT 'active'")
+        # Tax configuration
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_label VARCHAR(50) NOT NULL DEFAULT 'Tax'")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_id VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_exempt BOOLEAN NOT NULL DEFAULT false")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_notes TEXT")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS payment_terms INTEGER NOT NULL DEFAULT 30")
+        # Billing address
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_company VARCHAR(255)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_address_line1 VARCHAR(255)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_address_line2 VARCHAR(255)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_city VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_state VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_postal_code VARCHAR(20)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_country VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_email VARCHAR(255)")
         # Backfill: free/trial tenants get 0 platform fee
         cursor.execute("UPDATE tenants SET platform_fee_cents = 0 WHERE plan IN ('free', 'trial') AND platform_fee_cents != 0")
         # Phase 78: Migrate growth→pro plan + API key role renames
@@ -6618,9 +6634,14 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at'):
+        for ts in ('created_at', 'updated_at', 'license_activated_at', 'license_expires_at', 'trial_expires_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
+        # Ensure Decimal fields are float for JSON serialization
+        if result.get('tax_rate') is not None:
+            result['tax_rate'] = float(result['tax_rate'])
+        if result.get('discount_pct') is not None:
+            result['discount_pct'] = float(result['discount_pct'])
         return result
 
     def get_tenant_config(self, tenant_id):
@@ -6692,7 +6713,9 @@ class Database:
         allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at',
                    'subscription_term', 'primary_cloud', 'industry', 'compliance_framework', 'status',
                    'onboarding_stage', 'platform_fee_cents', 'discount_pct', 'trial_expires_at',
-                   'billing_status'}
+                   'billing_status', 'tax_label', 'tax_rate', 'tax_id', 'tax_exempt', 'tax_notes',
+                   'payment_terms', 'billing_company', 'billing_address_line1', 'billing_address_line2',
+                   'billing_city', 'billing_state', 'billing_postal_code', 'billing_country', 'billing_email'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_tenant_by_id(tenant_id)
@@ -7826,6 +7849,237 @@ class Database:
         self.conn.commit()
         cursor.close()
         return updated
+
+    # ================================================================
+    # Platform Settings (seller info for invoices)
+    # ================================================================
+
+    _platform_settings_ensured = False
+
+    def _ensure_platform_settings_table(self):
+        """Create platform_settings table if it doesn't exist."""
+        if Database._platform_settings_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS platform_settings (
+                key VARCHAR(100) PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        # Seed defaults
+        for k, v in [
+            ('company_name', 'AuditGraph Inc.'),
+            ('company_address', ''),
+            ('company_email', ''),
+            ('company_phone', ''),
+            ('company_tax_id', ''),
+            ('invoice_prefix', 'AG'),
+            ('invoice_footer', 'Thank you for your business.'),
+            ('logo_url', ''),
+        ]:
+            cursor.execute("""
+                INSERT INTO platform_settings (key, value) VALUES (%s, %s)
+                ON CONFLICT (key) DO NOTHING
+            """, (k, v))
+        self.conn.commit()
+        cursor.close()
+        Database._platform_settings_ensured = True
+
+    def get_platform_settings(self):
+        """Get all platform settings as a dict."""
+        self._ensure_platform_settings_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT key, value FROM platform_settings")
+        rows = cursor.fetchall()
+        cursor.close()
+        return {r['key']: r['value'] for r in rows}
+
+    def update_platform_settings(self, data):
+        """Update platform settings from a dict of key→value pairs."""
+        self._ensure_platform_settings_table()
+        allowed = {'company_name', 'company_address', 'company_email', 'company_phone',
+                   'company_tax_id', 'invoice_prefix', 'invoice_footer', 'logo_url'}
+        cursor = self.conn.cursor()
+        for k, v in data.items():
+            if k in allowed:
+                cursor.execute("""
+                    INSERT INTO platform_settings (key, value, updated_at) VALUES (%s, %s, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                """, (k, str(v) if v is not None else ''))
+        self.conn.commit()
+        cursor.close()
+
+    # ================================================================
+    # Invoices
+    # ================================================================
+
+    _invoices_ensured = False
+
+    def _ensure_invoices_table(self):
+        """Create invoices table if it doesn't exist."""
+        if Database._invoices_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                invoice_number VARCHAR(50) UNIQUE NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                period_start DATE NOT NULL,
+                period_end DATE NOT NULL,
+                subtotal_cents INTEGER NOT NULL DEFAULT 0,
+                tax_label VARCHAR(50),
+                tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0,
+                tax_amount_cents INTEGER NOT NULL DEFAULT 0,
+                discount_cents INTEGER NOT NULL DEFAULT 0,
+                total_cents INTEGER NOT NULL DEFAULT 0,
+                line_items JSONB NOT NULL DEFAULT '[]',
+                seller_snapshot JSONB NOT NULL DEFAULT '{}',
+                buyer_snapshot JSONB NOT NULL DEFAULT '{}',
+                issued_at TIMESTAMPTZ,
+                due_at TIMESTAMPTZ,
+                paid_at TIMESTAMPTZ,
+                voided_at TIMESTAMPTZ,
+                notes TEXT,
+                payment_terms INTEGER NOT NULL DEFAULT 30,
+                created_by INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_tenant ON invoices(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_number ON invoices(invoice_number)")
+        self.conn.commit()
+        cursor.close()
+        Database._invoices_ensured = True
+
+    def get_next_invoice_number(self, prefix='AG'):
+        """Generate next sequential invoice number like AG-2026-0001."""
+        self._ensure_invoices_table()
+        from datetime import datetime
+        year = datetime.now().year
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT invoice_number FROM invoices
+            WHERE invoice_number LIKE %s
+            ORDER BY invoice_number DESC LIMIT 1
+        """, (f'{prefix}-{year}-%',))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            try:
+                seq = int(row[0].split('-')[-1]) + 1
+            except (ValueError, IndexError):
+                seq = 1
+        else:
+            seq = 1
+        return f'{prefix}-{year}-{seq:04d}'
+
+    def create_invoice(self, tenant_id, invoice_number, period_start, period_end,
+                       subtotal_cents, tax_label, tax_rate, tax_amount_cents,
+                       discount_cents, total_cents, line_items, seller_snapshot,
+                       buyer_snapshot, due_at, notes, payment_terms, created_by):
+        """Create a new invoice and return it."""
+        self._ensure_invoices_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO invoices (
+                tenant_id, invoice_number, period_start, period_end,
+                subtotal_cents, tax_label, tax_rate, tax_amount_cents,
+                discount_cents, total_cents, line_items, seller_snapshot,
+                buyer_snapshot, issued_at, due_at, notes, payment_terms, created_by
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s)
+            RETURNING *
+        """, (tenant_id, invoice_number, period_start, period_end,
+              subtotal_cents, tax_label, tax_rate, tax_amount_cents,
+              discount_cents, total_cents, json.dumps(line_items), json.dumps(seller_snapshot),
+              json.dumps(buyer_snapshot), due_at, notes, payment_terms, created_by))
+        row = dict(cursor.fetchone())
+        self.conn.commit()
+        cursor.close()
+        return self._serialize_invoice(row)
+
+    def get_invoices(self, tenant_id=None, status=None, limit=50, offset=0):
+        """Get invoices with tenant name JOIN. Optionally filter by tenant_id and status."""
+        self._ensure_invoices_table()
+        self._ensure_tenants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        query = """
+            SELECT inv.*, t.name as tenant_name
+            FROM invoices inv
+            JOIN tenants t ON t.id = inv.tenant_id
+            WHERE 1=1
+        """
+        params = []
+        if tenant_id is not None:
+            query += " AND inv.tenant_id = %s"
+            params.append(tenant_id)
+        if status:
+            query += " AND inv.status = %s"
+            params.append(status)
+        query += " ORDER BY inv.created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return [self._serialize_invoice(r) for r in rows]
+
+    def get_invoice_by_id(self, invoice_id):
+        """Get a single invoice by ID with tenant name."""
+        self._ensure_invoices_table()
+        self._ensure_tenants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT inv.*, t.name as tenant_name
+            FROM invoices inv
+            JOIN tenants t ON t.id = inv.tenant_id
+            WHERE inv.id = %s
+        """, (invoice_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        return self._serialize_invoice(dict(row))
+
+    def update_invoice_status(self, invoice_id, status, paid_at=None, voided_at=None):
+        """Update invoice status and optional timestamp fields."""
+        self._ensure_invoices_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        set_parts = ["status = %s", "updated_at = NOW()"]
+        params = [status]
+        if paid_at:
+            set_parts.append("paid_at = %s")
+            params.append(paid_at)
+        if voided_at:
+            set_parts.append("voided_at = %s")
+            params.append(voided_at)
+        params.append(invoice_id)
+        cursor.execute(f"""
+            UPDATE invoices SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        return self._serialize_invoice(dict(row))
+
+    def _serialize_invoice(self, row):
+        """Serialize an invoice row for JSON response."""
+        for ts in ('created_at', 'updated_at', 'issued_at', 'due_at', 'paid_at', 'voided_at'):
+            if row.get(ts):
+                row[ts] = row[ts].isoformat() if hasattr(row[ts], 'isoformat') else row[ts]
+        for dt in ('period_start', 'period_end'):
+            if row.get(dt):
+                row[dt] = row[dt].isoformat() if hasattr(row[dt], 'isoformat') else row[dt]
+        if row.get('tax_rate') is not None:
+            row['tax_rate'] = float(row['tax_rate'])
+        return row
 
     # ================================================================
     # Identity ↔ Subscription Access (multi-subscription model)

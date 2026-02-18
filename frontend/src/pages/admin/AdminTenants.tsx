@@ -21,7 +21,55 @@ interface Tenant {
   license_expires_at: string | null;
   subscription_term: number;
   settings?: Record<string, unknown>;
+  tax_label?: string;
+  tax_rate?: number;
+  tax_id?: string;
+  tax_exempt?: boolean;
+  tax_notes?: string;
+  payment_terms?: number;
+  billing_company?: string;
+  billing_address_line1?: string;
+  billing_address_line2?: string;
+  billing_city?: string;
+  billing_state?: string;
+  billing_postal_code?: string;
+  billing_country?: string;
+  billing_email?: string;
 }
+
+interface TaxBillingForm {
+  tax_label: string;
+  tax_rate: number;
+  tax_id: string;
+  tax_exempt: boolean;
+  tax_notes: string;
+  payment_terms: number;
+  billing_company: string;
+  billing_address_line1: string;
+  billing_address_line2: string;
+  billing_city: string;
+  billing_state: string;
+  billing_postal_code: string;
+  billing_country: string;
+  billing_email: string;
+}
+
+const DEFAULT_TAX_BILLING: TaxBillingForm = {
+  tax_label: 'Tax',
+  tax_rate: 0,
+  tax_id: '',
+  tax_exempt: false,
+  tax_notes: '',
+  payment_terms: 30,
+  billing_company: '',
+  billing_address_line1: '',
+  billing_address_line2: '',
+  billing_city: '',
+  billing_state: '',
+  billing_postal_code: '',
+  billing_country: '',
+  billing_email: '',
+};
 
 interface ProvisionForm {
   admin_username: string;
@@ -79,6 +127,7 @@ export default function AdminTenants() {
   const [configForm, setConfigForm] = useState<CloudConfig>(DEFAULT_CLOUD_CONFIG);
   const [configTerm, setConfigTerm] = useState(0);
   const [configSaving, setConfigSaving] = useState(false);
+  const [taxBillingForm, setTaxBillingForm] = useState<TaxBillingForm>(DEFAULT_TAX_BILLING);
   const [tenantBilling, setTenantBilling] = useState<{
     billing: { platform_fee_cents: number; subscription_total_cents: number; net_monthly_cents: number; active_count: number; subscriptions_by_cloud: Record<string, { count: number; revenue_cents: number }> };
     subscriptions: Array<{ cloud: string; rate_cents: number; monitored: boolean }>;
@@ -241,6 +290,22 @@ export default function AdminTenants() {
     const addons = (settings.addons || DEFAULT_CLOUD_CONFIG.addons) as CloudConfig['addons'];
     setConfigForm({ cloud_providers: { ...DEFAULT_CLOUD_CONFIG.cloud_providers, ...cp }, addons: { ...DEFAULT_CLOUD_CONFIG.addons, ...addons } });
     setConfigTerm(t.subscription_term || 0);
+    setTaxBillingForm({
+      tax_label: t.tax_label || 'Tax',
+      tax_rate: t.tax_rate || 0,
+      tax_id: t.tax_id || '',
+      tax_exempt: t.tax_exempt || false,
+      tax_notes: t.tax_notes || '',
+      payment_terms: t.payment_terms || 30,
+      billing_company: t.billing_company || '',
+      billing_address_line1: t.billing_address_line1 || '',
+      billing_address_line2: t.billing_address_line2 || '',
+      billing_city: t.billing_city || '',
+      billing_state: t.billing_state || '',
+      billing_postal_code: t.billing_postal_code || '',
+      billing_country: t.billing_country || '',
+      billing_email: t.billing_email || '',
+    });
     setShowConfigure(t);
     setTenantBilling(null);
     // Fetch billing data for this tenant
@@ -261,7 +326,11 @@ export default function AdminTenants() {
         cloud_providers: configForm.cloud_providers,
         addons: configForm.addons,
       };
-      const payload: Record<string, unknown> = { settings: mergedSettings, subscription_term: configTerm };
+      const payload: Record<string, unknown> = {
+        settings: mergedSettings,
+        subscription_term: configTerm,
+        ...taxBillingForm,
+      };
       if (configTerm > 0 && !showConfigure.license_activated_at) {
         payload.license_activated_at = new Date().toISOString();
       }
@@ -716,6 +785,137 @@ export default function AdminTenants() {
               </div>
             </div>
           )}
+
+          {/* Tax & Billing Address */}
+          <div className="px-6 py-4 border-t border-gray-200">
+            <h4 className="text-xs font-bold text-gray-800 uppercase tracking-wider mb-3">Tax & Billing</h4>
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Tax Label</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.tax_label}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, tax_label: e.target.value }))}
+                  placeholder="Tax / GST / VAT"
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Tax Rate (%)</label>
+                <input
+                  type="number"
+                  value={taxBillingForm.tax_rate}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, tax_rate: parseFloat(e.target.value) || 0 }))}
+                  min={0} max={100} step={0.01}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Tax ID</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.tax_id}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, tax_id: e.target.value }))}
+                  placeholder="ABN / EIN / GST#"
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={taxBillingForm.tax_exempt}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, tax_exempt: e.target.checked }))}
+                  className="rounded border-gray-300"
+                />
+                <label className="text-xs text-gray-700">Tax Exempt</label>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Payment Terms</label>
+                <select
+                  value={taxBillingForm.payment_terms}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, payment_terms: parseInt(e.target.value) }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                >
+                  <option value={15}>Net 15</option>
+                  <option value={30}>Net 30</option>
+                  <option value={45}>Net 45</option>
+                  <option value={60}>Net 60</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Billing Email</label>
+                <input
+                  type="email"
+                  value={taxBillingForm.billing_email}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_email: e.target.value }))}
+                  placeholder="billing@company.com"
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Billing Company</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.billing_company}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_company: e.target.value }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Country</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.billing_country}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_country: e.target.value }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-3 mt-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Address Line 1</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.billing_address_line1}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_address_line1: e.target.value }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3 mt-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">City</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.billing_city}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_city: e.target.value }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">State</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.billing_state}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_state: e.target.value }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 mb-0.5">Postal Code</label>
+                <input
+                  type="text"
+                  value={taxBillingForm.billing_postal_code}
+                  onChange={e => setTaxBillingForm(p => ({ ...p, billing_postal_code: e.target.value }))}
+                  className="w-full text-xs border border-gray-200 rounded px-2 py-1.5"
+                />
+              </div>
+            </div>
+          </div>
 
           {/* Dark Billing Summary Card */}
           <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">

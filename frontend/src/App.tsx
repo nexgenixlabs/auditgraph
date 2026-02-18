@@ -49,6 +49,7 @@ import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
 import Subscriptions from './pages/Subscriptions';
+import Invoices from './pages/Invoices';
 import Overview from './pages/Overview';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -218,11 +219,6 @@ function AppContent() {
               {/* Top Bar */}
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
-              {/* Connection Switcher (shows only with 2+ connections) */}
-              <div className="fixed top-14 left-60 right-0 z-30">
-                <ConnectionSwitcher />
-              </div>
-
               {/* Left Sidebar */}
               <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} canManageConnections={canManageConnections} />
 
@@ -234,6 +230,8 @@ function AppContent() {
 
               {/* Page Content */}
               <main className="pl-60 pt-14 min-h-screen w-full overflow-x-hidden">
+                {/* Connection Switcher (shows only with 2+ connections, in normal flow) */}
+                <ConnectionSwitcher />
                 <Routes>
                   <Route path="/" element={
                     tenantStage !== 'active'
@@ -261,6 +259,7 @@ function AppContent() {
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
+                  <Route path="/invoices" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Invoices /></ErrorBoundary>} />
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><Settings /></ErrorBoundary>
