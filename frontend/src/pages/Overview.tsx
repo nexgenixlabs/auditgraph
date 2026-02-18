@@ -258,7 +258,18 @@ export default function Overview() {
 
       {/* Section 6: Compliance Posture Summary */}
       <CompliancePostureSummary
-        frameworks={compliance?.frameworks}
+        frameworks={compliance ? Object.values(compliance).map((fw: any) => ({
+          name: fw.name,
+          score: fw.score ?? 0,
+          pass_count: fw.pass_count ?? 0,
+          total_controls: fw.total_controls ?? 0,
+          tier: fw.tier,
+          category: fw.category,
+          short_name: fw.short_name,
+          identity_controls_count: fw.identity_controls_count,
+          total_framework_controls: fw.total_framework_controls,
+          scope_label: fw.scope_label,
+        })) : undefined}
         remediationPct={remediationSummary?.completion_pct}
         saGovernancePct={attackSurface?.governance?.dormant_cleanup_pct}
       />

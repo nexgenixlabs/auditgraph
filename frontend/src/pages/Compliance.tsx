@@ -43,6 +43,12 @@ interface IntelFramework {
   fail_count: number;
   total_controls: number;
   controls: IntelControl[];
+  tier?: string;
+  category?: string;
+  short_name?: string;
+  identity_controls_count?: number;
+  total_framework_controls?: number;
+  scope_label?: string;
 }
 
 interface RootCause {
@@ -73,6 +79,17 @@ interface TrendPoint {
   overall_score: number;
 }
 
+interface TierSummary {
+  tier: string;
+  category: string;
+  frameworks: number;
+  total_controls: number;
+  passing: number;
+  warnings: number;
+  failing: number;
+  score: number;
+}
+
 interface IntelligenceData {
   overall_score: number;
   risk_weighted_score: number;
@@ -85,6 +102,7 @@ interface IntelligenceData {
   frameworks: Record<string, IntelFramework>;
   root_causes: RootCause[];
   trend_mini: TrendPoint[];
+  tier_summary?: Record<string, TierSummary>;
   generated_at: string;
 }
 
@@ -187,6 +205,7 @@ export default function Compliance() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'controls' | 'rootcause'>('overview');
+  const [tierFilter, setTierFilter] = useState<string | null>(null);
   const [fwFilter, setFwFilter] = useState<string | null>(null);
   const [sevFilter, setSevFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
@@ -339,6 +358,59 @@ export default function Compliance() {
           </div>
         </div>
 
+        {/* ═══ Scope Banner ═══ */}
+        <div
+          className="rounded-xl px-5 py-3 flex items-center gap-3"
+          style={{ background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.12)' }}
+        >
+          <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ color: CI.accent }}>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs" style={{ color: CI.textSecondary }}>
+            <span style={{ fontWeight: 600, color: CI.accent }}>Scope: Identity, Access & Privilege Controls</span>
+            {' '}&mdash; AuditGraph evaluates {data.total_controls} identity controls across {Object.keys(data.frameworks).length} frameworks.
+            Full framework compliance requires additional assessments beyond identity posture.
+          </span>
+        </div>
+
+        {/* ═══ Tier Filter Tabs ═══ */}
+        {(() => {
+          const TIER_ORDER = ['core', 'industry', 'privacy', 'benchmark'];
+          const TIER_LABELS: Record<string, string> = {
+            core: 'Core', industry: 'Industry', privacy: 'Privacy', benchmark: 'Benchmarks',
+          };
+          const tiersPresent = TIER_ORDER.filter(t =>
+            Object.values(data.frameworks).some(fw => fw.tier === t)
+          );
+          return tiersPresent.length > 1 ? (
+            <div className="flex gap-1 rounded-lg p-1" style={{ background: 'rgba(255,255,255,0.03)' }}>
+              <button
+                onClick={() => setTierFilter(null)}
+                className="px-3 py-1.5 rounded-md text-xs font-medium transition-all"
+                style={{
+                  background: !tierFilter ? 'rgba(255,255,255,0.08)' : 'transparent',
+                  color: !tierFilter ? CI.text : CI.textMuted,
+                }}
+              >
+                All
+              </button>
+              {tiersPresent.map(tier => (
+                <button
+                  key={tier}
+                  onClick={() => setTierFilter(tierFilter === tier ? null : tier)}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium transition-all"
+                  style={{
+                    background: tierFilter === tier ? 'rgba(255,255,255,0.08)' : 'transparent',
+                    color: tierFilter === tier ? CI.text : CI.textMuted,
+                  }}
+                >
+                  {TIER_LABELS[tier] || tier}
+                </button>
+              ))}
+            </div>
+          ) : null;
+        })()}
+
         {/* ═══ Top Summary Row ═══ */}
         <div className="grid grid-cols-5 gap-4">
           {/* Risk Gauge */}
@@ -444,7 +516,7 @@ export default function Compliance() {
 
         {/* ═══ Tab Content ═══ */}
         <div className="ci-fade-up" key={activeTab}>
-          {activeTab === 'overview' && <OverviewTab data={data} onNavigate={(fw) => { setFwFilter(fw); setActiveTab('controls'); }} />}
+          {activeTab === 'overview' && <OverviewTab data={data} tierFilter={tierFilter} onNavigate={(fw) => { setFwFilter(fw); setActiveTab('controls'); }} />}
           {activeTab === 'controls' && (
             <ControlsTab
               data={data}
@@ -471,55 +543,98 @@ export default function Compliance() {
    Overview Tab
    ═══════════════════════════════════════════════ */
 
-function OverviewTab({ data, onNavigate }: { data: IntelligenceData; onNavigate: (fw: string) => void }) {
-  const frameworks = Object.entries(data.frameworks);
+const TIER_BADGE_COLORS: Record<string, { bg: string; text: string }> = {
+  core: { bg: 'rgba(139,92,246,0.15)', text: '#8B5CF6' },
+  industry: { bg: 'rgba(59,130,246,0.15)', text: '#3B82F6' },
+  privacy: { bg: 'rgba(16,185,129,0.15)', text: '#10B981' },
+  benchmark: { bg: 'rgba(245,158,11,0.15)', text: '#F59E0B' },
+};
+
+const TIER_SECTION_LABELS: Record<string, string> = {
+  core: 'Core Governance',
+  industry: 'Industry Specific',
+  privacy: 'Privacy & Data Protection',
+  benchmark: 'Technical Benchmarks',
+};
+
+function OverviewTab({ data, tierFilter, onNavigate }: { data: IntelligenceData; tierFilter: string | null; onNavigate: (fw: string) => void }) {
+  let frameworks = Object.entries(data.frameworks);
+  if (tierFilter) {
+    frameworks = frameworks.filter(([, fw]) => fw.tier === tierFilter);
+  }
+
+  // Group by tier for section headers
+  const TIER_ORDER = ['core', 'industry', 'privacy', 'benchmark'];
+  const tierGroups: Record<string, [string, IntelFramework][]> = {};
+  for (const entry of frameworks) {
+    const tier = entry[1].tier || 'core';
+    if (!tierGroups[tier]) tierGroups[tier] = [];
+    tierGroups[tier].push(entry);
+  }
+  const orderedTiers = TIER_ORDER.filter(t => tierGroups[t]?.length);
+
   return (
     <div className="space-y-6">
-      {/* Framework Grid */}
-      <div className="grid grid-cols-2 gap-4">
-        {frameworks.map(([key, fw]) => {
-          const pct = fw.total_controls ? Math.round((fw.pass_count / fw.total_controls) * 100) : 0;
-          const barColor = pct >= 80 ? CI.pass : pct >= 50 ? CI.warn : CI.fail;
-          return (
-            <button
-              key={key}
-              onClick={() => onNavigate(key)}
-              className="ci-fade-up rounded-xl p-5 text-left transition-all hover:scale-[1.01]"
-              style={{
-                background: CI.surface,
-                border: `1px solid ${CI.surfaceBorder}`,
-                cursor: 'pointer',
-              }}
-            >
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <span className="text-sm font-semibold" style={{ color: CI.text }}>{fw.name}</span>
-                  {fw.version && (
-                    <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium" style={{ background: 'rgba(255,255,255,0.06)', color: CI.textMuted }}>
-                      {fw.version}
+      {/* Framework Grid grouped by tier */}
+      {orderedTiers.map(tier => (
+        <div key={tier}>
+          {!tierFilter && orderedTiers.length > 1 && (
+            <div className="text-[10px] font-semibold uppercase tracking-widest mb-3" style={{ color: CI.textMuted, letterSpacing: 2 }}>
+              {TIER_SECTION_LABELS[tier] || tier}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-4">
+            {tierGroups[tier].map(([key, fw]) => {
+              const pct = fw.total_controls ? Math.round((fw.pass_count / fw.total_controls) * 100) : 0;
+              const barColor = pct >= 80 ? CI.pass : pct >= 50 ? CI.warn : CI.fail;
+              const tierBadge = TIER_BADGE_COLORS[fw.tier || 'core'] || TIER_BADGE_COLORS.core;
+              return (
+                <button
+                  key={key}
+                  onClick={() => onNavigate(key)}
+                  className="ci-fade-up rounded-xl p-5 text-left transition-all hover:scale-[1.01]"
+                  style={{
+                    background: CI.surface,
+                    border: `1px solid ${CI.surfaceBorder}`,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold" style={{ color: CI.text }}>{fw.short_name || fw.name}</span>
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase" style={{ background: tierBadge.bg, color: tierBadge.text }}>
+                          {fw.tier || 'core'}
+                        </span>
+                      </div>
+                      {!!fw.identity_controls_count && !!fw.total_framework_controls && fw.total_framework_controls > 0 && (
+                        <div className="text-[10px] mt-1" style={{ color: CI.textMuted }}>
+                          {fw.identity_controls_count} of {fw.total_framework_controls} controls assessed
+                        </div>
+                      )}
+                    </div>
+                    <span style={{ fontFamily: CI.mono, fontSize: 18, fontWeight: 700, color: barColor }}>
+                      {fw.risk_weighted_score}%
                     </span>
-                  )}
-                </div>
-                <span style={{ fontFamily: CI.mono, fontSize: 18, fontWeight: 700, color: barColor }}>
-                  {fw.risk_weighted_score}%
-                </span>
-              </div>
-              {/* Progress bar */}
-              <div className="w-full h-1.5 rounded-full" style={{ background: 'rgba(255,255,255,0.06)' }}>
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${pct}%`, background: barColor, transition: 'width 0.6s ease-out' }}
-                />
-              </div>
-              <div className="flex gap-4 mt-3 text-[11px]" style={{ color: CI.textMuted }}>
-                <span><span style={{ color: CI.pass, fontWeight: 600 }}>{fw.pass_count}</span> pass</span>
-                <span><span style={{ color: CI.warn, fontWeight: 600 }}>{fw.warn_count}</span> warn</span>
-                <span><span style={{ color: CI.fail, fontWeight: 600 }}>{fw.fail_count}</span> fail</span>
-              </div>
-            </button>
-          );
-        })}
-      </div>
+                  </div>
+                  {/* Progress bar */}
+                  <div className="w-full h-1.5 rounded-full" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${pct}%`, background: barColor, transition: 'width 0.6s ease-out' }}
+                    />
+                  </div>
+                  <div className="flex gap-4 mt-3 text-[11px]" style={{ color: CI.textMuted }}>
+                    <span><span style={{ color: CI.pass, fontWeight: 600 }}>{fw.pass_count}</span> pass</span>
+                    <span><span style={{ color: CI.warn, fontWeight: 600 }}>{fw.warn_count}</span> warn</span>
+                    <span><span style={{ color: CI.fail, fontWeight: 600 }}>{fw.fail_count}</span> fail</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
 
       {/* Top Root Causes Summary */}
       {data.root_causes.length > 0 && (

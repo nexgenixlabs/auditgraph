@@ -6,6 +6,12 @@ interface Framework {
   score: number;
   pass_count: number;
   total_controls: number;
+  tier?: string;
+  category?: string;
+  short_name?: string;
+  identity_controls_count?: number;
+  total_framework_controls?: number;
+  scope_label?: string;
 }
 
 interface CompliancePostureSummaryProps {
@@ -20,7 +26,10 @@ function scoreColor(pct: number): string {
   return '#EF4444';
 }
 
-function MiniDonut({ pct, label, passCount, totalControls }: { pct: number; label: string; passCount: number; totalControls: number }) {
+function MiniDonut({ pct, label, passCount, totalControls, identityControls, totalFrameworkControls }: {
+  pct: number; label: string; passCount: number; totalControls: number;
+  identityControls?: number; totalFrameworkControls?: number;
+}) {
   const color = scoreColor(pct);
   const r = 32;
   const circumference = 2 * Math.PI * r;
@@ -44,6 +53,11 @@ function MiniDonut({ pct, label, passCount, totalControls }: { pct: number; labe
       </div>
       <div className="text-[11px] font-semibold mt-1 text-center" style={{ color: COLORS.textPrimary }}>{label}</div>
       <div className="text-[9px]" style={{ color: COLORS.textMuted }}>{passCount}/{totalControls} controls</div>
+      {!!identityControls && !!totalFrameworkControls && totalFrameworkControls > 0 && (
+        <div className="text-[8px]" style={{ color: COLORS.textMuted }}>
+          {identityControls} of {totalFrameworkControls} assessed
+        </div>
+      )}
     </div>
   );
 }
@@ -63,37 +77,81 @@ function SummaryBar({ label, pct }: { label: string; pct: number }) {
   );
 }
 
-const DEFAULT_FRAMEWORKS = [
-  { name: 'CIS Azure', score: 0, pass_count: 0, total_controls: 0 },
-  { name: 'HIPAA', score: 0, pass_count: 0, total_controls: 0 },
-  { name: 'NIST 800-53', score: 0, pass_count: 0, total_controls: 0 },
-  { name: 'SOC 2', score: 0, pass_count: 0, total_controls: 0 },
-];
+const TIER_ORDER = ['core', 'industry', 'privacy', 'benchmark'];
+const TIER_LABELS: Record<string, string> = {
+  core: 'Core Governance',
+  industry: 'Industry Specific',
+  privacy: 'Privacy & Data Protection',
+  benchmark: 'Technical Benchmarks',
+};
 
 export default function CompliancePostureSummary({ frameworks, remediationPct, saGovernancePct }: CompliancePostureSummaryProps) {
-  const displayFrameworks = (frameworks && frameworks.length > 0)
-    ? frameworks.slice(0, 4)
-    : DEFAULT_FRAMEWORKS;
-
   const hasData = (frameworks && frameworks.length > 0) || remediationPct != null || saGovernancePct != null;
   if (!hasData) return null;
 
+  const displayFrameworks = frameworks && frameworks.length > 0 ? frameworks : [];
+
+  // Group by tier
+  const tierGroups: Record<string, Framework[]> = {};
+  for (const fw of displayFrameworks) {
+    const tier = fw.tier || 'core';
+    if (!tierGroups[tier]) tierGroups[tier] = [];
+    tierGroups[tier].push(fw);
+  }
+  const orderedTiers = TIER_ORDER.filter(t => tierGroups[t]?.length);
+
   return (
     <div>
-      <h3 className="text-[14px] font-bold mb-3" style={{ color: COLORS.textPrimary }}>Compliance Posture</h3>
+      <div className="flex items-center gap-3 mb-3">
+        <h3 className="text-[14px] font-bold" style={{ color: COLORS.textPrimary }}>Compliance Posture</h3>
+        <span className="text-[9px] px-2 py-0.5 rounded-full font-medium" style={{ background: 'rgba(139,92,246,0.1)', color: '#8B5CF6' }}>
+          Identity Controls Only
+        </span>
+      </div>
       <div className="bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
-        {/* Row 1: Framework donut rings */}
-        <div className="flex items-start justify-around mb-5">
-          {displayFrameworks.map(fw => (
-            <MiniDonut
-              key={fw.name}
-              pct={fw.score ?? 0}
-              label={fw.name}
-              passCount={fw.pass_count ?? 0}
-              totalControls={fw.total_controls ?? 0}
-            />
-          ))}
-        </div>
+        <p className="text-[10px] mb-4" style={{ color: COLORS.textMuted }}>
+          Assessing identity, access, and privilege controls only
+        </p>
+
+        {/* Tier-grouped framework donuts */}
+        {orderedTiers.map(tier => (
+          <div key={tier} className="mb-4 last:mb-0">
+            <div className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: COLORS.textMuted }}>
+              {TIER_LABELS[tier] || tier}
+            </div>
+            <div className="flex items-start justify-around flex-wrap gap-2">
+              {tierGroups[tier].map(fw => (
+                <MiniDonut
+                  key={fw.name}
+                  pct={fw.score ?? 0}
+                  label={fw.short_name || fw.name}
+                  passCount={fw.pass_count ?? 0}
+                  totalControls={fw.total_controls ?? 0}
+                  identityControls={fw.identity_controls_count}
+                  totalFrameworkControls={fw.total_framework_controls}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+
+        {/* Fallback if no tier data */}
+        {orderedTiers.length === 0 && displayFrameworks.length > 0 && (
+          <div className="flex items-start justify-around mb-5">
+            {displayFrameworks.slice(0, 6).map(fw => (
+              <MiniDonut
+                key={fw.name}
+                pct={fw.score ?? 0}
+                label={fw.short_name || fw.name}
+                passCount={fw.pass_count ?? 0}
+                totalControls={fw.total_controls ?? 0}
+                identityControls={fw.identity_controls_count}
+                totalFrameworkControls={fw.total_framework_controls}
+              />
+            ))}
+          </div>
+        )}
+
         {/* Row 2: Summary bars */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t" style={{ borderColor: COLORS.borderLight }}>
           <SummaryBar label="Remediation Progress" pct={remediationPct ?? 0} />

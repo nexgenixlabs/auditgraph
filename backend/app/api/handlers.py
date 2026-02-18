@@ -3294,6 +3294,67 @@ def _compute_compliance_metrics(cursor, run_ids):
     """, (run_ids,))
     no_credential_rotation = cursor.fetchone()[0]
 
+    # Shared/generic/test accounts (no_shared_accounts)
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND LOWER(COALESCE(i.display_name, '')) ~* '(shared|generic|test|temp|svc[-_]?test)'
+    """, (run_ids,))
+    no_shared_accounts = cursor.fetchone()[0]
+
+    # PIM coverage % (T0/T1 identities with PIM eligible assignments)
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND (
+            EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                AND LOWER(era.role_name) IN (
+                    'global administrator', 'privileged role administrator',
+                    'privileged authentication administrator',
+                    'application administrator', 'cloud application administrator',
+                    'hybrid identity administrator'
+                ))
+            OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                AND LOWER(ra.role_name) IN ('owner', 'user access administrator')
+                AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
+                     AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'))
+        )
+        AND EXISTS (SELECT 1 FROM pim_eligible_assignments pea WHERE pea.identity_db_id = i.id)
+    """, (run_ids,))
+    pim_eligible_t0 = cursor.fetchone()[0]
+    pim_coverage_pct = round(pim_eligible_t0 / max(t0_count, 1) * 100)
+
+    # Access reviews completed
+    try:
+        cursor.execute("SELECT COUNT(*) FROM access_reviews WHERE status = 'completed'")
+        access_reviews_completed = cursor.fetchone()[0]
+    except Exception:
+        access_reviews_completed = 0
+
+    # Managed identity % (MI vs SPN among NHIs)
+    cursor.execute(f"""
+        SELECT
+            COUNT(*) FILTER (WHERE LOWER(COALESCE(i.identity_category, '')) LIKE 'managed_identity%%') as mi_count,
+            COUNT(*) FILTER (WHERE LOWER(COALESCE(i.identity_category, '')) IN ('service_principal', 'managed_identity_system', 'managed_identity_user')) as nhi_count
+        FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+    """, (run_ids,))
+    row = cursor.fetchone()
+    mi_count = row[0] if row else 0
+    nhi_count = row[1] if row else 0
+    managed_identity_pct = round(mi_count / max(nhi_count, 1) * 100)
+
+    # Credential rotation compliance % (inverse of no_credential_rotation)
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND EXISTS (SELECT 1 FROM credentials c WHERE c.identity_db_id = i.id)
+    """, (run_ids,))
+    total_with_creds = cursor.fetchone()[0]
+    credential_rotation_compliance_pct = round(
+        (max(total_with_creds - no_credential_rotation, 0) / max(total_with_creds, 1)) * 100
+    )
+
     return {
         't0_count': t0_count,
         'dormant_privileged': dormant_privileged,
@@ -3305,6 +3366,11 @@ def _compute_compliance_metrics(cursor, run_ids):
         'excessive_permissions': excessive_permissions,
         'stale_accounts': stale_accounts,
         'no_credential_rotation': no_credential_rotation,
+        'no_shared_accounts': no_shared_accounts,
+        'pim_coverage_pct': pim_coverage_pct,
+        'access_reviews_completed': access_reviews_completed,
+        'managed_identity_pct': managed_identity_pct,
+        'credential_rotation_compliance_pct': credential_rotation_compliance_pct,
     }
 
 
@@ -3448,6 +3514,8 @@ def _compute_compliance_evidence(cursor, run_ids, needed_metrics):
 _FRAMEWORK_REF_PREFIX = {
     'soc2': 'SOC2', 'hipaa': 'HIPAA', 'pci_dss': 'PCI-DSS',
     'nist_800_53': 'NIST', 'cis_azure': 'CIS', 'iso_27001': 'ISO',
+    'nist_csf': 'NIST-CSF', 'sox': 'SOX', 'hitrust': 'HITRUST',
+    'gdpr': 'GDPR', 'ccpa': 'CCPA',
 }
 
 
@@ -3500,6 +3568,11 @@ def _format_metric_label(metric):
         'excessive_permissions': 'identities with excessive permissions',
         'stale_accounts': 'stale/unused accounts',
         'no_credential_rotation': 'credentials not rotated in 180+ days',
+        'no_shared_accounts': 'shared/generic/test accounts detected',
+        'pim_coverage_pct': '% T0 identities with PIM coverage',
+        'access_reviews_completed': 'completed access reviews',
+        'managed_identity_pct': '% NHI workloads using managed identities',
+        'credential_rotation_compliance_pct': '% credentials rotated within policy',
     }
     return labels.get(metric, metric)
 
@@ -3553,6 +3626,12 @@ def get_dashboard_compliance():
                 'warn_count': sum(1 for c in controls_out if c['status'] == 'warn'),
                 'fail_count': sum(1 for c in controls_out if c['status'] == 'fail'),
                 'total_controls': len(controls_out),
+                'tier': fw.get('tier', 'core'),
+                'category': fw.get('category', ''),
+                'short_name': fw.get('short_name', fw['name']),
+                'identity_controls_count': fw.get('identity_controls_count', len(controls_out)),
+                'total_framework_controls': fw.get('total_framework_controls', 0),
+                'scope_label': fw.get('scope_label', 'Identity, access, and privilege controls'),
             }
 
         return jsonify(scorecard)
@@ -3923,6 +4002,12 @@ def get_compliance_intelligence():
                 'fail_count': fw_fail,
                 'total_controls': n,
                 'controls': controls_out,
+                'tier': fw.get('tier', 'core'),
+                'category': fw.get('category', ''),
+                'short_name': fw.get('short_name', fw['name']),
+                'identity_controls_count': fw.get('identity_controls_count', n),
+                'total_framework_controls': fw.get('total_framework_controls', 0),
+                'scope_label': fw.get('scope_label', 'Identity, access, and privilege controls'),
             }
 
         overall_score = round(total_passing / total_controls * 100) if total_controls else 0
@@ -4017,6 +4102,21 @@ def get_compliance_intelligence():
                     ctrl['evidence_identities'] = evidence.get(ctrl['metric'], [])
                     ctrl['evidence_count'] = ctrl['value']
 
+        # Tier summary — aggregate scores by tier
+        tier_summary = {}
+        for fw_key, fw_data in fw_results.items():
+            tier = fw_data.get('tier', 'core')
+            if tier not in tier_summary:
+                tier_summary[tier] = {'tier': tier, 'category': fw_data.get('category', ''), 'frameworks': 0, 'total_controls': 0, 'passing': 0, 'warnings': 0, 'failing': 0}
+            ts = tier_summary[tier]
+            ts['frameworks'] += 1
+            ts['total_controls'] += fw_data['total_controls']
+            ts['passing'] += fw_data['pass_count']
+            ts['warnings'] += fw_data['warn_count']
+            ts['failing'] += fw_data['fail_count']
+        for ts in tier_summary.values():
+            ts['score'] = round(ts['passing'] / max(ts['total_controls'], 1) * 100)
+
         return jsonify({
             'overall_score': overall_score,
             'risk_weighted_score': risk_weighted_score,
@@ -4029,6 +4129,7 @@ def get_compliance_intelligence():
             'frameworks': fw_results,
             'root_causes': root_causes_out,
             'trend_mini': trend_mini,
+            'tier_summary': tier_summary,
             'generated_at': datetime.now(timezone.utc).isoformat(),
         })
     finally:

@@ -3725,6 +3725,13 @@ class Database:
         cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS cloud VARCHAR(20) DEFAULT 'azure'")
         cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS pillar VARCHAR(50)")
         cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS root_cause_id INTEGER")
+        # V3 columns — tier hierarchy, scope honesty
+        cursor.execute("ALTER TABLE compliance_frameworks ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT 'core'")
+        cursor.execute("ALTER TABLE compliance_frameworks ADD COLUMN IF NOT EXISTS category VARCHAR(50)")
+        cursor.execute("ALTER TABLE compliance_frameworks ADD COLUMN IF NOT EXISTS short_name VARCHAR(30)")
+        cursor.execute("ALTER TABLE compliance_frameworks ADD COLUMN IF NOT EXISTS identity_controls_count INTEGER DEFAULT 0")
+        cursor.execute("ALTER TABLE compliance_frameworks ADD COLUMN IF NOT EXISTS total_framework_controls INTEGER DEFAULT 0")
+        cursor.execute("ALTER TABLE compliance_frameworks ADD COLUMN IF NOT EXISTS scope_label VARCHAR(255) DEFAULT 'Identity, access, and privilege controls'")
         # Root causes table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS compliance_root_causes (
@@ -4557,6 +4564,311 @@ class Database:
                 FROM compliance_frameworks cf
                 WHERE cc.framework_id = cf.id AND cf.key = %s AND cc.control_id = %s
             """, (sev, wt, pillar, rc_id, fw_key, ctrl_id))
+
+        self.conn.commit()
+        cursor.close()
+
+    def _migrate_compliance_v3(self):
+        """Idempotent migration: add 5 new frameworks, expand 6 existing to 11-framework 3-tier model."""
+        self._ensure_compliance_tables()
+        cursor = self.conn.cursor()
+
+        # Check if migration already applied
+        cursor.execute("SELECT tier FROM compliance_frameworks WHERE key = 'soc2' LIMIT 1")
+        row = cursor.fetchone()
+        if row and row[0] and row[0] != 'core':
+            # tier already customized => skip (but 'core' is the default so check further)
+            pass
+        # Better check: see if nist_csf exists
+        cursor.execute("SELECT COUNT(*) FROM compliance_frameworks WHERE key = 'nist_csf'")
+        if cursor.fetchone()[0] > 0:
+            cursor.close()
+            return  # already migrated
+
+        # ── Step 1: Update existing 6 frameworks with tier/category/short_name/counts ──
+        existing_updates = [
+            ('soc2',       'core',      'Core Governance',       'SOC 2',      8,  64),
+            ('iso_27001',  'core',      'Core Governance',       'ISO 27001',  12, 93),
+            ('hipaa',      'industry',  'Industry Specific',     'HIPAA',      9,  75),
+            ('pci_dss',    'industry',  'Industry Specific',     'PCI-DSS',    10, 78),
+            ('cis_azure',  'benchmark', 'Technical Benchmarks',  'CIS Azure',  15, 200),
+            ('nist_800_53','benchmark', 'Technical Benchmarks',  'NIST 800-53',18, 325),
+        ]
+        for key, tier, category, short_name, id_count, total in existing_updates:
+            cursor.execute("""
+                UPDATE compliance_frameworks
+                SET tier = %s, category = %s, short_name = %s,
+                    identity_controls_count = %s, total_framework_controls = %s
+                WHERE key = %s
+            """, (tier, category, short_name, id_count, total, key))
+
+        # ── Step 2: Insert 5 new frameworks ──
+        new_frameworks = [
+            ('nist_csf', 'NIST Cybersecurity Framework', 'Voluntary framework for managing cybersecurity risk — Identify, Protect, Detect, Respond, Recover.',
+             'v2.0', True, 15, 'core', 'Core Governance', 'NIST CSF', 15, 108, 'Identity, access, and privilege controls'),
+            ('sox', 'SOX (Sarbanes-Oxley)', 'Financial reporting controls — IT General Controls for access management and segregation of duties.',
+             'Section 302/404', True, 25, 'industry', 'Industry Specific', 'SOX', 6, 66, 'Identity, access, and privilege controls'),
+            ('hitrust', 'HITRUST CSF', 'Common Security Framework harmonizing healthcare and security requirements.',
+             'v11', True, 35, 'industry', 'Industry Specific', 'HITRUST', 14, 156, 'Identity, access, and privilege controls'),
+            ('gdpr', 'GDPR', 'EU General Data Protection Regulation — data protection and privacy requirements.',
+             'Regulation (EU) 2016/679', True, 70, 'privacy', 'Privacy & Data Protection', 'GDPR', 7, 99, 'Identity, access, and privilege controls'),
+            ('ccpa', 'CCPA', 'California Consumer Privacy Act — consumer data protection requirements.',
+             'AB 375', True, 75, 'privacy', 'Privacy & Data Protection', 'CCPA', 5, 31, 'Identity, access, and privilege controls'),
+        ]
+        for key, name, desc, version, enabled, d_order, tier, category, short_name, id_count, total, scope in new_frameworks:
+            cursor.execute("""
+                INSERT INTO compliance_frameworks (key, name, description, version, enabled, display_order,
+                    tier, category, short_name, identity_controls_count, total_framework_controls, scope_label)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (key) DO NOTHING
+            """, (key, name, desc, version, enabled, d_order, tier, category, short_name, id_count, total, scope))
+
+        # ── Step 3: Add new controls to existing frameworks ──
+        # Build framework key → id map
+        cursor.execute("SELECT id, key FROM compliance_frameworks")
+        fw_map = {row[1]: row[0] for row in cursor.fetchall()}
+
+        def _add_controls(fw_key, controls):
+            """Insert controls; skip on conflict."""
+            fw_id = fw_map.get(fw_key)
+            if not fw_id:
+                return
+            for i, ctrl in enumerate(controls):
+                ctrl_id, name, metric, pass_op, pass_val, warn_op, warn_val, drilldown, severity, weight, pillar = ctrl
+                cursor.execute("""
+                    INSERT INTO compliance_controls
+                        (framework_id, control_id, name, metric, pass_operator, pass_value,
+                         warn_operator, warn_value, drilldown_url, display_order, severity, weight, pillar)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (framework_id, control_id) DO NOTHING
+                """, (fw_id, ctrl_id, name, metric, pass_op, pass_val, warn_op, warn_val, drilldown,
+                      (len(controls) + i + 1) * 10, severity, weight, pillar))
+
+        # SOC 2 +3
+        _add_controls('soc2', [
+            ('CC6.6', 'MFA Enforcement', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'critical', 9, 'authentication'),
+            ('CC7.1', 'Anomaly Monitoring', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 6, 'usage'),
+            ('CC8.2', 'Credential Rotation', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'high', 7, 'credential'),
+        ])
+
+        # ISO 27001 +7
+        _add_controls('iso_27001', [
+            ('A.5.18', 'Access Rights', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 7, 'privilege'),
+            ('A.6.1', 'Screening', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 5, 'usage'),
+            ('A.8.3', 'Access Restriction', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('A.8.6', 'Capacity Management', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'high', 7, 'usage'),
+            ('A.5.23', 'Cloud Security', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'high', 7, 'governance'),
+            ('A.5.24', 'Incident Management', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'high', 7, 'credential'),
+            ('A.5.25', 'Evidence Collection', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'medium', 6, 'credential'),
+        ])
+
+        # HIPAA +4
+        _add_controls('hipaa', [
+            ('§164.308(a)(1)', 'Risk Analysis', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('§164.308(a)(5)', 'Security Awareness', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'high', 8, 'authentication'),
+            ('§164.312(e)', 'Transmission Security', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'high', 7, 'credential'),
+            ('§164.308(a)(8)', 'Evaluation', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 6, 'usage'),
+        ])
+
+        # PCI-DSS +6
+        _add_controls('pci_dss', [
+            ('8.2.1', 'Unique IDs', 'no_shared_accounts', '==', 0, '<=', 2,
+             '/identities?shared_account=true', 'high', 8, 'governance'),
+            ('8.3', 'Secure Authentication', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'high', 8, 'credential'),
+            ('8.5', 'Shared IDs Prohibited', 'no_shared_accounts', '==', 0, '<=', 2,
+             '/identities?shared_account=true', 'high', 7, 'governance'),
+            ('10.1', 'Audit Trails', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 6, 'usage'),
+            ('10.2', 'Automated Audit', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+            ('7.2.2', 'Role-Based Access', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 7, 'privilege'),
+        ])
+
+        # CIS Azure +10
+        _add_controls('cis_azure', [
+            ('1.6', 'PIM for Global Admin', 'pim_coverage_pct', '>=', 80, '>=', 50,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('1.7', 'Guest Account Review', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?identity_category=guest', 'high', 7, 'usage'),
+            ('1.8', 'Credential Rotation Policy', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'high', 8, 'credential'),
+            ('1.9', 'Managed Identity Usage', 'managed_identity_pct', '>=', 60, '>=', 30,
+             '/identities?identity_category=service_principal', 'medium', 6, 'governance'),
+            ('1.10', 'SPN Owner Assignment', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'high', 7, 'governance'),
+            ('1.11', 'Dormant Account Cleanup', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'high', 7, 'usage'),
+            ('1.12', 'Access Review Completion', 'access_reviews_completed', '>=', 1, None, None,
+             '/identities?access_review=pending', 'medium', 5, 'governance'),
+            ('1.13', 'Excessive Role Assignments', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 7, 'privilege'),
+            ('1.14', 'Credential Rotation Compliance', 'credential_rotation_compliance_pct', '>=', 80, '>=', 50,
+             '/identities?credential_rotation=overdue', 'high', 8, 'credential'),
+            ('1.15', 'MFA for All Users', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'critical', 9, 'authentication'),
+        ])
+
+        # NIST 800-53 +13
+        _add_controls('nist_800_53', [
+            ('AC-3', 'Access Enforcement', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 8, 'privilege'),
+            ('IA-2', 'Identification & Auth', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'critical', 9, 'authentication'),
+            ('IA-4', 'Identifier Management', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'high', 7, 'usage'),
+            ('IA-8', 'Non-Org User Auth', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?identity_category=guest&mfa_enforced=false', 'high', 7, 'authentication'),
+            ('SI-4', 'System Monitoring', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+            ('PM-10', 'Security Authorization', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'high', 7, 'governance'),
+            ('AC-5', 'Separation of Duties', 'no_shared_accounts', '==', 0, '<=', 2,
+             '/identities?shared_account=true', 'high', 7, 'governance'),
+            ('IA-5(1)', 'Password-Based Auth', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'high', 8, 'credential'),
+            ('AC-2(3)', 'Disable Inactive Accounts', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'high', 7, 'usage'),
+            ('AC-6(5)', 'Privileged Accounts', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('IA-5(6)', 'Credential Protection', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'high', 8, 'credential'),
+            ('AC-2(4)', 'Automated Audit Actions', 'credential_rotation_compliance_pct', '>=', 80, '>=', 50,
+             '/identities?credential_rotation=overdue', 'high', 7, 'credential'),
+            ('SC-12', 'Cryptographic Key Mgmt', 'managed_identity_pct', '>=', 60, '>=', 30,
+             '/identities?identity_category=service_principal', 'medium', 6, 'credential'),
+        ])
+
+        # ── Step 4: Seed controls for new frameworks ──
+
+        # NIST CSF (15 controls)
+        _add_controls('nist_csf', [
+            ('PR.AA-1', 'Identity Management', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('PR.AA-2', 'Authentication', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'critical', 9, 'authentication'),
+            ('PR.AA-3', 'Credential Lifecycle', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'high', 8, 'credential'),
+            ('PR.AA-4', 'Access Reviews', 'access_reviews_completed', '>=', 1, None, None,
+             '/identities?access_review=pending', 'medium', 5, 'governance'),
+            ('PR.AA-5', 'Least Privilege', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 8, 'privilege'),
+            ('PR.AC-1', 'Access Control', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'high', 7, 'usage'),
+            ('DE.CM-1', 'Network Monitoring', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 6, 'usage'),
+            ('DE.CM-3', 'Personnel Activity', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+            ('RS.AN-1', 'Incident Analysis', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'high', 7, 'governance'),
+            ('RS.MI-1', 'Incident Mitigation', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'high', 7, 'credential'),
+            ('ID.AM-1', 'Asset Inventory', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 5, 'usage'),
+            ('ID.RA-1', 'Risk Assessment', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'high', 7, 'privilege'),
+            ('GV.OC-1', 'Org Context', 'pim_coverage_pct', '>=', 80, '>=', 50,
+             '/identities?privilege_tier=T0', 'medium', 5, 'governance'),
+            ('GV.RM-1', 'Risk Management', 'credential_rotation_compliance_pct', '>=', 80, '>=', 50,
+             '/identities?credential_rotation=overdue', 'medium', 5, 'credential'),
+            ('GV.SC-1', 'Supply Chain Risk', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'medium', 5, 'governance'),
+        ])
+
+        # SOX (6 controls)
+        _add_controls('sox', [
+            ('SOX-302', 'CEO/CFO Certification', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('SOX-404', 'Internal Controls', 'access_reviews_completed', '>=', 1, None, None,
+             '/identities?access_review=pending', 'high', 8, 'governance'),
+            ('SOX-IT1', 'Access Provisioning', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 7, 'privilege'),
+            ('SOX-IT2', 'Segregation of Duties', 'no_shared_accounts', '==', 0, '<=', 2,
+             '/identities?shared_account=true', 'high', 8, 'governance'),
+            ('SOX-IT3', 'Dormant Account Review', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'high', 7, 'usage'),
+            ('SOX-IT4', 'Credential Management', 'credential_rotation_compliance_pct', '>=', 80, '>=', 50,
+             '/identities?credential_rotation=overdue', 'medium', 6, 'credential'),
+        ])
+
+        # HITRUST (14 controls)
+        _add_controls('hitrust', [
+            ('01.b', 'User Registration', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('01.d', 'User Password Mgmt', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'high', 8, 'credential'),
+            ('01.e', 'Review of Access Rights', 'access_reviews_completed', '>=', 1, None, None,
+             '/identities?access_review=pending', 'high', 7, 'governance'),
+            ('01.f', 'Shared Account Control', 'no_shared_accounts', '==', 0, '<=', 2,
+             '/identities?shared_account=true', 'high', 7, 'governance'),
+            ('01.g', 'Unattended Equipment', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+            ('01.j', 'User Authentication', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'critical', 9, 'authentication'),
+            ('01.k', 'Equipment Identification', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'high', 7, 'governance'),
+            ('01.l', 'Remote Diagnostic Port', 'no_credential_rotation', '==', 0, '<=', 5,
+             '/identities?credential_rotation=overdue', 'high', 7, 'credential'),
+            ('01.s', 'Privilege Management', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 8, 'privilege'),
+            ('01.t', 'Session Timeout', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 5, 'usage'),
+            ('01.v', 'Information Access', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+            ('01.w', 'Sensitive System Isolation', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'high', 7, 'privilege'),
+            ('01.x', 'Access Control Policy', 'pim_coverage_pct', '>=', 80, '>=', 50,
+             '/identities?privilege_tier=T0', 'medium', 5, 'governance'),
+            ('01.y', 'Credential Rotation', 'credential_rotation_compliance_pct', '>=', 80, '>=', 50,
+             '/identities?credential_rotation=overdue', 'high', 7, 'credential'),
+        ])
+
+        # GDPR (7 controls)
+        _add_controls('gdpr', [
+            ('Art.5(1)(f)', 'Integrity & Confidentiality', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'critical', 9, 'privilege'),
+            ('Art.25', 'Data Protection by Design', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'high', 8, 'authentication'),
+            ('Art.32', 'Security of Processing', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'high', 8, 'credential'),
+            ('Art.33', 'Breach Notification', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'medium', 6, 'usage'),
+            ('Art.35', 'Impact Assessment', 'excessive_permissions', '==', 0, '<=', 5,
+             '/identities?excessive_permissions=true', 'high', 7, 'privilege'),
+            ('Art.30', 'Records of Processing', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+            ('Art.37', 'Data Protection Officer', 'unowned_spns', '==', 0, '<=', 3,
+             '/identities?identity_category=service_principal&has_owner=false', 'medium', 5, 'governance'),
+        ])
+
+        # CCPA (5 controls)
+        _add_controls('ccpa', [
+            ('1798.100', 'Consumer Right to Know', 't0_count', '<=', 2, '<=', 5,
+             '/identities?privilege_tier=T0', 'high', 7, 'privilege'),
+            ('1798.105', 'Right to Delete', 'stale_accounts', '==', 0, '<=', 3,
+             '/identities?activity_status=stale', 'high', 7, 'usage'),
+            ('1798.150', 'Data Breach Liability', 'expired_credentials', '==', 0, None, None,
+             '/identities?credential_status=expired', 'critical', 9, 'credential'),
+            ('1798.185', 'Reasonable Security', 'mfa_not_enforced', '==', 0, '<=', 2,
+             '/identities?mfa_enforced=false', 'high', 8, 'authentication'),
+            ('1798.140', 'Personal Information', 'dormant_privileged', '==', 0, '<=', 2,
+             '/identities?activity_status=stale&has_roles=true', 'medium', 6, 'usage'),
+        ])
 
         self.conn.commit()
         cursor.close()
