@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 
 interface CloudConnection {
@@ -65,10 +65,10 @@ export function useConnection() {
   const ctx = useContext(ConnectionContext);
 
   /** Append connection_id= to any URL when a specific connection is selected. */
-  const withConnection = (url: string) => {
+  const withConnection = useCallback((url: string) => {
     if (!ctx.connectionParam) return url;
     return url.includes('?') ? `${url}&${ctx.connectionParam}` : `${url}?${ctx.connectionParam}`;
-  };
+  }, [ctx.connectionParam]);
 
   return { ...ctx, withConnection };
 }

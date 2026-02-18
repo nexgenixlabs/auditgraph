@@ -3324,12 +3324,15 @@ def _compute_compliance_metrics(cursor, run_ids):
     pim_eligible_t0 = cursor.fetchone()[0]
     pim_coverage_pct = round(pim_eligible_t0 / max(t0_count, 1) * 100)
 
-    # Access reviews completed
+    # Access reviews completed (table may not exist)
+    access_reviews_completed = 0
     try:
+        cursor.execute("SAVEPOINT access_reviews_check")
         cursor.execute("SELECT COUNT(*) FROM access_reviews WHERE status = 'completed'")
         access_reviews_completed = cursor.fetchone()[0]
+        cursor.execute("RELEASE SAVEPOINT access_reviews_check")
     except Exception:
-        access_reviews_completed = 0
+        cursor.execute("ROLLBACK TO SAVEPOINT access_reviews_check")
 
     # Managed identity % (MI vs SPN among NHIs)
     cursor.execute(f"""
