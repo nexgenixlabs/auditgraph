@@ -2684,6 +2684,76 @@ def get_overview_insights():
             if category == 'service_principal' and (owner_count or 0) == 0:
                 unowned_spns.append(identity_stub)
 
+        # ── Risk Reduction Plan ────────────────────────────────────
+        total_count = len(rows)
+        plan = []
+
+        # Credential rotation
+        if expiring_creds > 0:
+            est = round((expiring_creds / max(total_count, 1)) * 20, 1)  # 20% weight for P2
+            plan.append({
+                "priority": "critical" if expiring_creds > 5 else "high",
+                "action": "credential_rotation",
+                "description": f"Rotate {expiring_creds} expired/expiring credential{'s' if expiring_creds != 1 else ''} on privileged service principals",
+                "affected_count": expiring_creds,
+                "estimated_risk_reduction_pct": min(est, 20),
+                "link": "/identities?credential_status=expiring_soon",
+            })
+
+        # Dormant privileged cleanup
+        if len(dormant_privileged) > 0:
+            est = round((len(dormant_privileged) / max(total_count, 1)) * 30, 1)  # 30% weight for P1
+            plan.append({
+                "priority": "critical",
+                "action": "dormant_cleanup",
+                "description": f"Disable or remove {len(dormant_privileged)} dormant T0/T1 identit{'ies' if len(dormant_privileged) != 1 else 'y'} with no recent activity",
+                "affected_count": len(dormant_privileged),
+                "estimated_risk_reduction_pct": min(est, 30),
+                "link": "/identities?activity_status=dormant&privilege_tier=0,1",
+            })
+
+        # Unowned SPN assignment
+        if len(unowned_spns) > 0:
+            est = round((len(unowned_spns) / max(total_count, 1)) * 10, 1)  # 10% weight for P5
+            plan.append({
+                "priority": "high",
+                "action": "ownership_assignment",
+                "description": f"Assign owners to {len(unowned_spns)} unowned service principal{'s' if len(unowned_spns) != 1 else ''}",
+                "affected_count": len(unowned_spns),
+                "estimated_risk_reduction_pct": min(est, 10),
+                "link": "/identities?identity_category=service_principal&owner_status=unowned",
+            })
+
+        # T0 footprint reduction
+        if tier_counts[0] > 2:
+            excess = tier_counts[0] - 2
+            est = round((excess / max(total_count, 1)) * 30, 1)
+            plan.append({
+                "priority": "high",
+                "action": "privilege_reduction",
+                "description": f"Reduce T0 footprint by {excess} — only 2 Global Admin accounts recommended",
+                "affected_count": excess,
+                "estimated_risk_reduction_pct": min(est, 15),
+                "link": "/identities?privilege_tier=0",
+            })
+
+        # Guest access review
+        guest_privileged = [row for row in rows if _normalize_category_key(row[2] or '') == 'guest'
+                           and (int(row[8]) if row[8] is not None else 3) <= 2]  # tier <= 2 means has roles
+        if len(guest_privileged) > 0:
+            est = round((len(guest_privileged) / max(total_count, 1)) * 20, 1)
+            plan.append({
+                "priority": "medium",
+                "action": "guest_access_review",
+                "description": f"Review {len(guest_privileged)} guest identit{'ies' if len(guest_privileged) != 1 else 'y'} with assigned roles",
+                "affected_count": len(guest_privileged),
+                "estimated_risk_reduction_pct": min(est, 10),
+                "link": "/identities?identity_category=guest",
+            })
+
+        # Sort by estimated risk reduction descending
+        plan.sort(key=lambda x: x['estimated_risk_reduction_pct'], reverse=True)
+
         return jsonify({
             "tier_distribution": {
                 "t0": {"count": tier_counts[0], "identities": tier_identities[0]},
@@ -2698,6 +2768,7 @@ def get_overview_insights():
             },
             "dormant_privileged": dormant_privileged[:10],
             "unowned_spns": unowned_spns[:10],
+            "risk_reduction_plan": plan[:6],
         })
     finally:
         cursor.close()
@@ -2789,7 +2860,21 @@ def get_attack_surface_score():
                         AND (era.directory_scope IS NULL OR era.directory_scope = '/'))
                     OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
                         AND ra.scope_type = 'tenant')
-                )) as tenant_scope_count
+                )) as tenant_scope_count,
+
+                -- NHI breakdown
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'human_user') as human_count,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'service_principal') as sp_count,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'managed_identity_system') as mi_system_count,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'managed_identity_user') as mi_user_count,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest') as nhi_guest_count,
+
+                -- Credential health counts
+                COUNT(*) FILTER (WHERE credential_count > 0
+                    AND (credential_expiration IS NULL OR credential_expiration >= NOW() + INTERVAL '30 days')) as healthy_creds,
+
+                -- Data completeness
+                COUNT(*) FILTER (WHERE risk_score IS NOT NULL) as has_risk_score
 
             FROM identities i
             WHERE i.discovery_run_id = ANY(%s)
@@ -2811,6 +2896,13 @@ def get_attack_surface_score():
         unowned_spns = r[11] or 0
         total_spns = max(r[12] or 1, 1)
         tenant_scope = r[13] or 0
+        human_count = r[14] or 0
+        sp_count = r[15] or 0
+        mi_system_count = r[16] or 0
+        mi_user_count = r[17] or 0
+        nhi_guest_count = r[18] or 0
+        healthy_creds = r[19] or 0
+        has_risk_score = r[20] or 0
 
         # P1: Effective Privilege — target < 1% at T0
         priv_pct = (t0t1_count / total_excl) * 100
@@ -2857,19 +2949,222 @@ def get_attack_surface_score():
         else:
             grade, severity = 'F', 'critical'
 
+        # ── NHI breakdown ──────────────────────────────────────────
+        nhi_total = sp_count + mi_system_count + mi_user_count + nhi_guest_count
+        nhi_pct = round((nhi_total / total_excl) * 100, 1) if total_excl > 0 else 0
+
+        nhi_breakdown = {
+            "human": human_count,
+            "service_principal": sp_count,
+            "managed_identity_system": mi_system_count,
+            "managed_identity_user": mi_user_count,
+            "guest": nhi_guest_count,
+            "nhi_total": nhi_total,
+            "nhi_pct": nhi_pct,
+        }
+
+        # ── Attack Opportunities ──────────────────────────────────
+        # Top 5 riskiest
+        cursor.execute(f"""
+            SELECT i.identity_id, i.display_name, COALESCE(i.risk_score, 0) as risk_score,
+                   COALESCE(i.identity_category, '') as identity_category, COALESCE(i.risk_level, 'info') as risk_level
+            FROM identities i WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
+              AND i.risk_level IN ('critical','high')
+            ORDER BY COALESCE(i.risk_score,0) DESC LIMIT 5
+        """, (run_ids,))
+        top_riskiest = [{"identity_id": row[0], "display_name": row[1] or '', "risk_score": row[2],
+                         "identity_category": row[3], "risk_level": row[4]} for row in cursor.fetchall()]
+
+        # Top 5 blast radius
+        cursor.execute(f"""
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category, '') as identity_category,
+                   COALESCE(i.additional_subscription_count, 0) as sub_count
+            FROM identities i WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
+            ORDER BY COALESCE(i.additional_subscription_count, 0) DESC LIMIT 5
+        """, (run_ids,))
+        top_blast_radius = [{"identity_id": row[0], "display_name": row[1] or '', "identity_category": row[2],
+                             "sub_count": row[3]} for row in cursor.fetchall()]
+
+        # Stale privileged (dormant T0/T1)
+        cursor.execute(f"""
+            SELECT i.identity_id, i.display_name, COALESCE(i.identity_category, '') as identity_category,
+                   COALESCE(i.activity_status, 'unknown') as activity_status,
+                   COALESCE(i.privilege_tier, 99) as privilege_tier
+            FROM identities i WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
+              AND i.activity_status IN ('stale','never_used','inactive')
+              AND COALESCE(i.privilege_tier, 99) <= 1
+            ORDER BY COALESCE(i.privilege_tier, 99) ASC LIMIT 5
+        """, (run_ids,))
+        stale_privileged = [{"identity_id": row[0], "display_name": row[1] or '', "identity_category": row[2],
+                             "activity_status": row[3], "privilege_tier": row[4]} for row in cursor.fetchall()]
+
+        # Privileged NHIs (T0/T1 that are SPN or MI)
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM identities i
+            WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
+            AND COALESCE(i.identity_category, '') IN ('service_principal','managed_identity_system','managed_identity_user')
+            AND COALESCE(i.privilege_tier, 99) <= 1
+        """, (run_ids,))
+        privileged_nhi_count = cursor.fetchone()[0] or 0
+
+        # Multi-subscription identities (2+ subscriptions)
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM identities i
+            WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
+            AND COALESCE(i.additional_subscription_count, 0) >= 1
+        """, (run_ids,))
+        multi_sub_count = cursor.fetchone()[0] or 0
+
+        # RBAC modifiers (Owner or User Access Administrator)
+        cursor.execute(f"""
+            SELECT COUNT(DISTINCT i.id) FROM identities i
+            JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
+            AND LOWER(ra.role_name) IN ('owner','user access administrator')
+        """, (run_ids,))
+        rbac_modifier_count = cursor.fetchone()[0] or 0
+
+        attack_opportunities = {
+            "top_riskiest": top_riskiest,
+            "top_blast_radius": top_blast_radius,
+            "stale_privileged": stale_privileged,
+            "privileged_nhi_count": privileged_nhi_count,
+            "dormant_privileged_count": len(stale_privileged),
+            "multi_sub_count": multi_sub_count,
+            "rbac_modifier_count": rbac_modifier_count,
+        }
+
+        # ── Governance Maturity ───────────────────────────────────
+        ownership_coverage_pct = round(((total_spns - unowned_spns) / total_spns) * 100, 1) if total_spns > 0 else 100
+        credential_rotation_pct = round((healthy_creds / has_creds) * 100, 1) if has_creds > 0 else 100
+        dormant_cleanup_pct = round(100 - (dormant_count / total_excl) * 100, 1) if total_excl > 0 else 100
+
+        # PIM adoption: distinct identities with PIM eligible assignments vs T0/T1 count
+        pim_adoption_pct = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT identity_db_id) FROM pim_eligible_assignments
+            """)
+            pim_count = cursor.fetchone()[0] or 0
+            pim_adoption_pct = round((pim_count / max(t0t1_count, 1)) * 100, 1) if t0t1_count > 0 else 0
+        except Exception:
+            pass
+
+        # Average remediation days
+        avg_remediation_days = None
+        try:
+            cursor.execute("""
+                SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/86400)
+                FROM remediation_actions WHERE status = 'resolved'
+            """)
+            avg_val = cursor.fetchone()[0]
+            avg_remediation_days = round(avg_val, 1) if avg_val is not None else None
+        except Exception:
+            pass
+
+        # Privileged under review + access reviews done
+        privileged_under_review_pct = 0
+        access_reviews_done = 0
+        try:
+            cursor.execute("SELECT COUNT(*) FROM access_reviews WHERE status = 'completed'")
+            access_reviews_done = cursor.fetchone()[0] or 0
+            cursor.execute("""
+                SELECT COUNT(DISTINCT ari.identity_id)
+                FROM access_review_items ari
+                JOIN access_reviews ar ON ar.id = ari.review_id
+                WHERE ar.status = 'completed'
+            """)
+            reviewed = cursor.fetchone()[0] or 0
+            privileged_under_review_pct = round((reviewed / max(t0t1_count, 1)) * 100, 1)
+        except Exception:
+            pass
+
+        governance = {
+            "ownership_coverage_pct": ownership_coverage_pct,
+            "credential_rotation_pct": credential_rotation_pct,
+            "pim_adoption_pct": min(pim_adoption_pct, 100),
+            "dormant_cleanup_pct": dormant_cleanup_pct,
+            "avg_remediation_days": avg_remediation_days,
+            "privileged_under_review_pct": min(privileged_under_review_pct, 100),
+            "access_reviews_done": access_reviews_done,
+        }
+
+        # ── Data Integrity ────────────────────────────────────────
+        data_completeness_pct = round((has_risk_score / total) * 100, 1) if total > 0 else 0
+        last_scan = None
+        scan_duration_seconds = None
+        try:
+            cursor.execute("""
+                SELECT completed_at, started_at FROM discovery_runs
+                WHERE status = 'completed' AND id = ANY(%s)
+                ORDER BY completed_at DESC LIMIT 1
+            """, (run_ids,))
+            run_row = cursor.fetchone()
+            if run_row and run_row[0]:
+                last_scan = run_row[0].isoformat() if run_row[0] else None
+                if run_row[1] and run_row[0]:
+                    scan_duration_seconds = round((run_row[0] - run_row[1]).total_seconds(), 1)
+        except Exception:
+            pass
+
+        data_integrity = {
+            "last_scan": last_scan,
+            "total_scanned": r[0] or 0,
+            "data_completeness_pct": data_completeness_pct,
+            "scan_duration_seconds": scan_duration_seconds,
+        }
+
+        # ── CISO Summary ─────────────────────────────────────────
+        pillar_scores = {
+            "effective_privilege": p1, "credential_risk": p2,
+            "trust_federation": p3, "usage_dormancy": p4,
+            "ownership_governance": p5, "external_exposure": p6,
+        }
+        pillar_labels = {
+            "effective_privilege": "Effective Privilege",
+            "credential_risk": "Credential Risk",
+            "trust_federation": "Trust & Federation",
+            "usage_dormancy": "Usage Dormancy",
+            "ownership_governance": "Ownership Governance",
+            "external_exposure": "External Exposure",
+        }
+        worst_key = max(pillar_scores, key=pillar_scores.get)
+        worst_label = pillar_labels[worst_key]
+        worst_score = round(pillar_scores[worst_key])
+        parts = [f"Identity attack surface: Grade {grade} ({round(score)}/100)."]
+        parts.append(f"Weakest area: {worst_label} ({worst_score}/100).")
+        if worst_key == "effective_privilege":
+            parts.append(f"{t0t1_count} identities hold T0/T1 privileges — reduce to under 1% of total.")
+        elif worst_key == "credential_risk":
+            parts.append(f"{expired_creds + expiring_creds} credentials expired or expiring — rotate immediately.")
+        elif worst_key == "trust_federation":
+            parts.append(f"{guest_with_roles} guest identities have privileged roles — review external access.")
+        elif worst_key == "usage_dormancy":
+            parts.append(f"{dormant_count} identities are dormant — disable or remove stale accounts.")
+        elif worst_key == "ownership_governance":
+            parts.append(f"{unowned_spns} service principals lack owners — assign accountability.")
+        elif worst_key == "external_exposure":
+            parts.append(f"{tenant_scope} identities have tenant-wide scope — apply least privilege.")
+        ciso_summary = ' '.join(parts)
+
         return jsonify({
             "score": score,
             "grade": grade,
             "severity": severity,
             "pillars": {
                 "effective_privilege": {"score": round(p1, 1), "weight": 30, "detail": {"t0": t0_count, "t0t1": t0t1_count, "total": total_excl}},
-                "credential_risk": {"score": round(p2, 1), "weight": 20, "detail": {"expired": expired_creds, "expiring": expiring_creds, "with_creds": has_creds}},
+                "credential_risk": {"score": round(p2, 1), "weight": 20, "detail": {"expired": expired_creds, "expiring": expiring_creds, "with_creds": has_creds, "healthy": healthy_creds}},
                 "trust_federation": {"score": round(p3, 1), "weight": 20, "detail": {"guests": guest_count, "guest_with_roles": guest_with_roles, "federated": federated_count}},
                 "usage_dormancy": {"score": round(p4, 1), "weight": 10, "detail": {"dormant": dormant_count, "total": total_excl}},
                 "ownership_governance": {"score": round(p5, 1), "weight": 10, "detail": {"unowned_spns": unowned_spns, "total_spns": total_spns}},
                 "external_exposure": {"score": round(p6, 1), "weight": 10, "detail": {"tenant_scope": tenant_scope, "total": total_excl}},
             },
             "total_identities": r[0] or 0,
+            "nhi_breakdown": nhi_breakdown,
+            "attack_opportunities": attack_opportunities,
+            "governance": governance,
+            "data_integrity": data_integrity,
+            "ciso_summary": ciso_summary,
         })
     finally:
         cursor.close()

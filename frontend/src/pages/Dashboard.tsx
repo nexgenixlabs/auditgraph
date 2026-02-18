@@ -20,6 +20,7 @@ import CredentialIntelligence from '../components/dashboard/CredentialIntelligen
 import TrustAccessPanel from '../components/dashboard/TrustAccessPanel';
 import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
+import AudienceBadge from '../components/AudienceBadge';
 import { useToast } from '../components/ToastProvider';
 import { useDashboardPreferences } from '../hooks/useDashboardPreferences';
 
@@ -295,9 +296,12 @@ export default function Dashboard() {
       {/* Page Header */}
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>
-          <h2 className="text-[22px] font-extrabold tracking-tight" style={{ color: COLORS.textPrimary }}>Dashboard</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-[22px] font-extrabold tracking-tight" style={{ color: COLORS.textPrimary }}>Risk Monitoring</h2>
+            <AudienceBadge label="SOC / IAM OPS" variant="blue" />
+          </div>
           <p className="text-sm" style={{ color: COLORS.textSecondary }}>
-            Posture view from the latest discovery run
+            Operational identity risk monitoring — What happened?
           </p>
           {latest?.completed_at && (
             <p className="text-xs mt-0.5" style={{ color: COLORS.textMuted }}>
@@ -327,6 +331,14 @@ export default function Dashboard() {
                 Run Discovery
               </>
             )}
+          </button>
+          <button
+            onClick={() => navigate('/identities')}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border transition hover:bg-gray-50"
+            style={{ borderColor: COLORS.border, color: COLORS.textPrimary }}
+          >
+            View All Identities
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
           </button>
           {schedulerInfo && (
             <span className="text-xs" style={{ color: COLORS.textMuted }} title={`Interval: every ${schedulerInfo.interval_hours}h`}>
@@ -426,27 +438,26 @@ export default function Dashboard() {
           {/* Tab 1: Exposure & Risk */}
           {activeTab === 'exposure' && (
             <div className="space-y-6">
-              {/* Row 1: Trend + Velocity (2 col) */}
+              {/* Row 1: Anomaly Alerts (full width — promoted to top) */}
+              <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
+              {/* Row 2: Trend + Escalation Tracker (2 col) */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {trends.length >= 2 && <RiskTrendChart data={trends} />}
                 {velocityData && velocityData.transitions.length > 0 && (
                   <RiskVelocityChart transitions={velocityData.transitions} retention={velocityData.retention} />
                 )}
               </div>
-              {/* Row 2: Heat Map + Donut (2 col) */}
+              {/* Row 3: Heat Map + Donut (2 col) */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <RiskHeatMap categories={categoryCards} />
                 <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick}
                   cloudSources={summary?.monitored_resources ? Object.entries(summary.monitored_resources).filter(([, v]) => (v as any)?.subscriptions > 0 || (v as any)?.accounts > 0 || (v as any)?.projects > 0).map(([k]) => k) : undefined} />
               </div>
-              {/* Row 3: Recent Changes + Anomaly Alerts (2 col) */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
-                  newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
-                  permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
-                  credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
-                <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
-              </div>
+              {/* Row 4: Recent Changes (full width) */}
+              <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
+                newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
+                permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
+                credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
             </div>
           )}
 
@@ -465,7 +476,22 @@ export default function Dashboard() {
           )}
 
           {/* Tab 3: Trust & Access */}
-          {activeTab === 'trust' && <TrustAccessPanel />}
+          {activeTab === 'trust' && (
+            <div>
+              <TrustAccessPanel />
+              {!loading && !stats?.latest_run && (
+                <div className="bg-white rounded-xl p-8 text-center" style={{ border: `1px solid ${COLORS.border}` }}>
+                  <div className="text-sm font-medium mb-2" style={{ color: COLORS.textSecondary }}>No trust & access data available</div>
+                  <p className="text-xs mb-4" style={{ color: COLORS.textMuted }}>Run a discovery scan to populate trust and access relationships.</p>
+                  <button onClick={triggerDiscovery} disabled={discoveryRunning}
+                    className="px-4 py-2 text-sm font-medium text-white rounded-lg transition hover:opacity-90"
+                    style={{ backgroundColor: COLORS.brand }}>
+                    Run Discovery
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Tab 4: Usage & Optimization */}
           {activeTab === 'usage' && (
