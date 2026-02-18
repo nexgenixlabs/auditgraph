@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename, RESOURCE_CSV_COLUMNS } from '../utils/exportUtils';
 
@@ -121,6 +122,7 @@ function KeyIssuesBadges({ row }: { row: ResourceRow }) {
 export default function Resources() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   const [resources, setResources] = useState<ResourceRow[]>([]);
   const [stats, setStats] = useState<ResourceStats | null>(null);
@@ -149,12 +151,12 @@ export default function Resources() {
     const abort = new AbortController();
     const params = new URLSearchParams();
     if (typeFilter) params.set('resource_type', typeFilter);
-    fetch(`/api/resources/stats?${params}`, { signal: abort.signal })
+    fetch(withConnection(`/api/resources/stats?${params}`), { signal: abort.signal })
       .then(r => r.json())
       .then(setStats)
       .catch(() => {});
     return () => abort.abort();
-  }, [typeFilter, initialized]);
+  }, [typeFilter, initialized, selectedConnectionId]);
 
   // Fetch resources
   useEffect(() => {
@@ -167,7 +169,7 @@ export default function Resources() {
     if (riskFilter) params.set('risk_level', riskFilter);
     if (search) params.set('search', search);
 
-    fetch(`/api/resources?${params}`, { signal: abort.signal })
+    fetch(withConnection(`/api/resources?${params}`), { signal: abort.signal })
       .then(r => r.json())
       .then(data => {
         setResources(data.resources || []);
@@ -175,7 +177,7 @@ export default function Resources() {
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [typeFilter, riskFilter, search, initialized]);
+  }, [typeFilter, riskFilter, search, initialized, selectedConnectionId]);
 
   // Client-side sort
   const sorted = useMemo(() => {

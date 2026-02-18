@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useConnection } from '../contexts/ConnectionContext';
 
 interface Group {
   id: number;
@@ -57,6 +58,7 @@ const COLOR_PRESETS = ['#3B82F6', '#6366F1', '#8B5CF6', '#EC4899', '#F59E0B', '#
 
 export default function IdentityGroups() {
   const { user } = useAuth();
+  const { withConnection, selectedConnectionId } = useConnection();
   const canEdit = user?.role === 'admin' || user?.role === 'reader';
 
   const [groups, setGroups] = useState<Group[]>([]);
@@ -78,7 +80,7 @@ export default function IdentityGroups() {
   const loadGroups = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/groups');
+      const res = await fetch(withConnection('/api/groups'));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const json = await res.json();
       setGroups(json.groups || []);
@@ -87,14 +89,14 @@ export default function IdentityGroups() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [withConnection]);
 
-  useEffect(() => { loadGroups(); }, [loadGroups]);
+  useEffect(() => { loadGroups(); }, [loadGroups, selectedConnectionId]);
 
   const loadDetail = useCallback(async (id: number) => {
     setDetailLoading(true);
     try {
-      const res = await fetch(`/api/groups/${id}`);
+      const res = await fetch(withConnection(`/api/groups/${id}`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const json: GroupDetail = await res.json();
       setDetail(json);
@@ -103,7 +105,7 @@ export default function IdentityGroups() {
     } finally {
       setDetailLoading(false);
     }
-  }, []);
+  }, [withConnection]);
 
   const toggleExpand = (id: number) => {
     if (expandedId === id) {
@@ -125,7 +127,7 @@ export default function IdentityGroups() {
     if (compareIds.length < 2) return;
     setCompareLoading(true);
     try {
-      const res = await fetch(`/api/groups/compare?ids=${compareIds.join(',')}`);
+      const res = await fetch(withConnection(`/api/groups/compare?ids=${compareIds.join(',')}`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const json = await res.json();
       setCompareData(json.groups || []);
@@ -139,7 +141,7 @@ export default function IdentityGroups() {
   const deleteGroup = async (id: number) => {
     if (!window.confirm('Delete this group?')) return;
     try {
-      const res = await fetch(`/api/groups/${id}`, { method: 'DELETE' });
+      const res = await fetch(withConnection(`/api/groups/${id}`), { method: 'DELETE' });
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       setExpandedId(null);
       loadGroups();
@@ -150,7 +152,7 @@ export default function IdentityGroups() {
 
   const removeMember = async (groupId: number, identityId: string) => {
     try {
-      const res = await fetch(`/api/groups/${groupId}/members`, {
+      const res = await fetch(withConnection(`/api/groups/${groupId}/members`), {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identity_ids: [identityId] }),
@@ -167,7 +169,7 @@ export default function IdentityGroups() {
     if (!term || term.length < 2) { setSearchIdentities([]); return; }
     setMemberSearchLoading(true);
     try {
-      const res = await fetch(`/api/identities?search=${encodeURIComponent(term)}&limit=10`);
+      const res = await fetch(withConnection(`/api/identities?search=${encodeURIComponent(term)}&limit=10`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const json = await res.json();
       setSearchIdentities((json.identities || []).map((i: Record<string, unknown>) => ({
@@ -190,7 +192,7 @@ export default function IdentityGroups() {
   const addMember = async (identityId: string) => {
     if (!expandedId) return;
     try {
-      const res = await fetch(`/api/groups/${expandedId}/members`, {
+      const res = await fetch(withConnection(`/api/groups/${expandedId}/members`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identity_ids: [identityId] }),

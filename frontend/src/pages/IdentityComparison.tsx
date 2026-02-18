@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 import {
   type IdentityCategory, type RiskLevel,
   RISK_BADGE, RISK_ORDER, CLOUD_BADGE, DORMANT_LABELS,
@@ -166,6 +167,7 @@ function PermPill({ perm }: { perm: any }) {
 
 export default function IdentityComparison() {
   const location = useLocation();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   const [idA, idB] = useMemo(() => {
     const params = new URLSearchParams(location.search);
@@ -193,8 +195,8 @@ export default function IdentityComparison() {
       setError(null);
       try {
         const [resA, resB] = await Promise.all([
-          fetch(`/api/identities/${encodeURIComponent(idA)}`),
-          fetch(`/api/identities/${encodeURIComponent(idB)}`),
+          fetch(withConnection(`/api/identities/${encodeURIComponent(idA)}`)),
+          fetch(withConnection(`/api/identities/${encodeURIComponent(idB)}`)),
         ]);
         if (!resA.ok) throw new Error(`Failed to fetch identity A: ${resA.status}`);
         if (!resB.ok) throw new Error(`Failed to fetch identity B: ${resB.status}`);
@@ -208,7 +210,7 @@ export default function IdentityComparison() {
     }
     load();
     return () => { cancelled = true; };
-  }, [idA, idB]);
+  }, [idA, idB, selectedConnectionId]);
 
   const left = swapped ? dataB : dataA;
   const right = swapped ? dataA : dataB;

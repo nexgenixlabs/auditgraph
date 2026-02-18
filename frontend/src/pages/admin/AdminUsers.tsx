@@ -230,11 +230,11 @@ export default function AdminUsers() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="flex items-start gap-3">
             <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700 mt-0.5">superadmin</span>
-            <div className="text-xs text-gray-600">Full platform access — tenant management, billing, user management, delete operations</div>
+            <div className="text-xs text-gray-600">Full platform access — client management, billing, user management, delete operations</div>
           </div>
           <div className="flex items-start gap-3">
             <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 mt-0.5">poweradmin</span>
-            <div className="text-xs text-gray-600">Create/edit/provision tenants, view billing & monitoring. Cannot delete tenants or manage portal users</div>
+            <div className="text-xs text-gray-600">Create/edit/provision clients, view billing & monitoring. Cannot delete clients or manage portal users</div>
           </div>
           <div className="flex items-start gap-3">
             <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 mt-0.5">billing</span>
@@ -517,7 +517,7 @@ export default function AdminUsers() {
                 >
                   <option value="reader">Reader — read-only overview and monitoring</option>
                   <option value="billing">Billing — read-only billing page</option>
-                  <option value="poweradmin">Power Admin — create/edit/provision tenants, view billing</option>
+                  <option value="poweradmin">Power Admin — create/edit/provision clients, view billing</option>
                   <option value="superadmin">Superadmin — full platform access</option>
                 </select>
               </div>

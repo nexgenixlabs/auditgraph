@@ -123,7 +123,7 @@ def auth_middleware():
         return None
 
     # Phase 53: Public tenant lookup by slug (no auth required)
-    if request.path.startswith('/api/tenants/by-slug/'):
+    if request.path.startswith('/api/tenants/by-slug/') or request.path.startswith('/api/clients/by-slug/'):
         return None
 
     # Phase 54: SAML SSO public endpoints

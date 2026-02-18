@@ -96,7 +96,7 @@ export default function CrossTenantAnalytics() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch('/api/analytics/tenants');
+        const res = await fetch('/api/analytics/clients');
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const json = await res.json();
         setData(json);
@@ -188,20 +188,20 @@ export default function CrossTenantAnalytics() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Cross-Tenant Analytics</h2>
+        <h2 className="text-2xl font-bold text-gray-900">Cross-Client Analytics</h2>
         <p className="text-sm text-gray-600 mt-1">
-          Aggregated risk posture across all tenants
+          Aggregated risk posture across all clients
         </p>
       </div>
 
       {/* Global Stats Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="bg-white border rounded-xl p-5">
-          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Tenants</div>
+          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Clients</div>
           <div className="text-3xl font-bold text-gray-900 mt-1">{g.total_tenants}</div>
         </div>
         <div className="bg-white border rounded-xl p-5">
-          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Active Tenants</div>
+          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Active Clients</div>
           <div className="text-3xl font-bold text-green-700 mt-1">{g.active_tenants}</div>
           <div className="text-xs text-gray-400 mt-0.5">with discovery data</div>
         </div>
@@ -232,13 +232,13 @@ export default function CrossTenantAnalytics() {
       {/* Tenant Comparison Table */}
       <div className="bg-white border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b bg-gray-50">
-          <h3 className="text-sm font-semibold text-gray-700">Tenant Comparison</h3>
+          <h3 className="text-sm font-semibold text-gray-700">Client Comparison</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b text-left">
-                <SortHeader label="Tenant" field="name" />
+                <SortHeader label="Client" field="name" />
                 <SortHeader label="Plan" field="plan" className="w-20" />
                 <SortHeader label="Users" field="user_count" className="w-20 text-right" />
                 <SortHeader label="Identities" field="total_identities" className="w-24 text-right" />
@@ -308,7 +308,7 @@ export default function CrossTenantAnalytics() {
               {sorted.length === 0 && (
                 <tr>
                   <td colSpan={9} className="px-4 py-12 text-center text-gray-400">
-                    No tenants found. Create tenants in Settings to see analytics.
+                    No clients found. Create clients in Settings to see analytics.
                   </td>
                 </tr>
               )}
@@ -321,7 +321,7 @@ export default function CrossTenantAnalytics() {
       {sorted.length > 0 && (
         <div className="bg-white border rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b bg-gray-50">
-            <h3 className="text-sm font-semibold text-gray-700">Risk Distribution by Tenant</h3>
+            <h3 className="text-sm font-semibold text-gray-700">Risk Distribution by Client</h3>
           </div>
           <div className="p-6 space-y-4">
             {sorted.map(tenant => {

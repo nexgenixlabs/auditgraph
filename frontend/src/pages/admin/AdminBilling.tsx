@@ -97,7 +97,7 @@ export default function AdminBilling() {
   useEffect(() => {
     Promise.all([
       fetch('/api/admin/billing/summary').then(r => r.ok ? r.json() : null),
-      fetch('/api/tenants').then(r => r.ok ? r.json() : { tenants: [] }),
+      fetch('/api/clients').then(r => r.ok ? r.json() : { tenants: [] }),
       fetch('/api/admin/billing/events?limit=20').then(r => r.ok ? r.json() : { events: [] }),
     ])
       .then(([summaryData, tenantsData, eventsData]) => {
@@ -118,7 +118,7 @@ export default function AdminBilling() {
     setExpandedTenant(tenantId);
     setExpandedBilling(null);
     setExpandLoading(true);
-    fetch(`/api/admin/tenants/${tenantId}/billing`)
+    fetch(`/api/admin/clients/${tenantId}/billing`)
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setExpandedBilling(data); })
       .catch(() => {})
@@ -155,7 +155,7 @@ export default function AdminBilling() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="text-2xl font-bold text-gray-900">{summary?.active_tenants ?? tenants.filter(t => t.enabled).length}</div>
-          <div className="text-xs text-gray-500 mt-1">Active Tenants</div>
+          <div className="text-xs text-gray-500 mt-1">Active Clients</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="text-2xl font-bold text-purple-700">{planCounts.enterprise || 0}</div>
@@ -190,7 +190,7 @@ export default function AdminBilling() {
                 <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                   <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                 </div>
-                <div className="text-[10px] text-gray-400 mt-1">{pct}% of tenants &middot; {formatCents(planMrr)}/mo</div>
+                <div className="text-[10px] text-gray-400 mt-1">{pct}% of clients &middot; {formatCents(planMrr)}/mo</div>
               </div>
             );
           })}
@@ -199,7 +199,7 @@ export default function AdminBilling() {
 
       {/* Active Users by Tenant */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <h3 className="text-sm font-semibold text-gray-800 mb-4">Active Users by Tenant</h3>
+        <h3 className="text-sm font-semibold text-gray-800 mb-4">Active Users by Client</h3>
         <div className="space-y-2">
           {[...tenants].sort((a, b) => b.user_count - a.user_count).map(t => {
             const maxUsers = Math.max(...tenants.map(t2 => t2.user_count), 1);

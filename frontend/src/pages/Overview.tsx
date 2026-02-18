@@ -4,6 +4,7 @@ import { COLORS, RISK_COLORS, scoreToColor, scoreToGrade } from '../constants/de
 import { ComplianceBadgeGroup } from '../components/ComplianceBadge';
 import { getFrameworkNames } from '../utils/complianceMapping';
 import StaleDataBanner from '../components/StaleDataBanner';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -68,6 +69,7 @@ interface AttackSurfaceData {
 
 export default function Overview() {
   const navigate = useNavigate();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -84,21 +86,21 @@ export default function Overview() {
       setError(null);
       try {
         const [statsRes, insightsRes] = await Promise.all([
-          fetch('/api/stats'),
-          fetch('/api/overview/insights'),
+          fetch(withConnection('/api/stats')),
+          fetch(withConnection('/api/overview/insights')),
         ]);
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
         const statsJson = await statsRes.json();
         const insightsJson = insightsRes.ok ? await insightsRes.json() : null;
 
         let trendsJson: TrendRun[] = [];
-        try { const r = await fetch('/api/trends'); if (r.ok) { const d = await r.json(); trendsJson = d.runs || []; } } catch {}
+        try { const r = await fetch(withConnection('/api/trends')); if (r.ok) { const d = await r.json(); trendsJson = d.runs || []; } } catch {}
 
         let postureJson = null;
-        try { const r = await fetch('/api/dashboard/posture'); if (r.ok) postureJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/dashboard/posture')); if (r.ok) postureJson = await r.json(); } catch {}
 
         let asJson: AttackSurfaceData | null = null;
-        try { const r = await fetch('/api/overview/attack-surface-score'); if (r.ok) asJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/overview/attack-surface-score')); if (r.ok) asJson = await r.json(); } catch {}
 
         if (!cancelled) {
           setStats(statsJson);
@@ -115,7 +117,7 @@ export default function Overview() {
     }
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [selectedConnectionId]);
 
   const latest = stats?.latest_run;
   const prev = stats?.previous_run;

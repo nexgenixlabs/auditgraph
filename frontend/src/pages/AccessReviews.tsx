@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
+import { useConnection } from '../contexts/ConnectionContext';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -149,6 +150,7 @@ const ALL_DECISIONS = [
 export default function AccessReviews() {
   const { addToast } = useToast();
   const { user } = useAuth();
+  const { withConnection, selectedConnectionId } = useConnection();
   const isAdmin = user?.role === 'admin';
 
   // Campaigns
@@ -192,7 +194,7 @@ export default function AccessReviews() {
     setLoading(true);
     try {
       const url = statusFilter ? `/api/access-reviews?status=${statusFilter}` : '/api/access-reviews';
-      const res = await fetch(url);
+      const res = await fetch(withConnection(url));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       setCampaigns(data.campaigns || []);
@@ -201,17 +203,17 @@ export default function AccessReviews() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, addToast]);
+  }, [statusFilter, addToast, withConnection]);
 
   const loadMetrics = useCallback(async () => {
     try {
-      const res = await fetch('/api/access-reviews/metrics');
+      const res = await fetch(withConnection('/api/access-reviews/metrics'));
       if (!res.ok) return;
       setMetrics(await res.json());
     } catch { /* ignore */ }
-  }, []);
+  }, [withConnection]);
 
-  useEffect(() => { loadCampaigns(); loadMetrics(); }, [loadCampaigns, loadMetrics]);
+  useEffect(() => { loadCampaigns(); loadMetrics(); }, [loadCampaigns, loadMetrics, selectedConnectionId]);
 
   const loadReviews = useCallback(async (campaignId: number, page = 0) => {
     setReviewsLoading(true);
@@ -227,7 +229,7 @@ export default function AccessReviews() {
       if (reviewType) params.set('identity_type', reviewType);
       if (reviewSearch.trim()) params.set('search', reviewSearch.trim());
 
-      const res = await fetch(`/api/access-reviews/${campaignId}?${params}`);
+      const res = await fetch(withConnection(`/api/access-reviews/${campaignId}?${params}`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       setReviews(data.reviews || []);
@@ -237,7 +239,7 @@ export default function AccessReviews() {
     } finally {
       setReviewsLoading(false);
     }
-  }, [reviewSort, reviewStatus, reviewRisk, reviewType, reviewSearch, addToast]);
+  }, [reviewSort, reviewStatus, reviewRisk, reviewType, reviewSearch, addToast, withConnection]);
 
   function toggleExpand(id: number) {
     if (expandedId === id) {
@@ -274,7 +276,7 @@ export default function AccessReviews() {
     }
     setCreating(true);
     try {
-      const res = await fetch('/api/access-reviews', {
+      const res = await fetch(withConnection('/api/access-reviews'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -310,7 +312,7 @@ export default function AccessReviews() {
   async function handleDecision(reviewId: number, decision: string) {
     if (!expandedId) return;
     try {
-      const res = await fetch(`/api/access-reviews/${expandedId}/reviews/${reviewId}`, {
+      const res = await fetch(withConnection(`/api/access-reviews/${expandedId}/reviews/${reviewId}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ decision }),
@@ -327,7 +329,7 @@ export default function AccessReviews() {
   async function handleBulkDecision(decision: string) {
     if (!expandedId || selectedIds.size === 0) return;
     try {
-      const res = await fetch(`/api/access-reviews/${expandedId}/reviews/bulk`, {
+      const res = await fetch(withConnection(`/api/access-reviews/${expandedId}/reviews/bulk`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ review_ids: Array.from(selectedIds), decision }),
@@ -346,7 +348,7 @@ export default function AccessReviews() {
 
   async function handleStatusChange(campaignId: number, newStatus: string) {
     try {
-      const res = await fetch(`/api/access-reviews/${campaignId}`, {
+      const res = await fetch(withConnection(`/api/access-reviews/${campaignId}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
@@ -368,7 +370,7 @@ export default function AccessReviews() {
   async function handleDelete(campaignId: number) {
     if (!window.confirm('Delete this archived campaign?')) return;
     try {
-      const res = await fetch(`/api/access-reviews/${campaignId}`, { method: 'DELETE' });
+      const res = await fetch(withConnection(`/api/access-reviews/${campaignId}`), { method: 'DELETE' });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || `Error: ${res.status}`);

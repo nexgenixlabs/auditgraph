@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useToast } from '../components/ToastProvider';
+import { useConnection } from '../contexts/ConnectionContext';
 import {
   downloadCSV, downloadJSON, exportFilename,
   IDENTITY_CSV_COLUMNS, COMPLIANCE_CSV_COLUMNS, DRIFT_CSV_COLUMNS,
@@ -68,6 +69,7 @@ const CSV_COLUMNS_MAP: Record<string, typeof IDENTITY_CSV_COLUMNS> = {
 
 export default function Exports() {
   const { addToast } = useToast();
+  const { withConnection } = useConnection();
   const [downloading, setDownloading] = useState<string | null>(null);
   const [lastExported, setLastExported] = useState<Record<string, string>>({});
 
@@ -75,7 +77,7 @@ export default function Exports() {
     const dlKey = `${exportType}-${format}`;
     setDownloading(dlKey);
     try {
-      const res = await fetch(`/api/export/${exportType}`);
+      const res = await fetch(withConnection(`/api/export/${exportType}`));
       if (!res.ok) {
         const errData = await res.json().catch(() => null);
         throw new Error(errData?.error || `Export failed (${res.status})`);

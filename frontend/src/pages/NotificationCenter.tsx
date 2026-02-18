@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -72,6 +73,7 @@ function timeAgo(dateStr: string): string {
 
 export default function NotificationCenter() {
   const navigate = useNavigate();
+  const { withConnection, selectedConnectionId } = useConnection();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [stats, setStats] = useState<NotificationStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -87,10 +89,10 @@ export default function NotificationCenter() {
 
   const loadStats = useCallback(async () => {
     try {
-      const res = await fetch('/api/notifications/stats');
+      const res = await fetch(withConnection('/api/notifications/stats'));
       if (res.ok) setStats(await res.json());
     } catch { /* ignore */ }
-  }, []);
+  }, [withConnection]);
 
   const loadNotifications = useCallback(async (reset = false) => {
     const newOffset = reset ? 0 : offset;
@@ -102,7 +104,7 @@ export default function NotificationCenter() {
       if (readFilter === 'unread') params.set('read', 'false');
       else if (readFilter === 'read') params.set('read', 'true');
 
-      const res = await fetch(`/api/notifications?${params}`);
+      const res = await fetch(withConnection(`/api/notifications?${params}`));
       if (res.ok) {
         const data = await res.json();
         const items = data.notifications || [];
@@ -117,17 +119,17 @@ export default function NotificationCenter() {
       }
     } catch { /* ignore */ }
     finally { setLoading(false); }
-  }, [offset, severityFilter, categoryFilter, readFilter]);
+  }, [offset, severityFilter, categoryFilter, readFilter, withConnection]);
 
   useEffect(() => {
     loadStats();
     loadNotifications(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [severityFilter, categoryFilter, readFilter]);
+  }, [severityFilter, categoryFilter, readFilter, selectedConnectionId]);
 
   async function handleMarkRead(id: number) {
     try {
-      await fetch(`/api/notifications/${id}`, {
+      await fetch(withConnection(`/api/notifications/${id}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ read: true }),
@@ -139,7 +141,7 @@ export default function NotificationCenter() {
 
   async function handleDismiss(id: number) {
     try {
-      await fetch(`/api/notifications/${id}`, {
+      await fetch(withConnection(`/api/notifications/${id}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action_type: 'dismiss' }),
@@ -151,7 +153,7 @@ export default function NotificationCenter() {
 
   async function handleMarkAllRead() {
     try {
-      await fetch('/api/notifications/mark-all-read', { method: 'POST' });
+      await fetch(withConnection('/api/notifications/mark-all-read'), { method: 'POST' });
       setNotifications(prev => prev.map(n => ({ ...n, read: true })));
       loadStats();
     } catch { /* ignore */ }
@@ -159,7 +161,7 @@ export default function NotificationCenter() {
 
   async function handleDelete(id: number) {
     try {
-      await fetch(`/api/notifications/${id}`, { method: 'DELETE' });
+      await fetch(withConnection(`/api/notifications/${id}`), { method: 'DELETE' });
       setNotifications(prev => prev.filter(n => n.id !== id));
       loadStats();
     } catch { /* ignore */ }

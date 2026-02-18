@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
+import { useConnection } from '../contexts/ConnectionContext';
 
 /* ───────── Types ───────── */
 
@@ -193,13 +194,14 @@ export default function Compliance() {
   const [expandedRC, setExpandedRC] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const { addToast } = useToast();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   /* Export */
   async function handleExport(format: 'csv' | 'json') {
     setExporting(true);
     try {
       if (format === 'csv') {
-        const res = await fetch('/api/compliance/gap-analysis?format=csv');
+        const res = await fetch(withConnection('/api/compliance/gap-analysis?format=csv'));
         if (!res.ok) throw new Error(`Export failed (${res.status})`);
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
@@ -209,7 +211,7 @@ export default function Compliance() {
         a.click();
         URL.revokeObjectURL(url);
       } else {
-        const res = await fetch('/api/compliance/intelligence');
+        const res = await fetch(withConnection('/api/compliance/intelligence'));
         if (!res.ok) throw new Error(`Export failed (${res.status})`);
         const exportData = await res.json();
         const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
@@ -232,7 +234,7 @@ export default function Compliance() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/compliance/intelligence');
+        const res = await fetch(withConnection('/api/compliance/intelligence'));
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const json: IntelligenceData = await res.json();
         setData(json);
@@ -242,7 +244,7 @@ export default function Compliance() {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [selectedConnectionId]);
 
   /* Loading */
   if (loading) {

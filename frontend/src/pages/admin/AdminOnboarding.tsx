@@ -75,17 +75,17 @@ export default function AdminOnboarding() {
     setError(null);
     setProcessing(true);
     try {
-      const res = await fetch('/api/tenants', {
+      const res = await fetch('/api/clients', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create tenant');
+      if (!res.ok) throw new Error(data.error || 'Failed to create client');
       setCreatedSlug(data.tenant.slug);
       setSuccess(true);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create tenant');
+      setError(err instanceof Error ? err.message : 'Failed to create client');
     } finally {
       setProcessing(false);
     }
@@ -147,7 +147,7 @@ export default function AdminOnboarding() {
 
           <div className="mt-5 flex items-center justify-center gap-4">
             <a href="/admin/tenants" className="text-sm text-blue-400 hover:text-blue-300 hover:underline">
-              View Tenants
+              View Clients
             </a>
             <button onClick={handleReset} className="text-sm text-gray-400 hover:text-white hover:underline">
               Onboard Another

@@ -44,7 +44,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
   // Tenant list for superadmin switcher
   useEffect(() => {
     if (!isSuperAdmin) return;
-    fetch('/api/tenants')
+    fetch('/api/clients')
       .then(r => r.ok ? r.json() : null)
       .then(d => d && setTenantsList(d.tenants || []))
       .catch(() => {});
@@ -130,7 +130,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
-              <span>{activeTenantName || 'All Tenants'}</span>
+              <span>{activeTenantName || 'All Clients'}</span>
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
@@ -143,7 +143,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
                     onClick={() => { switchTenant(null); setTenantDropdownOpen(false); }}
                     className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-slate-700 transition ${!activeTenantId ? 'font-bold text-purple-700 dark:text-purple-300' : 'text-gray-700 dark:text-slate-300'}`}
                   >
-                    All Tenants (no filter)
+                    All Clients (no filter)
                   </button>
                   {tenantsList.map(t => (
                     <button

@@ -172,6 +172,27 @@ export default function Settings() {
   const cloudSectionRef = useRef<HTMLDivElement>(null);
   const isAdmin = user?.role === 'admin';
 
+  // Cloud connections (multi-directory)
+  const [cloudConnections, setCloudConnections] = useState<Array<{
+    id: number; cloud: string; label: string; status: string;
+    entra_tenant_id: string | null; client_id: string | null;
+    last_test_status: string | null; last_discovery_at: string | null;
+    created_at: string;
+    sub_count?: number;
+    discovered_count?: number;
+  }>>([]);
+  const [showAddWizard, setShowAddWizard] = useState(false);
+  const [wizardStep, setWizardStep] = useState(0);
+  const [wizardCloud, setWizardCloud] = useState('azure');
+  const [wizardLabel, setWizardLabel] = useState('');
+  const [wizardEntraTenantId, setWizardEntraTenantId] = useState('');
+  const [wizardClientId, setWizardClientId] = useState('');
+  const [wizardClientSecret, setWizardClientSecret] = useState('');
+  const [wizardTesting, setWizardTesting] = useState(false);
+  const [wizardTestResult, setWizardTestResult] = useState<{ status: string; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
+  const [wizardSaving, setWizardSaving] = useState(false);
+  const [scanningConnId, setScanningConnId] = useState<number | null>(null);
+
   // Phase 85: Tenant onboarding stage
   const [tenantStage, setTenantStage] = useState<string>('active');
   const [primaryCloud, setPrimaryCloud] = useState<string | null>(null);
@@ -188,6 +209,116 @@ export default function Settings() {
       })
       .catch(() => {});
   }, [user]);
+
+  // Fetch cloud connections
+  function fetchConnections() {
+    fetch('/api/client/connections')
+      .then(r => r.ok ? r.json() : { connections: [] })
+      .then(d => setCloudConnections(d.connections || []))
+      .catch(() => {});
+  }
+  useEffect(() => { fetchConnections(); }, []);
+
+  async function handleWizardTest() {
+    setWizardTesting(true);
+    setWizardTestResult(null);
+    try {
+      const res = await fetch('/api/client/connections/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cloud: wizardCloud,
+          entra_tenant_id: wizardEntraTenantId,
+          client_id: wizardClientId,
+          client_secret: wizardClientSecret,
+        }),
+      });
+      const data = await res.json();
+      setWizardTestResult(data);
+      if (data.status === 'success') setWizardStep(3);
+    } catch {
+      setWizardTestResult({ status: 'error', message: 'Network error' });
+    } finally {
+      setWizardTesting(false);
+    }
+  }
+
+  async function handleWizardSave() {
+    setWizardSaving(true);
+    try {
+      const res = await fetch('/api/client/connections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cloud: wizardCloud,
+          label: wizardLabel,
+          entra_tenant_id: wizardEntraTenantId,
+          client_id: wizardClientId,
+          client_secret: wizardClientSecret,
+          connection_type: 'entra',
+          status: 'connected',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const discovered = data?.connection?.discovered_count || 0;
+        fetchConnections();
+        setShowAddWizard(false);
+        resetWizard();
+        if (discovered > 0) {
+          setSuccess(`Connection added! ${discovered} subscription(s) discovered — go to Subscriptions to activate.`);
+        } else {
+          setSuccess('Connection added successfully');
+        }
+        setTimeout(() => setSuccess(null), 5000);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setError(err.error || 'Failed to save connection');
+      }
+    } catch {
+      setError('Failed to save connection');
+    } finally {
+      setWizardSaving(false);
+    }
+  }
+
+  function resetWizard() {
+    setWizardStep(0);
+    setWizardCloud('azure');
+    setWizardLabel('');
+    setWizardEntraTenantId('');
+    setWizardClientId('');
+    setWizardClientSecret('');
+    setWizardTestResult(null);
+  }
+
+  async function handleDeleteConnection(connId: number) {
+    if (!window.confirm('Delete this connection?')) return;
+    try {
+      await fetch(`/api/client/connections/${connId}`, { method: 'DELETE' });
+      fetchConnections();
+    } catch { /* ignore */ }
+  }
+
+  async function handleRunScan(connId: number) {
+    setScanningConnId(connId);
+    try {
+      const res = await fetch('/api/runs/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: connId }),
+      });
+      if (res.ok) {
+        setSuccess('Discovery scan started for this connection. Check Runs for progress.');
+      } else {
+        setError('Failed to trigger discovery scan');
+      }
+    } catch {
+      setError('Failed to trigger discovery scan');
+    } finally {
+      setScanningConnId(null);
+    }
+  }
 
   async function handleSaveAndUnlock() {
     if (!settings) return;
@@ -324,7 +455,7 @@ export default function Settings() {
   // Load tenants list for superadmin user modal
   useEffect(() => {
     if (!isSuperAdmin) return;
-    fetch('/api/tenants')
+    fetch('/api/clients')
       .then(r => r.ok ? r.json() : { tenants: [] })
       .then(d => setTenants(d.tenants || []))
       .catch(() => {});
@@ -1454,7 +1585,7 @@ export default function Settings() {
                         try {
                           const tid = currentTenant?.id;
                           if (!tid) { setError('No tenant context'); return; }
-                          const res = await fetch(`/api/tenants/${tid}/logo`, {
+                          const res = await fetch(`/api/clients/${tid}/logo`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ logo: reader.result }),
@@ -1580,8 +1711,308 @@ export default function Settings() {
 
           {/* Section 2: Cloud Connections */}
           <div ref={cloudSectionRef} id="cloud-connections" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="text-lg font-semibold text-gray-900">Cloud Connections</div>
-            <p className="text-xs text-gray-500">Configure cloud provider credentials for identity discovery.</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold text-gray-900">Cloud Connections</div>
+                <p className="text-xs text-gray-500">Configure cloud provider credentials for identity discovery.</p>
+              </div>
+              {isAdmin && (
+                <button
+                  onClick={() => { resetWizard(); setShowAddWizard(true); }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Add Connection
+                </button>
+              )}
+            </div>
+
+            {/* Summary Strip */}
+            {cloudConnections.length > 0 && (
+              <div className="flex gap-4 text-xs">
+                <span className="text-gray-500">Connections: <span className="font-semibold text-gray-800">{cloudConnections.length}</span></span>
+                <span className="text-gray-500">Active Subs: <span className="font-semibold text-gray-800">{cloudConnections.reduce((s, c) => s + (c.sub_count || 0), 0)}</span></span>
+                {cloudConnections.reduce((s, c) => s + (c.discovered_count || 0), 0) > 0 && (
+                  <span className="text-amber-600 font-semibold">Discovered: {cloudConnections.reduce((s, c) => s + (c.discovered_count || 0), 0)}</span>
+                )}
+              </div>
+            )}
+
+            {/* Connections List */}
+            {cloudConnections.length > 0 && (
+              <div className="space-y-2">
+                {cloudConnections.map(conn => (
+                  <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
+                    conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
+                    conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
+                    'border-gray-200 bg-gray-50/30'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                          conn.cloud === 'azure' ? 'bg-blue-100 text-blue-700' :
+                          conn.cloud === 'aws' ? 'bg-orange-100 text-orange-700' :
+                          'bg-red-100 text-red-600'
+                        }`}>{conn.cloud.toUpperCase()}</span>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-gray-800">{conn.label}</span>
+                            {conn.label === 'Primary' && (
+                              <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
+                            )}
+                          </div>
+                          {conn.entra_tenant_id && (
+                            <div className="text-[10px] text-gray-400 font-mono">{conn.entra_tenant_id.slice(0, 8)}...</div>
+                          )}
+                          <div className="text-[10px] text-gray-500 mt-0.5">
+                            {conn.sub_count || 0} active subs
+                            {conn.last_discovery_at ? ` · Last scan: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No scan yet'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`flex items-center gap-1 text-[10px] font-semibold ${
+                          conn.status === 'connected' ? 'text-green-600' :
+                          conn.status === 'failed' ? 'text-red-600' :
+                          'text-gray-400'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            conn.status === 'connected' ? 'bg-green-500' :
+                            conn.status === 'failed' ? 'bg-red-500' :
+                            'bg-gray-400'
+                          }`} />
+                          {conn.status === 'connected' ? 'Connected' :
+                           conn.status === 'failed' ? 'Failed' : 'Pending'}
+                        </span>
+                        {isAdmin && conn.status === 'connected' && (
+                          <button
+                            onClick={() => handleRunScan(conn.id)}
+                            disabled={scanningConnId === conn.id}
+                            className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
+                          >
+                            {scanningConnId === conn.id ? 'Starting...' : 'Run Scan'}
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <button
+                            onClick={() => handleDeleteConnection(conn.id)}
+                            className="text-[10px] text-red-400 hover:text-red-600 font-medium"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {/* Discovered subscriptions warning */}
+                    {(conn.discovered_count || 0) > 0 && (
+                      <div className="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
+                        <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                        </svg>
+                        <span>{conn.discovered_count} subscription(s) discovered — </span>
+                        <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Add Connection Wizard Modal */}
+            {showAddWizard && (
+              <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddWizard(false)}>
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+                  {/* Wizard Header */}
+                  <div className="bg-slate-900 px-6 py-4 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-white">Add Cloud Connection</h3>
+                      <p className="text-[10px] text-slate-400 mt-0.5">Step {wizardStep + 1} of 4</p>
+                    </div>
+                    <button onClick={() => setShowAddWizard(false)} className="text-slate-400 hover:text-white text-lg">&times;</button>
+                  </div>
+
+                  {/* Step indicator */}
+                  <div className="px-6 pt-4">
+                    <div className="flex gap-1.5">
+                      {['Cloud', 'Credentials', 'Test', 'Confirm'].map((s, i) => (
+                        <div key={s} className="flex-1">
+                          <div className={`h-1 rounded-full transition ${i <= wizardStep ? 'bg-blue-500' : 'bg-gray-200'}`} />
+                          <div className={`text-[9px] mt-1 ${i <= wizardStep ? 'text-blue-600 font-semibold' : 'text-gray-400'}`}>{s}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-6 space-y-4">
+                    {/* Step 0: Select Cloud */}
+                    {wizardStep === 0 && (
+                      <div className="space-y-3">
+                        <p className="text-sm text-gray-600">Select the cloud provider for this connection.</p>
+                        {[
+                          { key: 'azure', label: 'Azure / Entra ID', desc: 'Microsoft Azure cloud and Entra directory', color: 'blue' },
+                          { key: 'aws', label: 'AWS', desc: 'Amazon Web Services (coming soon)', color: 'orange', disabled: true },
+                          { key: 'gcp', label: 'GCP', desc: 'Google Cloud Platform (coming soon)', color: 'red', disabled: true },
+                        ].map(c => (
+                          <button
+                            key={c.key}
+                            disabled={c.disabled}
+                            onClick={() => setWizardCloud(c.key)}
+                            className={`w-full text-left border-2 rounded-xl p-4 transition ${
+                              c.disabled ? 'opacity-50 cursor-not-allowed border-gray-200' :
+                              wizardCloud === c.key ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <div className="text-sm font-semibold text-gray-800">{c.label}</div>
+                                <div className="text-[10px] text-gray-500">{c.desc}</div>
+                              </div>
+                              {wizardCloud === c.key && !c.disabled && (
+                                <svg className="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                                </svg>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                        <div className="flex justify-end pt-2">
+                          <button onClick={() => setWizardStep(1)} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Step 1: Enter Credentials */}
+                    {wizardStep === 1 && (
+                      <div className="space-y-3">
+                        <p className="text-sm text-gray-600">Enter your Azure service principal credentials.</p>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Connection Name</label>
+                          <input
+                            value={wizardLabel}
+                            onChange={e => setWizardLabel(e.target.value)}
+                            placeholder="e.g., Production Entra Directory"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Entra Directory ID</label>
+                          <input
+                            value={wizardEntraTenantId}
+                            onChange={e => setWizardEntraTenantId(e.target.value)}
+                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Application (Client) ID</label>
+                          <input
+                            value={wizardClientId}
+                            onChange={e => setWizardClientId(e.target.value)}
+                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Client Secret</label>
+                          <input
+                            type="password"
+                            value={wizardClientSecret}
+                            onChange={e => setWizardClientSecret(e.target.value)}
+                            placeholder="Enter client secret"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div className="flex justify-between pt-2">
+                          <button onClick={() => setWizardStep(0)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
+                          <button
+                            onClick={() => setWizardStep(2)}
+                            disabled={!wizardLabel || !wizardEntraTenantId || !wizardClientId || !wizardClientSecret}
+                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Next: Test Connection
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Step 2: Test Connection */}
+                    {wizardStep === 2 && (
+                      <div className="space-y-4">
+                        <p className="text-sm text-gray-600">Verify that AuditGraph can connect to your Entra directory.</p>
+                        <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
+                          <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
+                          <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
+                          <div className="flex justify-between"><span className="text-gray-500">Directory</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                        </div>
+                        {wizardTestResult && (
+                          <div className={`rounded-lg p-3 text-sm ${
+                            wizardTestResult.status === 'success' ? 'bg-green-50 border border-green-200 text-green-700' :
+                            'bg-red-50 border border-red-200 text-red-700'
+                          }`}>
+                            {wizardTestResult.message}
+                            {wizardTestResult.subscriptions && wizardTestResult.subscriptions.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                {wizardTestResult.subscriptions.map(sub => (
+                                  <div key={sub.id} className="flex items-center gap-2 text-xs">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                                    <span className="font-medium">{sub.name}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <div className="flex justify-between pt-2">
+                          <button onClick={() => setWizardStep(1)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
+                          <button
+                            onClick={handleWizardTest}
+                            disabled={wizardTesting}
+                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40"
+                          >
+                            {wizardTesting ? 'Testing...' : 'Test Connection'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Step 3: Confirm & Save */}
+                    {wizardStep === 3 && (
+                      <div className="space-y-4">
+                        <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
+                          <svg className="w-10 h-10 text-green-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          <div className="text-sm font-semibold text-green-800">Connection Verified</div>
+                          <p className="text-xs text-green-600 mt-1">Ready to save this connection.</p>
+                        </div>
+                        <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
+                          <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
+                          <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
+                          <div className="flex justify-between"><span className="text-gray-500">Directory ID</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                          {wizardTestResult?.subscriptions && (
+                            <div className="flex justify-between"><span className="text-gray-500">Subscriptions</span><span className="font-semibold text-gray-800">{wizardTestResult.subscriptions.length} found</span></div>
+                          )}
+                        </div>
+                        <div className="flex justify-between pt-2">
+                          <button onClick={() => setWizardStep(2)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
+                          <button
+                            onClick={handleWizardSave}
+                            disabled={wizardSaving}
+                            className="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-40"
+                          >
+                            {wizardSaving ? 'Saving...' : 'Save Connection'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {tenantStage === 'locked' && (
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
@@ -1600,7 +2031,7 @@ export default function Settings() {
 
             {!isAdmin ? (
               <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-600">
-                Contact your tenant administrator to configure cloud credentials.
+                Contact your organization administrator to configure cloud credentials.
               </div>
             ) : (
               <div className="space-y-5">
@@ -1624,7 +2055,7 @@ export default function Settings() {
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Azure Tenant ID</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Entra Directory ID</label>
                       <input
                         type="text"
                         value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_tenant_id || '') : (settings?.azure_tenant_id || '')}

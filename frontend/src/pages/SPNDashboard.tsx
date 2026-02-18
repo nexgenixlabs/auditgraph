@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename } from '../utils/exportUtils';
 import { generateSPNReport } from '../utils/spnPdfGenerator';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -380,6 +381,7 @@ function SPNDrillDown({ detail, onClose }: { detail: SPNDetail; onClose: () => v
 
 export default function SPNDashboard() {
   const location = useLocation();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   const [stats, setStats] = useState<SPNStats | null>(null);
   const [spns, setSpns] = useState<SPNRow[]>([]);
@@ -415,11 +417,11 @@ export default function SPNDashboard() {
   // Fetch stats
   useEffect(() => {
     if (!initialized) return;
-    fetch('/api/spns/stats')
+    fetch(withConnection('/api/spns/stats'))
       .then(r => r.json())
       .then(setStats)
       .catch(() => {});
-  }, [initialized]);
+  }, [initialized, selectedConnectionId]);
 
   // Fetch SPN list
   useEffect(() => {
@@ -435,7 +437,7 @@ export default function SPNDashboard() {
     if (activityFilter) params.set('activity', activityFilter);
     if (search) params.set('search', search);
 
-    fetch(`/api/spns?${params}`, { signal: abort.signal })
+    fetch(withConnection(`/api/spns?${params}`), { signal: abort.signal })
       .then(r => r.json())
       .then(data => {
         setSpns(data.spns || []);
@@ -443,13 +445,13 @@ export default function SPNDashboard() {
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [initialized, riskFilter, blastFilter, credFilter, activityFilter, search, hideMicrosoft]);
+  }, [initialized, riskFilter, blastFilter, credFilter, activityFilter, search, hideMicrosoft, selectedConnectionId]);
 
   // Fetch detail when selected
   useEffect(() => {
     if (!selectedId) { setDetail(null); return; }
     setDetailLoading(true);
-    fetch(`/api/spns/${selectedId}`)
+    fetch(withConnection(`/api/spns/${selectedId}`))
       .then(r => r.json())
       .then(d => { setDetail(d); setDetailLoading(false); })
       .catch(() => setDetailLoading(false));
@@ -557,7 +559,7 @@ export default function SPNDashboard() {
 
       const details = await Promise.all(
         critSpns.map(s =>
-          fetch(`/api/spns/${s.identity_id}`)
+          fetch(withConnection(`/api/spns/${s.identity_id}`))
             .then(r => r.json())
             .catch(() => null)
         )

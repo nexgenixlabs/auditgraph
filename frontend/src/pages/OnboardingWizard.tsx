@@ -163,7 +163,7 @@ export default function OnboardingWizard() {
               </p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Azure Tenant ID</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Entra Directory ID</label>
               <input
                 type="text"
                 value={azureTenantId}
@@ -201,7 +201,7 @@ export default function OnboardingWizard() {
             <div>
               <h2 className="text-xl font-bold text-gray-900">Test Connection</h2>
               <p className="text-sm text-gray-600 mt-2">
-                Verify that AuditGraph can connect to your Azure AD tenant and discover subscriptions.
+                Verify that AuditGraph can connect to your Entra directory and discover subscriptions.
               </p>
             </div>
 
@@ -335,7 +335,7 @@ export default function OnboardingWizard() {
                 <span className="font-medium text-gray-900">{orgName}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500">Azure Tenant</span>
+                <span className="text-gray-500">Entra Directory</span>
                 <span className="font-mono text-xs text-gray-700">{azureTenantId.slice(0, 8)}...</span>
               </div>
               <div className="flex justify-between">

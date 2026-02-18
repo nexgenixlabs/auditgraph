@@ -22,6 +22,16 @@ from app.api.auth import generate_access_token, generate_refresh_token, hash_ref
 load_dotenv(".env.local")
 load_dotenv()
 
+# SQL clause to identify/hide Microsoft first-party identities.
+# The is_microsoft_system flag is the single source of truth, set by:
+#   - Discovery engine: _is_microsoft_system_app() uses appOwnerOrganizationId
+#   - Database backfill: sets flag based on naming conventions for old data
+# No LIKE patterns needed at query time — the flag is authoritative.
+IS_MICROSOFT_SQL = "COALESCE(i.is_microsoft_system, false)"
+
+# HIDE_MICROSOFT_SQL: AND NOT clause to exclude Microsoft first-party identities
+HIDE_MICROSOFT_SQL = "\n    AND NOT COALESCE(i.is_microsoft_system, false)\n"
+
 
 def _db() -> Database:
     """Create a Database connection with RLS tenant context from JWT.
@@ -69,27 +79,75 @@ def _log(db, action_type, description, metadata=None):
     db.log_activity(action_type, description, metadata, user_id=uid, tenant_id=tid)
 
 
-def _latest_run_query(cursor, tenant_id=None):
-    """Get latest completed discovery run ID, scoped by tenant.
+def _connection_id():
+    """Read optional connection_id from query string."""
+    val = request.args.get('connection_id')
+    return int(val) if val else None
 
-    tenant_id=None is only safe for superadmins (unscoped). The -1 sentinel
-    from _tenant_id() will match nothing, preventing cross-tenant leakage.
+
+def _latest_run_ids(cursor, tenant_id=None, connection_id=None):
+    """Get latest completed discovery run IDs — one per cloud_connection_id.
+
+    Returns a list of run_ids. When connection_id is specified, returns
+    only the latest run for that specific connection.
     """
-    if tenant_id is not None:  # Includes -1 sentinel — always scope
-        cursor.execute("SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (tenant_id,))
-    else:
-        # Belt-and-suspenders: verify caller is superadmin before unscoped query
-        user = getattr(g, 'current_user', None)
-        if not user or not user.get('is_superadmin'):
-            return None  # Safety: non-superadmin without tenant sees nothing
-        cursor.execute("SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed'")
-    row = cursor.fetchone()
-    if not row:
-        return None
-    # Support both RealDictCursor (dict) and regular cursor (tuple)
-    if isinstance(row, dict):
-        return row.get('run_id')
-    return row[0]
+    def _extract_id(row):
+        """Extract id from a row that may be a dict (RealDictCursor) or tuple."""
+        if isinstance(row, dict):
+            return row.get('id') or row.get('max')
+        return row[0]
+
+    if connection_id:
+        cursor.execute("""
+            SELECT MAX(id) AS id FROM discovery_runs
+            WHERE status = 'completed' AND tenant_id = %s AND cloud_connection_id = %s
+        """, (tenant_id, connection_id))
+        row = cursor.fetchone()
+        run_id = _extract_id(row) if row else None
+        return [run_id] if run_id else []
+
+    if tenant_id is not None:
+        cursor.execute("""
+            SELECT DISTINCT ON (cloud_connection_id)
+                id
+            FROM discovery_runs
+            WHERE status = 'completed' AND tenant_id = %s
+              AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+            ORDER BY cloud_connection_id, id DESC
+        """, (tenant_id,))
+        rows = cursor.fetchall()
+        result = [_extract_id(r) for r in rows]
+        if result:
+            return result
+        # Fallback: no runs with cloud_connection_id — use absolute latest
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE status = 'completed' AND tenant_id = %s
+            ORDER BY id DESC LIMIT 1
+        """, (tenant_id,))
+        row = cursor.fetchone()
+        return [_extract_id(row)] if row else []
+
+    user = getattr(g, 'current_user', None)
+    if not user or not user.get('is_superadmin'):
+        return []
+    cursor.execute("""
+        SELECT DISTINCT ON (cloud_connection_id)
+            id
+        FROM discovery_runs
+        WHERE status = 'completed'
+          AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+        ORDER BY cloud_connection_id, id DESC
+    """)
+
+    rows = cursor.fetchall()
+    return [_extract_id(r) for r in rows]
+
+
+def _latest_run_query(cursor, tenant_id=None, connection_id=None):
+    """Backward-compat wrapper — returns single run_id or None."""
+    ids = _latest_run_ids(cursor, tenant_id, connection_id)
+    return ids[0] if ids else None
 
 
 def _parse_risk_reasons(value):
@@ -120,30 +178,13 @@ def health_check():
 
 def get_stats():
     """
-    Dashboard summary statistics for latest completed discovery run.
+    Dashboard summary statistics — aggregated across all connections (same as other endpoints).
     """
     db = _db()
     cursor = db.conn.cursor()
 
     try:
         tid = _tenant_id()
-        if tid:
-            cursor.execute(
-                """
-                SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
-                FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s
-                ORDER BY id DESC LIMIT 1
-                """, (tid,)
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
-                FROM discovery_runs WHERE status = 'completed'
-                ORDER BY id DESC LIMIT 1
-                """
-            )
-        row = cursor.fetchone()
 
         if tid:
             cursor.execute("SELECT COUNT(*) FROM discovery_runs WHERE tenant_id = %s", (tid,))
@@ -151,46 +192,40 @@ def get_stats():
             cursor.execute("SELECT COUNT(*) FROM discovery_runs")
         total_runs = cursor.fetchone()[0] or 0
 
-        if not row:
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
             return jsonify({"latest_run": None, "total_discovery_runs": total_runs})
 
+        # Most recent completed_at across selected runs
+        cursor.execute("""
+            SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)
+        """, (run_ids,))
+        completed_at = cursor.fetchone()[0]
+
+        # Live-count excluding Microsoft first-party SPNs (across all connection runs)
+        cursor.execute(f"""
+            SELECT COUNT(*),
+                   SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN i.risk_level = 'high' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN i.risk_level = 'medium' THEN 1 ELSE 0 END)
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
+        filt = cursor.fetchone()
+
         latest = {
-            "id": row[0],
-            "completed_at": row[1].isoformat() if row[1] else None,
-            "total_identities": row[2] or 0,
-            "critical_count": row[3] or 0,
-            "high_count": row[4] or 0,
-            "medium_count": row[5] or 0,
+            "id": run_ids[0],
+            "completed_at": completed_at.isoformat() if completed_at else None,
+            "total_identities": filt[0] if filt else 0,
+            "critical_count": filt[1] if filt else 0,
+            "high_count": filt[2] if filt else 0,
+            "medium_count": filt[3] if filt else 0,
         }
 
-        # Previous run for trend comparison (Pillar 6)
-        if tid:
-            cursor.execute(
-                """
-                SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
-                FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s
-                ORDER BY id DESC LIMIT 1 OFFSET 1
-                """, (tid,)
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
-                FROM discovery_runs WHERE status = 'completed'
-                ORDER BY id DESC LIMIT 1 OFFSET 1
-                """
-            )
-        prev_row = cursor.fetchone()
+        # Previous run comparison is less meaningful with multi-connection,
+        # but keep for backwards compat — use None for now
         previous_run = None
-        if prev_row:
-            previous_run = {
-                "id": prev_row[0],
-                "completed_at": prev_row[1].isoformat() if prev_row[1] else None,
-                "total_identities": prev_row[2] or 0,
-                "critical_count": prev_row[3] or 0,
-                "high_count": prev_row[4] or 0,
-                "medium_count": prev_row[5] or 0,
-            }
 
         return jsonify({
             "latest_run": latest,
@@ -224,17 +259,21 @@ def get_identities():
     search = request.args.get("search")
     limit = request.args.get("limit", type=int)
     offset = request.args.get("offset", default=0, type=int)
+    hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
 
     cursor = db.conn.cursor()
 
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
 
-        if not latest_run:
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
-        query = _identity_list_select() + " WHERE i.discovery_run_id = %s"
-        params = [latest_run]
+        query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"
+        params = [run_ids]
+
+        if hide_microsoft:
+            query += HIDE_MICROSOFT_SQL
 
         if risk_filter:
             query += " AND i.risk_level = %s"
@@ -311,6 +350,10 @@ def get_identity_details(identity_id: str):
     cursor = db.conn.cursor()
 
     try:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
+            return jsonify({"error": "Identity not found"}), 404
+
         cursor.execute(
             """
             SELECT i.id, i.identity_id, i.display_name, i.identity_type, i.identity_category, i.risk_level,
@@ -342,11 +385,11 @@ def get_identity_details(identity_id: str):
                    dr.completed_at as run_completed_at
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s AND dr.tenant_id = %s
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             ORDER BY i.discovery_run_id DESC
             LIMIT 1
             """,
-            (identity_id, _tenant_id()),
+            (identity_id, run_ids),
         )
         row = cursor.fetchone()
         if not row:
@@ -535,19 +578,20 @@ def get_risks():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
         cursor.execute(
-            """
-            SELECT identity_id, display_name, identity_type, identity_category, risk_level, risk_reasons
-            FROM identities
-            WHERE discovery_run_id = %s
-              AND risk_level IN ('critical','high')
-            ORDER BY risk_level, display_name
+            f"""
+            SELECT i.identity_id, i.display_name, i.identity_type, i.identity_category, i.risk_level, i.risk_reasons
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.risk_level IN ('critical','high')
+              {HIDE_MICROSOFT_SQL}
+            ORDER BY i.risk_level, i.display_name
             """,
-            (latest_run,),
+            (run_ids,),
         )
         rows = cursor.fetchall()
 
@@ -705,9 +749,17 @@ def get_trends():
     try:
         limit = request.args.get('limit', 10, type=int)
         limit = min(max(limit, 2), 30)
+        conn_id = _connection_id()
+
+        conn_filter = "AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0"
+        params = [_tenant_id()]
+        if conn_id:
+            conn_filter += " AND dr.cloud_connection_id = %s"
+            params.append(conn_id)
+        params.append(limit)
 
         cursor.execute(
-            """
+            f"""
             SELECT
                 dr.id,
                 dr.completed_at,
@@ -739,10 +791,11 @@ def get_trends():
                 ), 0) as avg_risk_score
             FROM discovery_runs dr
             WHERE dr.status = 'completed' AND dr.tenant_id = %s
+              {conn_filter}
             ORDER BY dr.id DESC
             LIMIT %s
             """,
-            (_tenant_id(), limit),
+            tuple(params),
         )
         rows = cursor.fetchall()
 
@@ -778,12 +831,21 @@ def get_trends_velocity():
     cursor = db.conn.cursor()
     try:
         limit = min(max(request.args.get('limit', 10, type=int), 2), 20)
+        conn_id = _connection_id()
 
-        cursor.execute("""
+        conn_filter = "AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0"
+        params = [_tenant_id()]
+        if conn_id:
+            conn_filter += " AND cloud_connection_id = %s"
+            params.append(conn_id)
+        params.append(limit)
+
+        cursor.execute(f"""
             SELECT id, completed_at FROM discovery_runs
             WHERE status = 'completed' AND tenant_id = %s
+              {conn_filter}
             ORDER BY id DESC LIMIT %s
-        """, (_tenant_id(), limit))
+        """, tuple(params))
         runs = list(reversed(cursor.fetchall()))
 
         if len(runs) < 2:
@@ -871,16 +933,25 @@ def get_identity_risk_history(identity_id):
     cursor = db.conn.cursor()
     try:
         limit = min(max(request.args.get('limit', 20, type=int), 2), 50)
+        conn_id = _connection_id()
 
-        cursor.execute("""
+        conn_filter = "AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0"
+        params = [identity_id]
+        if conn_id:
+            conn_filter += " AND dr.cloud_connection_id = %s"
+            params.append(conn_id)
+        params.append(limit)
+
+        cursor.execute(f"""
             SELECT i.discovery_run_id, dr.completed_at,
                    COALESCE(i.risk_score, 0), i.risk_level
             FROM identities i
             JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND dr.status = 'completed'
+              {conn_filter}
             ORDER BY dr.id DESC
             LIMIT %s
-        """, (identity_id, limit))
+        """, tuple(params))
         rows = cursor.fetchall()
 
         if not rows:
@@ -913,11 +984,20 @@ def get_batch_risk_history():
         if not identity_ids or len(identity_ids) > 200:
             return jsonify({"error": "Provide 1-200 identity_ids"}), 400
 
-        cursor.execute("""
+        conn_id = _connection_id()
+        conn_filter = "AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0"
+        params = [_tenant_id()]
+        if conn_id:
+            conn_filter += " AND cloud_connection_id = %s"
+            params.append(conn_id)
+        params.append(run_limit)
+
+        cursor.execute(f"""
             SELECT id FROM discovery_runs
             WHERE status = 'completed' AND tenant_id = %s
+              {conn_filter}
             ORDER BY id DESC LIMIT %s
-        """, (_tenant_id(), run_limit))
+        """, tuple(params))
         run_ids = [r[0] for r in cursor.fetchall()]
 
         if not run_ids:
@@ -1130,16 +1210,28 @@ def test_email():
 
 
 def trigger_discovery():
-    """Trigger a manual discovery run in a background thread."""
+    """Trigger a manual discovery run in a background thread.
+    Accepts optional JSON body: {connection_id: int} to scan a single connection.
+    """
     import threading
     from app.scheduler import trigger_manual_discovery
 
     tid = _tenant_id()
     tname = g.current_user.get('tenant_name') if hasattr(g, 'current_user') and g.current_user else None
 
+    # Optional: scan only a specific connection
+    conn_id = None
+    data = request.get_json(silent=True)
+    if data and data.get('connection_id'):
+        try:
+            conn_id = int(data['connection_id'])
+        except (ValueError, TypeError):
+            pass
+
     def _run():
         try:
-            trigger_manual_discovery(db_tenant_id=tid, tenant_name=tname)
+            trigger_manual_discovery(db_tenant_id=tid, tenant_name=tname,
+                                     connection_id=conn_id)
         except Exception as e:
             logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
 
@@ -1148,11 +1240,18 @@ def trigger_discovery():
 
     db = _db()
     try:
-        _log(db,'discovery_triggered', 'Manual discovery run triggered')
+        msg = 'Manual discovery run triggered'
+        if conn_id:
+            msg += f' for connection {conn_id}'
+        _log(db, 'discovery_triggered', msg)
     finally:
         db.close()
 
-    return jsonify({"status": "started", "message": "Discovery run triggered. Check /api/runs for progress."}), 202
+    msg = "Discovery run triggered."
+    if conn_id:
+        msg = f"Discovery triggered for connection {conn_id}."
+    msg += " Check /api/runs for progress."
+    return jsonify({"status": "started", "message": msg}), 202
 
 
 def get_scheduler_status():
@@ -1179,16 +1278,16 @@ def get_identity_remediations(identity_id: str):
 
     try:
         # Get identity data
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
         cursor.execute("""
             SELECT i.id, i.identity_id, i.display_name, i.risk_level,
                    i.risk_reasons, i.activity_status, i.credential_status,
                    i.credential_risk, COALESCE(i.owner_count, 0) as owner_count,
                    i.ca_coverage_status
             FROM identities i
-            WHERE i.identity_id = %s
-            ORDER BY i.discovery_run_id DESC
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             LIMIT 1
-        """, (identity_id,))
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Identity not found"}), 404
@@ -1234,7 +1333,10 @@ def get_report_data():
     """
     db = _db()
     try:
-        data = db.get_report_data()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        cursor.close()
+        data = db.get_report_data(run_ids=run_ids if run_ids else None)
         if data is None:
             return jsonify({"error": "No completed discovery runs found"}), 404
         _log(db,'report_generated', 'Security report data generated', {
@@ -1824,7 +1926,8 @@ def _identity_list_select():
                     WHERE era2.identity_db_id = i.id
                 ) THEN 'directory'
                 ELSE 'none'
-            END as effective_scope
+            END as effective_scope,
+            COALESCE(i.is_microsoft_system, false) as is_microsoft_system
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -1883,6 +1986,7 @@ def _map_identity_row(row):
         "primary_subscription_id": row[41] or None,
         "additional_subscription_count": int(row[42] or 0),
         "effective_scope": row[43] if len(row) > 43 and row[43] else "none",
+        "is_microsoft_system": bool(row[44]) if len(row) > 44 and row[44] is not None else False,
         "privileged_level": "privileged" if int(row[34] or 3) == 0 else "elevated" if int(row[34] or 3) == 1 else "standard",
         "credential_health": (
             "none" if int(row[5] or 0) == 0
@@ -2094,8 +2198,8 @@ def preview_risk_rule():
 
         # Get latest run identities
         cursor = db.conn.cursor()
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"affected_count": 0, "affected": []})
 
         cursor.execute("""
@@ -2108,8 +2212,9 @@ def preview_risk_rule():
                    (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id) as entra_count,
                    (SELECT COUNT(*) FROM graph_api_permissions gap WHERE gap.identity_db_id = i.id) as perm_count
             FROM identities i
-            WHERE i.discovery_run_id = %s
-        """, (latest_run,))
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
         cols = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
@@ -2447,12 +2552,12 @@ def get_overview_insights():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
         # Privilege tier for each identity
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 i.identity_id,
                 i.display_name,
@@ -2524,8 +2629,9 @@ def get_overview_insights():
                     ELSE 3
                 END as privilege_tier
             FROM identities i
-            WHERE i.discovery_run_id = %s
-        """, (latest_run,))
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
 
         rows = cursor.fetchall()
 
@@ -2615,11 +2721,11 @@ def get_attack_surface_score():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 -- totals
                 COUNT(*) as total,
@@ -2686,8 +2792,9 @@ def get_attack_surface_score():
                 )) as tenant_scope_count
 
             FROM identities i
-            WHERE i.discovery_run_id = %s
-        """, (latest_run,))
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
 
         r = cursor.fetchone()
         total = max(r[0] or 1, 1)
@@ -2769,11 +2876,14 @@ def get_attack_surface_score():
         db.close()
 
 
-def _compute_compliance_metrics(cursor, latest_run):
+def _compute_compliance_metrics(cursor, run_ids):
     """Compute all compliance metrics from identity posture data."""
+    if not isinstance(run_ids, list):
+        run_ids = [run_ids]  # backward compat
     # T0 count
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND (
             EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
                 AND LOWER(era.role_name) IN (
@@ -2787,94 +2897,106 @@ def _compute_compliance_metrics(cursor, latest_run):
                 AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
                      AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'))
         )
-    """, (latest_run,))
+    """, (run_ids,))
     t0_count = cursor.fetchone()[0]
 
     # Dormant privileged
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND i.activity_status IN ('stale', 'never_used')
         AND (
             EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
             OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
         )
-    """, (latest_run,))
+    """, (run_ids,))
     dormant_privileged = cursor.fetchone()[0]
 
     # Expired credentials
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND i.credential_status = 'expired'
-    """, (latest_run,))
+    """, (run_ids,))
     expired_credentials = cursor.fetchone()[0]
 
     # Expiring within 30 days
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND i.credential_expiration IS NOT NULL
         AND i.credential_expiration > NOW()
         AND i.credential_expiration < NOW() + INTERVAL '30 days'
-    """, (latest_run,))
+    """, (run_ids,))
     expiring_credentials_30d = cursor.fetchone()[0]
 
     # Unowned SPNs
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND LOWER(COALESCE(i.identity_category, '')) = 'service_principal'
         AND COALESCE(i.owner_count, 0) = 0
-    """, (latest_run,))
+    """, (run_ids,))
     unowned_spns = cursor.fetchone()[0]
 
     # HIPAA violations
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT COUNT(DISTINCT rhm.role_name)
         FROM role_hipaa_mappings rhm
         WHERE EXISTS (
             SELECT 1 FROM entra_role_assignments era
             JOIN identities i ON era.identity_db_id = i.id
-            WHERE i.discovery_run_id = %s AND era.role_name = rhm.role_name
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+            AND era.role_name = rhm.role_name
         ) OR EXISTS (
             SELECT 1 FROM role_assignments ra
             JOIN identities i ON ra.identity_db_id = i.id
-            WHERE i.discovery_run_id = %s AND ra.role_name = rhm.role_name
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+            AND ra.role_name = rhm.role_name
         )
-    """, (latest_run, latest_run))
+    """, (run_ids, run_ids))
     hipaa_violations = cursor.fetchone()[0]
 
     # MFA not enforced (identities not covered by any CA policy requiring MFA)
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND COALESCE(i.ca_mfa_enforced, false) = false
         AND LOWER(COALESCE(i.identity_category, '')) IN ('human_user', 'guest')
-    """, (latest_run,))
+    """, (run_ids,))
     mfa_not_enforced = cursor.fetchone()[0]
 
     # Excessive permissions (>5 role assignments)
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND (
             (SELECT COUNT(*) FROM role_assignments ra WHERE ra.identity_db_id = i.id)
             + (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
         ) > 5
-    """, (latest_run,))
+    """, (run_ids,))
     excessive_permissions = cursor.fetchone()[0]
 
     # Stale accounts (inactive > 90 days)
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND i.activity_status IN ('stale', 'never_used')
-    """, (latest_run,))
+    """, (run_ids,))
     stale_accounts = cursor.fetchone()[0]
 
     # No credential rotation (credentials not rotated in 180+ days)
-    cursor.execute("""
-        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = %s
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM identities i WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
         AND EXISTS (
             SELECT 1 FROM credentials c WHERE c.identity_db_id = i.id
             AND c.start_datetime IS NOT NULL
             AND c.start_datetime < NOW() - INTERVAL '180 days'
         )
-    """, (latest_run,))
+    """, (run_ids,))
     no_credential_rotation = cursor.fetchone()[0]
 
     return {
@@ -2891,8 +3013,10 @@ def _compute_compliance_metrics(cursor, latest_run):
     }
 
 
-def _compute_compliance_evidence(cursor, latest_run, needed_metrics):
+def _compute_compliance_evidence(cursor, run_ids, needed_metrics):
     """For each metric in needed_metrics, return up to 50 identities contributing to it."""
+    if not isinstance(run_ids, list):
+        run_ids = [run_ids]
     evidence = {}
     _COLS = "i.id, i.identity_id, i.display_name, i.risk_level, COALESCE(i.risk_score,0), COALESCE(i.identity_category,''), i.activity_status"
 
@@ -2906,7 +3030,7 @@ def _compute_compliance_evidence(cursor, latest_run, needed_metrics):
 
     if 't0_count' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND (
                 EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
                     AND LOWER(era.role_name) IN (
@@ -2921,52 +3045,52 @@ def _compute_compliance_evidence(cursor, latest_run, needed_metrics):
                          AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'))
             )
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['t0_count'] = _rows("Control Plane (T0) privileged identity")
 
     if 'dormant_privileged' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND i.activity_status IN ('stale', 'never_used')
             AND (
                 EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
                 OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
             )
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['dormant_privileged'] = _rows("Dormant/stale identity with active role assignments")
 
     if 'expired_credentials' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND i.credential_status = 'expired'
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['expired_credentials'] = _rows("Expired credentials")
 
     if 'expiring_credentials_30d' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND i.credential_expiration IS NOT NULL
             AND i.credential_expiration > NOW()
             AND i.credential_expiration < NOW() + INTERVAL '30 days'
             ORDER BY i.credential_expiration ASC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['expiring_credentials_30d'] = _rows("Credential expires within 30 days")
 
     if 'unowned_spns' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND LOWER(COALESCE(i.identity_category, '')) = 'service_principal'
             AND COALESCE(i.owner_count, 0) = 0
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['unowned_spns'] = _rows("Service principal without assigned owner")
 
     if 'hipaa_violations' in needed_metrics:
         cursor.execute(f"""
             SELECT {_COLS} FROM identities i
-            WHERE i.discovery_run_id = %s
+            WHERE i.discovery_run_id = ANY(%s)
             AND (
                 EXISTS (
                     SELECT 1 FROM entra_role_assignments era
@@ -2980,47 +3104,47 @@ def _compute_compliance_evidence(cursor, latest_run, needed_metrics):
                 )
             )
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['hipaa_violations'] = _rows("Has roles with HIPAA violation mappings")
 
     if 'mfa_not_enforced' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND COALESCE(i.ca_mfa_enforced, false) = false
             AND LOWER(COALESCE(i.identity_category, '')) IN ('human_user', 'guest')
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['mfa_not_enforced'] = _rows("Human user without MFA enforcement")
 
     if 'excessive_permissions' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND (
                 (SELECT COUNT(*) FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                 + (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
             ) > 5
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['excessive_permissions'] = _rows("Has >5 role assignments")
 
     if 'stale_accounts' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND i.activity_status IN ('stale', 'never_used')
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['stale_accounts'] = _rows("Stale or never-used account")
 
     if 'no_credential_rotation' in needed_metrics:
         cursor.execute(f"""
-            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = %s
+            SELECT {_COLS} FROM identities i WHERE i.discovery_run_id = ANY(%s)
             AND EXISTS (
                 SELECT 1 FROM credentials c WHERE c.identity_db_id = i.id
                 AND c.start_datetime IS NOT NULL
                 AND c.start_datetime < NOW() - INTERVAL '180 days'
             )
             ORDER BY i.risk_score DESC LIMIT 50
-        """, (latest_run,))
+        """, (run_ids,))
         evidence['no_credential_rotation'] = _rows("Credentials not rotated in 180+ days")
 
     return evidence
@@ -3093,11 +3217,11 @@ def get_dashboard_compliance():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
-        metrics = _compute_compliance_metrics(cursor, latest_run)
+        metrics = _compute_compliance_metrics(cursor, run_ids)
         frameworks = db.get_compliance_frameworks(enabled_only=True)
 
         scorecard = {}
@@ -3265,11 +3389,11 @@ def get_compliance_gap_analysis():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
-        metrics = _compute_compliance_metrics(cursor, latest_run)
+        metrics = _compute_compliance_metrics(cursor, run_ids)
         frameworks = db.get_compliance_frameworks(enabled_only=True)
         if fw_filter:
             frameworks = [fw for fw in frameworks if fw['key'] == fw_filter]
@@ -3303,7 +3427,7 @@ def get_compliance_gap_analysis():
             fw_results[fw['key']] = {'name': fw['name'], 'version': fw.get('version'), 'controls': controls_out}
 
         # Batch-fetch evidence for non-passing metrics
-        evidence = _compute_compliance_evidence(cursor, latest_run, needed_metrics) if needed_metrics else {}
+        evidence = _compute_compliance_evidence(cursor, run_ids, needed_metrics) if needed_metrics else {}
 
         # Fetch all remediation playbooks once
         cursor.execute("SELECT id, title, description, impact, effort, compliance_refs FROM remediation_playbooks ORDER BY priority_score DESC")
@@ -3350,7 +3474,7 @@ def get_compliance_gap_analysis():
 
         result = {
             'generated_at': datetime.now(timezone.utc).isoformat(),
-            'run_id': latest_run,
+            'run_id': run_ids[0] if run_ids else None,
             'overall_score': overall_score,
             'total_controls': total_controls,
             'passing': total_passing,
@@ -3401,11 +3525,11 @@ def get_compliance_intelligence():
     cursor = db.conn.cursor()
     rc_cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
-        metrics = _compute_compliance_metrics(cursor, latest_run)
+        metrics = _compute_compliance_metrics(cursor, run_ids)
         frameworks = db.get_compliance_frameworks(enabled_only=True)
 
         # Fetch root causes
@@ -3587,7 +3711,7 @@ def get_compliance_intelligence():
             pass
 
         # Batch-fetch evidence for non-passing controls
-        evidence = _compute_compliance_evidence(cursor, latest_run, needed_metrics) if needed_metrics else {}
+        evidence = _compute_compliance_evidence(cursor, run_ids, needed_metrics) if needed_metrics else {}
         # Attach evidence to controls in fw_results
         for fw_key, fw_data in fw_results.items():
             for ctrl in fw_data['controls']:
@@ -3627,60 +3751,54 @@ def get_dashboard_posture():
     cursor = db.conn.cursor()
 
     try:
-        # Get latest two completed runs for trend comparison (tenant-scoped)
-        cursor.execute(
-            """
-            SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
-            FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s
-            ORDER BY id DESC
-            LIMIT 2
-            """,
-            (_tenant_id(),),
-        )
-        runs = cursor.fetchall()
-
-        if not runs:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
-        current_run_id = runs[0][0]
+        # Live filtered count across all connection runs (excluding Microsoft SPNs)
+        cursor.execute(f"""
+            SELECT COUNT(*),
+                   SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN i.risk_level = 'high' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN i.risk_level = 'medium' THEN 1 ELSE 0 END)
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
+        filt = cursor.fetchone()
+
+        cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (run_ids,))
+        completed_at = cursor.fetchone()[0]
+
         current_run = {
-            "id": runs[0][0],
-            "completed_at": runs[0][1].isoformat() if runs[0][1] else None,
-            "total_identities": runs[0][2] or 0,
-            "critical_count": runs[0][3] or 0,
-            "high_count": runs[0][4] or 0,
-            "medium_count": runs[0][5] or 0,
+            "id": run_ids[0],
+            "completed_at": completed_at.isoformat() if completed_at else None,
+            "total_identities": filt[0] if filt else 0,
+            "critical_count": filt[1] if filt else 0,
+            "high_count": filt[2] if filt else 0,
+            "medium_count": filt[3] if filt else 0,
         }
 
         previous_run = None
-        if len(runs) > 1:
-            previous_run = {
-                "id": runs[1][0],
-                "completed_at": runs[1][1].isoformat() if runs[1][1] else None,
-                "total_identities": runs[1][2] or 0,
-                "critical_count": runs[1][3] or 0,
-                "high_count": runs[1][4] or 0,
-                "medium_count": runs[1][5] or 0,
-            }
 
         # Credential health breakdown
         cursor.execute(
-            """
+            f"""
             SELECT
-                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
-                    AND credential_expiration < NOW()) as expired,
-                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
-                    AND credential_expiration >= NOW()
-                    AND credential_expiration < NOW() + INTERVAL '30 days') as expiring_soon,
-                COUNT(*) FILTER (WHERE credential_expiration IS NOT NULL
-                    AND credential_expiration >= NOW() + INTERVAL '30 days') as healthy,
-                COUNT(*) FILTER (WHERE credential_count = 0
-                    OR credential_count IS NULL) as no_credentials
-            FROM identities
-            WHERE discovery_run_id = %s
+                COUNT(*) FILTER (WHERE i.credential_expiration IS NOT NULL
+                    AND i.credential_expiration < NOW()) as expired,
+                COUNT(*) FILTER (WHERE i.credential_expiration IS NOT NULL
+                    AND i.credential_expiration >= NOW()
+                    AND i.credential_expiration < NOW() + INTERVAL '30 days') as expiring_soon,
+                COUNT(*) FILTER (WHERE i.credential_expiration IS NOT NULL
+                    AND i.credential_expiration >= NOW() + INTERVAL '30 days') as healthy,
+                COUNT(*) FILTER (WHERE i.credential_count = 0
+                    OR i.credential_count IS NULL) as no_credentials
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
             """,
-            (current_run_id,),
+            (run_ids,),
         )
         cred_row = cursor.fetchone()
         credential_health = {
@@ -3692,26 +3810,28 @@ def get_dashboard_posture():
 
         # Dormant identities (stale activity)
         cursor.execute(
-            """
+            f"""
             SELECT COUNT(*)
-            FROM identities
-            WHERE discovery_run_id = %s
-              AND activity_status = 'stale'
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.activity_status = 'stale'
+            {HIDE_MICROSOFT_SQL}
             """,
-            (current_run_id,),
+            (run_ids,),
         )
         dormant_count = cursor.fetchone()[0] or 0
 
         # No-owner count
         cursor.execute(
-            """
+            f"""
             SELECT COUNT(*)
-            FROM identities
-            WHERE discovery_run_id = %s
-              AND (owner_count = 0 OR owner_count IS NULL)
-              AND COALESCE(identity_category, '') NOT IN ('human_user', 'guest', 'microsoft_internal')
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND (i.owner_count = 0 OR i.owner_count IS NULL)
+              AND COALESCE(i.identity_category, '') NOT IN ('human_user', 'guest', 'microsoft_internal')
+            {HIDE_MICROSOFT_SQL}
             """,
-            (current_run_id,),
+            (run_ids,),
         )
         no_owner_count = cursor.fetchone()[0] or 0
 
@@ -3752,12 +3872,12 @@ def get_trust_dashboard():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
         # External identity breakdown
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE COALESCE(identity_category, '') = 'guest') as guests,
@@ -3780,8 +3900,9 @@ def get_trust_dashboard():
                 ) as multi_tenant_apps,
                 COUNT(*) FILTER (WHERE tenant_or_org_id IS NOT NULL AND tenant_or_org_id != '') as cross_tenant
             FROM identities i
-            WHERE i.discovery_run_id = %s
-        """, (latest_run,))
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
         r = cursor.fetchone()
         external = {
             "total_identities": r[0] or 0,
@@ -3794,27 +3915,29 @@ def get_trust_dashboard():
         }
 
         # Top external organizations (by tenant_or_org_id)
-        cursor.execute("""
-            SELECT tenant_or_org_id, COUNT(*) as cnt,
-                   COUNT(*) FILTER (WHERE risk_level IN ('critical', 'high')) as high_risk
-            FROM identities
-            WHERE discovery_run_id = %s
-              AND tenant_or_org_id IS NOT NULL AND tenant_or_org_id != ''
-            GROUP BY tenant_or_org_id
+        cursor.execute(f"""
+            SELECT i.tenant_or_org_id, COUNT(*) as cnt,
+                   COUNT(*) FILTER (WHERE i.risk_level IN ('critical', 'high')) as high_risk
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.tenant_or_org_id IS NOT NULL AND i.tenant_or_org_id != ''
+            {HIDE_MICROSOFT_SQL}
+            GROUP BY i.tenant_or_org_id
             ORDER BY cnt DESC
             LIMIT 10
-        """, (latest_run,))
+        """, (run_ids,))
         orgs = [{"org_id": row[0], "identity_count": row[1], "high_risk_count": row[2]} for row in cursor.fetchall()]
 
         # Guest identities list (top 10 by risk)
-        cursor.execute("""
-            SELECT identity_id, display_name, risk_level, COALESCE(risk_score, 0),
-                   activity_status, tenant_or_org_id
-            FROM identities
-            WHERE discovery_run_id = %s AND COALESCE(identity_category, '') = 'guest'
-            ORDER BY COALESCE(risk_score, 0) DESC
+        cursor.execute(f"""
+            SELECT i.identity_id, i.display_name, i.risk_level, COALESCE(i.risk_score, 0),
+                   i.activity_status, i.tenant_or_org_id
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s) AND COALESCE(i.identity_category, '') = 'guest'
+            {HIDE_MICROSOFT_SQL}
+            ORDER BY COALESCE(i.risk_score, 0) DESC
             LIMIT 10
-        """, (latest_run,))
+        """, (run_ids,))
         top_guests = [{
             "identity_id": row[0], "display_name": row[1], "risk_level": row[2],
             "risk_score": row[3], "activity_status": row[4], "org_id": row[5],
@@ -3838,12 +3961,12 @@ def get_credential_intelligence():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
         # Secret age distribution — buckets by age of oldest credential
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 COUNT(*) FILTER (WHERE c.age_days IS NOT NULL AND c.age_days < 30) as age_lt_30,
                 COUNT(*) FILTER (WHERE c.age_days >= 30 AND c.age_days < 90) as age_30_90,
@@ -3855,10 +3978,11 @@ def get_credential_intelligence():
                     EXTRACT(EPOCH FROM (NOW() - MIN(cr.start_date))) / 86400 as age_days
                 FROM identities i
                 JOIN credentials cr ON cr.identity_db_id = i.id
-                WHERE i.discovery_run_id = %s
+                WHERE i.discovery_run_id = ANY(%s)
+                {HIDE_MICROSOFT_SQL}
                 GROUP BY i.id
             ) c
-        """, (latest_run,))
+        """, (run_ids,))
         age_row = cursor.fetchone()
         secret_age = {
             "<30d": age_row[0] or 0,
@@ -3869,22 +3993,23 @@ def get_credential_intelligence():
         }
 
         # Auth method breakdown — credential types
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 COALESCE(cr.credential_type, 'unknown') as ctype,
                 COUNT(DISTINCT cr.identity_db_id) as identity_count
             FROM credentials cr
             JOIN identities i ON i.id = cr.identity_db_id
-            WHERE i.discovery_run_id = %s
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
             GROUP BY ctype
             ORDER BY identity_count DESC
-        """, (latest_run,))
+        """, (run_ids,))
         auth_methods = {}
         for row in cursor.fetchall():
             auth_methods[row[0]] = row[1]
 
         # Rotation compliance — identities with creds needing rotation
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL AND cr.end_date < NOW()) as rotation_overdue,
                 COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL
@@ -3901,8 +4026,9 @@ def get_credential_intelligence():
                 ) > 1) as multi_active
             FROM identities i
             JOIN credentials cr ON cr.identity_db_id = i.id
-            WHERE i.discovery_run_id = %s
-        """, (latest_run,))
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
+        """, (run_ids,))
         rot_row = cursor.fetchone()
         rotation = {
             "overdue": rot_row[0] or 0,
@@ -3934,32 +4060,31 @@ def get_identity_summary():
     cursor = db.conn.cursor()
 
     try:
-        # Get latest completed discovery run (tenant-scoped)
-        cursor.execute("SELECT MAX(id), MAX(completed_at) FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (_tenant_id(),))
-        row = cursor.fetchone()
-        run_id = row[0] if row else None
-        completed_at = row[1] if row else None
-
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({
                 "run_id": None,
                 "completed_at": None,
                 "categories": {}
             })
 
+        cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (run_ids,))
+        completed_at = cursor.fetchone()[0]
+
         # Get individual identities to properly categorize each one
         # This ensures Microsoft internal detection works correctly
         cursor.execute(
-            """
+            f"""
             SELECT
-                display_name,
-                identity_type,
-                COALESCE(identity_category, 'unknown') as category,
-                COALESCE(risk_level, 'unknown') as risk
-            FROM identities
-            WHERE discovery_run_id = %s
+                i.display_name,
+                i.identity_type,
+                COALESCE(i.identity_category, 'unknown') as category,
+                COALESCE(i.risk_level, 'unknown') as risk
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+            {HIDE_MICROSOFT_SQL}
             """,
-            (run_id,),
+            (run_ids,),
         )
         rows = cursor.fetchall()
 
@@ -3994,30 +4119,60 @@ def get_identity_summary():
             )
             FROM role_assignments ra
             JOIN identities i ON i.id = ra.identity_db_id
-            WHERE i.discovery_run_id = %s
+            WHERE i.discovery_run_id = ANY(%s)
               AND ra.scope LIKE '/subscriptions/%%'
-        """, (run_id,))
-        azure_sub_count = cursor.fetchone()[0] or 0
+        """, (run_ids,))
+        arm_sub_count = cursor.fetchone()[0] or 0
 
         # Also get the distinct subscription names/IDs for the detail view
         cursor.execute("""
             SELECT DISTINCT SPLIT_PART(ra.scope, '/', 3) as sub_id
             FROM role_assignments ra
             JOIN identities i ON i.id = ra.identity_db_id
-            WHERE i.discovery_run_id = %s
+            WHERE i.discovery_run_id = ANY(%s)
               AND ra.scope LIKE '/subscriptions/%%'
             ORDER BY sub_id
-        """, (run_id,))
+        """, (run_ids,))
         azure_subs = [r[0] for r in cursor.fetchall() if r[0]]
 
+        # Also check cloud_subscriptions table for accurate count
+        # (includes subs from ALL connections, not just the latest discovery run)
+        tid = _tenant_id()
+        if tid:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT account_id)
+                FROM cloud_subscriptions
+                WHERE tenant_id = %s AND cloud = 'azure'
+                  AND status IN ('active', 'discovered')
+            """, (tid,))
+            cs_count = cursor.fetchone()[0] or 0
+            # Also get sub IDs from cloud_subscriptions
+            cursor.execute("""
+                SELECT DISTINCT account_id
+                FROM cloud_subscriptions
+                WHERE tenant_id = %s AND cloud = 'azure'
+                  AND status IN ('active', 'discovered')
+                ORDER BY account_id
+            """, (tid,))
+            cs_subs = [r[0] for r in cursor.fetchall() if r[0]]
+        else:
+            cs_count = 0
+            cs_subs = []
+
+        # Use the higher count (cloud_subscriptions is more accurate for multi-connection)
+        azure_sub_count = max(arm_sub_count, cs_count)
+        # Merge subscription IDs from both sources
+        all_sub_ids = list(set(azure_subs + cs_subs))
+        all_sub_ids.sort()
+
         return jsonify({
-            "run_id": run_id,
+            "run_id": run_ids[0] if run_ids else None,
             "completed_at": completed_at.isoformat() if completed_at else None,
             "categories": categories,
             "monitored_resources": {
                 "azure": {
                     "subscriptions": azure_sub_count,
-                    "subscription_ids": azure_subs,
+                    "subscription_ids": all_sub_ids,
                 },
                 "aws": {
                     "accounts": 0,
@@ -4112,15 +4267,16 @@ def get_identity_graph_data(identity_id):
     cursor = db.conn.cursor()
 
     try:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
         cursor.execute("""
             SELECT id, identity_id, display_name, identity_category, risk_level,
                    COALESCE(risk_score, 0), activity_status,
                    COALESCE(cloud, 'azure'), COALESCE(owner_count, 0),
                    COALESCE(credential_count, 0)
             FROM identities
-            WHERE identity_id = %s
-            ORDER BY discovery_run_id DESC LIMIT 1
-        """, (identity_id,))
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+            LIMIT 1
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Identity not found"}), 404
@@ -4567,13 +4723,12 @@ def get_identity_pim_data(identity_id):
 
     try:
         # Resolve identity_db_id from identity_id (tenant-scoped)
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
         cursor.execute("""
             SELECT i.id FROM identities i
-            JOIN (SELECT MAX(id) as rid FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s) dr
-            ON i.discovery_run_id = dr.rid
-            WHERE i.identity_id = %s
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             LIMIT 1
-        """, (_tenant_id(), identity_id))
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         if not row:
             return jsonify({"eligible_assignments": [], "activations": [], "overuse_metrics": {
@@ -4610,16 +4765,16 @@ def get_dashboard_ca_summary():
     cursor = db.conn.cursor()
 
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
 
-        if not latest_run:
+        if not run_ids:
             return jsonify({
                 "total_policies": 0, "enabled_policies": 0,
                 "coverage": {"covered": 0, "excluded": 0, "no_coverage": 0, "coverage_pct": 0},
                 "weak_policy_flags": []
             })
 
-        summary = db.get_ca_summary(latest_run)
+        summary = db.get_ca_summary(run_ids[0])
         return jsonify(summary)
 
     finally:
@@ -5765,8 +5920,8 @@ def _export_identities():
         risk_filter = request.args.get('risk_level')
         category_filter = request.args.get('identity_category')
 
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
         query = """
@@ -5823,9 +5978,9 @@ def _export_identities():
                 COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
                 i.risk_reasons
             FROM identities i
-            WHERE i.discovery_run_id = %s
+            WHERE i.discovery_run_id = ANY(%s)
         """
-        params = [latest_run]
+        params = [run_ids]
 
         if risk_filter:
             query += " AND i.risk_level = %s"
@@ -5884,7 +6039,7 @@ def _export_identities():
         return jsonify({
             'export_type': 'identities',
             'generated_at': datetime.utcnow().isoformat(),
-            'run_id': latest_run,
+            'run_id': run_ids[0] if run_ids else None,
             'total_count': len(identities),
             'filters': {'risk_level': risk_filter, 'identity_category': category_filter},
             'identities': identities,
@@ -5899,11 +6054,11 @@ def _export_compliance():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
-        metrics = _compute_compliance_metrics(cursor, latest_run)
+        metrics = _compute_compliance_metrics(cursor, run_ids)
         frameworks = db.get_compliance_frameworks(enabled_only=True)
 
         scorecard = {}
@@ -5973,7 +6128,7 @@ def _export_compliance():
         return jsonify({
             'export_type': 'compliance',
             'generated_at': datetime.utcnow().isoformat(),
-            'run_id': latest_run,
+            'run_id': run_ids[0] if run_ids else None,
             'overall_score': overall_score,
             'raw_metrics': metrics,
             'frameworks': scorecard,
@@ -6391,6 +6546,7 @@ def get_identity_lifecycle(identity_id):
     db = _db()
     try:
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
         cursor.execute("""
             SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
                    i.enabled, i.activity_status, i.credential_status, i.credential_count,
@@ -6400,9 +6556,9 @@ def get_identity_lifecycle(identity_id):
                    dr.completed_at as run_completed_at
             FROM identities i
             JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s AND dr.status = 'completed'
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             ORDER BY dr.completed_at ASC
-        """, (identity_id,))
+        """, (identity_id, run_ids))
         snapshots = [dict(r) for r in cursor.fetchall()]
         cursor.close()
 
@@ -6780,6 +6936,27 @@ def get_groups_list():
     db = _db()
     try:
         groups = db.get_groups()
+
+        # Recompute auto-group member counts with Microsoft filter + multi-run
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if run_ids:
+            for grp in groups:
+                if grp.get('group_type') == 'auto' and grp.get('auto_criteria'):
+                    criteria = grp['auto_criteria']
+                    if isinstance(criteria, str):
+                        import json as _json
+                        criteria = _json.loads(criteria)
+                    where_parts, where_params = db._build_auto_criteria_where(criteria)
+                    where_clause = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+                    cursor.execute(f"""
+                        SELECT COUNT(*) FROM identities i
+                        WHERE i.discovery_run_id = ANY(%s)
+                          {where_clause} {HIDE_MICROSOFT_SQL}
+                    """, [run_ids] + where_params)
+                    grp['member_count'] = cursor.fetchone()[0]
+        cursor.close()
+
         return jsonify({'groups': groups})
     finally:
         db.close()
@@ -6974,8 +7151,8 @@ def query_identities():
 
     cursor = db.conn.cursor()
     try:
-        latest_run = _latest_run_query(cursor, _tenant_id())
-        if not latest_run:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
         try:
@@ -6983,8 +7160,12 @@ def query_identities():
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
-        query = _identity_list_select() + " WHERE i.discovery_run_id = %s"
-        params = [latest_run]
+        hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
+        query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"
+        params = [run_ids]
+
+        if hide_microsoft:
+            query += HIDE_MICROSOFT_SQL
 
         query += adv_where
         params.extend(adv_params)
@@ -8332,6 +8513,291 @@ def test_azure_connection():
         }), 400
 
 
+# ── Cloud Connections (multi-directory / multi-cloud) ───────────
+
+def get_client_connections():
+    """List all cloud connections for the current tenant.
+    Auto-creates a 'Primary' connection from settings if none exist yet.
+    """
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+    cloud = request.args.get('cloud')
+    db = Database()
+    try:
+        connections = db.get_cloud_connections(tid, cloud=cloud)
+
+        # Auto-create primary connection from existing settings if none exist
+        if not connections and not cloud:
+            try:
+                settings = db.get_settings(tenant_id=tid)
+                azure_tid = (settings.get('azure_tenant_id') or '').strip()
+                azure_cid = (settings.get('azure_client_id') or '').strip()
+                if azure_tid:
+                    conn = db.create_cloud_connection(
+                        tenant_id=tid, cloud='azure', label='Primary',
+                        entra_tenant_id=azure_tid, client_id=azure_cid,
+                        connection_type='entra',
+                        metadata={'migrated_from_settings': True},
+                    )
+                    # Mark as connected since it was already working
+                    db.update_cloud_connection(conn['id'], status='connected',
+                                               last_test_status='success')
+                    # Link existing subscriptions to this primary connection
+                    db._ensure_cloud_subscriptions_table()
+                    cursor = db.conn.cursor()
+                    cursor.execute("""
+                        UPDATE cloud_subscriptions
+                        SET cloud_connection_id = %s
+                        WHERE tenant_id = %s AND cloud_connection_id IS NULL
+                    """, (conn['id'], tid))
+                    db.conn.commit()
+                    cursor.close()
+                    connections = db.get_cloud_connections(tid)
+            except Exception:
+                pass
+
+        return jsonify({'connections': connections})
+    finally:
+        db.close()
+
+
+def create_client_connection():
+    """Create a new cloud connection for the current tenant.
+    Stores credentials in metadata and auto-discovers subscriptions.
+    """
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    cloud = (data.get('cloud') or 'azure').strip().lower()
+    label = (data.get('label') or '').strip()
+    entra_tenant_id = (data.get('entra_tenant_id') or data.get('azure_tenant_id') or '').strip()
+    client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
+    client_secret = (data.get('client_secret') or '').strip()
+    connection_type = (data.get('connection_type') or 'entra').strip()
+    status = (data.get('status') or 'pending').strip()
+
+    if not label:
+        return jsonify({'error': 'Connection label is required'}), 400
+    if cloud == 'azure' and not entra_tenant_id:
+        return jsonify({'error': 'Entra Directory ID is required for Azure connections'}), 400
+
+    # Build metadata — store credentials securely in JSONB
+    metadata = data.get('metadata') or {}
+    if client_secret:
+        metadata['client_secret'] = client_secret
+
+    db = Database()
+    try:
+        conn = db.create_cloud_connection(
+            tenant_id=tid, cloud=cloud, label=label,
+            entra_tenant_id=entra_tenant_id or None,
+            client_id=client_id or None,
+            connection_type=connection_type,
+            metadata=metadata,
+        )
+        # If already verified (test passed), mark connected
+        if status == 'connected':
+            conn = db.update_cloud_connection(conn['id'], status='connected',
+                                               last_test_status='success') or conn
+
+        # Auto-discover subscriptions for verified Azure connections
+        discovered_count = 0
+        discovered_subs = []
+        if cloud == 'azure' and status == 'connected' and client_secret and entra_tenant_id and client_id:
+            try:
+                from azure.identity import ClientSecretCredential
+                from azure.mgmt.resource import SubscriptionClient
+                credential = ClientSecretCredential(
+                    tenant_id=entra_tenant_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+                sub_client = SubscriptionClient(credential)
+                subs_list = []
+                for sub in sub_client.subscriptions.list():
+                    if sub.state and sub.state.lower() in ('enabled', 'warned'):
+                        subs_list.append({
+                            'id': sub.subscription_id,
+                            'name': sub.display_name or sub.subscription_id,
+                        })
+                discovered_count = db.insert_discovered_subscriptions(
+                    tid, cloud, conn['id'], subs_list)
+                discovered_subs = subs_list
+            except Exception:
+                pass  # Non-fatal — connection is still saved
+
+        _log(db, 'connection_created', f'Created {cloud} connection: {label}',
+             {'connection_id': conn['id'], 'cloud': cloud, 'discovered_subs': discovered_count})
+
+        result = dict(conn)
+        result['discovered_count'] = discovered_count
+        result['discovered_subscriptions'] = discovered_subs
+        # Strip secret from response
+        meta = result.get('metadata') or {}
+        if isinstance(meta, dict):
+            meta.pop('client_secret', None)
+            result['metadata'] = meta
+        return jsonify({'connection': result}), 201
+    finally:
+        db.close()
+
+
+def update_client_connection(connection_id):
+    """Update a cloud connection."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    db = Database()
+    try:
+        # Verify ownership
+        existing = db.get_cloud_connection_by_id(connection_id)
+        if not existing or existing['tenant_id'] != tid:
+            return jsonify({'error': 'Connection not found'}), 404
+
+        allowed_fields = {}
+        for key in ('label', 'status', 'display_order', 'entra_tenant_id', 'client_id'):
+            if key in data:
+                allowed_fields[key] = data[key]
+
+        updated = db.update_cloud_connection(connection_id, **allowed_fields)
+        _log(db, 'connection_updated', f'Updated connection: {existing["label"]}',
+             {'connection_id': connection_id, 'changes': list(allowed_fields.keys())})
+        return jsonify({'connection': updated})
+    finally:
+        db.close()
+
+
+def delete_client_connection(connection_id):
+    """Delete a cloud connection."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = Database()
+    try:
+        existing = db.get_cloud_connection_by_id(connection_id)
+        if not existing or existing['tenant_id'] != tid:
+            return jsonify({'error': 'Connection not found'}), 404
+
+        db.delete_cloud_connection(connection_id, tenant_id=tid)
+        _log(db, 'connection_deleted', f'Deleted connection: {existing["label"]}',
+             {'connection_id': connection_id, 'cloud': existing['cloud']})
+        return jsonify({'deleted': True})
+    finally:
+        db.close()
+
+
+def test_client_connection():
+    """Test cloud connection credentials without saving."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    cloud = (data.get('cloud') or 'azure').strip().lower()
+
+    if cloud == 'azure':
+        entra_tenant_id = (data.get('entra_tenant_id') or data.get('azure_tenant_id') or '').strip()
+        azure_client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
+        azure_client_secret = (data.get('client_secret') or data.get('azure_client_secret') or '').strip()
+
+        if not all([entra_tenant_id, azure_client_id, azure_client_secret]):
+            return jsonify({'error': 'Entra Directory ID, Client ID, and Client Secret are required'}), 400
+
+        try:
+            from azure.identity import ClientSecretCredential
+            from azure.mgmt.resource import SubscriptionClient
+
+            credential = ClientSecretCredential(
+                tenant_id=entra_tenant_id,
+                client_id=azure_client_id,
+                client_secret=azure_client_secret,
+            )
+            sub_client = SubscriptionClient(credential)
+            subs = []
+            for sub in sub_client.subscriptions.list():
+                if sub.state and sub.state.lower() in ('enabled', 'warned'):
+                    subs.append({
+                        'id': sub.subscription_id,
+                        'name': sub.display_name or sub.subscription_id,
+                    })
+
+            # If connection_id provided, update its test status
+            connection_id = data.get('connection_id')
+            if connection_id:
+                db = Database()
+                try:
+                    db.update_cloud_connection(connection_id,
+                                               last_test_at=datetime.now(timezone.utc).isoformat(),
+                                               last_test_status='success',
+                                               status='connected')
+                finally:
+                    db.close()
+
+            return jsonify({
+                'status': 'success',
+                'subscriptions': subs,
+                'message': f'Connected successfully. Found {len(subs)} subscription(s).',
+            })
+        except Exception as e:
+            # Update test status on failure
+            connection_id = data.get('connection_id')
+            if connection_id:
+                db = Database()
+                try:
+                    db.update_cloud_connection(connection_id,
+                                               last_test_at=datetime.now(timezone.utc).isoformat(),
+                                               last_test_status='failed')
+                finally:
+                    db.close()
+            return jsonify({
+                'status': 'error',
+                'error': str(e),
+                'message': 'Failed to connect. Check your credentials.',
+            }), 400
+    else:
+        return jsonify({'error': f'Cloud provider "{cloud}" test not yet supported'}), 400
+
+
+def discover_client_connection(connection_id):
+    """Trigger discovery for a specific cloud connection."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = Database()
+    try:
+        existing = db.get_cloud_connection_by_id(connection_id)
+        if not existing or existing['tenant_id'] != tid:
+            return jsonify({'error': 'Connection not found'}), 404
+
+        if existing['status'] != 'connected':
+            return jsonify({'error': 'Connection must be tested and connected before discovery'}), 400
+
+        _log(db, 'connection_discovery', f'Discovery triggered for connection: {existing["label"]}',
+             {'connection_id': connection_id})
+
+        return jsonify({
+            'status': 'queued',
+            'message': f'Discovery queued for connection: {existing["label"]}',
+            'connection_id': connection_id,
+        })
+    finally:
+        db.close()
+
+
 # ── Phase 49: Identity Risk Simulation ──────────────────────────
 
 def _compute_risk_score(azure_roles, entra_roles, permissions, app_roles, credentials,
@@ -8587,8 +9053,8 @@ def get_resources():
         search = request.args.get('search', '')
 
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'resources': [], 'count': 0, 'total': 0})
 
@@ -8614,9 +9080,9 @@ def get_resources():
                        ) AS key_config,
                        tags, created_at
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = %s
+                WHERE discovery_run_id = ANY(%s)
             """)
-            params.append(run_id)
+            params.append(run_ids)
             if tenant_id and tenant_id > 0:
                 parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
                 params.append(tenant_id)
@@ -8640,9 +9106,9 @@ def get_resources():
                        ) AS key_config,
                        tags, created_at
                 FROM azure_key_vaults
-                WHERE discovery_run_id = %s
+                WHERE discovery_run_id = ANY(%s)
             """)
-            params.append(run_id)
+            params.append(run_ids)
             if tenant_id and tenant_id > 0:
                 parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
                 params.append(tenant_id)
@@ -8720,8 +9186,8 @@ def get_resource_stats():
         tenant_id = _tenant_id()
         resource_type = request.args.get('resource_type', '')
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({
                 'total': 0, 'storage_accounts': 0, 'key_vaults': 0,
@@ -8730,7 +9196,7 @@ def get_resource_stats():
             })
 
         tenant_filter = ""
-        params = [run_id]
+        params = [run_ids]
         if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
@@ -8753,7 +9219,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE risk_level = 'low') as low,
                        COUNT(*) FILTER (WHERE risk_level = 'info') as info
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = %s{tenant_filter}
+                WHERE discovery_run_id = ANY(%s){tenant_filter}
             """, params)
             sa = dict(cursor.fetchone())
         else:
@@ -8769,7 +9235,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE risk_level = 'low') as low,
                        COUNT(*) FILTER (WHERE risk_level = 'info') as info
                 FROM azure_key_vaults
-                WHERE discovery_run_id = %s{tenant_filter}
+                WHERE discovery_run_id = ANY(%s){tenant_filter}
             """, params)
             kv = dict(cursor.fetchone())
         else:
@@ -8791,7 +9257,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE shared_key_access = true AND diagnostic_logging_enabled = true AND (sas_policy_enabled IS NULL OR sas_policy_enabled = false)) as partial,
                        COUNT(*) FILTER (WHERE shared_key_access = true AND (diagnostic_logging_enabled IS NULL OR diagnostic_logging_enabled = false)) as unauditable
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = %s{tenant_filter}
+                WHERE discovery_run_id = ANY(%s){tenant_filter}
             """, params)
             rotation_row = dict(cursor.fetchone())
             rotation_data = {
@@ -8821,7 +9287,7 @@ def get_resource_stats():
                        COALESCE(SUM(certs_expired), 0) as expired_certs,
                        COALESCE(SUM(certs_expiring_soon), 0) as expiring_certs
                 FROM azure_key_vaults
-                WHERE discovery_run_id = %s{tenant_filter}
+                WHERE discovery_run_id = ANY(%s){tenant_filter}
             """, params)
             expiry_row = dict(cursor.fetchone())
             expiry_data = {
@@ -8868,13 +9334,13 @@ def get_resource_detail(resource_id):
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'error': 'No completed discovery run found'}), 404
 
         tenant_filter = ""
-        params = [run_id, resource_id]
+        params = [run_ids, resource_id]
         if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
@@ -8886,7 +9352,7 @@ def get_resource_detail(resource_id):
         cursor.execute(f"""
             SELECT *, 'storage_account' AS resource_type
             FROM azure_storage_accounts
-            WHERE discovery_run_id = %s AND resource_id = %s{tenant_filter}
+            WHERE discovery_run_id = ANY(%s) AND resource_id = %s{tenant_filter}
         """, params)
         row = cursor.fetchone()
 
@@ -8895,7 +9361,7 @@ def get_resource_detail(resource_id):
             cursor.execute(f"""
                 SELECT *, 'key_vault' AS resource_type
                 FROM azure_key_vaults
-                WHERE discovery_run_id = %s AND resource_id = %s{tenant_filter}
+                WHERE discovery_run_id = ANY(%s) AND resource_id = %s{tenant_filter}
             """, params)
             row = cursor.fetchone()
 
@@ -8984,13 +9450,13 @@ def get_resource_access(resource_id):
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'resource_id': resource_id, 'rbac_access': [], 'policy_access': [], 'count': 0, 'blast_radius': 0})
 
-        # Note: tenant filtering is already handled via run_id (which belongs to the tenant)
-        params = [run_id, resource_id, resource_id]
+        # Note: tenant filtering is already handled via run_ids (which belong to the tenant)
+        params = [run_ids, resource_id, resource_id]
 
         # RBAC access
         cursor.execute(f"""
@@ -8999,7 +9465,7 @@ def get_resource_access(resource_id):
                    ra.role_name, ra.scope, ra.scope_type
             FROM identities i
             JOIN role_assignments ra ON ra.identity_db_id = i.id
-            WHERE i.discovery_run_id = %s
+            WHERE i.discovery_run_id = ANY(%s)
               AND (ra.scope = %s OR %s LIKE ra.scope || '/%%')
             ORDER BY i.risk_score DESC, ra.role_name
         """, params)
@@ -9034,7 +9500,7 @@ def get_resource_access(resource_id):
 
         # Key Vault access policy cross-reference
         policy_access = []
-        kv_params = [run_id, resource_id]
+        kv_params = [run_ids, resource_id]
         kv_tenant_clause = ""
         if tenant_id and tenant_id > 0:
             kv_tenant_clause = "AND (tenant_id = %s OR tenant_id IS NULL)"
@@ -9045,7 +9511,7 @@ def get_resource_access(resource_id):
         cursor.execute(f"""
             SELECT access_policies
             FROM azure_key_vaults
-            WHERE discovery_run_id = %s AND resource_id = %s
+            WHERE discovery_run_id = ANY(%s) AND resource_id = %s
             {kv_tenant_clause}
         """, kv_params)
         kv_row = cursor.fetchone()
@@ -9063,11 +9529,11 @@ def get_resource_access(resource_id):
             policy_object_ids = [p.get('object_id') for p in policies if p.get('object_id')]
             if policy_object_ids:
                 placeholders = ','.join(['%s'] * len(policy_object_ids))
-                id_params = [run_id] + policy_object_ids
+                id_params = [run_ids] + policy_object_ids
                 cursor.execute(f"""
                     SELECT id, display_name, identity_category, risk_level, risk_score, object_id
                     FROM identities
-                    WHERE discovery_run_id = %s AND object_id IN ({placeholders})
+                    WHERE discovery_run_id = ANY(%s) AND object_id IN ({placeholders})
                 """, id_params)
                 identity_map = {r['object_id']: dict(r) for r in cursor.fetchall()}
 
@@ -9115,13 +9581,13 @@ def get_resource_expiry_summary():
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'secrets': {}, 'keys': {}, 'certs': {}, 'timeline': []})
 
         tenant_filter = ""
-        params = [run_id]
+        params = [run_ids]
         if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
@@ -9135,7 +9601,7 @@ def get_resource_expiry_summary():
                    keys_total, keys_expired, keys_expiring_soon,
                    certs_total, certs_expired, certs_expiring_soon
             FROM azure_key_vaults
-            WHERE discovery_run_id = %s{tenant_filter}
+            WHERE discovery_run_id = ANY(%s){tenant_filter}
         """, params)
         rows = cursor.fetchall()
         cursor.close()
@@ -9207,13 +9673,13 @@ def get_resource_compliance_summary():
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'storage': {}, 'key_vault': {}})
 
         tenant_filter = ""
-        params = [run_id]
+        params = [run_ids]
         if tenant_id and tenant_id > 0:
             tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
             params.append(tenant_id)
@@ -9237,7 +9703,7 @@ def get_resource_compliance_summary():
                    COUNT(*) FILTER (WHERE sas_policy_enabled = true) as sas_policy_pass,
                    COUNT(*) FILTER (WHERE bypass_settings = 'AzureServices') as bypass_pass
             FROM azure_storage_accounts
-            WHERE discovery_run_id = %s{tenant_filter}
+            WHERE discovery_run_id = ANY(%s){tenant_filter}
         """, params)
         sa_row = dict(cursor.fetchone())
         sa_total = sa_row['total']
@@ -9253,7 +9719,7 @@ def get_resource_compliance_summary():
                    COUNT(*) FILTER (WHERE private_endpoint_count > 0) as private_ep_pass,
                    COUNT(*) FILTER (WHERE soft_delete_retention_days >= 90) as retention_pass
             FROM azure_key_vaults
-            WHERE discovery_run_id = %s{tenant_filter}
+            WHERE discovery_run_id = ANY(%s){tenant_filter}
         """, params)
         kv_row = dict(cursor.fetchone())
         kv_total = kv_row['total']
@@ -9827,24 +10293,25 @@ def get_sa_governance_stats():
 
     try:
         # Get latest run
-        run_id = _latest_run_query(cursor, tid)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
             return jsonify({'error': 'No completed discovery runs'}), 404
 
         policies = _load_sa_gov_policies(db, tid)
 
         # Basic counts from identities table
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 COUNT(*) as total,
-                COUNT(*) FILTER (WHERE COALESCE(owner_count, 0) = 0) as unowned,
-                COUNT(*) FILTER (WHERE activity_status IN ('stale', 'never_used')) as dormant,
-                COUNT(*) FILTER (WHERE credential_risk = 'expired') as credential_expired,
-                COUNT(*) FILTER (WHERE credential_risk = 'expiring_soon') as credential_expiring
-            FROM identities
-            WHERE discovery_run_id = %s
-              AND identity_category IN %s
-        """, (run_id, SA_CATEGORIES))
+                COUNT(*) FILTER (WHERE COALESCE(i.owner_count, 0) = 0) as unowned,
+                COUNT(*) FILTER (WHERE i.activity_status IN ('stale', 'never_used')) as dormant,
+                COUNT(*) FILTER (WHERE i.credential_risk = 'expired') as credential_expired,
+                COUNT(*) FILTER (WHERE i.credential_risk = 'expiring_soon') as credential_expiring
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.identity_category IN %s
+              {HIDE_MICROSOFT_SQL}
+        """, (run_ids, SA_CATEGORIES))
         row = cursor.fetchone()
         total = row[0] or 0
         unowned = row[1] or 0
@@ -9862,12 +10329,13 @@ def get_sa_governance_stats():
         # Fetch all SA identity_ids and their governance-relevant fields
         from psycopg2.extras import RealDictCursor
         cursor2 = db.conn.cursor(cursor_factory=RealDictCursor)
-        cursor2.execute("""
-            SELECT identity_id, owner_count, credential_risk, activity_status,
-                   credential_expiration, next_expiry
-            FROM identities
-            WHERE discovery_run_id = %s AND identity_category IN %s
-        """, (run_id, SA_CATEGORIES))
+        cursor2.execute(f"""
+            SELECT i.identity_id, i.owner_count, i.credential_risk, i.activity_status,
+                   i.credential_expiration, i.next_expiry
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s
+              {HIDE_MICROSOFT_SQL}
+        """, (run_ids, SA_CATEGORIES))
         sa_rows = cursor2.fetchall()
         cursor2.close()
 
@@ -9925,14 +10393,8 @@ def get_sa_governance_list():
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Get latest run
-        if tid:
-            cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s", (tid,))
-        else:
-            cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
-        row = cursor.fetchone()
-        run_id = list(row.values())[0] if row else None
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
             return jsonify({'items': [], 'total': 0})
 
         policies = _load_sa_gov_policies(db, tid)
@@ -9946,8 +10408,8 @@ def get_sa_governance_list():
         offset = int(request.args.get('offset', '0'))
 
         # Build query
-        where_clauses = ["i.discovery_run_id = %s", "i.identity_category IN %s"]
-        params = [run_id, SA_CATEGORIES]
+        where_clauses = ["i.discovery_run_id = ANY(%s)", "i.identity_category IN %s"]
+        params = [run_ids, SA_CATEGORIES]
 
         if search:
             where_clauses.append("LOWER(i.display_name) LIKE %s")
@@ -9960,7 +10422,7 @@ def get_sa_governance_list():
         elif filter_type == 'dormant':
             where_clauses.append("i.activity_status IN ('stale', 'never_used')")
 
-        where_sql = " AND ".join(where_clauses)
+        where_sql = " AND ".join(where_clauses) + " " + HIDE_MICROSOFT_SQL
 
         # Allowed sort columns
         sort_map = {
@@ -10089,12 +10551,14 @@ def post_sa_attestation(identity_id):
         # Verify identity exists and is a service account
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
         cursor.execute("""
             SELECT id, identity_id, display_name, identity_category
             FROM identities
             WHERE identity_id = %s AND identity_category IN %s
+              AND discovery_run_id = ANY(%s)
             ORDER BY id DESC LIMIT 1
-        """, (identity_id, SA_CATEGORIES))
+        """, (identity_id, SA_CATEGORIES, run_ids))
         identity = cursor.fetchone()
         cursor.close()
 
@@ -10188,8 +10652,8 @@ def get_governance_identities():
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        run_id = _latest_run_query(cursor, tid)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
             return jsonify({'items': [], 'total': 0})
 
         policies = _load_sa_gov_policies(db, tid)
@@ -10205,8 +10669,8 @@ def get_governance_identities():
         offset = int(request.args.get('offset', '0'))
 
         # Build WHERE
-        where_clauses = ["i.discovery_run_id = %s", "i.identity_category IN %s"]
-        params = [run_id, SA_CATEGORIES]
+        where_clauses = ["i.discovery_run_id = ANY(%s)", "i.identity_category IN %s"]
+        params = [run_ids, SA_CATEGORIES]
 
         if search:
             where_clauses.append("LOWER(i.display_name) LIKE %s")
@@ -10216,7 +10680,7 @@ def get_governance_identities():
             where_clauses.append("i.identity_category = %s")
             params.append(category_filter)
 
-        where_sql = " AND ".join(where_clauses)
+        where_sql = " AND ".join(where_clauses) + " " + HIDE_MICROSOFT_SQL
 
         # Count total (before risk_band filter, which is post-compute)
         cursor.execute(f"SELECT COUNT(*) as cnt FROM identities i WHERE {where_sql}", params)
@@ -10411,6 +10875,7 @@ def get_governance_identity_detail(identity_id):
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
 
         # Find identity
         cursor.execute("""
@@ -10422,8 +10887,9 @@ def get_governance_identity_detail(identity_id):
                    i.service_principal_type, i.app_id
             FROM identities i
             WHERE i.identity_id = %s AND i.identity_category IN %s
+              AND i.discovery_run_id = ANY(%s)
             ORDER BY i.id DESC LIMIT 1
-        """, (identity_id, SA_CATEGORIES))
+        """, (identity_id, SA_CATEGORIES, run_ids))
         identity = cursor.fetchone()
         if not identity:
             return jsonify({'error': 'Service account not found'}), 404
@@ -10585,6 +11051,7 @@ def post_governance_decision(identity_id):
 
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
 
         # Verify identity exists
         cursor.execute("""
@@ -10595,8 +11062,9 @@ def post_governance_decision(identity_id):
                    credential_count, last_sign_in
             FROM identities
             WHERE identity_id = %s AND identity_category IN %s
+              AND discovery_run_id = ANY(%s)
             ORDER BY id DESC LIMIT 1
-        """, (identity_id, SA_CATEGORIES))
+        """, (identity_id, SA_CATEGORIES, run_ids))
         identity = cursor.fetchone()
         if not identity:
             return jsonify({'error': 'Service account not found'}), 404
@@ -10677,8 +11145,8 @@ def get_governance_stats():
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        run_id = _latest_run_query(cursor, tid)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
             return jsonify({
                 'total': 0, 'risk_distribution': {}, 'governance_breakdown': {},
                 'action_summary': {}, 'top_risk': []
@@ -10687,15 +11155,16 @@ def get_governance_stats():
         policies = _load_sa_gov_policies(db, tid)
 
         # Fetch all SAs
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT i.id, i.identity_id, i.display_name, i.identity_category,
                    COALESCE(i.risk_score, 0) as risk_score,
                    COALESCE(i.owner_count, 0) as owner_count,
                    i.credential_risk, i.activity_status, i.service_principal_type,
                    i.credential_count, i.last_sign_in
             FROM identities i
-            WHERE i.discovery_run_id = %s AND i.identity_category IN %s
-        """, (run_id, SA_CATEGORIES))
+            WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s
+              {HIDE_MICROSOFT_SQL}
+        """, (run_ids, SA_CATEGORIES))
         rows = [dict(r) for r in cursor.fetchall()]
 
         if not rows:
@@ -11222,8 +11691,8 @@ def get_spn_stats():
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({
                 'total': 0, 'custom': 0, 'microsoft': 0,
@@ -11233,67 +11702,67 @@ def get_spn_stats():
                 'by_activity': {}, 'by_blast_radius': {},
             })
 
-        base = "FROM identities i WHERE i.discovery_run_id = %s AND i.identity_category IN %s"
+        base = "FROM identities i WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s"
         cats = SPN_CATEGORIES
-        params = [run_id, cats]
+        params = [run_ids, cats]
 
         # Total + custom vs microsoft
         cursor.execute(f"""
             SELECT COUNT(*) as total,
-                   COUNT(*) FILTER (WHERE NOT COALESCE(i.is_microsoft_system, false)) as custom,
-                   COUNT(*) FILTER (WHERE COALESCE(i.is_microsoft_system, false)) as microsoft
+                   COUNT(*) FILTER (WHERE NOT {IS_MICROSOFT_SQL}) as custom,
+                   COUNT(*) FILTER (WHERE {IS_MICROSOFT_SQL}) as microsoft
             {base}
         """, params)
         counts = dict(cursor.fetchone())
 
-        # By risk level
+        # By risk level (custom only)
         cursor.execute(f"""
             SELECT COALESCE(i.risk_level, 'info') as rl, COUNT(*) as c
             {base}
-            AND NOT COALESCE(i.is_microsoft_system, false)
+            {HIDE_MICROSOFT_SQL}
             GROUP BY rl
         """, params)
         by_risk = {r['rl']: r['c'] for r in cursor.fetchall()}
 
-        # By category
+        # By category (custom only)
         cursor.execute(f"""
             SELECT i.identity_category as cat, COUNT(*) as c
             {base}
-            AND NOT COALESCE(i.is_microsoft_system, false)
+            {HIDE_MICROSOFT_SQL}
             GROUP BY cat
         """, params)
         by_category = {r['cat']: r['c'] for r in cursor.fetchall()}
 
-        # Credential risk
+        # Credential risk (custom only)
         cursor.execute(f"""
             SELECT
                 COUNT(*) FILTER (WHERE i.credential_risk = 'expired') as expired,
                 COUNT(*) FILTER (WHERE i.credential_risk = 'expiring_soon') as expiring_soon,
                 COUNT(*) FILTER (WHERE i.credential_count = 0 AND i.identity_category = 'service_principal') as no_credentials
             {base}
-            AND NOT COALESCE(i.is_microsoft_system, false)
+            {HIDE_MICROSOFT_SQL}
         """, params)
         cred = dict(cursor.fetchone())
 
-        # Activity status breakdown
+        # Activity status breakdown (custom only)
         cursor.execute(f"""
             SELECT COALESCE(i.activity_status, 'unknown') as act, COUNT(*) as c
             {base}
-            AND NOT COALESCE(i.is_microsoft_system, false)
+            {HIDE_MICROSOFT_SQL}
             GROUP BY act
         """, params)
         by_activity = {r['act']: r['c'] for r in cursor.fetchall()}
 
-        # Blast radius — join role_assignments to compute
-        cursor.execute("""
+        # Blast radius — join role_assignments to compute (custom only)
+        cursor.execute(f"""
             SELECT i.id,
                    ARRAY_AGG(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL) as role_names,
                    ARRAY_AGG(DISTINCT ra.scope_type) FILTER (WHERE ra.scope_type IS NOT NULL) as scope_types,
                    ARRAY_AGG(DISTINCT ra.scope) FILTER (WHERE ra.scope IS NOT NULL) as scopes
             FROM identities i
             LEFT JOIN role_assignments ra ON ra.identity_db_id = i.id
-            WHERE i.discovery_run_id = %s AND i.identity_category IN %s
-            AND NOT COALESCE(i.is_microsoft_system, false)
+            WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s
+            {HIDE_MICROSOFT_SQL}
             GROUP BY i.id
         """, params)
         blast_counts = {'high': 0, 'medium': 0, 'low': 0, 'none': 0}
@@ -11345,18 +11814,18 @@ def get_spn_list():
         sort_dir = request.args.get('dir', 'desc')
 
         cursor = db.conn.cursor()
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'spns': [], 'count': 0, 'total': 0})
 
         # Use existing identity list select
         sql = _identity_list_select()
-        where = [" WHERE i.discovery_run_id = %s", " AND i.identity_category IN %s"]
-        params = [run_id, SPN_CATEGORIES]
+        where = [" WHERE i.discovery_run_id = ANY(%s)", " AND i.identity_category IN %s"]
+        params = [run_ids, SPN_CATEGORIES]
 
         if hide_ms:
-            where.append(" AND NOT COALESCE(i.is_microsoft_system, false)")
+            where.append(f" {HIDE_MICROSOFT_SQL}")
         if risk_level:
             where.append(" AND i.risk_level = %s")
             params.append(risk_level)
@@ -11408,8 +11877,8 @@ def get_spn_list():
             placeholders = ','.join(['%s'] * len(id_list))
             cursor.execute(f"""
                 SELECT i.identity_id, i.id FROM identities i
-                WHERE i.discovery_run_id = %s AND i.identity_id IN ({placeholders})
-            """, [run_id] + id_list)
+                WHERE i.discovery_run_id = ANY(%s) AND i.identity_id IN ({placeholders})
+            """, [run_ids] + id_list)
             id_map = {}
             for row in cursor.fetchall():
                 id_map[row[0]] = row[1]
@@ -11461,15 +11930,15 @@ def get_spn_detail(identity_id):
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery run found'}), 404
 
         cursor.execute("""
             SELECT * FROM identities
-            WHERE discovery_run_id = %s AND identity_id = %s
-        """, (run_id, identity_id))
+            WHERE discovery_run_id = ANY(%s) AND identity_id = %s
+        """, (run_ids, identity_id))
         identity = cursor.fetchone()
         if not identity:
             cursor.close()
@@ -11571,8 +12040,8 @@ def get_app_reg_stats():
         db._ensure_app_registrations_table()
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({
                 'total': 0, 'by_risk': {}, 'ownerless': 0, 'stale': 0,
@@ -11580,8 +12049,8 @@ def get_app_reg_stats():
                 'multi_tenant': 0, 'third_party': 0, 'by_audience': {},
             })
 
-        base = "FROM app_registrations ar WHERE ar.discovery_run_id = %s"
-        params = [run_id]
+        base = "FROM app_registrations ar WHERE ar.discovery_run_id = ANY(%s)"
+        params = [run_ids]
 
         cursor.execute(f"SELECT COUNT(*) as total {base}", params)
         total = cursor.fetchone()['total']
@@ -11662,8 +12131,8 @@ def get_app_reg_list():
         db._ensure_app_registrations_table()
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'items': [], 'total': 0})
 
@@ -11677,8 +12146,8 @@ def get_app_reg_list():
         sort_field = request.args.get('sort', 'risk_score')
         sort_dir = request.args.get('dir', 'desc')
 
-        where = ["ar.discovery_run_id = %s"]
-        params: list = [run_id]
+        where = ["ar.discovery_run_id = ANY(%s)"]
+        params: list = [run_ids]
 
         if hide_microsoft:
             where.append("ar.is_third_party = false")
@@ -11756,15 +12225,15 @@ def get_app_reg_detail(app_id):
         db._ensure_app_registrations_table()
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_id = _latest_run_query(cursor, tenant_id)
-        if not run_id:
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery run'}), 404
 
         cursor.execute("""
             SELECT * FROM app_registrations ar
-            WHERE ar.discovery_run_id = %s AND ar.app_id = %s
-        """, (run_id, app_id))
+            WHERE ar.discovery_run_id = ANY(%s) AND ar.app_id = %s
+        """, (run_ids, app_id))
         row = cursor.fetchone()
         if not row:
             cursor.close()
@@ -12167,6 +12636,10 @@ def get_exposure_graph():
     tid = _tenant_id()
 
     try:
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
+            return jsonify({"nodes": [], "edges": []})
+
         # If preset, fetch matching identity_ids
         if preset and not identity_ids:
             preset_filters = {
@@ -12179,10 +12652,9 @@ def get_exposure_graph():
             where = preset_filters.get(preset, '')
             cursor.execute(f"""
                 SELECT i.identity_id FROM identities i
-                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-                WHERE dr.tenant_id = %s {where}
+                WHERE i.discovery_run_id = ANY(%s) {where}
                 ORDER BY i.risk_score DESC LIMIT 50
-            """, (tid,))
+            """, (run_ids,))
             identity_ids = [r[0] for r in cursor.fetchall()]
 
         if not identity_ids:
@@ -12201,10 +12673,9 @@ def get_exposure_graph():
                 SELECT i.id, i.identity_id, i.display_name, i.risk_level, i.risk_score,
                        i.identity_category, i.activity_status
                 FROM identities i
-                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-                WHERE i.identity_id = %s AND dr.tenant_id = %s
+                WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
                 ORDER BY i.discovery_run_id DESC LIMIT 1
-            """, (iid, tid))
+            """, (iid, run_ids))
             row = cursor.fetchone()
             if not row:
                 continue
@@ -12301,14 +12772,14 @@ def get_identity_usage(identity_id):
     cursor = db.conn.cursor()
     try:
         # Get identity with activity + credential data
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
         cursor.execute("""
             SELECT i.id, i.activity_status, i.last_seen_auth, i.last_sign_in,
                    i.credential_count, i.credential_status, i.credential_expiration
             FROM identities i
-            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s AND dr.tenant_id = %s
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             ORDER BY i.discovery_run_id DESC LIMIT 1
-        """, (identity_id, _tenant_id()))
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Identity not found"}), 404
@@ -12391,21 +12862,14 @@ def get_identity_timeline(identity_id):
     db = _db()
     try:
         cursor = db.conn.cursor()
-        tid = _tenant_id()
 
         # Resolve identity DB id
-        if tid:
-            cursor.execute("""
-                SELECT i.id FROM identities i
-                JOIN discovery_runs r ON i.discovery_run_id = r.id
-                WHERE i.identity_id = %s AND r.tenant_id = %s
-                ORDER BY i.discovery_run_id DESC LIMIT 1
-            """, (identity_id, tid))
-        else:
-            cursor.execute("""
-                SELECT id FROM identities
-                WHERE identity_id = %s ORDER BY discovery_run_id DESC LIMIT 1
-            """, (identity_id,))
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        cursor.execute("""
+            SELECT i.id FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         if not row:
             cursor.close()
@@ -12554,25 +13018,16 @@ def get_identity_attack_paths(identity_id):
     db = _db()
     try:
         cursor = db.conn.cursor()
-        tid = _tenant_id()
 
         # Resolve identity
-        if tid:
-            cursor.execute("""
-                SELECT i.id, i.display_name, i.risk_level, i.risk_score,
-                       i.identity_category, i.object_id, i.app_id
-                FROM identities i
-                JOIN discovery_runs r ON i.discovery_run_id = r.id
-                WHERE i.identity_id = %s AND r.tenant_id = %s
-                ORDER BY i.discovery_run_id DESC LIMIT 1
-            """, (identity_id, tid))
-        else:
-            cursor.execute("""
-                SELECT id, display_name, risk_level, risk_score,
-                       identity_category, object_id, app_id
-                FROM identities
-                WHERE identity_id = %s ORDER BY discovery_run_id DESC LIMIT 1
-            """, (identity_id,))
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.risk_level, i.risk_score,
+                   i.identity_category, i.object_id, i.app_id
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
         ident = cursor.fetchone()
         if not ident:
             cursor.close()
@@ -12982,12 +13437,12 @@ def get_identity_subscriptions(identity_id):
     try:
         # Resolve identity_id to identity_db_id from latest run
         cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
         cursor.execute("""
             SELECT i.id FROM identities i
-            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s AND dr.tenant_id = %s
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             ORDER BY i.discovery_run_id DESC LIMIT 1
-        """, (identity_id, _tenant_id()))
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         cursor.close()
         if not row:

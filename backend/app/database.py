@@ -103,7 +103,8 @@ class Database:
             )
             cursor.close()
 
-    def create_discovery_run(self, subscription_id: str, subscription_name: str, tenant_id=None) -> int:
+    def create_discovery_run(self, subscription_id: str, subscription_name: str,
+                             tenant_id=None, cloud_connection_id=None) -> int:
         """
         Create a new discovery run record
 
@@ -114,11 +115,11 @@ class Database:
         cursor.execute(
             """
             INSERT INTO discovery_runs (
-                subscription_id, subscription_name, started_at, status, tenant_id
-            ) VALUES (%s, %s, %s, %s, %s)
+                subscription_id, subscription_name, started_at, status, tenant_id, cloud_connection_id
+            ) VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
         """,
-            (subscription_id, subscription_name, datetime.utcnow(), "running", tenant_id),
+            (subscription_id, subscription_name, datetime.utcnow(), "running", tenant_id, cloud_connection_id),
         )
 
         run_id = cursor.fetchone()[0]
@@ -165,6 +166,123 @@ class Database:
         cursor.close()
 
     _risk_factors_col_ensured = False
+    _ms_flag_backfilled = False
+
+    def backfill_microsoft_flag(self):
+        """Startup backfill of is_microsoft_system for ALL data.
+
+        Ensures every identity has the correct flag. Runs on every startup
+        because discovery runs may have stored SPNs with incorrect flags
+        (e.g., due to UUID comparison bug in _is_microsoft_system_app).
+
+        Strategy:
+        1. SPNs with recognized customer prefixes → false
+        2. SPNs with non-Microsoft app_owner_org_id → false
+        3. All remaining service_principal SPNs → true
+        4. Non-SPN categories → false
+        """
+        if Database._ms_flag_backfilled:
+            return
+        cursor = self.conn.cursor()
+        try:
+            # Add column for Graph API appOwnerOrganizationId
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_owner_org_id TEXT")
+            self.conn.commit()
+
+            customer_prefixes = [
+                'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
+                'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
+            ]
+            prefix_conditions = " OR ".join([
+                f"LOWER(display_name) LIKE '{p}%%'" for p in customer_prefixes
+            ])
+
+            # Pass 1: Mark customer-prefix SPNs as NOT Microsoft
+            cursor.execute(f"""
+                UPDATE identities SET is_microsoft_system = false
+                WHERE identity_category = 'service_principal'
+                  AND COALESCE(is_microsoft_system, true) = true
+                  AND ({prefix_conditions})
+            """)
+            customer_count = cursor.rowcount
+
+            # Pass 2: SPNs with non-Microsoft app_owner_org_id → NOT Microsoft
+            cursor.execute("""
+                UPDATE identities SET is_microsoft_system = false
+                WHERE identity_category = 'service_principal'
+                  AND COALESCE(is_microsoft_system, true) = true
+                  AND app_owner_org_id IS NOT NULL
+                  AND app_owner_org_id != 'f8cdef31-a31e-4b4a-93e4-5f571e91255a'
+            """)
+            org_count = cursor.rowcount
+
+            # Pass 3: All remaining SPNs without customer prefix AND without
+            # non-Microsoft org → Microsoft (catches undetected MS SPNs)
+            cursor.execute(f"""
+                UPDATE identities SET is_microsoft_system = true
+                WHERE identity_category = 'service_principal'
+                  AND COALESCE(is_microsoft_system, false) = false
+                  AND NOT ({prefix_conditions})
+                  AND (app_owner_org_id IS NULL OR app_owner_org_id = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a')
+            """)
+            ms_count = cursor.rowcount
+
+            # Pass 4: Non-SPN categories → NOT Microsoft
+            cursor.execute("""
+                UPDATE identities SET is_microsoft_system = false
+                WHERE identity_category NOT IN ('service_principal')
+                  AND (is_microsoft_system IS NULL OR is_microsoft_system = true)
+            """)
+            other_count = cursor.rowcount
+
+            self.conn.commit()
+            total = customer_count + org_count + ms_count + other_count
+            if total > 0:
+                print(f"  📋 Backfilled is_microsoft_system: {customer_count} customer-prefix, {org_count} customer-org, {ms_count} → Microsoft, {other_count} non-SPNs")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ Microsoft flag backfill error: {e}")
+        finally:
+            cursor.close()
+        Database._ms_flag_backfilled = True
+
+    def sweep_microsoft_flag(self, run_id: int):
+        """Post-discovery sweep: mark remaining undetected Microsoft SPNs for a specific run.
+
+        Called after discovery saves all identities. Catches SPNs that slipped through
+        _is_microsoft_system_app() by using the same customer-prefix whitelist approach.
+        """
+        cursor = self.conn.cursor()
+        try:
+            # Customer-owned SPNs have recognizable naming prefixes
+            customer_prefixes = [
+                'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
+                'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
+            ]
+            prefix_conditions = " OR ".join([
+                f"LOWER(display_name) LIKE '{p}%%'" for p in customer_prefixes
+            ])
+
+            # Mark any service_principal with is_microsoft_system=false
+            # that does NOT match customer prefixes AND does NOT have a
+            # non-Microsoft app_owner_org_id → likely a missed Microsoft SPN
+            cursor.execute(f"""
+                UPDATE identities SET is_microsoft_system = true
+                WHERE discovery_run_id = %s
+                  AND identity_category = 'service_principal'
+                  AND is_microsoft_system = false
+                  AND NOT ({prefix_conditions})
+                  AND (app_owner_org_id IS NULL OR app_owner_org_id = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a')
+            """, (run_id,))
+            swept = cursor.rowcount
+            self.conn.commit()
+            if swept > 0:
+                print(f"  🧹 Post-discovery sweep: marked {swept} additional Microsoft SPNs")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ Microsoft flag sweep error: {e}")
+        finally:
+            cursor.close()
 
     def save_identity(self, run_id: int, identity_data: Dict) -> int:
         """
@@ -238,6 +356,8 @@ class Database:
                 status,
                 last_seen_auth,
 
+                app_owner_org_id,
+
                 tenant_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
@@ -250,6 +370,7 @@ class Database:
                 %s, %s,
                 %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s,
                 %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
@@ -293,6 +414,8 @@ class Database:
                 is_federated = EXCLUDED.is_federated,
                 status = EXCLUDED.status,
                 last_seen_auth = EXCLUDED.last_seen_auth,
+
+                app_owner_org_id = EXCLUDED.app_owner_org_id,
 
                 created_at = NOW()
             RETURNING id
@@ -344,6 +467,8 @@ class Database:
                 is_federated,
                 status,
                 identity_data.get("last_sign_in"),  # last_seen_auth = last_sign_in
+
+                identity_data.get("app_owner_org_id"),  # appOwnerOrganizationId from Graph API
 
                 self._tenant_id,
             ),
@@ -1488,32 +1613,45 @@ class Database:
             }
         }
 
-    def get_report_data(self) -> Dict:
+    def get_report_data(self, run_ids=None) -> Dict:
         """
         Get comprehensive data for PDF report generation.
         Returns stats, posture, compliance, top risks, and remediation summary.
+        If run_ids provided, scope report to those runs (multi-connection support).
         """
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Get latest run
-        cursor.execute("""
-            SELECT id, completed_at, total_identities, critical_count, high_count, medium_count, low_count
-            FROM discovery_runs WHERE status = 'completed'
-            ORDER BY id DESC LIMIT 1
-        """)
+        if run_ids:
+            # Multi-connection: aggregate stats across provided run IDs
+            cursor.execute("""
+                SELECT MAX(id) AS id, MAX(completed_at) AS completed_at,
+                       SUM(total_identities) AS total_identities,
+                       SUM(critical_count) AS critical_count,
+                       SUM(high_count) AS high_count,
+                       SUM(medium_count) AS medium_count,
+                       SUM(low_count) AS low_count
+                FROM discovery_runs WHERE id = ANY(%s)
+            """, (run_ids,))
+        else:
+            cursor.execute("""
+                SELECT id, completed_at, total_identities, critical_count, high_count, medium_count, low_count
+                FROM discovery_runs WHERE status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """)
         run = cursor.fetchone()
-        if not run:
+        if not run or not run.get('id'):
             cursor.close()
             return None
 
-        run_id = run["id"]
+        use_run_ids = run_ids if run_ids else [run["id"]]
 
-        # Previous run for trend
+        # Previous run for trend (use oldest run's predecessor)
+        oldest_run_id = min(use_run_ids) if use_run_ids else run["id"]
         cursor.execute("""
             SELECT id, total_identities, critical_count, high_count, medium_count
-            FROM discovery_runs WHERE status = 'completed'
-            ORDER BY id DESC LIMIT 1 OFFSET 1
-        """)
+            FROM discovery_runs WHERE status = 'completed' AND id < %s
+            ORDER BY id DESC LIMIT 1
+        """, (oldest_run_id,))
         prev_run = cursor.fetchone()
 
         # Top 20 critical/high identities
@@ -1524,12 +1662,12 @@ class Database:
                    COALESCE(i.owner_count, 0) as owner_count,
                    i.ca_coverage_status
             FROM identities i
-            WHERE i.discovery_run_id = %s AND i.risk_level IN ('critical', 'high')
+            WHERE i.discovery_run_id = ANY(%s) AND i.risk_level IN ('critical', 'high')
             ORDER BY
                 CASE i.risk_level WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END,
                 COALESCE(i.risk_score, 0) DESC
             LIMIT 20
-        """, (run_id,))
+        """, (use_run_ids,))
         top_risks_rows = [dict(r) for r in cursor.fetchall()]
 
         # Get roles for each top risk identity for remediation matching
@@ -1599,8 +1737,8 @@ class Database:
                 COUNT(*) FILTER (WHERE credential_risk = 'expiring_soon') as expiring_soon,
                 COUNT(*) FILTER (WHERE credential_risk = 'healthy') as healthy,
                 COUNT(*) FILTER (WHERE credential_risk IS NULL OR credential_risk = 'unknown') as unknown
-            FROM identities WHERE discovery_run_id = %s
-        """, (run_id,))
+            FROM identities WHERE discovery_run_id = ANY(%s)
+        """, (use_run_ids,))
         cred_row = cursor.fetchone() or {}
 
         # CA coverage
@@ -1609,15 +1747,15 @@ class Database:
                 COUNT(*) FILTER (WHERE ca_coverage_status = 'covered') as covered,
                 COUNT(*) FILTER (WHERE ca_coverage_status = 'no_coverage' OR ca_coverage_status IS NULL) as not_covered,
                 COUNT(*) as total
-            FROM identities WHERE discovery_run_id = %s
-        """, (run_id,))
+            FROM identities WHERE discovery_run_id = ANY(%s)
+        """, (use_run_ids,))
         ca_row = cursor.fetchone() or {}
 
         cursor.close()
 
         return {
             "generated_at": datetime.utcnow().isoformat(),
-            "run_id": run_id,
+            "run_id": use_run_ids[0] if len(use_run_ids) == 1 else use_run_ids,
             "collected_at": run["completed_at"].isoformat() if run.get("completed_at") else None,
             "stats": {
                 "total_identities": run.get("total_identities", 0),
@@ -6423,6 +6561,8 @@ class Database:
         # 4. Add tenant_id to discovery_runs
         cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_tenant ON discovery_runs(tenant_id)")
+        cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS cloud_connection_id INTEGER")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_connection ON discovery_runs(cloud_connection_id)")
         if default_tenant_id:
             cursor.execute("UPDATE discovery_runs SET tenant_id = %s WHERE tenant_id IS NULL", (default_tenant_id,))
         self.conn.commit()
@@ -6627,7 +6767,7 @@ class Database:
         tier3_tables = [
             'notifications', 'custom_risk_rules', 'copilot_conversations',
             'remediation_actions', 'ca_policies', 'drift_reports',
-            'cloud_subscriptions', 'billing_events',
+            'cloud_subscriptions', 'cloud_connections', 'billing_events',
         ]
         for tbl in tier3_tables:
             try:
@@ -7134,6 +7274,165 @@ class Database:
         return rows
 
     # ================================================================
+    # Cloud Connections (multi-directory / multi-cloud)
+    # ================================================================
+
+    _cloud_connections_ensured = False
+
+    def _ensure_cloud_connections_table(self):
+        """Create cloud_connections table for multi-Entra / multi-cloud support."""
+        if Database._cloud_connections_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cloud_connections (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                cloud VARCHAR(20) NOT NULL DEFAULT 'azure',
+                connection_type VARCHAR(30) NOT NULL DEFAULT 'entra',
+                label VARCHAR(255) NOT NULL,
+                entra_tenant_id VARCHAR(100),
+                client_id VARCHAR(100),
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                display_order INTEGER NOT NULL DEFAULT 0,
+                last_test_at TIMESTAMPTZ,
+                last_test_status VARCHAR(20),
+                last_discovery_at TIMESTAMPTZ,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(tenant_id, cloud, entra_tenant_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_tenant ON cloud_connections(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_cloud ON cloud_connections(cloud)")
+        self.conn.commit()
+        cursor.close()
+        Database._cloud_connections_ensured = True
+
+    def create_cloud_connection(self, tenant_id, cloud, label, entra_tenant_id=None,
+                                 client_id=None, connection_type='entra', metadata=None):
+        """Create a new cloud connection for a tenant."""
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        # Auto-assign display_order
+        cursor.execute("SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order FROM cloud_connections WHERE tenant_id = %s", (tenant_id,))
+        next_order = cursor.fetchone()['next_order']
+        cursor.execute("""
+            INSERT INTO cloud_connections (tenant_id, cloud, connection_type, label, entra_tenant_id,
+                                           client_id, status, display_order, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+            ON CONFLICT (tenant_id, cloud, entra_tenant_id) DO UPDATE
+              SET label = EXCLUDED.label, client_id = EXCLUDED.client_id,
+                  updated_at = NOW()
+            RETURNING *
+        """, (tenant_id, cloud, connection_type, label, entra_tenant_id,
+              client_id, next_order, json.dumps(metadata or {})))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def get_cloud_connections(self, tenant_id, cloud=None, include_secrets=False):
+        """Get all cloud connections for a tenant, with computed sub/identity counts.
+        Set include_secrets=True to keep client_secret in metadata (for scheduler use).
+        """
+        self._ensure_cloud_connections_table()
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        query = """
+            SELECT cc.*,
+                COALESCE((SELECT COUNT(*) FROM cloud_subscriptions cs
+                          WHERE cs.cloud_connection_id = cc.id AND cs.monitored = true), 0) AS sub_count,
+                COALESCE((SELECT COUNT(*) FROM cloud_subscriptions cs
+                          WHERE cs.cloud_connection_id = cc.id AND cs.monitored = false), 0) AS discovered_count
+            FROM cloud_connections cc
+            WHERE cc.tenant_id = %s
+        """
+        params: list = [tenant_id]
+        if cloud:
+            query += " AND cc.cloud = %s"
+            params.append(cloud)
+        query += " ORDER BY cc.display_order, cc.created_at"
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+            if not include_secrets:
+                # Strip sensitive metadata from response
+                meta = row.get('metadata') or {}
+                if isinstance(meta, dict):
+                    meta.pop('client_secret', None)
+                    row['metadata'] = meta
+        return rows
+
+    def get_cloud_connection_by_id(self, connection_id):
+        """Get a single cloud connection by ID."""
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM cloud_connections WHERE id = %s", (connection_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def update_cloud_connection(self, connection_id, **kwargs):
+        """Update a cloud connection."""
+        self._ensure_cloud_connections_table()
+        allowed = {'label', 'status', 'display_order', 'last_test_at', 'last_test_status',
+                   'last_discovery_at', 'metadata', 'entra_tenant_id', 'client_id'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return self.get_cloud_connection_by_id(connection_id)
+        set_parts = []
+        params = []
+        for k, v in updates.items():
+            set_parts.append(f"{k} = %s")
+            params.append(json.dumps(v) if k == 'metadata' else v)
+        set_parts.append("updated_at = NOW()")
+        params.append(connection_id)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE cloud_connections SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def delete_cloud_connection(self, connection_id, tenant_id=None):
+        """Delete a cloud connection. Optionally verify tenant ownership."""
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor()
+        if tenant_id:
+            cursor.execute("DELETE FROM cloud_connections WHERE id = %s AND tenant_id = %s", (connection_id, tenant_id))
+        else:
+            cursor.execute("DELETE FROM cloud_connections WHERE id = %s", (connection_id,))
+        deleted = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return deleted > 0
+
+    # ================================================================
     # Cloud Subscriptions (per-account monitoring)
     # ================================================================
 
@@ -7164,6 +7463,7 @@ class Database:
         # Billing columns
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS rate_cents INTEGER NOT NULL DEFAULT 6900")
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS discovered_at TIMESTAMPTZ DEFAULT NOW()")
+        cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS cloud_connection_id INTEGER")
         # Backfill rates by cloud
         cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7900 WHERE cloud = 'aws' AND rate_cents = 6900")
         cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7400 WHERE cloud = 'gcp' AND rate_cents = 6900")
@@ -7264,21 +7564,60 @@ class Database:
         self.conn.commit()
         cursor.close()
 
-    def get_cloud_subscriptions(self, tenant_id, cloud=None):
-        """List cloud subscriptions for a tenant. None = superadmin (all)."""
+    def insert_discovered_subscriptions(self, tenant_id, cloud, connection_id, subs_list):
+        """Insert discovered subscriptions for a connection.
+        subs_list: list of {'id': sub_id, 'name': display_name}
+        Returns count of inserted rows.
+        """
         self._ensure_cloud_subscriptions_table()
+        if not subs_list:
+            return 0
+        cursor = self.conn.cursor()
+        inserted = 0
+        rate = 6900 if cloud == 'azure' else (7900 if cloud == 'aws' else 7400)
+        for sub in subs_list:
+            sub_id = sub.get('id', '').strip()
+            sub_name = sub.get('name', sub_id)
+            if not sub_id:
+                continue
+            try:
+                cursor.execute("""
+                    INSERT INTO cloud_subscriptions
+                        (tenant_id, cloud, account_id, account_name, status, cloud_connection_id, rate_cents)
+                    VALUES (%s, %s, %s, %s, 'discovered', %s, %s)
+                    ON CONFLICT (tenant_id, cloud, account_id)
+                    DO UPDATE SET cloud_connection_id = EXCLUDED.cloud_connection_id,
+                                  account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
+                """, (tenant_id, cloud, sub_id, sub_name, connection_id, rate))
+                inserted += 1
+            except Exception:
+                self.conn.rollback()
+        self.conn.commit()
+        cursor.close()
+        return inserted
+
+    def get_cloud_subscriptions(self, tenant_id, cloud=None):
+        """List cloud subscriptions for a tenant with connection_label. None = superadmin (all)."""
+        self._ensure_cloud_subscriptions_table()
+        self._ensure_cloud_connections_table()
         self.sync_cloud_subscriptions(tenant_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if tenant_id is not None:
-            query = "SELECT * FROM cloud_subscriptions WHERE tenant_id = %s"
-            params = [tenant_id]
+            query = """SELECT cs.*, cc.label AS connection_label
+                       FROM cloud_subscriptions cs
+                       LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
+                       WHERE cs.tenant_id = %s"""
+            params: list = [tenant_id]
         else:
-            query = "SELECT * FROM cloud_subscriptions WHERE 1=1"
+            query = """SELECT cs.*, cc.label AS connection_label
+                       FROM cloud_subscriptions cs
+                       LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
+                       WHERE 1=1"""
             params = []
         if cloud:
-            query += " AND cloud = %s"
+            query += " AND cs.cloud = %s"
             params.append(cloud)
-        query += " ORDER BY cloud, account_name"
+        query += " ORDER BY cs.cloud, cs.account_name"
         cursor.execute(query, params)
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()

@@ -64,7 +64,7 @@ export default function AdminMonitoring() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/analytics/tenants').then(r => r.ok ? r.json() : { tenants: [] }),
+      fetch('/api/analytics/clients').then(r => r.ok ? r.json() : { tenants: [] }),
       fetch('/api/health').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/system/health').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`/api/analytics/login-sessions?limit=50${portalFilter ? `&portal=${portalFilter}` : ''}`).then(r => r.ok ? r.json() : { sessions: [] }).catch(() => ({ sessions: [] })),

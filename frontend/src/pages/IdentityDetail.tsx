@@ -5,6 +5,7 @@ import {
   ResponsiveContainer, ReferenceLine,
 } from 'recharts';
 import { useToast } from '../components/ToastProvider';
+import { useConnection } from '../contexts/ConnectionContext';
 import { AccessGraphTab } from '../components/graph';
 import {
   type IdentityCategory, type RiskLevel,
@@ -421,6 +422,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
 export default function IdentityDetail() {
   const { id } = useParams<{ id: string }>();
   const { addToast } = useToast();
+  const { withConnection } = useConnection();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -456,7 +458,7 @@ export default function IdentityDetail() {
     if (!id) return;
     setSimulating(true);
     try {
-      const res = await fetch(`/api/identities/${encodeURIComponent(id)}/simulate`, {
+      const res = await fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/simulate`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -496,7 +498,7 @@ export default function IdentityDetail() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/identities/${encodeURIComponent(id || '')}`);
+        const res = await fetch(withConnection(`/api/identities/${encodeURIComponent(id || '')}`));
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const json = await res.json();
         if (!cancelled) setData(json);
@@ -515,7 +517,7 @@ export default function IdentityDetail() {
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
-    fetch(`/api/identities/${encodeURIComponent(id)}/risk-history?limit=20`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/risk-history?limit=20`))
       .then(res => res.ok ? res.json() : null)
       .then(json => { if (!cancelled && json?.points) setRiskHistory(json.points); })
       .catch(() => {});
@@ -527,7 +529,7 @@ export default function IdentityDetail() {
     if (activeTab !== 'pim' || pimData || pimLoading || !id) return;
     let cancelled = false;
     setPimLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(id)}/pim`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/pim`))
       .then(res => res.ok ? res.json() : Promise.reject('PIM fetch failed'))
       .then(json => { if (!cancelled) setPimData(json); })
       .catch(() => { if (!cancelled) setPimData({ eligible_assignments: [], activations: [], overuse_metrics: { activation_frequency_30d: 0, always_active_pattern: false, total_active_hours_30d: 0 } }); })
@@ -542,8 +544,8 @@ export default function IdentityDetail() {
     setRemediationLoading(true);
 
     Promise.all([
-      fetch(`/api/identities/${encodeURIComponent(id)}/remediations`).then(r => r.ok ? r.json() : null),
-      fetch(`/api/identities/${encodeURIComponent(id)}/remediation-status`).then(r => r.ok ? r.json() : null),
+      fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/remediations`)).then(r => r.ok ? r.json() : null),
+      fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/remediation-status`)).then(r => r.ok ? r.json() : null),
     ])
       .then(([playbookJson, statusJson]) => {
         if (cancelled) return;
@@ -565,7 +567,7 @@ export default function IdentityDetail() {
     if (activeTab !== 'lifecycle' || lifecycleData || lifecycleLoading || !id) return;
     let cancelled = false;
     setLifecycleLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(id)}/lifecycle`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/lifecycle`))
       .then(res => res.ok ? res.json() : Promise.reject('Lifecycle fetch failed'))
       .then(json => { if (!cancelled) setLifecycleData(json); })
       .catch(() => { if (!cancelled) setLifecycleData({ events: [], summary: { total_runs_observed: 0, first_seen: null, last_seen: null, risk_changes: 0, credential_events: 0, access_changes: 0, status_changes: 0 }, total_events: 0 }); })
@@ -578,7 +580,7 @@ export default function IdentityDetail() {
     if (activeTab !== 'anomalies' || anomalyData || anomalyLoading || !id) return;
     let cancelled = false;
     setAnomalyLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(id)}/anomalies`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/anomalies`))
       .then(res => res.ok ? res.json() : Promise.reject('Anomalies fetch failed'))
       .then(json => { if (!cancelled) setAnomalyData(json); })
       .catch(() => { if (!cancelled) setAnomalyData({ anomalies: [], count: 0 }); })
@@ -590,7 +592,7 @@ export default function IdentityDetail() {
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
-    fetch(`/api/identities/${encodeURIComponent(id)}/groups`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/groups`))
       .then(res => res.ok ? res.json() : Promise.reject('Groups fetch failed'))
       .then(json => { if (!cancelled) setIdentityGroups(json.groups || []); })
       .catch(() => {});
@@ -601,7 +603,7 @@ export default function IdentityDetail() {
     if (!id) return;
     setActionLoading(playbookId);
     try {
-      const res = await fetch(`/api/identities/${encodeURIComponent(id)}/remediation-action`, {
+      const res = await fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/remediation-action`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playbook_id: playbookId, status, notes }),
@@ -634,7 +636,7 @@ export default function IdentityDetail() {
     if (!id) return;
     setExecuteLoading(playbookId);
     try {
-      const res = await fetch(`/api/identities/${encodeURIComponent(id)}/remediation-execute`, {
+      const res = await fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/remediation-execute`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playbook_id: playbookId, action_type: actionType }),
@@ -2726,6 +2728,7 @@ const EVENT_LABELS: Record<string, string> = {
 };
 
 function TimelineTab({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
   const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
@@ -2739,7 +2742,7 @@ function TimelineTab({ identityId }: { identityId: string }) {
     if (filters.size > 0) params.set('event_types', Array.from(filters).join(','));
     if (fromDate) params.set('from', fromDate);
     if (toDate) params.set('to', toDate);
-    fetch(`/api/identities/${encodeURIComponent(identityId)}/timeline?${params}`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/timeline?${params}`))
       .then(r => r.ok ? r.json() : { events: [], total: 0 })
       .then(d => { setEvents(d.events || []); setTotal(d.total || 0); })
       .catch(() => { setEvents([]); setTotal(0); })

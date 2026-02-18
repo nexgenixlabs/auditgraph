@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { CATEGORY_DISPLAY_ORDER } from '../constants/metrics';
 import { DASHBOARD_TABS, type DashboardTab, COLORS } from '../constants/design';
+import { useConnection } from '../contexts/ConnectionContext';
 
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
@@ -95,6 +96,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { addToast } = useToast();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   // Tab state from URL
   const activeTab = (searchParams.get('tab') as DashboardTab) || 'exposure';
@@ -141,11 +143,11 @@ export default function Dashboard() {
       setError(null);
       try {
         const [statsRes, summaryRes, postureRes, complianceRes, caRes] = await Promise.all([
-          fetch('/api/stats'),
-          fetch('/api/identity-summary'),
-          fetch('/api/dashboard/posture'),
-          fetch('/api/dashboard/compliance'),
-          fetch('/api/dashboard/conditional-access'),
+          fetch(withConnection('/api/stats')),
+          fetch(withConnection('/api/identity-summary')),
+          fetch(withConnection('/api/dashboard/posture')),
+          fetch(withConnection('/api/dashboard/compliance')),
+          fetch(withConnection('/api/dashboard/conditional-access')),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
@@ -163,25 +165,25 @@ export default function Dashboard() {
         const caJson = caRes.ok ? await caRes.json() : null;
 
         let schedJson = null;
-        try { const r = await fetch('/api/scheduler'); if (r.ok) schedJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/scheduler')); if (r.ok) schedJson = await r.json(); } catch {}
 
         let driftJson = null;
-        try { const r = await fetch('/api/drift/latest'); if (r.ok) driftJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/drift/latest')); if (r.ok) driftJson = await r.json(); } catch {}
 
         let trendsJson: typeof trends = [];
-        try { const r = await fetch('/api/trends'); if (r.ok) { const d = await r.json(); trendsJson = d.runs || []; } } catch {}
+        try { const r = await fetch(withConnection('/api/trends')); if (r.ok) { const d = await r.json(); trendsJson = d.runs || []; } } catch {}
 
         let remSummaryJson = null;
-        try { const r = await fetch('/api/remediation-summary'); if (r.ok) remSummaryJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/remediation-summary')); if (r.ok) remSummaryJson = await r.json(); } catch {}
 
         let roleUsageJson = null;
-        try { const r = await fetch('/api/dashboard/role-usage'); if (r.ok) roleUsageJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/dashboard/role-usage')); if (r.ok) roleUsageJson = await r.json(); } catch {}
 
         let anomalyJson = null;
-        try { const r = await fetch('/api/dashboard/anomalies'); if (r.ok) anomalyJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/dashboard/anomalies')); if (r.ok) anomalyJson = await r.json(); } catch {}
 
         let velocityJson = null;
-        try { const r = await fetch('/api/trends/velocity'); if (r.ok) velocityJson = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/trends/velocity')); if (r.ok) velocityJson = await r.json(); } catch {}
 
         if (!cancelled) {
           setStats(statsJson);
@@ -206,7 +208,7 @@ export default function Dashboard() {
 
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [selectedConnectionId]);
 
   useEffect(() => {
     if (!showRuns) return;

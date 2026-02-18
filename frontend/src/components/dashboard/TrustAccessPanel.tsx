@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { COLORS, RISK_COLORS } from '../../constants/design';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 interface ExternalSummary {
   total_identities: number;
@@ -42,20 +43,21 @@ const RISK_BADGE: Record<string, { bg: string; text: string }> = {
 
 export default function TrustAccessPanel() {
   const navigate = useNavigate();
+  const { withConnection, selectedConnectionId } = useConnection();
   const [data, setData] = useState<TrustData | null>(null);
   const [resourceStats, setResourceStats] = useState<{ storage_accounts?: number; key_vaults?: number; total_high_risk?: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/dashboard/trust').then(r => r.ok ? r.json() : null),
-      fetch('/api/resources/stats').then(r => r.ok ? r.json() : null),
+      fetch(withConnection('/api/dashboard/trust')).then(r => r.ok ? r.json() : null),
+      fetch(withConnection('/api/resources/stats')).then(r => r.ok ? r.json() : null),
     ]).then(([trustData, resData]) => {
       setData(trustData);
       setResourceStats(resData);
       setLoading(false);
     }).catch(() => setLoading(false));
-  }, []);
+  }, [selectedConnectionId]);
 
   if (loading) {
     return (

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 interface SoarAction {
   id: number;
@@ -44,6 +45,7 @@ function timeAgo(dateStr: string): string {
 }
 
 export default function SOARActivity() {
+  const { withConnection, selectedConnectionId } = useConnection();
   const [actions, setActions] = useState<SoarAction[]>([]);
   const [stats, setStats] = useState<SoarStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -52,8 +54,8 @@ export default function SOARActivity() {
     async function load() {
       try {
         const [actionsRes, statsRes] = await Promise.all([
-          fetch('/api/soar/actions?limit=6'),
-          fetch('/api/soar/actions/stats'),
+          fetch(withConnection('/api/soar/actions?limit=6')),
+          fetch(withConnection('/api/soar/actions/stats')),
         ]);
         if (actionsRes.ok) {
           const d = await actionsRes.json();
@@ -66,7 +68,7 @@ export default function SOARActivity() {
       finally { setLoading(false); }
     }
     load();
-  }, []);
+  }, [selectedConnectionId]);
 
   if (loading) {
     return (

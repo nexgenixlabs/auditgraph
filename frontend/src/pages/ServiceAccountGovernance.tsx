@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ─── Theme-aware constants (page-scoped) ───
 const G = {
@@ -116,6 +117,7 @@ type SortField = 'display_name' | 'risk_score' | 'identity_category' | 'owner_co
 
 export default function ServiceAccountGovernance() {
   const { isAdmin, isReader } = useAuth();
+  const { withConnection, selectedConnectionId } = useConnection();
   const canDecide = isAdmin || !isReader;
 
   const [stats, setStats] = useState<GovStats | null>(null);
@@ -158,7 +160,7 @@ export default function ServiceAccountGovernance() {
       });
       if (activeBand !== 'All') params.set('risk_band', activeBand);
 
-      const res = await fetch(`/api/governance/identities?${params}`);
+      const res = await fetch(withConnection(`/api/governance/identities?${params}`));
       if (res.ok) {
         const d = await res.json();
         setItems(d.items || []);
@@ -166,14 +168,14 @@ export default function ServiceAccountGovernance() {
       }
     } catch { /* ignore */ }
     setLoading(false);
-  }, [activeBand, search, sortBy, sortDir, page]);
+  }, [activeBand, search, sortBy, sortDir, page, selectedConnectionId]);
 
   const loadStats = useCallback(async () => {
     try {
-      const res = await fetch('/api/governance/stats');
+      const res = await fetch(withConnection('/api/governance/stats'));
       if (res.ok) setStats(await res.json());
     } catch { /* ignore */ }
-  }, []);
+  }, [selectedConnectionId]);
 
   useEffect(() => { loadStats(); }, [loadStats]);
   useEffect(() => { loadList(); }, [loadList]);
@@ -190,12 +192,12 @@ export default function ServiceAccountGovernance() {
     let cancelled = false;
     setDetailLoading(true);
     setDetailTab('risk');
-    fetch(`/api/governance/identities/${selectedId}`)
+    fetch(withConnection(`/api/governance/identities/${selectedId}`))
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (!cancelled) { setDetail(d); setDetailLoading(false); } })
       .catch(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedId]);
+  }, [selectedId, selectedConnectionId]);
 
   // ─── Handlers ───
   function handleSort(field: SortField) {
@@ -220,7 +222,7 @@ export default function ServiceAccountGovernance() {
       const body: Record<string, string> = { decision: decisionType, reason: decisionReason };
       if (decisionType === 'exception' && exceptionExpiry) body.exception_expiry = exceptionExpiry;
 
-      const res = await fetch(`/api/governance/identities/${decisionTarget.identity_id}/decide`, {
+      const res = await fetch(withConnection(`/api/governance/identities/${decisionTarget.identity_id}/decide`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -234,7 +236,7 @@ export default function ServiceAccountGovernance() {
         loadStats();
         if (selectedId === decisionTarget.identity_id) {
           // Refresh detail
-          fetch(`/api/governance/identities/${selectedId}`)
+          fetch(withConnection(`/api/governance/identities/${selectedId}`))
             .then(r => r.ok ? r.json() : null)
             .then(d => setDetail(d))
             .catch(() => {});

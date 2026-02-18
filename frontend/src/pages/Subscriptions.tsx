@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useConnection } from '../contexts/ConnectionContext';
 import { maskCredential } from '../utils/maskCredential';
 import { formatCents, SUB_RATES_CENTS } from '../constants/pricing';
 
@@ -14,6 +15,7 @@ interface CloudSubscription {
   activated_at: string | null;
   created_at: string | null;
   rate_cents?: number;
+  connection_label?: string | null;
 }
 
 interface SubscriptionStats {
@@ -42,6 +44,7 @@ const CLOUD_BADGE: Record<string, { label: string; color: string; bg: string }> 
 
 export default function Subscriptions() {
   const { canActivateSubscriptions, canSeePricing } = useAuth();
+  const { withConnection, selectedConnectionId } = useConnection();
   const [subs, setSubs] = useState<CloudSubscription[]>([]);
   const [stats, setStats] = useState<SubscriptionStats | null>(null);
   const [billing, setBilling] = useState<BillingBreakdown | null>(null);
@@ -51,8 +54,8 @@ export default function Subscriptions() {
 
   const fetchData = () => {
     Promise.all([
-      fetch('/api/subscriptions').then(r => r.json()),
-      fetch('/api/subscriptions/stats').then(r => r.json()),
+      fetch(withConnection('/api/subscriptions')).then(r => r.json()),
+      fetch(withConnection('/api/subscriptions/stats')).then(r => r.json()),
     ])
       .then(([subsData, statsData]) => {
         setSubs(subsData.subscriptions || []);
@@ -63,13 +66,13 @@ export default function Subscriptions() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => { fetchData(); }, [selectedConnectionId]);
 
   const handleActivate = async (id: number) => {
     setActivating(id);
     setActivateError(null);
     try {
-      const res = await fetch('/api/subscriptions/activate', {
+      const res = await fetch(withConnection('/api/subscriptions/activate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
@@ -90,7 +93,7 @@ export default function Subscriptions() {
   const handleDeactivate = async (id: number) => {
     setActivating(id);
     try {
-      const res = await fetch(`/api/subscriptions/${id}/deactivate`, { method: 'PUT' });
+      const res = await fetch(withConnection(`/api/subscriptions/${id}/deactivate`), { method: 'PUT' });
       if (res.ok) fetchData();
     } finally {
       setActivating(null);
@@ -214,6 +217,7 @@ export default function Subscriptions() {
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Account ID</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Account Name</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Connection</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Cloud</th>
                 {canSeePricing && <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Rate</th>}
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Status</th>
@@ -222,9 +226,9 @@ export default function Subscriptions() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={canSeePricing ? 6 : 5} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
               ) : subs.length === 0 ? (
-                <tr><td colSpan={canSeePricing ? 6 : 5} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Run a discovery scan to detect cloud accounts.</td></tr>
+                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Run a discovery scan to detect cloud accounts.</td></tr>
               ) : subs.map(sub => {
                 const badge = CLOUD_BADGE[sub.cloud] || CLOUD_BADGE.azure;
                 const rateCents = sub.rate_cents ?? SUB_RATES_CENTS[sub.cloud] ?? SUB_RATES_CENTS.azure;
@@ -232,6 +236,7 @@ export default function Subscriptions() {
                   <tr key={sub.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-mono text-xs text-gray-700">{maskCredential(sub.account_id)}</td>
                     <td className="px-4 py-3 text-gray-900">{sub.account_name || '\u2014'}</td>
+                    <td className="px-4 py-3 text-xs text-gray-600">{sub.connection_label || '\u2014'}</td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${badge.color} ${badge.bg}`}>{badge.label}</span>
                     </td>

@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { generateReport, generateExecutiveReport, generateComplianceReport } from '../utils/pdfGenerator';
 import { useToast } from '../components/ToastProvider';
+import { useConnection } from '../contexts/ConnectionContext';
 
 type ReportType = 'full' | 'executive' | 'compliance';
 
 export default function Reports() {
   const { addToast } = useToast();
+  const { withConnection } = useConnection();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientName, setClientName] = useState('');
@@ -17,7 +19,7 @@ export default function Reports() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/reports/data');
+      const res = await fetch(withConnection('/api/reports/data'));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       setPreviewData(data);
@@ -25,7 +27,7 @@ export default function Reports() {
         generateExecutiveReport(data, clientName || undefined);
       } else if (reportType === 'compliance') {
         let asData = null;
-        try { const r = await fetch('/api/overview/attack-surface-score'); if (r.ok) asData = await r.json(); } catch {}
+        try { const r = await fetch(withConnection('/api/overview/attack-surface-score')); if (r.ok) asData = await r.json(); } catch {}
         generateComplianceReport(data, asData, clientName || undefined);
       } else {
         generateReport(data, clientName || undefined);

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { RISK_BADGE, RISK_SOLID, safeLower } from '../constants/metrics';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -237,6 +238,7 @@ function CheckItem({ label, pass, detail }: { label: string; pass: boolean | nul
 export default function ResourceDetail() {
   const [searchParams] = useSearchParams();
   const rid = searchParams.get('rid') || '';
+  const { withConnection } = useConnection();
 
   const [resource, setResource] = useState<ResourceData | null>(null);
   const [rbacAccess, setRbacAccess] = useState<AccessIdentity[]>([]);
@@ -251,7 +253,7 @@ export default function ResourceDetail() {
   useEffect(() => {
     if (!rid) return;
     setLoading(true);
-    fetch(`/api/resources/${encodeURIComponent(rid)}`)
+    fetch(withConnection(`/api/resources/${encodeURIComponent(rid)}`))
       .then(r => r.json())
       .then(data => { setResource(data); setLoading(false); })
       .catch(() => setLoading(false));
@@ -261,7 +263,7 @@ export default function ResourceDetail() {
   useEffect(() => {
     if (activeTab !== 'access' || !rid || accessLoaded) return;
     setAccessLoading(true);
-    fetch(`/api/resources/${encodeURIComponent(rid)}/access`)
+    fetch(withConnection(`/api/resources/${encodeURIComponent(rid)}/access`))
       .then(r => r.json())
       .then(data => {
         setRbacAccess(data.rbac_access || []);

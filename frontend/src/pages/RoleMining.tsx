@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -182,6 +183,7 @@ const TOXIC_CATEGORY_ICONS: Record<string, string> = {
 // ── Component ─────────────────────────────────────────────────
 
 export default function RoleMining() {
+  const { withConnection, selectedConnectionId } = useConnection();
   const [data, setData] = useState<RoleMiningData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -206,7 +208,7 @@ export default function RoleMining() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/role-mining?window_days=${windowDays}`);
+      const res = await fetch(withConnection(`/api/role-mining?window_days=${windowDays}`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       setData(await res.json());
     } catch (e: unknown) {
@@ -214,9 +216,9 @@ export default function RoleMining() {
     } finally {
       setLoading(false);
     }
-  }, [windowDays]);
+  }, [windowDays, withConnection]);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { loadData(); }, [loadData, selectedConnectionId]);
 
   const filteredFindings = useMemo(() => {
     if (!data) return [];

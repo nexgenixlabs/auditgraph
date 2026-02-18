@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 interface SAGovStats {
   total: number;
@@ -13,17 +14,18 @@ interface SAGovStats {
 }
 
 export default function ServiceAccountGovernance() {
+  const { withConnection, selectedConnectionId } = useConnection();
   const [stats, setStats] = useState<SAGovStats | null>(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetch('/api/service-accounts/stats')
+    fetch(withConnection('/api/service-accounts/stats'))
       .then(r => r.ok ? r.json() : null)
       .then(d => d && setStats(d))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [selectedConnectionId]);
 
   if (loading) {
     return (

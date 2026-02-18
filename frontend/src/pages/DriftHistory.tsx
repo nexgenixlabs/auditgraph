@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -86,6 +87,7 @@ function categoryLabel(cat: string) {
 
 export default function DriftHistory() {
   const { addToast } = useToast();
+  const { withConnection, selectedConnectionId } = useConnection();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reports, setReports] = useState<DriftReport[]>([]);
@@ -110,7 +112,7 @@ export default function DriftHistory() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch('/api/drift/history?limit=50');
+        const res = await fetch(withConnection('/api/drift/history?limit=50'));
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const data = await res.json();
         setReports(data.reports || []);
@@ -121,7 +123,7 @@ export default function DriftHistory() {
       }
     }
     load();
-  }, []);
+  }, [selectedConnectionId]);
 
   async function toggleRow(runId: number) {
     if (expandedRunId === runId) {
@@ -136,7 +138,7 @@ export default function DriftHistory() {
     setDetail(null);
 
     try {
-      const res = await fetch(`/api/runs/${runId}/drift`);
+      const res = await fetch(withConnection(`/api/runs/${runId}/drift`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       setDetail(data);

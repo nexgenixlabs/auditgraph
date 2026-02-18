@@ -109,7 +109,8 @@ class AzureDiscoveryEngine:
         subscription_name: Human-readable subscription name
     """
 
-    def __init__(self, tenant_id: str, client_id: str, client_secret: str, db_tenant_id=None):
+    def __init__(self, tenant_id: str, client_id: str, client_secret: str,
+                 db_tenant_id=None, cloud_connection_id: int = None):
         """
         Initialize the discovery engine with Azure credentials.
 
@@ -118,11 +119,13 @@ class AzureDiscoveryEngine:
             client_id: Service principal application ID
             client_secret: Service principal client secret
             db_tenant_id: AuditGraph tenant ID (integer) for RLS context
+            cloud_connection_id: ID from cloud_connections table (for multi-connection support)
         """
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.client_secret = client_secret
         self.db_tenant_id = db_tenant_id
+        self.cloud_connection_id = cloud_connection_id
         self.db = Database(tenant_id=db_tenant_id)
         
         self.credential = ClientSecretCredential(
@@ -188,7 +191,8 @@ class AzureDiscoveryEngine:
         # Store all subscription IDs as comma-separated for the run record
         all_sub_ids = ",".join(s['id'] for s in self.subscriptions) if self.subscriptions else os.getenv('AZURE_SUBSCRIPTION_ID', '')
         all_sub_names = ", ".join(s['name'] for s in self.subscriptions) if self.subscriptions else os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')
-        run_id = self.db.create_discovery_run(all_sub_ids, all_sub_names)
+        run_id = self.db.create_discovery_run(all_sub_ids, all_sub_names,
+                                               cloud_connection_id=self.cloud_connection_id)
         print(f"  ✓ Discovery run created (ID: {run_id})")
         
         # Step 1: Get role assignments FIRST
@@ -334,12 +338,21 @@ class AzureDiscoveryEngine:
                 cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (run_id,))
                 run_row = cursor.fetchone()
                 run_tenant_id = run_row[0] if run_row and run_row[0] else 1
-                cursor.execute("""
-                    INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
-                    VALUES (%s, 'azure', %s, %s, 'discovered')
-                    ON CONFLICT (tenant_id, cloud, account_id) DO UPDATE
-                    SET account_name = EXCLUDED.account_name
-                """, (run_tenant_id, sub['id'], sub['name']))
+                if self.cloud_connection_id:
+                    cursor.execute("""
+                        INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status, cloud_connection_id)
+                        VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                        ON CONFLICT (tenant_id, cloud, account_id) DO UPDATE
+                        SET account_name = EXCLUDED.account_name,
+                            cloud_connection_id = COALESCE(EXCLUDED.cloud_connection_id, cloud_subscriptions.cloud_connection_id)
+                    """, (run_tenant_id, sub['id'], sub['name'], self.cloud_connection_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                        VALUES (%s, 'azure', %s, %s, 'discovered')
+                        ON CONFLICT (tenant_id, cloud, account_id) DO UPDATE
+                        SET account_name = EXCLUDED.account_name
+                    """, (run_tenant_id, sub['id'], sub['name']))
                 self.db.conn.commit()
                 cursor.close()
             print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
@@ -436,7 +449,8 @@ class AzureDiscoveryEngine:
                         'created_datetime': created,
                         'last_sign_in': last_sign_in,
                         'service_principal_type': sp.service_principal_type if hasattr(sp, 'service_principal_type') else None,
-                        'app_owner_organization_id': sp.app_owner_organization_id if hasattr(sp, 'app_owner_organization_id') else None,
+                        'app_owner_organization_id': str(sp.app_owner_organization_id) if hasattr(sp, 'app_owner_organization_id') and sp.app_owner_organization_id else None,
+                        'app_owner_org_id': str(sp.app_owner_organization_id) if hasattr(sp, 'app_owner_organization_id') and sp.app_owner_organization_id else None,
                         'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
                         # Multi-cloud normalized fields
                         'cloud': 'azure',
@@ -477,9 +491,12 @@ class AzureDiscoveryEngine:
                         identities.append(identity_dict)
 
                     elif self._is_microsoft_system_app(identity_dict):
-                        # SKIP: Microsoft first-party app (Office 365, Azure Portal, Graph API, etc.)
+                        # STORE with flag: Microsoft first-party app (filtered at query time)
+                        identity_dict["identity_category"] = "service_principal"
+                        identity_dict["identity_type"] = "service_principal"
+                        identity_dict["is_microsoft_system"] = True
+                        identities.append(identity_dict)
                         skipped_microsoft_count += 1
-                        continue
 
                     else:
                         # KEEP: Customer service principal (app registration)
@@ -489,8 +506,8 @@ class AzureDiscoveryEngine:
                         identities.append(identity_dict)
             
             if skipped_microsoft_count > 0 or skipped_sami_count > 0:
-                print(f"  🚫 Excluded: {skipped_microsoft_count} Microsoft system apps, {skipped_sami_count} system-assigned managed identities")
-                print(f"  ✅ Kept: {len(identities)} customer-owned identities")
+                print(f"  🏷️ Flagged: {skipped_microsoft_count} Microsoft system apps (is_microsoft_system=True), excluded {skipped_sami_count} system-assigned MIs")
+                print(f"  ✅ Total: {len(identities)} identities ({len(identities) - skipped_microsoft_count} customer, {skipped_microsoft_count} Microsoft)")
 
             return identities
         except Exception as e:
@@ -1882,11 +1899,13 @@ class AzureDiscoveryEngine:
         MICROSOFT_TENANT_ID = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a'
 
         # Check 1: Microsoft-owned tenant (most reliable check)
+        # NOTE: MS Graph SDK returns UUID objects, must convert to str for comparison
         app_owner_org = identity.get('app_owner_organization_id') or identity.get('appOwnerOrganizationId')
-        if app_owner_org == MICROSOFT_TENANT_ID:
+        app_owner_org_str = str(app_owner_org).lower() if app_owner_org else None
+        if app_owner_org_str == MICROSOFT_TENANT_ID:
             return True
         # If app_owner_organization_id is set and is NOT Microsoft, it's customer-owned
-        if app_owner_org and app_owner_org != MICROSOFT_TENANT_ID:
+        if app_owner_org_str and app_owner_org_str != MICROSOFT_TENANT_ID:
             return False
 
         # Check 2: Publisher name indicates Microsoft
@@ -1990,6 +2009,19 @@ class AzureDiscoveryEngine:
             'virtual visits', 'billing rp', 'aci', 'spauthevent',
             'customer experience', 'experience platform',
 
+            # Azure resource services
+            'acr', 'container registry', 'asm', 'app service',
+            'cdn', 'frontdoor', 'traffic manager', 'load balancer',
+            'logic app', 'function app', 'devops',
+            'cosmos', 'sql server', 'sql database',
+            'redis', 'signalr', 'event hub', 'event grid',
+            'iot', 'data factory', 'data lake', 'databricks',
+            'cognitive', 'bot framework', 'qna',
+            'cloud shell', 'advisor', 'cost management',
+            'monitor', 'log analytics', 'application insights',
+            'backup', 'recovery', 'site recovery',
+            'batch', 'hpc', 'machine learning',
+
             # Generic Microsoft service patterns
             'service', 'processor', 'handler', 'proxy', 'agent',
             'scheduler', 'deployer', 'cab', 'capacity', ' rp',
@@ -1998,6 +2030,13 @@ class AzureDiscoveryEngine:
         # Check if display name contains any Microsoft keyword
         for keyword in microsoft_keywords:
             if keyword in display_name:
+                return True
+
+        # Heuristic: SPNs without owner org that have UUID-prefixed names
+        # are Microsoft auto-generated service principals
+        if not app_owner_org:
+            import re
+            if re.match(r'^[0-9a-f]{8}-', display_name):
                 return True
 
         # Default: Assume customer-owned if no Microsoft patterns found
@@ -2623,6 +2662,9 @@ class AzureDiscoveryEngine:
 
                 covered = sum(1 for c in ca_coverage_map.values() if c['coverage_status'] == 'covered')
                 print(f"  ✓ CA coverage computed: {covered}/{len(ca_coverage_map)} identities covered")
+
+        # Post-discovery sweep: catch any Microsoft SPNs that slipped through detection
+        self.db.sweep_microsoft_flag(run_id)
 
         return saved_count
     

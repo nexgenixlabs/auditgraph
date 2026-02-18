@@ -212,6 +212,12 @@ from app.api.handlers import (
     get_admin_billing_summary,
     get_admin_billing_events,
     get_client_billing_summary,
+    get_client_connections,
+    create_client_connection,
+    update_client_connection,
+    delete_client_connection,
+    test_client_connection,
+    discover_client_connection,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -243,9 +249,10 @@ def create_app():
         from app.database import Database as _DbInit
         _db_init = _DbInit()
         _db_init._ensure_identity_subscription_access_table()
+        _db_init.backfill_microsoft_flag()
         _db_init.close()
     except Exception as e:
-        print(f"  ⚠️ Could not ensure identity_subscription_access table: {e}")
+        print(f"  ⚠️ Could not ensure tables/backfill: {e}")
 
     # -----------------------
     # Health & Monitoring (Phase 68)
@@ -429,6 +436,29 @@ def create_app():
         return delete_tenant_handler(tenant_id)
 
     # -----------------------
+    # Client Aliases (Tenant → Client terminology rename)
+    # -----------------------
+    @app.get("/api/clients")
+    @require_portal_access()
+    def clients_list():
+        return get_tenants_list()
+
+    @app.post("/api/clients")
+    @require_portal_role('superadmin', 'poweradmin')
+    def clients_create():
+        return create_tenant_handler()
+
+    @app.put("/api/clients/<int:tenant_id>")
+    @require_portal_role('superadmin', 'poweradmin')
+    def clients_update(tenant_id):
+        return update_tenant_handler(tenant_id)
+
+    @app.delete("/api/clients/<int:tenant_id>")
+    @require_superadmin()
+    def clients_delete(tenant_id):
+        return delete_tenant_handler(tenant_id)
+
+    # -----------------------
     # Admin Billing API
     # -----------------------
     @app.get("/api/admin/tenants/<int:tenant_id>/billing")
@@ -471,6 +501,32 @@ def create_app():
     def client_billing_summary():
         return get_client_billing_summary()
 
+    # Admin Billing Client Aliases
+    @app.get("/api/admin/clients/<int:tenant_id>/billing")
+    @require_portal_access()
+    def admin_client_billing(tenant_id):
+        return get_admin_tenant_billing(tenant_id)
+
+    @app.put("/api/admin/clients/<int:tenant_id>/plan")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_client_plan(tenant_id):
+        return update_admin_tenant_plan(tenant_id)
+
+    @app.put("/api/admin/clients/<int:tenant_id>/commitment")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_client_commitment(tenant_id):
+        return update_admin_tenant_commitment(tenant_id)
+
+    @app.put("/api/admin/clients/<int:tenant_id>/platform-fee")
+    @require_superadmin()
+    def admin_client_platform_fee(tenant_id):
+        return update_admin_tenant_platform_fee(tenant_id)
+
+    @app.put("/api/admin/clients/<int:tenant_id>/clouds/<cloud>/rate")
+    @require_superadmin()
+    def admin_client_cloud_rate(tenant_id, cloud):
+        return update_admin_cloud_rate(tenant_id, cloud)
+
     @app.get("/api/tenant")
     def tenant_current():
         return get_current_tenant_handler()
@@ -498,9 +554,18 @@ def create_app():
     def tenant_by_slug(slug):
         return get_tenant_by_slug_public(slug)
 
+    @app.get("/api/clients/by-slug/<slug>")
+    def client_by_slug(slug):
+        return get_tenant_by_slug_public(slug)
+
     @app.post("/api/tenants/<int:tenant_id>/provision")
     @require_portal_role('superadmin', 'poweradmin')
     def tenants_provision(tenant_id):
+        return provision_tenant_handler(tenant_id)
+
+    @app.post("/api/clients/<int:tenant_id>/provision")
+    @require_portal_role('superadmin', 'poweradmin')
+    def clients_provision(tenant_id):
         return provision_tenant_handler(tenant_id)
 
     @app.get("/api/auth/tenants")
@@ -611,6 +676,17 @@ def create_app():
     @app.get("/api/analytics/tenants/trends")
     @require_portal_access()
     def analytics_tenants_trends():
+        return get_cross_tenant_trends()
+
+    # Client aliases for analytics
+    @app.get("/api/analytics/clients")
+    @require_portal_access()
+    def analytics_clients():
+        return get_cross_tenant_analytics()
+
+    @app.get("/api/analytics/clients/trends")
+    @require_portal_access()
+    def analytics_clients_trends():
         return get_cross_tenant_trends()
 
     @app.get("/api/analytics/login-sessions")
@@ -939,6 +1015,38 @@ def create_app():
         return test_azure_connection()
 
     # -----------------------
+    # Cloud Connections (multi-directory / multi-cloud)
+    # -----------------------
+    @app.get("/api/client/connections")
+    def client_connections_list():
+        return get_client_connections()
+
+    @app.post("/api/client/connections")
+    @require_role('admin', 'security_admin')
+    def client_connections_create():
+        return create_client_connection()
+
+    @app.put("/api/client/connections/<int:connection_id>")
+    @require_role('admin', 'security_admin')
+    def client_connections_update(connection_id):
+        return update_client_connection(connection_id)
+
+    @app.delete("/api/client/connections/<int:connection_id>")
+    @require_role('admin')
+    def client_connections_delete(connection_id):
+        return delete_client_connection(connection_id)
+
+    @app.post("/api/client/connections/test")
+    @require_role('admin', 'security_admin')
+    def client_connections_test():
+        return test_client_connection()
+
+    @app.post("/api/client/connections/<int:connection_id>/discover")
+    @require_role('admin', 'security_admin')
+    def client_connections_discover(connection_id):
+        return discover_client_connection(connection_id)
+
+    # -----------------------
     # Webhooks (Phase 28 - Admin only for writes)
     # -----------------------
     @app.get("/api/webhooks")
@@ -1236,6 +1344,17 @@ def create_app():
     @app.delete("/api/tenants/<int:tenant_id>/logo")
     @require_portal_role('superadmin', 'poweradmin')
     def tenant_logo_delete(tenant_id):
+        return delete_tenant_logo(tenant_id)
+
+    # Client aliases for logo routes
+    @app.post("/api/clients/<int:tenant_id>/logo")
+    @require_portal_role('superadmin', 'poweradmin')
+    def client_logo_upload(tenant_id):
+        return upload_tenant_logo(tenant_id)
+
+    @app.delete("/api/clients/<int:tenant_id>/logo")
+    @require_portal_role('superadmin', 'poweradmin')
+    def client_logo_delete(tenant_id):
         return delete_tenant_logo(tenant_id)
 
     # Phase 78: Scan modes

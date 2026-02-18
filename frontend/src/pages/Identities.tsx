@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
+import { useConnection } from '../contexts/ConnectionContext';
 import QueryBuilder from '../components/QueryBuilder';
 import type { AdvancedQuery, QueryFieldDefinition } from '../types';
 import { queryIdentities, getQueryFields } from '../services/api';
@@ -259,9 +260,11 @@ function TypeLabel({ type }: { type?: string }) {
 // ─── Main component ────────────────────────────────────────────────
 
 export default function IdentitiesPage() {
+  const { selectedConnectionId, connectionParam } = useConnection();
   const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showMicrosoft, setShowMicrosoft] = useState(false);
   const [search, setSearch] = useState('');
   const [riskFilter, setRiskFilter] = useState<RiskLevel | 'all'>('all');
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
@@ -350,7 +353,10 @@ export default function IdentitiesPage() {
     let cancelled = false;
     async function load() {
       try {
-        const resp = await fetch('/api/identities');
+        const params = new URLSearchParams();
+        params.set('hide_microsoft', String(!showMicrosoft));
+        if (connectionParam) params.append(...connectionParam.split('=') as [string, string]);
+        const resp = await fetch(`/api/identities?${params}`);
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
         const rows: IdentityRow[] = (data.identities || []).map((raw: any) => ({
@@ -402,7 +408,7 @@ export default function IdentitiesPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [showMicrosoft, selectedConnectionId]);
 
   // ─── Batch risk histories for sparkline column ─────────────────
   useEffect(() => {
@@ -1264,6 +1270,11 @@ export default function IdentitiesPage() {
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600 dark:text-slate-400 cursor-pointer whitespace-nowrap">
+            <input type="checkbox" checked={showMicrosoft} onChange={e => setShowMicrosoft(e.target.checked)}
+              className="rounded border-gray-300" />
+            Show Microsoft
+          </label>
         </div>
         ) : (
           <QueryBuilder

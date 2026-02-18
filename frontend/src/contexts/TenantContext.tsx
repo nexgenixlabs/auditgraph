@@ -64,7 +64,7 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
 
     // Use the raw fetch (not the intercepted one) since this is pre-auth
     const origFetch = window.fetch;
-    origFetch(`/api/tenants/by-slug/${encodeURIComponent(tenantSlug)}`)
+    origFetch(`/api/clients/by-slug/${encodeURIComponent(tenantSlug)}`)
       .then(res => {
         if (!res.ok) throw new Error(res.status === 404 ? 'Organization not found' : 'Failed to resolve organization');
         return res.json();

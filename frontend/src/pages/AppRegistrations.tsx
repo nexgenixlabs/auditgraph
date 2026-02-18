@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename } from '../utils/exportUtils';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -382,6 +383,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 
 export default function AppRegistrations() {
   const location = useLocation();
+  const { withConnection, selectedConnectionId } = useConnection();
 
   const [stats, setStats] = useState<AppRegStats | null>(null);
   const [items, setItems] = useState<AppRegRow[]>([]);
@@ -415,11 +417,11 @@ export default function AppRegistrations() {
   // Fetch stats
   useEffect(() => {
     if (!initialized) return;
-    fetch('/api/app-registrations/stats')
+    fetch(withConnection('/api/app-registrations/stats'))
       .then(r => r.json())
       .then(setStats)
       .catch(() => {});
-  }, [initialized]);
+  }, [initialized, selectedConnectionId]);
 
   // Fetch list
   useEffect(() => {
@@ -435,7 +437,7 @@ export default function AppRegistrations() {
     if (audienceFilter) params.set('audience', audienceFilter);
     if (search) params.set('search', search);
 
-    fetch(`/api/app-registrations?${params}`, { signal: abort.signal })
+    fetch(withConnection(`/api/app-registrations?${params}`), { signal: abort.signal })
       .then(r => r.json())
       .then(data => {
         setItems(data.items || []);
@@ -444,13 +446,13 @@ export default function AppRegistrations() {
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [initialized, riskFilter, credFilter, audienceFilter, search, sortField, sortDir]);
+  }, [initialized, riskFilter, credFilter, audienceFilter, search, sortField, sortDir, selectedConnectionId]);
 
   // Fetch detail when selected
   useEffect(() => {
     if (!selectedAppId) { setDetail(null); return; }
     setDetailLoading(true);
-    fetch(`/api/app-registrations/${selectedAppId}`)
+    fetch(withConnection(`/api/app-registrations/${selectedAppId}`))
       .then(r => r.json())
       .then(d => { setDetail(d); setDetailLoading(false); })
       .catch(() => setDetailLoading(false));

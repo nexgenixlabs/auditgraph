@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 interface ResourceStats {
   total: number;
@@ -30,20 +31,21 @@ const RISK_COLORS: Record<string, string> = {
 
 export default function ResourceOverview() {
   const navigate = useNavigate();
+  const { withConnection, selectedConnectionId } = useConnection();
   const [stats, setStats] = useState<ResourceStats | null>(null);
   const [compliance, setCompliance] = useState<ComplianceSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/resources/stats').then(r => r.json()),
-      fetch('/api/resources/compliance-summary').then(r => r.json()).catch(() => null),
+      fetch(withConnection('/api/resources/stats')).then(r => r.json()),
+      fetch(withConnection('/api/resources/compliance-summary')).then(r => r.json()).catch(() => null),
     ]).then(([s, c]) => {
       setStats(s);
       setCompliance(c);
       setLoading(false);
     }).catch(() => setLoading(false));
-  }, []);
+  }, [selectedConnectionId]);
 
   if (loading) {
     return (

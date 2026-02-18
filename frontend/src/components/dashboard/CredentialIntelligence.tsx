@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { COLORS, RISK_COLORS } from '../../constants/design';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 interface CredentialIntelData {
   secret_age_distribution: Record<string, number>;
@@ -31,15 +32,16 @@ const METHOD_COLORS: Record<string, string> = {
 };
 
 export default function CredentialIntelligence() {
+  const { withConnection, selectedConnectionId } = useConnection();
   const [data, setData] = useState<CredentialIntelData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/dashboard/credential-intelligence')
+    fetch(withConnection('/api/dashboard/credential-intelligence'))
       .then(r => r.ok ? r.json() : null)
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
-  }, []);
+  }, [selectedConnectionId]);
 
   if (loading) {
     return (

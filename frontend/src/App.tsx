@@ -58,7 +58,9 @@ import TopBar from './components/layout/TopBar';
 import CopilotPanel from './components/CopilotPanel';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { TenantProvider, useTenant } from './contexts/TenantContext';
+import { ConnectionProvider } from './contexts/ConnectionContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import ConnectionSwitcher from './components/ConnectionSwitcher';
 
 function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode; requiredRole?: string }) {
   const { user, loading } = useAuth();
@@ -216,6 +218,11 @@ function AppContent() {
               {/* Top Bar */}
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
+              {/* Connection Switcher (shows only with 2+ connections) */}
+              <div className="fixed top-14 left-60 right-0 z-30">
+                <ConnectionSwitcher />
+              </div>
+
               {/* Left Sidebar */}
               <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} canManageConnections={canManageConnections} />
 
@@ -278,7 +285,9 @@ function App() {
       <Router>
         <TenantProvider>
           <AuthProvider>
-            <AppContent />
+            <ConnectionProvider>
+              <AppContent />
+            </ConnectionProvider>
           </AuthProvider>
         </TenantProvider>
       </Router>

@@ -56,7 +56,7 @@ export default function AdminOverview() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/analytics/tenants')
+    fetch('/api/analytics/clients')
       .then(r => {
         if (!r.ok) throw new Error('Forbidden');
         return r.json();
@@ -106,13 +106,13 @@ export default function AdminOverview() {
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Platform Overview</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Cross-tenant health and activity summary</p>
+        <p className="text-sm text-gray-500 mt-0.5">Cross-client health and activity summary</p>
       </div>
 
       {/* Global stats — 5 cards */}
       <div className="grid grid-cols-5 gap-4">
-        <StatCard label="Total Tenants" value={g.total_tenants} color="blue" />
-        <StatCard label="Active Tenants" value={g.active_tenants} color="green" />
+        <StatCard label="Total Clients" value={g.total_tenants} color="blue" />
+        <StatCard label="Active Clients" value={g.active_tenants} color="green" />
         <StatCard label="Pro" value={planCounts.pro || 0} color="pro" />
         <StatCard label="Enterprise" value={planCounts.enterprise || 0} color="purple" />
         <StatCard label="Total Users" value={totalUsers} color="gray" />
@@ -164,7 +164,7 @@ export default function AdminOverview() {
 
         {/* Active / Inactive + Status Bars */}
         <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Tenant Status</h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-4">Client Status</h3>
           <div className="space-y-4">
             {/* Active vs Inactive bars */}
             <div>
@@ -232,12 +232,12 @@ export default function AdminOverview() {
       {/* Tenant health table */}
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-200">
-          <h3 className="text-sm font-semibold text-gray-800">Tenant Health</h3>
+          <h3 className="text-sm font-semibold text-gray-800">Client Health</h3>
         </div>
         <table className="min-w-full text-left text-xs">
           <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase tracking-wider font-medium">
             <tr>
-              <th className="px-4 py-2.5">Tenant</th>
+              <th className="px-4 py-2.5">Client</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">License Model</th>
               <th className="px-4 py-2.5">Term</th>

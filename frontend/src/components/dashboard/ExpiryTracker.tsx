@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 interface ExpirySummary {
   secrets: { total: number; expired: number; expiring_7d: number; expiring_30d: number; expiring_90d: number; no_expiry: number };
@@ -28,15 +29,16 @@ function MiniCard({ label, total, expired, expiringSoon }: { label: string; tota
 
 export default function ExpiryTracker() {
   const navigate = useNavigate();
+  const { withConnection, selectedConnectionId } = useConnection();
   const [data, setData] = useState<ExpirySummary | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/resources/expiry-summary')
+    fetch(withConnection('/api/resources/expiry-summary'))
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
-  }, []);
+  }, [selectedConnectionId]);
 
   if (loading) {
     return (

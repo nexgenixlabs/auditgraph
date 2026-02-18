@@ -85,13 +85,13 @@ export default function AdminTenants() {
   } | null>(null);
 
   const fetchTenants = useCallback(() => {
-    fetch('/api/tenants')
+    fetch('/api/clients')
       .then(r => {
-        if (!r.ok) throw new Error(`Failed to load tenants (${r.status})`);
+        if (!r.ok) throw new Error(`Failed to load clients (${r.status})`);
         return r.json();
       })
       .then(d => setTenants(d.tenants || []))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load tenants'))
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load clients'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -100,7 +100,7 @@ export default function AdminTenants() {
   async function handleProvision(tenantId: number) {
     setError(null);
     try {
-      const res = await fetch(`/api/tenants/${tenantId}/provision`, {
+      const res = await fetch(`/api/clients/${tenantId}/provision`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(provisionForm),
@@ -118,7 +118,7 @@ export default function AdminTenants() {
 
   async function toggleEnabled(t: Tenant) {
     try {
-      await fetch(`/api/tenants/${t.id}`, {
+      await fetch(`/api/clients/${t.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !t.enabled }),
@@ -129,7 +129,7 @@ export default function AdminTenants() {
 
   async function changePlan(t: Tenant, plan: string) {
     try {
-      await fetch(`/api/admin/tenants/${t.id}/plan`, {
+      await fetch(`/api/admin/clients/${t.id}/plan`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plan }),
@@ -142,7 +142,7 @@ export default function AdminTenants() {
     if (!showDeleteConfirm) return;
     setError(null);
     try {
-      const res = await fetch(`/api/tenants/${showDeleteConfirm.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/clients/${showDeleteConfirm.id}`, { method: 'DELETE' });
       const text = await res.text();
       let data: Record<string, string> = {};
       try { data = JSON.parse(text); } catch { /* non-JSON response */ }
@@ -160,7 +160,7 @@ export default function AdminTenants() {
     if (!showEdit) return;
     setError(null);
     try {
-      const res = await fetch(`/api/tenants/${showEdit.id}`, {
+      const res = await fetch(`/api/clients/${showEdit.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: editForm.name }),
@@ -201,7 +201,7 @@ export default function AdminTenants() {
         reader.onload = () => resolve(reader.result as string);
         reader.readAsDataURL(logoFile);
       });
-      const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+      const res = await fetch(`/api/clients/${tenantId}/logo`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ logo: dataUrl }),
@@ -223,7 +223,7 @@ export default function AdminTenants() {
 
   async function handleLogoDelete(tenantId: number) {
     try {
-      const res = await fetch(`/api/tenants/${tenantId}/logo`, { method: 'DELETE' });
+      const res = await fetch(`/api/clients/${tenantId}/logo`, { method: 'DELETE' });
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.error || 'Failed to delete logo');
@@ -244,7 +244,7 @@ export default function AdminTenants() {
     setShowConfigure(t);
     setTenantBilling(null);
     // Fetch billing data for this tenant
-    fetch(`/api/admin/tenants/${t.id}/billing`)
+    fetch(`/api/admin/clients/${t.id}/billing`)
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setTenantBilling(data); })
       .catch(() => {});
@@ -265,7 +265,7 @@ export default function AdminTenants() {
       if (configTerm > 0 && !showConfigure.license_activated_at) {
         payload.license_activated_at = new Date().toISOString();
       }
-      const res = await fetch(`/api/tenants/${showConfigure.id}`, {
+      const res = await fetch(`/api/clients/${showConfigure.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -326,18 +326,18 @@ export default function AdminTenants() {
   const termDiscount = getTermDiscount(configTerm);
   const enterpriseBundles = ENTERPRISE_BUNDLES[configTerm] || [];
 
-  if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading tenants...</div>;
+  if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading clients...</div>;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-gray-900">Tenant Management</h2>
+          <h2 className="text-xl font-bold text-gray-900">Client Management</h2>
           <p className="text-sm text-gray-500 mt-0.5">{tenants.length} organizations</p>
         </div>
         {canWrite && (
           <p className="text-xs text-gray-500">
-            To create a new tenant, use the{' '}
+            To create a new client, use the{' '}
             <a href="/admin/onboarding" className="text-blue-600 hover:text-blue-700 underline">Onboarding</a> tab.
           </p>
         )}
@@ -350,7 +350,7 @@ export default function AdminTenants() {
       {/* Provision modal */}
       {showProvision !== null && (
         <div className="bg-white border border-blue-200 rounded-lg p-6 shadow-sm">
-          <h3 className="text-sm font-semibold text-gray-800 mb-3">Provision Tenant — Create Admin User</h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-3">Provision Client — Create Admin User</h3>
           <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Admin Username</label>

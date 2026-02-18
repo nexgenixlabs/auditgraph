@@ -134,36 +134,38 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
     logger.info("=" * 70)
 
 
-def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep'):
-    """Run discovery for a single tenant using their stored Azure credentials."""
-    # Read this tenant's settings (tenant-scoped, not system-level)
-    settings_db = Database(tenant_id=db_tenant_id)
+def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep',
+                          connection_id: int = None):
+    """Run discovery for a single tenant using their cloud connections.
+    If connection_id is provided, only scan that specific connection.
+    Otherwise scan ALL connected connections for the tenant.
+    Falls back to legacy settings-based credentials if no connections exist.
+    """
+    admin_db = Database()
     try:
-        settings = settings_db.get_settings(tenant_id=db_tenant_id)
+        connections = admin_db.get_cloud_connections(db_tenant_id, cloud='azure',
+                                                     include_secrets=True)
     finally:
-        settings_db.close()
+        admin_db.close()
 
-    azure_tenant_id = settings.get('azure_tenant_id')
-    azure_client_id = settings.get('azure_client_id')
-    azure_client_secret = settings.get('azure_client_secret')
+    # Filter to specific connection if requested
+    if connection_id:
+        connections = [c for c in connections if c['id'] == connection_id]
+        if not connections:
+            logger.warning(f"  ⚠ Connection {connection_id} not found for tenant {tenant_name}")
+            return
 
-    if not all([azure_tenant_id, azure_client_id, azure_client_secret]):
-        logger.info(f"  ⏭ Skipping tenant {tenant_name} — no Azure credentials configured")
-        return
+    # Filter to only connected connections
+    connected = [c for c in connections if c.get('status') == 'connected']
 
-    logger.info(f"  ✓ Azure credentials loaded for {tenant_name}")
-
-    # Initialize discovery engine with RLS tenant context
-    engine = AzureDiscoveryEngine(
-        tenant_id=azure_tenant_id,
-        client_id=azure_client_id,
-        client_secret=azure_client_secret,
-        db_tenant_id=db_tenant_id,
-    )
-    logger.info(f"  ✓ Discovery engine initialized for {tenant_name}")
-
-    # Run discovery
-    engine.run_discovery()
+    if connected:
+        logger.info(f"  Found {len(connected)} connected connection(s) for {tenant_name}")
+        for conn in connected:
+            _run_connection_discovery(db_tenant_id, tenant_name, conn, scan_mode)
+    else:
+        # Fallback: legacy settings-based credentials
+        logger.info(f"  No cloud_connections found, trying legacy settings for {tenant_name}")
+        _run_legacy_settings_discovery(db_tenant_id, tenant_name, scan_mode)
 
     logger.info(f"  ✅ Discovery completed for {tenant_name}")
 
@@ -195,6 +197,74 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
         'description': f'Scheduled discovery run completed for {tenant_name}.',
         'severity': 'info',
     }, db_tenant_id=db_tenant_id)
+
+
+def _run_connection_discovery(db_tenant_id: int, tenant_name: str, conn: dict, scan_mode: str = 'deep'):
+    """Run discovery for a single cloud connection."""
+    conn_id = conn['id']
+    label = conn.get('label', 'Unknown')
+    cloud = conn.get('cloud', 'azure')
+
+    # Extract credentials from connection fields + metadata
+    entra_tenant_id = conn.get('entra_tenant_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+    client_secret = metadata.get('client_secret')
+
+    if not all([entra_tenant_id, client_id, client_secret]):
+        logger.warning(f"  ⏭ Skipping connection '{label}' (id={conn_id}) — incomplete credentials")
+        return
+
+    logger.info(f"  ▶ Scanning connection '{label}' (id={conn_id}, cloud={cloud})")
+
+    # Initialize discovery engine with connection-specific credentials
+    engine = AzureDiscoveryEngine(
+        tenant_id=entra_tenant_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        db_tenant_id=db_tenant_id,
+        cloud_connection_id=conn_id,
+    )
+    logger.info(f"    ✓ Engine initialized for '{label}'")
+
+    engine.run_discovery()
+    logger.info(f"    ✅ Discovery completed for connection '{label}'")
+
+    # Update last_discovery_at on the connection
+    try:
+        admin_db = Database()
+        admin_db.update_cloud_connection(conn_id, last_discovery_at=datetime.utcnow())
+        admin_db.close()
+    except Exception as e:
+        logger.warning(f"    ⚠ Failed to update last_discovery_at for connection {conn_id}: {e}")
+
+
+def _run_legacy_settings_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep'):
+    """Fallback: run discovery using legacy settings-table credentials (single connection)."""
+    settings_db = Database(tenant_id=db_tenant_id)
+    try:
+        settings = settings_db.get_settings(tenant_id=db_tenant_id)
+    finally:
+        settings_db.close()
+
+    azure_tenant_id = settings.get('azure_tenant_id')
+    azure_client_id = settings.get('azure_client_id')
+    azure_client_secret = settings.get('azure_client_secret')
+
+    if not all([azure_tenant_id, azure_client_id, azure_client_secret]):
+        logger.info(f"  ⏭ Skipping tenant {tenant_name} — no Azure credentials configured")
+        return
+
+    logger.info(f"  ✓ Azure credentials loaded from settings for {tenant_name}")
+
+    engine = AzureDiscoveryEngine(
+        tenant_id=azure_tenant_id,
+        client_id=azure_client_id,
+        client_secret=azure_client_secret,
+        db_tenant_id=db_tenant_id,
+    )
+    logger.info(f"  ✓ Discovery engine initialized for {tenant_name}")
+    engine.run_discovery()
 
 
 def _send_change_notification_if_needed(db_tenant_id: int = None):
@@ -952,15 +1022,19 @@ def get_next_report_time():
     return None
 
 
-def trigger_manual_discovery(scan_mode: str = 'deep', db_tenant_id: int = None, tenant_name: str = None):
+def trigger_manual_discovery(scan_mode: str = 'deep', db_tenant_id: int = None,
+                             tenant_name: str = None, connection_id: int = None):
     """
     Trigger discovery immediately (manual override).
     If db_tenant_id is provided, runs for that single tenant only.
+    If connection_id is also provided, only scans that specific connection.
     Otherwise runs for all tenants (scheduled behavior).
     """
     if db_tenant_id is not None:
-        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for tenant {tenant_name or db_tenant_id} (mode={scan_mode})")
-        _run_tenant_discovery(db_tenant_id, tenant_name or str(db_tenant_id), scan_mode)
+        suffix = f" connection={connection_id}" if connection_id else ""
+        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for tenant {tenant_name or db_tenant_id} (mode={scan_mode}){suffix}")
+        _run_tenant_discovery(db_tenant_id, tenant_name or str(db_tenant_id), scan_mode,
+                              connection_id=connection_id)
     else:
         logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for all tenants (mode={scan_mode})")
         run_scheduled_discovery(scan_mode=scan_mode)
