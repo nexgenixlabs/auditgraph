@@ -473,13 +473,18 @@ export default function Dashboard() {
                       style={{ color: COLORS.brand }}>View All →</Link>
                   </div>
                   {stats.workload_exposure.exposure_distribution && (
-                    <ExposureDistributionBar distribution={stats.workload_exposure.exposure_distribution} total={stats.workload_exposure.total} />
+                    <ExposureDistributionBar distribution={stats.workload_exposure.exposure_distribution} total={stats.workload_exposure.total}
+                      onSegmentClick={k => navigate(`/workload-identities?exposure=${k}`)} />
                   )}
                   <div className="grid grid-cols-4 gap-3 mt-3">
-                    <MiniStat label="Total" value={stats.workload_exposure.total} />
-                    <MiniStat label="Avg Score" value={stats.workload_exposure.avg_exposure_score ?? '—'} warn={(stats.workload_exposure.avg_exposure_score ?? 0) >= 50} />
-                    <MiniStat label="Orphaned" value={stats.workload_exposure.orphaned} warn={stats.workload_exposure.orphaned > 0} />
-                    <MiniStat label="Can Escalate" value={stats.workload_exposure.can_escalate} warn={stats.workload_exposure.can_escalate > 0} />
+                    <MiniStat label="Total" value={stats.workload_exposure.total}
+                      onClick={() => navigate('/workload-identities')} title="View all workload identities" />
+                    <MiniStat label="Avg Score" value={stats.workload_exposure.avg_exposure_score ?? '—'} warn={(stats.workload_exposure.avg_exposure_score ?? 0) >= 50}
+                      onClick={() => navigate('/workload-identities')} title="View workload identities" />
+                    <MiniStat label="Orphaned" value={stats.workload_exposure.orphaned} warn={stats.workload_exposure.orphaned > 0}
+                      onClick={() => navigate('/workload-identities?owner=orphaned')} title="View orphaned identities" />
+                    <MiniStat label="Can Escalate" value={stats.workload_exposure.can_escalate} warn={stats.workload_exposure.can_escalate > 0}
+                      onClick={() => navigate('/workload-identities?escalate=true')} title="View identities that can escalate" />
                   </div>
                 </div>
               )}
@@ -534,27 +539,32 @@ export default function Dashboard() {
             <div className="space-y-6">
               {/* Usage summary cards */}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
+                  onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} title="View dormant identities">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Dormant Identities</div>
                   <div className="text-2xl font-extrabold" style={{ color: (posture?.dormant_count ?? 0) > 0 ? '#F97316' : '#22C55E' }}>{posture?.dormant_count ?? 0}</div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Stale &gt;90 days</div>
                 </div>
-                <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
+                  onClick={() => navigate('/workload-identities?owner=orphaned')} title="View unowned SPNs">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Unowned SPNs</div>
                   <div className="text-2xl font-extrabold" style={{ color: (posture?.no_owner_count ?? 0) > 0 ? '#F97316' : '#22C55E' }}>{posture?.no_owner_count ?? 0}</div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>No assigned owner</div>
                 </div>
-                <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-red-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
+                  onClick={() => navigate('/workload-identities?exposure=critical')} title="View expiring credentials">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Expiring Credentials</div>
                   <div className="text-2xl font-extrabold" style={{ color: (posture?.expiring_credentials_count ?? 0) > 0 ? '#EF4444' : '#22C55E' }}>{posture?.expiring_credentials_count ?? 0}</div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Within 30 days</div>
                 </div>
-                <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
+                  onClick={() => navigate('/identities')} title="View active identities">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Active Identities</div>
                   <div className="text-2xl font-extrabold" style={{ color: COLORS.brandLight }}>{Math.max((latest?.total_identities ?? 0) - (posture?.dormant_count ?? 0), 0)}</div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Used within 90 days</div>
                 </div>
-                <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
+                  onClick={() => navigate('/workload-identities')} title="View workload identities">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Avg Exposure</div>
                   <div className="text-2xl font-extrabold" style={{ color: (stats?.workload_exposure?.avg_exposure_score ?? 0) >= 50 ? '#EF4444' : '#22C55E' }}>
                     {stats?.workload_exposure?.avg_exposure_score ?? '—'}
@@ -652,7 +662,7 @@ export default function Dashboard() {
 
 // ── Inline helpers for workload exposure ─────────────────────────────
 
-function ExposureDistributionBar({ distribution, total }: { distribution: { critical: number; high: number; medium: number; low: number }; total: number }) {
+function ExposureDistributionBar({ distribution, total, onSegmentClick }: { distribution: { critical: number; high: number; medium: number; low: number }; total: number; onSegmentClick?: (key: string) => void }) {
   const segments = [
     { key: 'critical', count: distribution.critical },
     { key: 'high', count: distribution.high },
@@ -666,8 +676,9 @@ function ExposureDistributionBar({ distribution, total }: { distribution: { crit
           const cfg = EXPOSURE_LEVEL_CONFIG[s.key];
           const w = total > 0 ? (s.count / total) * 100 : 0;
           return (
-            <div key={s.key} style={{ width: `${w}%`, backgroundColor: cfg.color, transition: 'width 0.8s ease' }}
-              className="flex items-center justify-center" title={`${cfg.label}: ${s.count}`}>
+            <div key={s.key} style={{ width: `${w}%`, backgroundColor: cfg.color, transition: 'width 0.8s ease', cursor: onSegmentClick ? 'pointer' : undefined }}
+              className="flex items-center justify-center" title={`${cfg.label}: ${s.count}${onSegmentClick ? ' — Click to filter' : ''}`}
+              onClick={onSegmentClick ? () => onSegmentClick(s.key) : undefined}>
               {w > 14 && <span className="text-[9px] font-bold text-white">{s.count}</span>}
             </div>
           );
@@ -677,7 +688,8 @@ function ExposureDistributionBar({ distribution, total }: { distribution: { crit
         {segments.map(s => {
           const cfg = EXPOSURE_LEVEL_CONFIG[s.key];
           return (
-            <span key={s.key} className="text-[10px] flex items-center gap-1" style={{ color: COLORS.textSecondary }}>
+            <span key={s.key} className="text-[10px] flex items-center gap-1" style={{ color: COLORS.textSecondary, cursor: onSegmentClick ? 'pointer' : undefined }}
+              onClick={onSegmentClick ? () => onSegmentClick(s.key) : undefined}>
               <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: cfg.color }} />
               {cfg.label} {s.count}
             </span>
@@ -688,9 +700,11 @@ function ExposureDistributionBar({ distribution, total }: { distribution: { crit
   );
 }
 
-function MiniStat({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) {
+function MiniStat({ label, value, warn, onClick, title }: { label: string; value: number | string; warn?: boolean; onClick?: () => void; title?: string }) {
   return (
-    <div className="text-center p-2 rounded-lg" style={{ backgroundColor: warn ? '#FEF2F2' : '#F8FAFC', border: `1px solid ${warn ? '#FECACA' : COLORS.border}` }}>
+    <div className={`text-center p-2 rounded-lg${onClick ? ' cursor-pointer hover:ring-1 hover:ring-blue-300 dark:hover:ring-blue-700 transition-shadow' : ''}`}
+      style={{ backgroundColor: warn ? '#FEF2F2' : '#F8FAFC', border: `1px solid ${warn ? '#FECACA' : COLORS.border}` }}
+      onClick={onClick} title={title}>
       <div className="text-lg font-extrabold" style={{ color: warn ? '#EF4444' : COLORS.textPrimary }}>{value}</div>
       <div className="text-[10px] uppercase tracking-wider" style={{ color: COLORS.textMuted }}>{label}</div>
     </div>

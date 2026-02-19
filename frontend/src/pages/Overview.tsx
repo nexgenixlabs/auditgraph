@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import PillarDrilldownPanel from '../components/PillarDrilldownPanel';
 
 // ─── Command Center Design Tokens ───────────────────────────────────
 const C = {
@@ -88,6 +89,7 @@ function pct(n: number, d: number) { return d ? Math.round((n / d) * 100) : 0; }
 // ─── Main Component ─────────────────────────────────────────────────
 export default function Overview() {
   const { withConnection, selectedConnectionId } = useConnection();
+  const navigate = useNavigate();
   const [mounted, setMounted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -101,6 +103,7 @@ export default function Overview() {
   const [prevScore, setPrevScore] = useState<number | null>(null);
   const [expandedPillar, setExpandedPillar] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('risk');
+  const [pillarPanel, setPillarPanel] = useState<string | null>(null);
 
   useEffect(() => { setTimeout(() => setMounted(true), 50); }, []);
 
@@ -234,12 +237,17 @@ export default function Overview() {
             <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 8 }}>
               Identities
             </div>
-            <div style={{ fontSize: 32, fontWeight: 800, fontFamily: F.mono, color: C.text }}>
+            <div style={{ fontSize: 32, fontWeight: 800, fontFamily: F.mono, color: C.text, cursor: 'pointer', transition: 'color 0.2s' }}
+              onClick={() => navigate('/identities')} title="View all identities"
+              onMouseEnter={e => { (e.currentTarget as any).style.color = C.accent; }}
+              onMouseLeave={e => { (e.currentTarget as any).style.color = C.text; }}>
               {latest?.total_identities ?? 0}
             </div>
             <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end', marginTop: 8 }}>
-              <CountChip label="CRIT" value={latest?.critical_count ?? 0} color={C.critical} />
-              <CountChip label="HIGH" value={latest?.high_count ?? 0} color={C.high} />
+              <CountChip label="CRIT" value={latest?.critical_count ?? 0} color={C.critical}
+                onClick={() => navigate('/identities?risk_level=critical')} title="View critical identities" />
+              <CountChip label="HIGH" value={latest?.high_count ?? 0} color={C.high}
+                onClick={() => navigate('/identities?risk_level=high')} title="View high-risk identities" />
             </div>
           </div>
         </div>
@@ -294,7 +302,7 @@ export default function Overview() {
             <Card>
               <SectionLabel>Risk Radar</SectionLabel>
               <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}>
-                <RadarChart pillars={pillars} />
+                <RadarChart pillars={pillars} onLabelClick={k => setPillarPanel(k)} />
               </div>
             </Card>
             <Card>
@@ -339,6 +347,15 @@ export default function Overview() {
                               {' '}{dk.replace(/_/g, ' ')}
                             </div>
                           ))}
+                          <button onClick={e => { e.stopPropagation(); setPillarPanel(k); }} style={{
+                            marginTop: 8, padding: '4px 12px', borderRadius: 6, border: `1px solid ${C.accentBorder}`,
+                            background: 'transparent', color: C.accent, fontSize: 10, fontFamily: F.mono, fontWeight: 600,
+                            cursor: 'pointer', transition: 'background 0.2s',
+                          }}
+                          onMouseEnter={e => { (e.currentTarget as any).style.background = `${C.accent}12`; }}
+                          onMouseLeave={e => { (e.currentTarget as any).style.background = 'transparent'; }}>
+                            Drill Down →
+                          </button>
                         </div>
                       )}
                     </div>
@@ -352,13 +369,16 @@ export default function Overview() {
           <div style={{ ...fadeIn(350), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
             <AttackCard title="Privileged NHIs" value={atk?.privileged_nhi_count ?? 0}
               subtitle={`${pct(atk?.privileged_nhi_count ?? 0, latest?.total_identities ?? 1)}% of high privilege from machines`}
-              severity="critical" />
+              severity="critical" onClick={() => navigate('/workload-identities?escalate=true')} actionTitle="View privileged NHIs" />
             <AttackCard title="Dormant Privileged" value={atk?.dormant_privileged_count ?? 0}
-              subtitle="Unused >90 days with active roles" severity="high" />
+              subtitle="Unused >90 days with active roles" severity="high"
+              onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} actionTitle="View dormant privileged" />
             <AttackCard title="Subscription Access" value={atk?.multi_sub_count ?? 0}
-              subtitle="Contributor+ at subscription scope" severity="warning" />
+              subtitle="Contributor+ at subscription scope" severity="warning"
+              onClick={() => navigate('/workload-identities?scope=subscription')} actionTitle="View subscription-scoped identities" />
             <AttackCard title="RBAC Modifiers" value={atk?.rbac_modifier_count ?? 0}
-              subtitle="Can alter access policies directly" severity="critical" />
+              subtitle="Can alter access policies directly" severity="critical"
+              onClick={() => navigate('/workload-identities?escalate=true')} actionTitle="View RBAC modifiers" />
           </div>
 
           {/* Workload Exposure Summary — enriched */}
@@ -377,15 +397,17 @@ export default function Overview() {
                     Exposure Distribution
                   </div>
                   <StackedBar segments={[
-                    { value: we.exposure_distribution.critical, color: C.critical, label: `Critical ${we.exposure_distribution.critical}` },
-                    { value: we.exposure_distribution.high, color: C.high, label: `High ${we.exposure_distribution.high}` },
-                    { value: we.exposure_distribution.medium, color: C.warning, label: `Medium ${we.exposure_distribution.medium}` },
-                    { value: we.exposure_distribution.low, color: C.good, label: `Low ${we.exposure_distribution.low}` },
-                  ]} />
+                    { value: we.exposure_distribution.critical, color: C.critical, label: `Critical ${we.exposure_distribution.critical}`, key: 'critical' },
+                    { value: we.exposure_distribution.high, color: C.high, label: `High ${we.exposure_distribution.high}`, key: 'high' },
+                    { value: we.exposure_distribution.medium, color: C.warning, label: `Medium ${we.exposure_distribution.medium}`, key: 'medium' },
+                    { value: we.exposure_distribution.low, color: C.good, label: `Low ${we.exposure_distribution.low}`, key: 'low' },
+                  ]} onSegmentClick={k => navigate(`/workload-identities?exposure=${k}`)} />
                   <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
                     <CountChip label="Avg Score" value={we.component_averages.total} color={we.component_averages.total >= 50 ? C.critical : C.good} />
-                    <CountChip label="Can Escalate" value={we.flags.can_escalate} color={we.flags.can_escalate > 0 ? C.critical : C.textTer} />
-                    <CountChip label="Orphaned" value={we.flags.orphaned} color={we.flags.orphaned > 0 ? C.high : C.textTer} />
+                    <CountChip label="Can Escalate" value={we.flags.can_escalate} color={we.flags.can_escalate > 0 ? C.critical : C.textTer}
+                      onClick={() => navigate('/workload-identities?escalate=true')} title="View identities that can escalate" />
+                    <CountChip label="Orphaned" value={we.flags.orphaned} color={we.flags.orphaned > 0 ? C.high : C.textTer}
+                      onClick={() => navigate('/workload-identities?owner=orphaned')} title="View orphaned identities" />
                   </div>
                 </div>
 
@@ -419,19 +441,22 @@ export default function Overview() {
                     Lifecycle State
                   </div>
                   <StackedBar segments={[
-                    { value: we.lifecycle_distribution.active, color: C.good, label: `Active ${we.lifecycle_distribution.active}` },
-                    { value: we.lifecycle_distribution.possibly_active, color: C.info, label: `Possible ${we.lifecycle_distribution.possibly_active}` },
-                    { value: we.lifecycle_distribution.likely_dormant, color: C.warning, label: `Likely Dormant ${we.lifecycle_distribution.likely_dormant}` },
-                    { value: we.lifecycle_distribution.dormant, color: C.high, label: `Dormant ${we.lifecycle_distribution.dormant}` },
-                    { value: we.lifecycle_distribution.blind, color: C.critical, label: `Blind ${we.lifecycle_distribution.blind}` },
-                  ]} />
+                    { value: we.lifecycle_distribution.active, color: C.good, label: `Active ${we.lifecycle_distribution.active}`, key: 'active' },
+                    { value: we.lifecycle_distribution.possibly_active, color: C.info, label: `Possible ${we.lifecycle_distribution.possibly_active}`, key: 'possibly_active' },
+                    { value: we.lifecycle_distribution.likely_dormant, color: C.warning, label: `Likely Dormant ${we.lifecycle_distribution.likely_dormant}`, key: 'likely_dormant' },
+                    { value: we.lifecycle_distribution.dormant, color: C.high, label: `Dormant ${we.lifecycle_distribution.dormant}`, key: 'dormant' },
+                    { value: we.lifecycle_distribution.blind, color: C.critical, label: `Blind ${we.lifecycle_distribution.blind}`, key: 'blind' },
+                  ]} onSegmentClick={k => navigate(`/workload-identities?lifecycle=${k}`)} />
                 </div>
 
                 {/* Row 4: Key risk flags */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 14 }}>
-                  <StatCell label="Zombies" value={we.zombie_count} color={we.zombie_count > 0 ? C.critical : C.textTer} />
-                  <StatCell label="Cross-Sub" value={we.flags.cross_subscription} color={we.flags.cross_subscription > 0 ? C.high : C.textTer} />
-                  <StatCell label="Tenant Scope" value={we.scope_distribution.tenant} color={we.scope_distribution.tenant > 0 ? C.critical : C.textTer} />
+                  <StatCell label="Zombies" value={we.zombie_count} color={we.zombie_count > 0 ? C.critical : C.textTer}
+                    onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} title="View zombie identities" />
+                  <StatCell label="Cross-Sub" value={we.flags.cross_subscription} color={we.flags.cross_subscription > 0 ? C.high : C.textTer}
+                    onClick={() => navigate('/workload-identities?cross_subscription=true')} title="View cross-subscription identities" />
+                  <StatCell label="Tenant Scope" value={we.scope_distribution.tenant} color={we.scope_distribution.tenant > 0 ? C.critical : C.textTer}
+                    onClick={() => navigate('/workload-identities?scope=tenant')} title="View tenant-scoped identities" />
                 </div>
               </Card>
             </div>
@@ -459,12 +484,18 @@ export default function Overview() {
                 ]} />
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 14 }}>
-                  <StatCell label="Total SPNs" value={nhi?.service_principal ?? 0} color={C.textSec} />
-                  <StatCell label="Unowned" value={insights?.action_items?.unowned_spn_count ?? 0} color={C.critical} />
-                  <StatCell label="High Priv" value={atk?.privileged_nhi_count ?? 0} color={C.high} />
-                  <StatCell label="Avg Exposure" value={we?.component_averages?.total != null ? we.component_averages.total.toFixed(1) : '—'} color={we?.component_averages?.total != null && we.component_averages.total >= 50 ? C.critical : C.good} />
-                  <StatCell label="Expiring" value={insights?.action_items?.expiring_credential_count ?? 0} color={C.warning} />
-                  <StatCell label="Zombies" value={we?.zombie_count ?? 0} color={(we?.zombie_count ?? 0) > 0 ? C.critical : C.textTer} />
+                  <StatCell label="Total SPNs" value={nhi?.service_principal ?? 0} color={C.textSec}
+                    onClick={() => navigate('/workload-identities?type=spn')} title="View all SPNs" />
+                  <StatCell label="Unowned" value={insights?.action_items?.unowned_spn_count ?? 0} color={C.critical}
+                    onClick={() => navigate('/workload-identities?owner=orphaned')} title="View unowned identities" />
+                  <StatCell label="High Priv" value={atk?.privileged_nhi_count ?? 0} color={C.high}
+                    onClick={() => navigate('/workload-identities?escalate=true')} title="View high-privilege identities" />
+                  <StatCell label="Avg Exposure" value={we?.component_averages?.total != null ? we.component_averages.total.toFixed(1) : '—'} color={we?.component_averages?.total != null && we.component_averages.total >= 50 ? C.critical : C.good}
+                    onClick={() => navigate('/workload-identities')} title="View all workload identities" />
+                  <StatCell label="Expiring" value={insights?.action_items?.expiring_credential_count ?? 0} color={C.warning}
+                    onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} title="View expiring credentials" />
+                  <StatCell label="Zombies" value={we?.zombie_count ?? 0} color={(we?.zombie_count ?? 0) > 0 ? C.critical : C.textTer}
+                    onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} title="View zombie identities" />
                 </div>
               </div>
             </Card>
@@ -505,7 +536,8 @@ export default function Overview() {
             }>
               Compliance Posture
             </SectionLabel>
-            <ComplianceSection compliance={compliance} remPct={remSum?.completion_pct} saGovPct={gov?.dormant_cleanup_pct} />
+            <ComplianceSection compliance={compliance} remPct={remSum?.completion_pct} saGovPct={gov?.dormant_cleanup_pct}
+              onFrameworkClick={shortName => navigate(`/compliance?framework=${encodeURIComponent(shortName)}`)} />
           </Card>
         </div>
       )}
@@ -598,6 +630,15 @@ export default function Overview() {
           </div>
         </>
       )}
+
+      {/* Pillar Drilldown Panel */}
+      <PillarDrilldownPanel
+        open={!!pillarPanel}
+        onClose={() => setPillarPanel(null)}
+        pillarKey={pillarPanel || ''}
+        pillarData={pillars[pillarPanel || '']}
+        attackData={as}
+      />
     </div>
   );
 }
@@ -647,7 +688,7 @@ function ScoreRing({ score, grade, size = 140 }: { score: number; grade: string;
   );
 }
 
-function RadarChart({ pillars }: { pillars: Record<string, PillarData> }) {
+function RadarChart({ pillars, onLabelClick }: { pillars: Record<string, PillarData>; onLabelClick?: (key: string) => void }) {
   const size = 260; const cx = size / 2; const cy = size / 2; const maxR = 100;
   const keys = PILLAR_KEYS;
   const n = keys.length;
@@ -700,7 +741,12 @@ function RadarChart({ pillars }: { pillars: Record<string, PillarData> }) {
         const meta = PILLAR_META[k];
         return (
           <text key={k} x={x} y={y} textAnchor="middle" dominantBaseline="central"
-            fill={C.textSec} style={{ fontSize: 9.5, fontFamily: F.mono }}>{meta.short}</text>
+            fill={C.textSec} style={{ fontSize: 9.5, fontFamily: F.mono, ...(onLabelClick ? { cursor: 'pointer' } : {}) }}
+            onClick={onLabelClick ? () => onLabelClick(k) : undefined}
+            onMouseEnter={onLabelClick ? (e => { (e.currentTarget as SVGTextElement).setAttribute('fill', C.accent); }) : undefined}
+            onMouseLeave={onLabelClick ? (e => { (e.currentTarget as SVGTextElement).setAttribute('fill', C.textSec); }) : undefined}>
+            {meta.short}
+          </text>
         );
       })}
     </svg>
@@ -758,17 +804,23 @@ function MiniBar({ value, color }: { value: number; color: string }) {
   );
 }
 
-function StackedBar({ segments }: { segments: { value: number; color: string; label: string }[] }) {
+function StackedBar({ segments, onSegmentClick }: { segments: { value: number; color: string; label: string; key?: string }[]; onSegmentClick?: (key: string) => void }) {
   const total = segments.reduce((s, seg) => s + seg.value, 0) || 1;
   return (
     <div style={{ display: 'flex', height: 26, borderRadius: 6, overflow: 'hidden', background: C.card }}>
       {segments.filter(s => s.value > 0).map((s, i) => {
         const w = (s.value / total) * 100;
+        const clickable = !!onSegmentClick && !!s.key;
         return (
           <div key={i} style={{
             width: `${w}%`, background: s.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transition: 'width 1s ease',
-          }}>
+            transition: 'width 1s ease, opacity 0.2s',
+            ...(clickable ? { cursor: 'pointer' } : {}),
+          }}
+          onClick={clickable ? () => onSegmentClick(s.key!) : undefined}
+          title={clickable ? `View ${s.label}` : undefined}
+          onMouseEnter={clickable ? (e => { (e.currentTarget as any).style.opacity = '0.85'; }) : undefined}
+          onMouseLeave={clickable ? (e => { (e.currentTarget as any).style.opacity = '1'; }) : undefined}>
             {w > 18 && <span style={{ fontSize: 9, fontFamily: F.mono, fontWeight: 700, color: '#0a0f1a' }}>{s.label}</span>}
           </div>
         );
@@ -777,11 +829,15 @@ function StackedBar({ segments }: { segments: { value: number; color: string; la
   );
 }
 
-function StatCell({ label, value, color }: { label: string; value: number | string; color: string }) {
+function StatCell({ label, value, color, onClick, title }: { label: string; value: number | string; color: string; onClick?: () => void; title?: string }) {
   return (
     <div style={{
       padding: '8px 10px', borderRadius: 8, background: `${color}06`, border: `1px solid ${color}10`, textAlign: 'center',
-    }}>
+      ...(onClick ? { cursor: 'pointer', transition: 'all 0.2s' } : {}),
+    }}
+    onClick={onClick} title={title}
+    onMouseEnter={onClick ? (e => { (e.currentTarget as any).style.borderColor = `${color}40`; (e.currentTarget as any).style.transform = 'translateY(-1px)'; }) : undefined}
+    onMouseLeave={onClick ? (e => { (e.currentTarget as any).style.borderColor = `${color}10`; (e.currentTarget as any).style.transform = 'translateY(0)'; }) : undefined}>
       <div style={{ fontSize: 16, fontFamily: F.mono, fontWeight: 700, color }}>{value}</div>
       <div style={{ fontSize: 9, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 2 }}>{label}</div>
     </div>
@@ -797,13 +853,19 @@ function MetaChip({ label, value, color, glow }: { label: string; value: string;
   );
 }
 
-function CountChip({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <span style={{ fontSize: 11, fontFamily: F.mono }}>
-      <span style={{ color: C.textTer }}>{label}</span>{' '}
-      <span style={{ color, fontWeight: 700 }}>{value}</span>
-    </span>
-  );
+function CountChip({ label, value, color, onClick, title }: { label: string; value: number; color: string; onClick?: () => void; title?: string }) {
+  const style: React.CSSProperties = { fontSize: 11, fontFamily: F.mono, ...(onClick ? { cursor: 'pointer', borderBottom: '1px dotted transparent', transition: 'border-color 0.2s' } : {}) };
+  const inner = <><span style={{ color: C.textTer }}>{label}</span>{' '}<span style={{ color, fontWeight: 700 }}>{value}</span></>;
+  if (onClick) {
+    return (
+      <button onClick={onClick} title={title} style={{ ...style, background: 'none', border: 'none', padding: 0 }}
+        onMouseEnter={e => { (e.currentTarget as any).style.borderBottom = `1px dotted ${color}`; }}
+        onMouseLeave={e => { (e.currentTarget as any).style.borderBottom = '1px dotted transparent'; }}>
+        {inner}
+      </button>
+    );
+  }
+  return <span style={style}>{inner}</span>;
 }
 
 function CoverageChip({ label, connected, detail }: { label: string; connected?: boolean; detail?: string }) {
@@ -815,14 +877,15 @@ function CoverageChip({ label, connected, detail }: { label: string; connected?:
   );
 }
 
-function AttackCard({ title, value, subtitle, severity }: { title: string; value: number; subtitle: string; severity: string }) {
+function AttackCard({ title, value, subtitle, severity, onClick, actionTitle }: { title: string; value: number; subtitle: string; severity: string; onClick?: () => void; actionTitle?: string }) {
   const color = sevColor(severity);
   return (
     <div style={{
       background: `${color}06`, border: `1px solid ${color}20`, borderLeft: `3px solid ${color}`,
       borderRadius: 14, padding: '20px 20px 16px', position: 'relative', overflow: 'hidden',
-      cursor: 'default', transition: 'all 0.25s ease',
+      cursor: onClick ? 'pointer' : 'default', transition: 'all 0.25s ease',
     }}
+    onClick={onClick} title={actionTitle}
     onMouseEnter={e => { const t = e.currentTarget; t.style.transform = 'translateY(-2px)'; t.style.borderColor = `${color}40`; }}
     onMouseLeave={e => { const t = e.currentTarget; t.style.transform = 'translateY(0)'; t.style.borderColor = `${color}20`; }}>
       {/* Decorative circle */}
@@ -966,7 +1029,7 @@ const TIER_CONFIG: Record<string, { label: string }> = {
   benchmark: { label: 'BENCHMARK' },
 };
 
-function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; remPct?: number; saGovPct?: number }) {
+function ComplianceSection({ compliance, remPct, saGovPct, onFrameworkClick }: { compliance: any; remPct?: number; saGovPct?: number; onFrameworkClick?: (shortName: string) => void }) {
   if (!compliance) return <div style={{ fontSize: 12, color: C.textTer, padding: 16, textAlign: 'center' }}>No compliance data</div>;
 
   const frameworks = Object.values(compliance || {}) as any[];
@@ -997,10 +1060,12 @@ function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; 
                   <div key={fw.name || fw.short_name} style={{
                     display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
                     background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
-                    minWidth: 180, cursor: 'default', transition: 'border-color 0.2s',
+                    minWidth: 180, cursor: onFrameworkClick ? 'pointer' : 'default', transition: 'all 0.2s',
                   }}
-                  onMouseEnter={e => { (e.currentTarget as any).style.borderColor = C.borderHover; }}
-                  onMouseLeave={e => { (e.currentTarget as any).style.borderColor = C.border; }}>
+                  onClick={onFrameworkClick ? () => onFrameworkClick(fw.short_name || fw.name) : undefined}
+                  title={onFrameworkClick ? `View ${fw.short_name || fw.name} compliance details` : undefined}
+                  onMouseEnter={e => { (e.currentTarget as any).style.borderColor = C.borderHover; if (onFrameworkClick) (e.currentTarget as any).style.transform = 'translateY(-1px)'; }}
+                  onMouseLeave={e => { (e.currentTarget as any).style.borderColor = C.border; if (onFrameworkClick) (e.currentTarget as any).style.transform = 'translateY(0)'; }}>
                     <ComplianceRing pct={passPct} />
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{fw.short_name || fw.name}</div>

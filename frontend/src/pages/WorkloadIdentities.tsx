@@ -130,6 +130,9 @@ const WorkloadIdentities: React.FC = () => {
   const [lifecycleFilter, setLifecycleFilter] = useState(searchParams.get('lifecycle') || '');
   const [ownerFilter, setOwnerFilter] = useState(searchParams.get('owner') || '');
   const [canEscalate, setCanEscalate] = useState(searchParams.get('escalate') === 'true');
+  const [scopeFilter, setScopeFilter] = useState(searchParams.get('scope') || '');
+  const [crossSub, setCrossSub] = useState(searchParams.get('cross_subscription') === 'true');
+  const [riskLevel, setRiskLevel] = useState(searchParams.get('risk_level') || '');
   const [hideMicrosoft, setHideMicrosoft] = useState(true);
   const [offset, setOffset] = useState(0);
   const limit = 50;
@@ -166,6 +169,9 @@ const WorkloadIdentities: React.FC = () => {
     if (lifecycleFilter) params.set('lifecycle_state', lifecycleFilter);
     if (ownerFilter) params.set('owner_status', ownerFilter);
     if (canEscalate) params.set('can_escalate', 'true');
+    if (scopeFilter) params.set('scope', scopeFilter);
+    if (crossSub) params.set('cross_subscription', 'true');
+    if (riskLevel) params.set('risk_level', riskLevel);
     if (search) params.set('search', search);
     params.set('sort', sortCol);
     params.set('dir', sortDir);
@@ -178,7 +184,7 @@ const WorkloadIdentities: React.FC = () => {
       .then(d => { setItems(d.items || []); setTotal(d.total || 0); })
       .catch(() => { setItems([]); setTotal(0); })
       .finally(() => setLoading(false));
-  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, search, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
+  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, scopeFilter, crossSub, riskLevel, search, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
 
   const openDetail = (row: WorkloadRow) => {
     navigate(`/workload-identities/${row.workload_id}?type=${row.identity_type}`);
@@ -205,6 +211,13 @@ const WorkloadIdentities: React.FC = () => {
     const cfg = WORKLOAD_TYPE_CONFIG[type] || WORKLOAD_TYPE_CONFIG.spn;
     return <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.badgeClass}`}>{cfg.shortLabel}</span>;
   };
+
+  const FilterChip = ({ label, onRemove }: { label: string; onRemove: () => void }) => (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800/40 text-[10px] text-blue-700 dark:text-blue-300 font-medium">
+      {label}
+      <button onClick={onRemove} className="ml-0.5 hover:text-blue-900 dark:hover:text-white">&times;</button>
+    </span>
+  );
 
   // ── Render ───────────────────────────────────────────────────────
 
@@ -244,6 +257,29 @@ const WorkloadIdentities: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {/* Active Filter Chips */}
+      {(exposureLevel || lifecycleFilter || ownerFilter || canEscalate || scopeFilter || crossSub || riskLevel) && (
+        <div className="flex flex-wrap gap-1.5 mb-3 items-center">
+          <span className="text-[10px] text-gray-400 dark:text-slate-500 uppercase mr-1">Filters:</span>
+          {exposureLevel && <FilterChip label={`Exposure: ${exposureLevel}`} onRemove={() => { setExposureLevel(''); updateParams('exposure', ''); }} />}
+          {lifecycleFilter && <FilterChip label={`Lifecycle: ${lifecycleFilter.replace(/_/g, ' ')}`} onRemove={() => { setLifecycleFilter(''); updateParams('lifecycle', ''); }} />}
+          {ownerFilter && <FilterChip label={`Owner: ${ownerFilter}`} onRemove={() => { setOwnerFilter(''); updateParams('owner', ''); }} />}
+          {canEscalate && <FilterChip label="Can Escalate" onRemove={() => { setCanEscalate(false); updateParams('escalate', ''); }} />}
+          {scopeFilter && <FilterChip label={`Scope: ${scopeFilter.replace(/_/g, ' ')}`} onRemove={() => { setScopeFilter(''); updateParams('scope', ''); }} />}
+          {crossSub && <FilterChip label="Cross-Subscription" onRemove={() => { setCrossSub(false); updateParams('cross_subscription', ''); }} />}
+          {riskLevel && <FilterChip label={`Risk: ${riskLevel}`} onRemove={() => { setRiskLevel(''); updateParams('risk_level', ''); }} />}
+          <button onClick={() => {
+            setExposureLevel(''); setLifecycleFilter(''); setOwnerFilter(''); setCanEscalate(false);
+            setScopeFilter(''); setCrossSub(false); setRiskLevel('');
+            setSearchParams(prev => {
+              const next = new URLSearchParams(prev);
+              ['exposure', 'lifecycle', 'owner', 'escalate', 'scope', 'cross_subscription', 'risk_level'].forEach(k => next.delete(k));
+              return next;
+            }, { replace: true });
+          }} className="text-xs text-blue-500 hover:underline ml-2">Clear All</button>
+        </div>
+      )}
 
       {/* Alert Banner — P2 active vs visibility gap */}
       {stats && !!stats.p2_enabled && !!stats.telemetry && (
@@ -389,7 +425,12 @@ const WorkloadIdentities: React.FC = () => {
         <div className="flex-1" />
         <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search..."
           className="text-xs border border-gray-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-800 text-gray-700 dark:text-slate-300 w-48" />
-        <span className="text-xs text-gray-400 dark:text-slate-500">{total} {total === 1 ? 'identity' : 'identities'}</span>
+        <span className="text-xs text-gray-400 dark:text-slate-500">
+          {total} {total === 1 ? 'identity' : 'identities'}
+          {(exposureLevel || lifecycleFilter || ownerFilter || canEscalate || scopeFilter || crossSub || riskLevel) && stats
+            ? ` of ${stats.total} total`
+            : ''}
+        </span>
       </div>
 
       {/* Table */}

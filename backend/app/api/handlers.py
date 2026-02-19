@@ -15125,6 +15125,9 @@ def get_workload_list():
         owner_status = request.args.get('owner_status')
         can_escalate = request.args.get('can_escalate')
         search = request.args.get('search', '').strip()
+        scope_flag = request.args.get('scope')              # tenant, management_group, subscription
+        cross_sub = request.args.get('cross_subscription')  # true
+        risk_level = request.args.get('risk_level')         # critical, high, medium, low
         sort_col = request.args.get('sort', 'exposure_score')
         sort_dir = request.args.get('dir', 'desc').lower()
         limit = min(request.args.get('limit', 50, type=int), 200)
@@ -15170,6 +15173,17 @@ def get_workload_list():
 
             if can_escalate == 'true':
                 where_parts.append("COALESCE(i.can_escalate, false) = true")
+
+            if scope_flag:
+                where_parts.append("COALESCE(i.effective_scope_flag, 'resource') = %s")
+                params.append(scope_flag)
+
+            if cross_sub == 'true':
+                where_parts.append("COALESCE(i.cross_subscription, false) = true")
+
+            if risk_level:
+                where_parts.append("COALESCE(i.risk_level, 'info') = %s")
+                params.append(risk_level)
 
             if search:
                 where_parts.append("i.display_name ILIKE %s")
@@ -15232,6 +15246,17 @@ def get_workload_list():
 
             if can_escalate == 'true':
                 ar_where.append("COALESCE(a.can_escalate, false) = true")
+
+            if scope_flag:
+                ar_where.append("COALESCE(a.effective_scope_flag, 'resource') = %s")
+                ar_params.append(scope_flag)
+
+            if cross_sub == 'true':
+                ar_where.append("COALESCE(a.cross_subscription, false) = true")
+
+            if risk_level:
+                ar_where.append("COALESCE(a.risk_level, 'info') = %s")
+                ar_params.append(risk_level)
 
             if search:
                 ar_where.append("a.display_name ILIKE %s")

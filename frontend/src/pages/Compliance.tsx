@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 
 /* ───────── Types ───────── */
@@ -125,15 +126,19 @@ function MiniBar({ value, color }: { value: number; color: string }) {
   );
 }
 
-function FrameworkCard({ name, pct, identity, assessed }: {
-  name: string; pct: number; identity: string; assessed: string;
+function FrameworkCard({ name, pct, identity, assessed, id, highlight, expanded, onClick }: {
+  name: string; pct: number; identity: string; assessed: string; id?: string; highlight?: boolean;
+  expanded?: boolean; onClick?: () => void;
 }) {
   const color = pct >= 80 ? C.good : pct >= 50 ? C.warning : C.critical;
   return (
     <div
+      id={id}
+      onClick={onClick}
+      title={`Click to ${expanded ? 'collapse' : 'expand'} ${name} controls`}
       style={{
-        background: "#111827",
-        border: `1px solid ${C.border}`,
+        background: expanded ? "#141c2b" : highlight ? "#141c2b" : "#111827",
+        border: `1px solid ${expanded ? `${color}50` : highlight ? `${color}60` : C.border}`,
         borderRadius: 12,
         padding: "20px 16px",
         display: "flex",
@@ -145,14 +150,15 @@ function FrameworkCard({ name, pct, identity, assessed }: {
         transition: "all 0.2s",
         cursor: "pointer",
         position: "relative",
+        ...(highlight || expanded ? { boxShadow: `0 0 16px ${color}20` } : {}),
       }}
       onMouseEnter={e => {
         (e.currentTarget as HTMLDivElement).style.borderColor = `${color}40`;
         (e.currentTarget as HTMLDivElement).style.background = "#141c2b";
       }}
       onMouseLeave={e => {
-        (e.currentTarget as HTMLDivElement).style.borderColor = C.border;
-        (e.currentTarget as HTMLDivElement).style.background = "#111827";
+        (e.currentTarget as HTMLDivElement).style.borderColor = expanded ? `${color}50` : highlight ? `${color}60` : C.border;
+        (e.currentTarget as HTMLDivElement).style.background = expanded || highlight ? "#141c2b" : "#111827";
       }}
     >
       <ScoreRing pct={pct} />
@@ -167,6 +173,12 @@ function FrameworkCard({ name, pct, identity, assessed }: {
           {assessed}
         </div>
       </div>
+      {/* Expand indicator */}
+      <div style={{
+        position: "absolute", bottom: 6, right: 10, fontSize: 10,
+        color: C.textDim, transition: "transform 0.2s",
+        transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
+      }}>&#9660;</div>
     </div>
   );
 }
@@ -191,6 +203,249 @@ function TierDivider({ icon, label, count }: { icon: string; label: string; coun
   );
 }
 
+/* ───────── Control Expansion ───────── */
+
+const STATUS_ORDER: Record<string, number> = { fail: 0, warn: 1, pass: 2 };
+const STATUS_META: Record<string, { label: string; color: string; icon: string }> = {
+  fail: { label: 'Failing', color: C.critical, icon: '\u2716' },
+  warn: { label: 'Warning', color: C.warning, icon: '\u26A0' },
+  pass: { label: 'Passing', color: C.good, icon: '\u2714' },
+};
+
+function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdentityClick: (id: number) => void }) {
+  const [expandedCtrl, setExpandedCtrl] = useState<string | null>(null);
+
+  const sorted = [...fw.controls].sort((a, b) =>
+    (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) || b.weight - a.weight
+  );
+
+  const groups: Record<string, IntelControl[]> = {};
+  sorted.forEach(ctrl => {
+    if (!groups[ctrl.status]) groups[ctrl.status] = [];
+    groups[ctrl.status].push(ctrl);
+  });
+
+  return (
+    <div style={{
+      background: "#0d1420", border: `1px solid ${C.border}`, borderRadius: 12,
+      padding: "16px 20px", marginTop: 12,
+      animation: "fwExpandIn 0.25s ease",
+    }}>
+      <style>{`@keyframes fwExpandIn { from { opacity: 0; max-height: 0; } to { opacity: 1; max-height: 2000px; } }`}</style>
+
+      {/* Summary strip */}
+      <div style={{
+        display: "flex", gap: 16, marginBottom: 14, padding: "8px 12px",
+        background: "#111827", borderRadius: 8, border: `1px solid ${C.border}`,
+      }}>
+        {['fail', 'warn', 'pass'].map(s => {
+          const meta = STATUS_META[s];
+          const count = groups[s]?.length || 0;
+          return (
+            <div key={s} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 11, color: meta.color }}>{meta.icon}</span>
+              <span style={{ fontSize: 11, fontFamily: mono, fontWeight: 700, color: meta.color }}>{count}</span>
+              <span style={{ fontSize: 10, fontFamily: mono, color: C.textDim }}>{meta.label}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Control groups */}
+      {['fail', 'warn', 'pass'].map(status => {
+        const ctrls = groups[status];
+        if (!ctrls || ctrls.length === 0) return null;
+        const meta = STATUS_META[status];
+        const isPass = status === 'pass';
+
+        return (
+          <div key={status} style={{ marginBottom: 12 }}>
+            <div style={{
+              fontSize: 10, fontFamily: mono, fontWeight: 700, color: meta.color,
+              textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 6,
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span>{meta.icon}</span> {meta.label} ({ctrls.length})
+            </div>
+
+            {ctrls.map(ctrl => {
+              const isExpanded = expandedCtrl === ctrl.control_id;
+              const hasEvidence = ctrl.evidence_identities && ctrl.evidence_identities.length > 0;
+              const severityColor = ctrl.severity === 'critical' ? C.critical
+                : ctrl.severity === 'high' ? "#FF8C42" : ctrl.severity === 'medium' ? C.warning : C.textDim;
+
+              return (
+                <div key={ctrl.control_id} style={{ marginBottom: 4 }}>
+                  {/* Control row */}
+                  <div
+                    onClick={() => !isPass && hasEvidence && setExpandedCtrl(isExpanded ? null : ctrl.control_id)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+                      background: isExpanded ? "#141c2b" : "#111827",
+                      border: `1px solid ${isExpanded ? `${meta.color}30` : "transparent"}`,
+                      borderRadius: 8, cursor: !isPass && hasEvidence ? "pointer" : "default",
+                      transition: "all 0.15s",
+                    }}
+                    onMouseEnter={e => {
+                      if (!isPass && hasEvidence) (e.currentTarget as HTMLDivElement).style.background = "#141c2b";
+                    }}
+                    onMouseLeave={e => {
+                      if (!isExpanded) (e.currentTarget as HTMLDivElement).style.background = "#111827";
+                    }}
+                    title={!isPass && hasEvidence ? `Click to see ${ctrl.evidence_count} impacted identities` : undefined}
+                  >
+                    {/* Status dot */}
+                    <div style={{
+                      width: 7, height: 7, borderRadius: "50%", background: meta.color,
+                      flexShrink: 0, boxShadow: `0 0 6px ${meta.color}40`,
+                    }} />
+
+                    {/* Control ID */}
+                    <span style={{
+                      fontSize: 10, fontFamily: mono, fontWeight: 700, color: C.textMuted,
+                      minWidth: 70, flexShrink: 0,
+                    }}>{ctrl.control_id}</span>
+
+                    {/* Name */}
+                    <span style={{
+                      fontSize: 12, color: "#E5E7EB", flex: 1,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>{ctrl.name}</span>
+
+                    {/* Severity badge */}
+                    {!isPass && (
+                      <span style={{
+                        fontSize: 8, fontFamily: mono, fontWeight: 700, textTransform: "uppercase",
+                        padding: "1px 6px", borderRadius: 3, letterSpacing: 0.5,
+                        color: severityColor, background: `${severityColor}15`,
+                        border: `1px solid ${severityColor}30`,
+                      }}>{ctrl.severity}</span>
+                    )}
+
+                    {/* Evidence count */}
+                    {!isPass && ctrl.evidence_count > 0 && (
+                      <span style={{
+                        fontSize: 10, fontFamily: mono, fontWeight: 600, color: meta.color,
+                        display: "flex", alignItems: "center", gap: 3,
+                      }}>
+                        {ctrl.evidence_count}
+                        <span style={{ fontSize: 8, color: C.textDim }}>ids</span>
+                      </span>
+                    )}
+
+                    {/* Expand arrow */}
+                    {!isPass && hasEvidence && (
+                      <span style={{
+                        fontSize: 9, color: C.textDim, transition: "transform 0.2s",
+                        transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)",
+                      }}>&#9660;</span>
+                    )}
+                  </div>
+
+                  {/* Expanded: evidence identities */}
+                  {isExpanded && hasEvidence && (
+                    <div style={{
+                      marginLeft: 20, marginTop: 4, marginBottom: 8,
+                      padding: "10px 14px", background: "#0a1018",
+                      border: `1px solid ${C.border}`, borderRadius: 8,
+                    }}>
+                      <div style={{
+                        fontSize: 9, fontFamily: mono, fontWeight: 700, color: C.textDim,
+                        textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 8,
+                      }}>
+                        Impacted Identities ({ctrl.evidence_identities.length}{ctrl.evidence_count > ctrl.evidence_identities.length ? ` of ${ctrl.evidence_count}` : ''})
+                      </div>
+
+                      {/* Detail text */}
+                      <div style={{
+                        fontSize: 11, color: "#9CA3AF", marginBottom: 10,
+                        padding: "6px 10px", background: "#111827", borderRadius: 6,
+                        borderLeft: `3px solid ${meta.color}40`,
+                      }}>
+                        {ctrl.detail}
+                      </div>
+
+                      {/* Identity rows */}
+                      {ctrl.evidence_identities.slice(0, 8).map((eid, idx) => {
+                        const rColor = eid.risk_level === 'critical' ? C.critical
+                          : eid.risk_level === 'high' ? "#FF8C42"
+                          : eid.risk_level === 'medium' ? C.warning : C.good;
+                        return (
+                          <div key={eid.id || idx}
+                            onClick={() => onIdentityClick(eid.id)}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 8, padding: "6px 8px",
+                              borderRadius: 6, cursor: "pointer", transition: "background 0.15s",
+                            }}
+                            onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = "#141c2b"; }}
+                            onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+                            title={`View ${eid.display_name} detail`}
+                          >
+                            {/* Risk badge */}
+                            <span style={{
+                              fontSize: 8, fontFamily: mono, fontWeight: 700, textTransform: "uppercase",
+                              padding: "1px 5px", borderRadius: 3,
+                              color: rColor, background: `${rColor}12`, border: `1px solid ${rColor}25`,
+                              minWidth: 44, textAlign: "center",
+                            }}>{eid.risk_level}</span>
+
+                            {/* Name */}
+                            <span style={{
+                              fontSize: 11, color: "#E5E7EB", flex: 1,
+                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            }}>{eid.display_name}</span>
+
+                            {/* Category */}
+                            <span style={{ fontSize: 9, fontFamily: mono, color: C.textDim }}>
+                              {eid.identity_category?.replace(/_/g, ' ')}
+                            </span>
+
+                            {/* Score */}
+                            <span style={{
+                              fontSize: 12, fontFamily: mono, fontWeight: 800, color: rColor,
+                            }}>{eid.risk_score}</span>
+
+                            {/* Arrow */}
+                            <span style={{ fontSize: 10, color: C.textDim }}>&#8594;</span>
+                          </div>
+                        );
+                      })}
+
+                      {/* "Show more" if truncated */}
+                      {ctrl.evidence_identities.length > 8 && (
+                        <div style={{
+                          fontSize: 10, fontFamily: mono, color: C.accentBlue,
+                          padding: "6px 8px", cursor: "pointer",
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onIdentityClick(ctrl.evidence_identities[0]?.id);
+                        }}>
+                          + {ctrl.evidence_identities.length - 8} more identities...
+                        </div>
+                      )}
+
+                      {/* Reason summary */}
+                      {ctrl.evidence_identities[0]?.reason && (
+                        <div style={{
+                          fontSize: 10, fontFamily: mono, color: C.textDim, fontStyle: "italic",
+                          marginTop: 6, paddingTop: 6, borderTop: `1px solid ${C.border}`,
+                        }}>
+                          Reason: {ctrl.evidence_identities[0].reason}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ───────── Helpers ───────── */
 
 function buildFrameworkCard(fw: IntelFramework) {
@@ -209,6 +464,10 @@ export default function Compliance() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { withConnection, selectedConnectionId } = useConnection();
+  const [searchParams] = useSearchParams();
+  const highlightFramework = searchParams.get('framework') || '';
+  const [expandedFw, setExpandedFw] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     (async () => {
@@ -223,6 +482,16 @@ export default function Compliance() {
       }
     })();
   }, [selectedConnectionId]);
+
+  // Auto-scroll and auto-expand when navigating from Overview
+  useEffect(() => {
+    if (highlightFramework && data) {
+      setExpandedFw(highlightFramework);
+      setTimeout(() => {
+        document.getElementById(`fw-${highlightFramework}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 300);
+    }
+  }, [highlightFramework, data]);
 
   /* Loading */
   if (loading) {
@@ -332,12 +601,25 @@ export default function Compliance() {
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                 {fws.map((fw, i) => {
                   const card = buildFrameworkCard(fw);
+                  const fwId = fw.short_name || fw.name || '';
                   return (
                     <FrameworkCard key={i} name={card.name} pct={card.pct}
-                      identity={card.identity} assessed={card.assessed} />
+                      identity={card.identity} assessed={card.assessed}
+                      id={`fw-${fwId}`} highlight={highlightFramework === fwId}
+                      expanded={expandedFw === fwId}
+                      onClick={() => setExpandedFw(expandedFw === fwId ? null : fwId)} />
                   );
                 })}
               </div>
+              {/* Inline control expansion */}
+              {fws.map(fw => {
+                const fwId = fw.short_name || fw.name || '';
+                if (expandedFw !== fwId) return null;
+                return (
+                  <ControlExpansion key={`exp-${fwId}`} fw={fw}
+                    onIdentityClick={(id) => navigate(`/identities/${id}`)} />
+                );
+              })}
             </div>
           );
         })}
