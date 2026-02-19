@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 import { WORKLOAD_TYPE_CONFIG, LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG } from '../constants/metrics';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -154,6 +155,7 @@ function ComponentBar({ label, score, max }: { label: string; score: number; max
 // ── Page Component ───────────────────────────────────────────────────
 
 const WorkloadIdentities: React.FC = () => {
+  const { withConnection, selectedConnectionId } = useConnection();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const activeType = searchParams.get('type') || 'all';
@@ -192,11 +194,11 @@ const WorkloadIdentities: React.FC = () => {
 
   // Fetch stats
   useEffect(() => {
-    fetch('/api/workload-identities/stats')
+    fetch(withConnection('/api/workload-identities/stats'))
       .then(r => r.ok ? r.json() : null)
       .then(d => d && setStats(d))
       .catch(() => {});
-  }, []);
+  }, [selectedConnectionId]);
 
   // Fetch list
   useEffect(() => {
@@ -214,16 +216,16 @@ const WorkloadIdentities: React.FC = () => {
     params.set('offset', String(offset));
     params.set('hide_microsoft', String(hideMicrosoft));
 
-    fetch(`/api/workload-identities?${params}`)
+    fetch(withConnection(`/api/workload-identities?${params}`))
       .then(r => r.ok ? r.json() : { items: [], total: 0 })
       .then(d => { setItems(d.items || []); setTotal(d.total || 0); })
       .catch(() => { setItems([]); setTotal(0); })
       .finally(() => setLoading(false));
-  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, search, sortCol, sortDir, offset, hideMicrosoft]);
+  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, search, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
 
   const openDetail = (row: WorkloadRow) => {
     setDetailLoading(true);
-    fetch(`/api/workload-identities/${row.workload_id}?type=${row.identity_type}`)
+    fetch(withConnection(`/api/workload-identities/${row.workload_id}?type=${row.identity_type}`))
       .then(r => r.ok ? r.json() : null)
       .then(d => d && setSelectedDetail(d))
       .catch(() => {})
