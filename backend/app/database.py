@@ -4017,6 +4017,9 @@ class Database:
             ('sas_expiration_period', 'TEXT'),
             ('diagnostic_logging_enabled', 'BOOLEAN'),
             ('logging_destinations', 'JSONB DEFAULT \'[]\''),
+            ('risk_components', 'JSONB DEFAULT \'{}\''),
+            ('blast_radius_score', 'INTEGER DEFAULT 0'),
+            ('critical_overrides', 'JSONB DEFAULT \'[]\''),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE azure_storage_accounts ADD COLUMN {col} {defn}")
@@ -4075,9 +4078,16 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_kv_run ON azure_key_vaults(discovery_run_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_kv_risk ON azure_key_vaults(risk_level)")
         # Add columns if upgrading from older schema
-        for col in ['secrets_detail', 'keys_detail', 'certs_detail']:
+        for col, defn in [
+            ('secrets_detail', 'JSONB DEFAULT \'[]\''),
+            ('keys_detail', 'JSONB DEFAULT \'[]\''),
+            ('certs_detail', 'JSONB DEFAULT \'[]\''),
+            ('risk_components', 'JSONB DEFAULT \'{}\''),
+            ('blast_radius_score', 'INTEGER DEFAULT 0'),
+            ('critical_overrides', 'JSONB DEFAULT \'[]\''),
+        ]:
             try:
-                cursor.execute(f"ALTER TABLE azure_key_vaults ADD COLUMN {col} JSONB DEFAULT '[]'")
+                cursor.execute(f"ALTER TABLE azure_key_vaults ADD COLUMN {col} {defn}")
             except Exception:
                 self.conn.rollback()
         self.conn.commit()
@@ -4099,12 +4109,13 @@ class Database:
                 encryption_details, key1_created_at, key2_created_at,
                 key_rotation_stale, sas_policy_enabled, sas_expiration_period,
                 risk_level, risk_score, risk_reasons,
+                risk_components, blast_radius_score, critical_overrides,
                 tags, tenant_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s
+                %s,%s,%s,%s,%s,%s,%s,%s
             )
             ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
                 name=EXCLUDED.name, location=EXCLUDED.location,
@@ -4133,7 +4144,11 @@ class Database:
                 sas_policy_enabled=EXCLUDED.sas_policy_enabled,
                 sas_expiration_period=EXCLUDED.sas_expiration_period,
                 risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons, tags=EXCLUDED.tags,
+                risk_reasons=EXCLUDED.risk_reasons,
+                risk_components=EXCLUDED.risk_components,
+                blast_radius_score=EXCLUDED.blast_radius_score,
+                critical_overrides=EXCLUDED.critical_overrides,
+                tags=EXCLUDED.tags,
                 created_at=NOW()
             RETURNING id
         """, (
@@ -4157,6 +4172,9 @@ class Database:
             data.get('sas_expiration_period'),
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
+            json.dumps(data.get('risk_components', {})),
+            data.get('blast_radius_score', 0),
+            json.dumps(data.get('critical_overrides', [])),
             json.dumps(data.get('tags', {})), data.get('tenant_id') or self._tenant_id
         ))
         db_id = cursor.fetchone()[0]
@@ -4181,12 +4199,14 @@ class Database:
                 certs_total, certs_expired, certs_expiring_soon,
                 access_policy_count, access_policies,
                 secrets_detail, keys_detail, certs_detail,
-                risk_level, risk_score, risk_reasons, tags, tenant_id
+                risk_level, risk_score, risk_reasons,
+                risk_components, blast_radius_score, critical_overrides,
+                tags, tenant_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s
             )
             ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
                 name=EXCLUDED.name, location=EXCLUDED.location,
@@ -4216,7 +4236,11 @@ class Database:
                 keys_detail=EXCLUDED.keys_detail,
                 certs_detail=EXCLUDED.certs_detail,
                 risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons, tags=EXCLUDED.tags,
+                risk_reasons=EXCLUDED.risk_reasons,
+                risk_components=EXCLUDED.risk_components,
+                blast_radius_score=EXCLUDED.blast_radius_score,
+                critical_overrides=EXCLUDED.critical_overrides,
+                tags=EXCLUDED.tags,
                 created_at=NOW()
             RETURNING id
         """, (
@@ -4245,6 +4269,9 @@ class Database:
             json.dumps(data.get('certs_detail', [])),
             data.get('risk_level', 'info'), data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
+            json.dumps(data.get('risk_components', {})),
+            data.get('blast_radius_score', 0),
+            json.dumps(data.get('critical_overrides', [])),
             json.dumps(data.get('tags', {})), data.get('tenant_id') or self._tenant_id
         ))
         db_id = cursor.fetchone()[0]

@@ -1598,14 +1598,8 @@ class AzureDiscoveryEngine:
                     except Exception:
                         pass  # Monitor API may not be accessible
 
-                    risk_score, risk_reasons = self._compute_storage_risk(
-                        public_blob, https_only, tls, shared_key,
-                        default_action, pe_count, cmk, key_stale,
-                        sas_policy_enabled, diag_enabled
-                    )
-                    risk_level = self._resource_risk_level(risk_score)
-
-                    storage_accounts.append({
+                    # Build storage data dict for component scoring
+                    sa_data = {
                         'resource_id': resource_id, 'name': name, 'location': location,
                         'resource_group': rg, 'subscription_id': sub_id,
                         'subscription_name': sub_name,
@@ -1630,10 +1624,20 @@ class AzureDiscoveryEngine:
                         'sas_expiration_period': sas_expiration_period,
                         'diagnostic_logging_enabled': diag_enabled,
                         'logging_destinations': logging_destinations,
-                        'risk_level': risk_level, 'risk_score': risk_score,
-                        'risk_reasons': risk_reasons,
                         'tags': dict(account.tags or {}),
-                    })
+                    }
+
+                    # Component-based scoring
+                    from app.engines.data_security import score_storage_account
+                    risk_score, risk_level, risk_components, critical_overrides, risk_reasons = score_storage_account(sa_data)
+
+                    sa_data['risk_score'] = risk_score
+                    sa_data['risk_level'] = risk_level
+                    sa_data['risk_reasons'] = risk_reasons
+                    sa_data['risk_components'] = risk_components
+                    sa_data['critical_overrides'] = critical_overrides
+                    sa_data['blast_radius_score'] = 0  # computed post-save via identity cross-link
+                    storage_accounts.append(sa_data)
             except Exception as e:
                 print(f"    ⚠️  Storage discovery failed for {sub_name}: {e}")
                 continue
@@ -1766,13 +1770,8 @@ class AzureDiscoveryEngine:
                     except Exception:
                         pass
 
-                    risk_score, risk_reasons = self._compute_keyvault_risk(
-                        soft_delete, purge_prot, public_access, default_action,
-                        pe_count, secrets_summary, keys_summary, certs_summary
-                    )
-                    risk_level = self._resource_risk_level(risk_score)
-
-                    key_vaults.append({
+                    # Build vault data dict for component scoring
+                    kv_data = {
                         'resource_id': resource_id, 'name': vault_name,
                         'location': location, 'resource_group': rg,
                         'subscription_id': sub_id, 'subscription_name': sub_name,
@@ -1800,10 +1799,20 @@ class AzureDiscoveryEngine:
                         'secrets_detail': secrets_detail,
                         'keys_detail': keys_detail,
                         'certs_detail': certs_detail,
-                        'risk_level': risk_level, 'risk_score': risk_score,
-                        'risk_reasons': risk_reasons,
                         'tags': dict(getattr(vault, 'tags', None) or {}),
-                    })
+                    }
+
+                    # Component-based scoring
+                    from app.engines.data_security import score_key_vault
+                    risk_score, risk_level, risk_components, critical_overrides, risk_reasons = score_key_vault(kv_data)
+
+                    kv_data['risk_score'] = risk_score
+                    kv_data['risk_level'] = risk_level
+                    kv_data['risk_reasons'] = risk_reasons
+                    kv_data['risk_components'] = risk_components
+                    kv_data['critical_overrides'] = critical_overrides
+                    kv_data['blast_radius_score'] = 0
+                    key_vaults.append(kv_data)
             except Exception as e:
                 print(f"    ⚠️  Key Vault discovery failed for {sub_name}: {e}")
                 continue

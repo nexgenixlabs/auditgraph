@@ -43,6 +43,7 @@ import CrossTenantAnalytics from './pages/CrossTenantAnalytics';
 import OnboardingWizard from './pages/OnboardingWizard';
 import Resources from './pages/Resources';
 import ResourceDetail from './pages/ResourceDetail';
+import DataSecurity from './pages/DataSecurity';
 import AdminConsole from './pages/AdminConsole';
 import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
@@ -260,6 +261,7 @@ function AppContent() {
                   <Route path="/rbac-hygiene" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RbacHygiene /></ErrorBoundary>} />
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
+                  <Route path="/data-security" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DataSecurity /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
                   <Route path="/invoices" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Invoices /></ErrorBoundary>} />
                   <Route path="/settings" element={

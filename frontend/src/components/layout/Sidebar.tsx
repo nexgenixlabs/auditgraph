@@ -135,10 +135,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked, canMan
             ],
           } as NavSubGroup,
           {
-            label: 'Resources',
+            label: 'Data Security',
             icon: resourcesIcon,
             defaultOpen: false,
             items: [
+              { to: '/data-security', label: 'Attack Surface', icon: resourcesIcon },
               { to: '/resources?resource_type=storage_account', label: 'Storage Accounts', icon: storageIcon },
               { to: '/resources?resource_type=key_vault', label: 'Key Vaults', icon: keyVaultIcon },
             ],

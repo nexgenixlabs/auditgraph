@@ -142,6 +142,7 @@ from app.api.handlers import (
     get_resource_access,
     get_resource_expiry_summary,
     get_resource_compliance_summary,
+    get_data_security_summary,
     get_tenant_by_slug_public,
     provision_tenant_handler,
     get_user_tenants_handler,
@@ -1337,6 +1338,11 @@ def create_app():
     @require_role('compliance', 'reader', 'admin')
     def resources_access(resource_id):
         return get_resource_access(resource_id)
+
+    @app.get("/api/data-security/summary")
+    @require_role('compliance', 'reader', 'admin')
+    def data_security_summary():
+        return get_data_security_summary()
 
     # -----------------------
     # Activity Log (Phase 17)

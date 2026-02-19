@@ -9491,6 +9491,9 @@ def get_resources():
                            'diagnostic_logging_enabled', diagnostic_logging_enabled,
                            'sas_policy_enabled', sas_policy_enabled
                        ) AS key_config,
+                       COALESCE(risk_components, '{}') AS risk_components,
+                       COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                       COALESCE(critical_overrides, '[]') AS critical_overrides,
                        tags, created_at
                 FROM azure_storage_accounts
                 WHERE discovery_run_id = ANY(%s)
@@ -9517,6 +9520,9 @@ def get_resources():
                            'keys_expired', keys_expired,
                            'certs_expired', certs_expired
                        ) AS key_config,
+                       COALESCE(risk_components, '{}') AS risk_components,
+                       COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                       COALESCE(critical_overrides, '[]') AS critical_overrides,
                        tags, created_at
                 FROM azure_key_vaults
                 WHERE discovery_run_id = ANY(%s)
@@ -9571,16 +9577,12 @@ def get_resources():
         for row in rows:
             r = dict(row)
             r['risk_reasons'] = _parse_risk_reasons(r.get('risk_reasons'))
-            if isinstance(r.get('tags'), str):
-                try:
-                    r['tags'] = json.loads(r['tags'])
-                except Exception:
-                    r['tags'] = {}
-            if isinstance(r.get('key_config'), str):
-                try:
-                    r['key_config'] = json.loads(r['key_config'])
-                except Exception:
-                    r['key_config'] = {}
+            for jf in ('tags', 'key_config', 'risk_components', 'critical_overrides'):
+                if jf in r and isinstance(r[jf], str):
+                    try:
+                        r[jf] = json.loads(r[jf])
+                    except Exception:
+                        r[jf] = {} if jf in ('tags', 'key_config', 'risk_components') else []
             resources.append(r)
 
         return jsonify({
@@ -10187,6 +10189,122 @@ def get_resource_compliance_summary():
                 'score': pct(kv_passed, kv_total_checks),
                 'checks': kv_checks,
             },
+        })
+    finally:
+        db.close()
+
+
+# ─── Data Security Attack Surface ─────────────────────────────────
+
+def get_data_security_summary():
+    """GET /api/data-security/summary — component-based risk summary across storage + vaults."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'total': 0, 'storage_accounts': 0, 'key_vaults': 0,
+                'by_risk': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0},
+                'at_risk': 0, 'avg_score': 0,
+                'component_averages': {'storage': {}, 'key_vault': {}},
+                'top_risks': [],
+            })
+
+        tenant_filter = ""
+        params = [run_ids]
+        if tenant_id and tenant_id > 0:
+            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
+            params.append(tenant_id)
+        elif tenant_id is not None:
+            tenant_filter = " AND tenant_id = %s"
+            params.append(tenant_id)
+
+        # Fetch all storage accounts with component data
+        cursor.execute(f"""
+            SELECT name, resource_id, risk_score, risk_level,
+                   COALESCE(risk_components, '{{}}'::jsonb) AS risk_components,
+                   COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                   COALESCE(critical_overrides, '[]'::jsonb) AS critical_overrides,
+                   'storage_account' AS resource_type
+            FROM azure_storage_accounts
+            WHERE discovery_run_id = ANY(%s){tenant_filter}
+        """, params)
+        sa_rows = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute(f"""
+            SELECT name, resource_id, risk_score, risk_level,
+                   COALESCE(risk_components, '{{}}'::jsonb) AS risk_components,
+                   COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                   COALESCE(critical_overrides, '[]'::jsonb) AS critical_overrides,
+                   'key_vault' AS resource_type
+            FROM azure_key_vaults
+            WHERE discovery_run_id = ANY(%s){tenant_filter}
+        """, params)
+        kv_rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        # Parse JSONB fields
+        all_resources = []
+        for r in sa_rows + kv_rows:
+            if isinstance(r.get('risk_components'), str):
+                try:
+                    r['risk_components'] = json.loads(r['risk_components'])
+                except Exception:
+                    r['risk_components'] = {}
+            if isinstance(r.get('critical_overrides'), str):
+                try:
+                    r['critical_overrides'] = json.loads(r['critical_overrides'])
+                except Exception:
+                    r['critical_overrides'] = []
+            all_resources.append(r)
+
+        total = len(all_resources)
+        by_risk = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
+        for r in all_resources:
+            lvl = r.get('risk_level', 'info')
+            if lvl in by_risk:
+                by_risk[lvl] += 1
+
+        scores = [r.get('risk_score', 0) for r in all_resources]
+        avg_score = round(sum(scores) / max(len(scores), 1)) if scores else 0
+
+        # Component averages for storage
+        sa_comp_keys = ['network_exposure', 'auth_posture', 'logging_audit', 'data_protection']
+        sa_comp_avgs = {}
+        for ck in sa_comp_keys:
+            vals = [r['risk_components'].get(ck, {}).get('pct', 0) for r in sa_rows if r.get('risk_components')]
+            sa_comp_avgs[ck] = round(sum(vals) / max(len(vals), 1)) if vals else 0
+
+        kv_comp_keys = ['network_exposure', 'vault_protection', 'identity_access', 'secret_hygiene']
+        kv_comp_avgs = {}
+        for ck in kv_comp_keys:
+            vals = [r['risk_components'].get(ck, {}).get('pct', 0) for r in kv_rows if r.get('risk_components')]
+            kv_comp_avgs[ck] = round(sum(vals) / max(len(vals), 1)) if vals else 0
+
+        top_risks = sorted(all_resources, key=lambda r: r.get('risk_score', 0), reverse=True)[:5]
+        # Slim down top_risks for JSON
+        top_risks_out = [{
+            'name': r['name'], 'resource_id': r['resource_id'],
+            'resource_type': r['resource_type'],
+            'risk_score': r.get('risk_score', 0),
+            'risk_level': r.get('risk_level', 'info'),
+        } for r in top_risks]
+
+        return jsonify({
+            'total': total,
+            'storage_accounts': len(sa_rows),
+            'key_vaults': len(kv_rows),
+            'by_risk': by_risk,
+            'at_risk': by_risk['critical'] + by_risk['high'],
+            'avg_score': avg_score,
+            'component_averages': {
+                'storage': sa_comp_avgs,
+                'key_vault': kv_comp_avgs,
+            },
+            'top_risks': top_risks_out,
         })
     finally:
         db.close()
