@@ -44,7 +44,8 @@ class WorkloadExposureEngine:
     """Compute exposure scores and findings for all workload identity types."""
 
     def compute_exposure(self, identity_data, roles, entra_roles, credentials,
-                         permissions, owners, pim_data, identity_type='spn'):
+                         permissions, owners, pim_data, identity_type='spn',
+                         p2_stats=None):
         """
         Main entry point for SPNs and Managed Identities. Returns:
         {
@@ -131,12 +132,12 @@ class WorkloadExposureEngine:
         flags['owner_status'] = owner_status
 
         # ── Component 5: Visibility (max 5) ─────────────────────────
-        vis_score, vis_findings = self._score_visibility(identity_data)
+        vis_score, vis_findings = self._score_visibility(identity_data, p2_stats=p2_stats)
         scores['visibility'] = min(vis_score, 5)
         findings.extend(vis_findings)
 
         # ── Activity Inference ──────────────────────────────────────
-        activity = self._infer_activity(identity_data, creds, rbac_roles, pim)
+        activity = self._infer_activity(identity_data, creds, rbac_roles, pim, p2_stats=p2_stats)
         flags['lifecycle_state'] = activity['classification']
 
         # ── Total Score ─────────────────────────────────────────────
@@ -835,12 +836,15 @@ class WorkloadExposureEngine:
 
     # ── Visibility Scoring ──────────────────────────────────────────
 
-    def _score_visibility(self, identity_data):
+    def _score_visibility(self, identity_data, p2_stats=None):
         score = 0
         findings = []
 
+        # If P2 data is available, visibility gap is resolved
+        has_p2 = p2_stats is not None
+
         activity = (identity_data.get('activity_status') or '').lower()
-        if activity in ('unknown', ''):
+        if activity in ('unknown', '') and not has_p2:
             score += 3
             findings.append({
                 'finding_type': 'no_audit_logging',
@@ -869,9 +873,53 @@ class WorkloadExposureEngine:
 
         return score, findings
 
-    # ── Activity Inference (P2-independent) ─────────────────────────
+    # ── Activity Inference (P2-aware) ───────────────────────────────
 
-    def _infer_activity(self, identity_data, credentials, rbac_roles, pim):
+    def _infer_activity(self, identity_data, credentials, rbac_roles, pim, p2_stats=None):
+        # P2-aware path: use real sign-in telemetry when available
+        if p2_stats and p2_stats.get('total_sign_ins', 0) > 0:
+            total = p2_stats['total_sign_ins']
+            now = datetime.utcnow()
+            classification = 'active'
+            confidence = 95
+
+            # Check recency — if stats are old, may still be dormant
+            last_sign_in = identity_data.get('last_sign_in')
+            if last_sign_in:
+                if isinstance(last_sign_in, str):
+                    try:
+                        ls_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00')).replace(tzinfo=None)
+                    except Exception:
+                        ls_dt = None
+                else:
+                    ls_dt = last_sign_in.replace(tzinfo=None) if hasattr(last_sign_in, 'replace') else last_sign_in
+                if ls_dt and (now - ls_dt).days > 30:
+                    classification = 'possibly_active'
+                    confidence = 80
+
+            return {
+                'confidence': confidence,
+                'classification': classification,
+                'evidence_sources': ['p2_signin_logs', 'activity_stats'],
+                'p2_enriched': True,
+                'last_30d_sign_ins': total,
+                'unique_resources': p2_stats.get('unique_resources', 0),
+                'off_hours_pct': p2_stats.get('off_hours_pct', 0),
+            }
+
+        # P2 enabled but zero sign-ins → confirmed dormant
+        if p2_stats and p2_stats.get('total_sign_ins', 0) == 0:
+            return {
+                'confidence': 95,
+                'classification': 'dormant',
+                'evidence_sources': ['p2_signin_logs'],
+                'p2_enriched': True,
+                'last_30d_sign_ins': 0,
+                'unique_resources': 0,
+                'off_hours_pct': 0,
+            }
+
+        # Fallback: heuristic-based inference (no P2 data)
         confidence = 0
         evidence_sources = []
         now = datetime.utcnow()

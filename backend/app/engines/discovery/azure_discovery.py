@@ -277,6 +277,23 @@ class AzureDiscoveryEngine:
             import traceback
             traceback.print_exc()
 
+        # Step 9a-ii: P2 Telemetry Ingestion (if enabled)
+        try:
+            p2_enabled = self.db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+            if p2_enabled:
+                print("\n📊 Ingesting P2 sign-in telemetry...")
+                from app.engines.telemetry.p2_ingestion import P2TelemetryService
+                telemetry = P2TelemetryService(self.credential, self.db)
+                tenant_id = self.db._tenant_id
+                telemetry.ingest_signin_logs(run_id, tenant_id)
+                telemetry.compute_activity_stats(run_id, tenant_id)
+                # Run behavioral anomaly detection
+                from app.engines.telemetry.behavioral_engine import BehavioralAnomalyEngine
+                anomaly_engine = BehavioralAnomalyEngine(self.db)
+                anomaly_engine.detect_anomalies(run_id, tenant_id)
+        except Exception as e:
+            print(f"  ⚠️ P2 telemetry ingestion error: {e}")
+
         # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
         print("\n🗄️  Discovering Azure Resources...")
         storage_accounts = self._discover_storage_accounts()
@@ -2700,14 +2717,16 @@ class AzureDiscoveryEngine:
 
         # ── Part 1: SPN + Managed Identity scoring ──────────────────
         cursor.execute("""
-            SELECT id, identity_id, object_id, display_name, identity_category,
-                   risk_level, risk_score, activity_status, last_sign_in,
-                   created_datetime, service_principal_type, credential_risk,
-                   ca_coverage_status, enabled, sign_in_audience
-            FROM identities
-            WHERE discovery_run_id = %s
-              AND identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
-              AND NOT COALESCE(is_microsoft_system, false)
+            SELECT i.id, i.identity_id, i.object_id, i.display_name, i.identity_category,
+                   i.risk_level, i.risk_score, i.activity_status, i.last_sign_in,
+                   i.created_datetime, i.service_principal_type, i.credential_risk,
+                   i.ca_coverage_status, i.enabled, ar.sign_in_audience
+            FROM identities i
+            LEFT JOIN app_registrations ar
+              ON ar.linked_spn_id = i.id AND ar.discovery_run_id = i.discovery_run_id
+            WHERE i.discovery_run_id = %s
+              AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+              AND NOT COALESCE(i.is_microsoft_system, false)
         """, (run_id,))
         spn_rows = cursor.fetchall()
 
@@ -2760,6 +2779,25 @@ class AzureDiscoveryEngine:
             except Exception:
                 pass  # PIM tables may not exist
 
+            # Batch-fetch P2 activity stats (if available)
+            p2_stats_map = {}
+            try:
+                cursor.execute(f"""
+                    SELECT identity_db_id, total_sign_ins, successful_sign_ins,
+                           failed_sign_ins, unique_resources, unique_ips,
+                           unique_locations, peak_hour, off_hours_pct,
+                           avg_daily_sign_ins, risk_sign_ins, ca_failures
+                    FROM workload_activity_stats
+                    WHERE identity_db_id IN ({ph})
+                    ORDER BY period_end DESC
+                """, db_ids)
+                for r in cursor.fetchall():
+                    dbid = r['identity_db_id']
+                    if dbid not in p2_stats_map:
+                        p2_stats_map[dbid] = dict(r)
+            except Exception:
+                pass  # Table may not exist yet
+
         scored = 0
         critical_count = 0
         for row in (spn_rows or []):
@@ -2775,6 +2813,7 @@ class AzureDiscoveryEngine:
                 owners_map.get(db_id, []),
                 pim_map.get(db_id, {}),
                 identity_type=cat,
+                p2_stats=p2_stats_map.get(db_id),
             )
             self.db.save_spn_exposure(db_id, result, result.get('findings', []), run_id)
             scored += 1

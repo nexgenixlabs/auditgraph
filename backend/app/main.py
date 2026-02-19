@@ -236,6 +236,8 @@ from app.api.handlers import (
     get_workload_list,
     get_workload_detail,
     get_workload_findings,
+    get_workload_anomalies,
+    get_workload_anomaly_stats,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -262,13 +264,16 @@ def create_app():
                 request.method, path, response.status_code, duration_ms)
         return response
 
-    # Ensure identity_subscription_access table exists (Phase 84: multi-sub model)
+    # Ensure tables exist at startup (run as admin user for DDL privileges)
     try:
         from app.database import Database as _DbInit
         _db_init = _DbInit()
         _db_init._ensure_identity_subscription_access_table()
         _db_init.backfill_microsoft_flag()
         _db_init.ensure_permission_plane_column()
+        _db_init._ensure_spn_exposure()
+        _db_init._ensure_app_reg_exposure()
+        _db_init._ensure_workload_telemetry_tables()
         _db_init.close()
     except Exception as e:
         print(f"  ⚠️ Could not ensure tables/backfill: {e}")
@@ -1414,6 +1419,14 @@ def create_app():
     @app.get("/api/workload-identities/findings")
     def workload_findings():
         return get_workload_findings()
+
+    @app.get("/api/workload-identities/anomalies/stats")
+    def workload_anomaly_stats_route():
+        return get_workload_anomaly_stats()
+
+    @app.get("/api/workload-identities/anomalies")
+    def workload_anomalies_route():
+        return get_workload_anomalies()
 
     @app.get("/api/workload-identities")
     def workload_list():

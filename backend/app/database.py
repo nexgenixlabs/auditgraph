@@ -8709,11 +8709,11 @@ class Database:
                 ('critical_exposure_overrides', "JSONB DEFAULT '[]'::jsonb"),
             ]
             for col, coltype in exposure_cols:
+                cursor.execute("SAVEPOINT sp_col")
                 try:
                     cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col} {coltype}")
                 except Exception:
-                    self.conn.rollback()
-                    self.set_tenant_context(self._tenant_id)
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_col")
 
             # spn_exposure_findings table
             cursor.execute("""
@@ -8738,14 +8738,14 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_tenant ON spn_exposure_findings(tenant_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_severity ON spn_exposure_findings(severity)")
             self.conn.commit()
+            Database._spn_exposure_ensured = True
         except Exception as e:
             self.conn.rollback()
-            # Restore tenant context lost by rollback
-            self.set_tenant_context(self._tenant_id)
+            if self._tenant_id:
+                self.set_tenant_context(self._tenant_id)
             print(f"  ⚠️ SPN exposure schema error: {e}")
         finally:
             cursor.close()
-        Database._spn_exposure_ensured = True
 
     def save_spn_exposure(self, identity_db_id, exposure_data, findings, run_id):
         """Save computed exposure data: UPDATE identities + INSERT findings."""
@@ -8873,11 +8873,11 @@ class Database:
                 ('critical_exposure_overrides', "JSONB DEFAULT '[]'::jsonb"),
             ]
             for col, coltype in exposure_cols:
+                cursor.execute("SAVEPOINT sp_col")
                 try:
                     cursor.execute(f"ALTER TABLE app_registrations ADD COLUMN IF NOT EXISTS {col} {coltype}")
                 except Exception:
-                    self.conn.rollback()
-                    self.set_tenant_context(self._tenant_id)
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_col")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS app_reg_exposure_findings (
@@ -8901,14 +8901,14 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_tenant ON app_reg_exposure_findings(tenant_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_severity ON app_reg_exposure_findings(severity)")
             self.conn.commit()
+            Database._app_reg_exposure_ensured = True
         except Exception as e:
             self.conn.rollback()
-            # Restore tenant context lost by rollback
-            self.set_tenant_context(self._tenant_id)
+            if self._tenant_id:
+                self.set_tenant_context(self._tenant_id)
             print(f"  ⚠️ App reg exposure schema error: {e}")
         finally:
             cursor.close()
-        Database._app_reg_exposure_ensured = True
 
     def save_app_reg_exposure(self, app_reg_id, exposure_data, findings, run_id):
         """Save computed exposure data: UPDATE app_registrations + INSERT findings."""
@@ -9006,6 +9006,147 @@ class Database:
             if r.get('created_at') and hasattr(r['created_at'], 'isoformat'):
                 r['created_at'] = r['created_at'].isoformat()
         return rows
+
+    # ─── Workload Telemetry Tables (P2 Telemetry Pipeline) ──────────────
+
+    _workload_telemetry_ensured = False
+
+    def _ensure_workload_telemetry_tables(self):
+        """Create workload sign-in events, activity stats, and anomaly tables."""
+        if Database._workload_telemetry_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS workload_signin_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL,
+                    identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
+                    identity_id TEXT NOT NULL,
+                    sign_in_id TEXT,
+                    created_datetime TIMESTAMPTZ NOT NULL,
+                    status TEXT NOT NULL,
+                    error_code INTEGER,
+                    failure_reason TEXT,
+                    resource_display_name TEXT,
+                    resource_id TEXT,
+                    ip_address TEXT,
+                    location_city TEXT,
+                    location_country TEXT,
+                    app_display_name TEXT,
+                    client_app_type TEXT,
+                    is_interactive BOOLEAN DEFAULT FALSE,
+                    risk_level TEXT,
+                    risk_detail TEXT,
+                    conditional_access_status TEXT,
+                    discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    ingested_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_tenant ON workload_signin_events(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_db ON workload_signin_events(identity_db_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_created ON workload_signin_events(created_datetime)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_id ON workload_signin_events(identity_id)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS workload_activity_stats (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL,
+                    identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
+                    identity_id TEXT NOT NULL,
+                    period_start DATE NOT NULL,
+                    period_end DATE NOT NULL,
+                    total_sign_ins INTEGER DEFAULT 0,
+                    successful_sign_ins INTEGER DEFAULT 0,
+                    failed_sign_ins INTEGER DEFAULT 0,
+                    unique_resources INTEGER DEFAULT 0,
+                    unique_ips INTEGER DEFAULT 0,
+                    unique_locations INTEGER DEFAULT 0,
+                    peak_hour INTEGER,
+                    off_hours_pct REAL DEFAULT 0,
+                    avg_daily_sign_ins REAL DEFAULT 0,
+                    risk_sign_ins INTEGER DEFAULT 0,
+                    ca_failures INTEGER DEFAULT 0,
+                    discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    computed_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(identity_db_id, period_start, period_end)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_was_tenant ON workload_activity_stats(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_was_identity_db ON workload_activity_stats(identity_db_id)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS workload_anomaly_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL,
+                    identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
+                    identity_id TEXT NOT NULL,
+                    anomaly_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    evidence JSONB DEFAULT '{}',
+                    baseline JSONB DEFAULT '{}',
+                    detected_value JSONB DEFAULT '{}',
+                    resolved BOOLEAN DEFAULT FALSE,
+                    resolved_at TIMESTAMPTZ,
+                    resolved_by TEXT,
+                    discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_tenant ON workload_anomaly_events(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_identity_db ON workload_anomaly_events(identity_db_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_type ON workload_anomaly_events(anomaly_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_severity ON workload_anomaly_events(severity)")
+
+            self.conn.commit()
+            Database._workload_telemetry_ensured = True
+        except Exception as e:
+            self.conn.rollback()
+            if self._tenant_id:
+                self.set_tenant_context(self._tenant_id)
+            print(f"  ⚠️ Workload telemetry tables error: {e}")
+        finally:
+            cursor.close()
+
+    def cleanup_signin_events(self, days=90) -> int:
+        """Delete old sign-in events beyond retention period."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM workload_signin_events WHERE ingested_at < NOW() - INTERVAL '%s days'",
+                (days,)
+            )
+            count = cursor.rowcount
+            self.conn.commit()
+            return count
+        except Exception:
+            self.conn.rollback()
+            if self._tenant_id:
+                self.set_tenant_context(self._tenant_id)
+            return 0
+        finally:
+            cursor.close()
+
+    def cleanup_workload_anomalies(self, days=180) -> int:
+        """Delete resolved workload anomalies beyond retention period."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM workload_anomaly_events WHERE resolved = true AND created_at < NOW() - INTERVAL '%s days'",
+                (days,)
+            )
+            count = cursor.rowcount
+            self.conn.commit()
+            return count
+        except Exception:
+            self.conn.rollback()
+            if self._tenant_id:
+                self.set_tenant_context(self._tenant_id)
+            return 0
+        finally:
+            cursor.close()
 
 
 # ─── Access Review V2 Helper Functions ────────────────────────────────

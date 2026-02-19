@@ -861,6 +861,15 @@ def run_data_retention():
                 results['soar_actions'] = db.cleanup_old_soar_actions(days=soar_days)
                 results['notifications'] = db.cleanup_old_notifications(days=notif_days)
 
+                # P2 telemetry retention
+                signin_days = int(db.get_system_setting('retention_signin_events_days', '90'))
+                wl_anomaly_days = int(db.get_system_setting('retention_workload_anomalies_days', '180'))
+                try:
+                    results['signin_events'] = db.cleanup_signin_events(days=signin_days)
+                    results['workload_anomalies'] = db.cleanup_workload_anomalies(days=wl_anomaly_days)
+                except Exception:
+                    pass  # Tables may not exist yet
+
                 total = sum(results.values())
                 if total > 0:
                     db.log_activity('data_retention', f'Scheduled cleanup for {tenant_name}: {total} records deleted',

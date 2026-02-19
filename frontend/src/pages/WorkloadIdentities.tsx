@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { WORKLOAD_TYPE_CONFIG, LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG } from '../constants/metrics';
 
@@ -29,6 +29,8 @@ interface WorkloadRow {
   cross_subscription: boolean;
   credential_age_days: number;
   created_datetime: string;
+  sign_ins_30d?: number | null;
+  anomaly_count?: number;
 }
 
 interface WorkloadStats {
@@ -50,46 +52,16 @@ interface WorkloadStats {
     display_name: string;
     source_type: string;
   }>;
-}
-
-interface WorkloadDetail {
-  identity_type: string;
-  display_name: string;
-  exposure: {
-    total: number;
-    privilege: number;
-    credential_risk: number;
-    exposure: number;
-    lifecycle: number;
-    visibility: number;
-    can_escalate: boolean;
-    effective_scope_flag: string;
-    lifecycle_state: string;
-    owner_status: string;
-    federated_trust: boolean;
-    cross_subscription: boolean;
-    credential_age_days: number;
-    critical_overrides: Array<{ type: string; description: string }>;
+  p2_enabled?: boolean;
+  telemetry?: {
+    total_sign_ins_30d: number;
+    active_identities: number;
+    dormant_confirmed: number;
+    risky_sign_ins: number;
+    ca_failures: number;
+    anomaly_count: number;
+    unresolved_anomalies: number;
   };
-  findings: Array<{
-    finding_type: string;
-    severity: string;
-    title: string;
-    description: string;
-    remediation: string;
-    component: string;
-    score_impact: number;
-  }>;
-  activity_inference: { confidence: number; classification: string };
-  recommendations: Array<{ priority: string; action: string }>;
-  detail: Record<string, any>;
-  roles?: any[];
-  entra_roles?: any[];
-  credentials?: any[];
-  owners?: any[];
-  blast_radius?: string;
-  critical_roles?: string[];
-  linked_spn?: any;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -138,33 +110,18 @@ function ExposureRing({ score, size = 36 }: { score: number; size?: number }) {
   );
 }
 
-function ComponentBar({ label, score, max }: { label: string; score: number; max: number }) {
-  const pct = max > 0 ? Math.min((score / max) * 100, 100) : 0;
-  const color = pct >= 80 ? 'bg-red-500' : pct >= 50 ? 'bg-orange-400' : pct >= 25 ? 'bg-yellow-400' : 'bg-green-400';
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="w-20 text-gray-500 dark:text-slate-400 text-right">{label}</span>
-      <div className="flex-1 h-2 bg-gray-100 dark:bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="w-10 text-gray-600 dark:text-slate-300 text-right font-medium">{score}/{max}</span>
-    </div>
-  );
-}
-
 // ── Page Component ───────────────────────────────────────────────────
 
 const WorkloadIdentities: React.FC = () => {
   const { withConnection, selectedConnectionId } = useConnection();
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   const activeType = searchParams.get('type') || 'all';
   const [stats, setStats] = useState<WorkloadStats | null>(null);
   const [items, setItems] = useState<WorkloadRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [selectedDetail, setSelectedDetail] = useState<WorkloadDetail | null>(null);
 
   const [sortCol, setSortCol] = useState('exposure_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -224,12 +181,7 @@ const WorkloadIdentities: React.FC = () => {
   }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, search, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
 
   const openDetail = (row: WorkloadRow) => {
-    setDetailLoading(true);
-    fetch(withConnection(`/api/workload-identities/${row.workload_id}?type=${row.identity_type}`))
-      .then(r => r.ok ? r.json() : null)
-      .then(d => d && setSelectedDetail(d))
-      .catch(() => {})
-      .finally(() => setDetailLoading(false));
+    navigate(`/workload-identities/${row.workload_id}?type=${row.identity_type}`);
   };
 
   const handleSort = (col: string) => {
@@ -293,8 +245,23 @@ const WorkloadIdentities: React.FC = () => {
         ))}
       </div>
 
-      {/* Alert Banner */}
-      {stats && stats.blind_count > 0 && (
+      {/* Alert Banner — P2 active vs visibility gap */}
+      {stats && !!stats.p2_enabled && !!stats.telemetry && (
+        <div className="mb-5 rounded-lg bg-gradient-to-r from-emerald-50 to-green-50 dark:from-emerald-900/20 dark:to-green-900/20 border border-emerald-200 dark:border-emerald-800/40 p-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-emerald-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+            </svg>
+            <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
+              P2 Telemetry Active &mdash; {stats.telemetry.active_identities} active, {stats.telemetry.dormant_confirmed} confirmed dormant
+            </span>
+            <span className="text-xs text-gray-500 dark:text-slate-400 ml-2">
+              {stats.telemetry.risky_sign_ins} risky sign-ins &middot; {stats.telemetry.unresolved_anomalies} unresolved anomalies
+            </span>
+          </div>
+        </div>
+      )}
+      {stats && !stats.p2_enabled && stats.blind_count > 0 && (
         <div className="mb-5 rounded-lg bg-gradient-to-r from-red-50 to-amber-50 dark:from-red-900/20 dark:to-amber-900/20 border border-red-200 dark:border-red-800/40 p-3">
           <div className="flex items-center gap-2">
             <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -312,16 +279,18 @@ const WorkloadIdentities: React.FC = () => {
         </div>
       )}
 
-      {/* 5 Exposure Summary Cards */}
+      {/* Exposure Summary Cards */}
       {stats && (
-        <div className="grid grid-cols-5 gap-3 mb-5">
+        <div className={`grid gap-3 mb-5 ${stats.p2_enabled && stats.telemetry ? 'grid-cols-7' : 'grid-cols-5'}`}>
           {[
-            { label: 'Critical Exposure', value: stats.exposure_critical, color: 'text-red-600 dark:text-red-400', sub: 'Score ≥ 80' },
-            { label: 'Orphaned', value: stats.orphaned_count, color: 'text-orange-600 dark:text-orange-400', sub: 'No owner' },
-            { label: 'Stale Credentials', value: stats.stale_credentials, color: 'text-yellow-600 dark:text-yellow-400', sub: '> 365 days' },
-            { label: 'Can Escalate', value: stats.can_escalate_count, color: 'text-purple-600 dark:text-purple-400', sub: 'Priv escalation' },
-            { label: 'Zombie', value: stats.zombie_count, color: 'text-gray-600 dark:text-gray-400', sub: 'Dormant + risky' },
-          ].map(c => (
+            { label: 'Critical Exposure', value: stats.exposure_critical, color: 'text-red-600 dark:text-red-400', sub: 'Score ≥ 80', show: true },
+            { label: 'Orphaned', value: stats.orphaned_count, color: 'text-orange-600 dark:text-orange-400', sub: 'No owner', show: true },
+            { label: 'Stale Credentials', value: stats.stale_credentials, color: 'text-yellow-600 dark:text-yellow-400', sub: '> 365 days', show: true },
+            { label: 'Can Escalate', value: stats.can_escalate_count, color: 'text-purple-600 dark:text-purple-400', sub: 'Priv escalation', show: true },
+            { label: 'Zombie', value: stats.zombie_count, color: 'text-gray-600 dark:text-gray-400', sub: 'Dormant + risky', show: true },
+            { label: 'Risky Sign-Ins', value: stats.telemetry?.risky_sign_ins ?? 0, color: 'text-red-500 dark:text-red-400', sub: 'P2 risk detection', show: !!stats.p2_enabled && !!stats.telemetry },
+            { label: 'Anomalies', value: stats.telemetry?.unresolved_anomalies ?? 0, color: 'text-violet-600 dark:text-violet-400', sub: 'Unresolved', show: !!stats.p2_enabled && !!stats.telemetry },
+          ].filter(c => c.show).map(c => (
             <div key={c.label} className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3">
               <p className="text-xs text-gray-500 dark:text-slate-400">{c.label}</p>
               <p className={`text-2xl font-bold mt-1 ${c.color}`}>{c.value}</p>
@@ -443,17 +412,23 @@ const WorkloadIdentities: React.FC = () => {
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Lifecycle</th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Owner</th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Scope</th>
+              {!!stats?.p2_enabled && (
+                <>
+                  <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-[72px]">Sign-Ins</th>
+                  <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-14">Anom</th>
+                </>
+              )}
               <th className="w-8" />
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={8} className="text-center py-8">
+              <tr><td colSpan={stats?.p2_enabled ? 10 : 8} className="text-center py-8">
                 <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
               </td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={8} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No workload identities found</td></tr>
+              <tr><td colSpan={stats?.p2_enabled ? 10 : 8} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No workload identities found</td></tr>
             )}
             {!loading && items.map(row => {
               const lcCfg = LIFECYCLE_STATE_CONFIG[row.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
@@ -495,6 +470,24 @@ const WorkloadIdentities: React.FC = () => {
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scCfg.badgeClass}`}>{scCfg.label}</span>
                   </td>
+                  {!!stats?.p2_enabled && (
+                    <>
+                      <td className="text-center px-2 py-2">
+                        <span className="text-xs text-gray-600 dark:text-slate-300">
+                          {row.sign_ins_30d != null ? row.sign_ins_30d.toLocaleString() : '—'}
+                        </span>
+                      </td>
+                      <td className="text-center px-2 py-2">
+                        {(row.anomaly_count ?? 0) > 0 ? (
+                          <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                            {row.anomaly_count}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-400 dark:text-slate-500">0</span>
+                        )}
+                      </td>
+                    </>
+                  )}
                   <td className="px-2 py-2 text-gray-400">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
                   </td>
@@ -523,156 +516,6 @@ const WorkloadIdentities: React.FC = () => {
           </div>
         )}
       </div>
-
-      {/* Detail Modal */}
-      {(selectedDetail || detailLoading) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => { setSelectedDetail(null); }}>
-          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl max-w-xl w-full max-h-[85vh] overflow-y-auto m-4" onClick={e => e.stopPropagation()}>
-            {detailLoading && !selectedDetail ? (
-              <div className="p-8 text-center">
-                <div className="animate-spin h-8 w-8 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
-              </div>
-            ) : selectedDetail && (
-              <>
-                {/* Modal Header */}
-                <div className="sticky top-0 bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-700 px-5 py-3 flex items-center justify-between z-10">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <TypeBadge type={selectedDetail.identity_type} />
-                    <h2 className="text-lg font-bold text-gray-900 dark:text-white truncate">{selectedDetail.display_name}</h2>
-                  </div>
-                  <button onClick={() => setSelectedDetail(null)} className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-slate-300">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                  </button>
-                </div>
-
-                {/* Exposure Score Header */}
-                <div className="px-5 py-4 flex items-center gap-4 border-b border-gray-100 dark:border-slate-800">
-                  <ExposureRing score={selectedDetail.exposure.total} size={56} />
-                  <div>
-                    <p className="text-sm text-gray-500 dark:text-slate-400">Exposure Score</p>
-                    <p className={`text-2xl font-bold ${exposureColor(selectedDetail.exposure.total)}`}>{selectedDetail.exposure.total}/100</p>
-                  </div>
-                  {selectedDetail.exposure.critical_overrides.length > 0 && (
-                    <span className="ml-auto px-2 py-1 rounded text-[10px] font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
-                      OVERRIDE: 100
-                    </span>
-                  )}
-                </div>
-
-                {/* 5 Component Bars */}
-                <div className="px-5 py-3 space-y-1.5 border-b border-gray-100 dark:border-slate-800">
-                  <ComponentBar label="Privilege" score={selectedDetail.exposure.privilege} max={40} />
-                  <ComponentBar label="Cred Risk" score={selectedDetail.exposure.credential_risk} max={25} />
-                  <ComponentBar label="Exposure" score={selectedDetail.exposure.exposure} max={20} />
-                  <ComponentBar label="Lifecycle" score={selectedDetail.exposure.lifecycle} max={10} />
-                  <ComponentBar label="Visibility" score={selectedDetail.exposure.visibility} max={5} />
-                </div>
-
-                {/* Derived Flags */}
-                <div className="px-5 py-3 flex flex-wrap gap-1.5 border-b border-gray-100 dark:border-slate-800">
-                  {selectedDetail.exposure.can_escalate && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">Can Escalate</span>
-                  )}
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                    LIFECYCLE_STATE_CONFIG[selectedDetail.exposure.lifecycle_state]?.badgeClass || 'bg-gray-100 text-gray-500'
-                  }`}>{LIFECYCLE_STATE_CONFIG[selectedDetail.exposure.lifecycle_state]?.label || selectedDetail.exposure.lifecycle_state}</span>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                    OWNER_STATUS_CONFIG[selectedDetail.exposure.owner_status]?.badgeClass || 'bg-gray-100 text-gray-500'
-                  }`}>{OWNER_STATUS_CONFIG[selectedDetail.exposure.owner_status]?.label || selectedDetail.exposure.owner_status}</span>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                    SCOPE_FLAG_CONFIG[selectedDetail.exposure.effective_scope_flag]?.badgeClass || 'bg-gray-100 text-gray-500'
-                  }`}>{SCOPE_FLAG_CONFIG[selectedDetail.exposure.effective_scope_flag]?.label || selectedDetail.exposure.effective_scope_flag}</span>
-                  {selectedDetail.exposure.cross_subscription && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300">Cross-Sub</span>
-                  )}
-                  {selectedDetail.exposure.federated_trust && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">Federated</span>
-                  )}
-                </div>
-
-                {/* Activity Inference */}
-                <div className="px-5 py-3 border-b border-gray-100 dark:border-slate-800">
-                  <h4 className="text-xs font-semibold text-gray-700 dark:text-slate-300 mb-1">Activity Inference</h4>
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1 h-2 bg-gray-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500 rounded-full" style={{ width: `${selectedDetail.activity_inference.confidence}%` }} />
-                    </div>
-                    <span className="text-xs text-gray-600 dark:text-slate-300 font-medium">
-                      {selectedDetail.activity_inference.confidence}% — {selectedDetail.activity_inference.classification.replace(/_/g, ' ')}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Findings */}
-                {selectedDetail.findings.length > 0 && (
-                  <div className="px-5 py-3 border-b border-gray-100 dark:border-slate-800">
-                    <h4 className="text-xs font-semibold text-gray-700 dark:text-slate-300 mb-2">Findings ({selectedDetail.findings.length})</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {selectedDetail.findings.map((f, i) => (
-                        <div key={i} className="text-xs">
-                          <div className="flex items-start gap-1.5">
-                            <span className={`mt-0.5 px-1 py-0.5 rounded text-[9px] font-bold ${SEV_BADGE[f.severity] || 'bg-gray-100 text-gray-500'}`}>
-                              {f.severity.toUpperCase()}
-                            </span>
-                            <div>
-                              <p className="font-medium text-gray-700 dark:text-slate-300">{f.title}</p>
-                              <p className="text-gray-500 dark:text-slate-400 mt-0.5">{f.description}</p>
-                              {f.remediation && (
-                                <p className="text-blue-600 dark:text-blue-400 mt-0.5">{f.remediation}</p>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Recommendations */}
-                {selectedDetail.recommendations.length > 0 && (
-                  <div className="px-5 py-3 border-b border-gray-100 dark:border-slate-800">
-                    <h4 className="text-xs font-semibold text-gray-700 dark:text-slate-300 mb-2">Recommendations</h4>
-                    <ul className="space-y-1">
-                      {selectedDetail.recommendations.map((rec, i) => (
-                        <li key={i} className="flex items-start gap-1.5 text-xs">
-                          <span className={`mt-0.5 px-1 py-0.5 rounded text-[9px] font-bold ${SEV_BADGE[rec.priority] || 'bg-gray-100 text-gray-500'}`}>
-                            {rec.priority.toUpperCase()}
-                          </span>
-                          <span className="text-gray-600 dark:text-slate-400">{rec.action}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* Critical Overrides */}
-                {selectedDetail.exposure.critical_overrides.length > 0 && (
-                  <div className="px-5 py-3 border-b border-gray-100 dark:border-slate-800 bg-red-50 dark:bg-red-900/10">
-                    <h4 className="text-xs font-semibold text-red-700 dark:text-red-300 mb-1">Critical Overrides (Score Forced to 100)</h4>
-                    {selectedDetail.exposure.critical_overrides.map((ov, i) => (
-                      <p key={i} className="text-xs text-red-600 dark:text-red-400">{ov.description}</p>
-                    ))}
-                  </div>
-                )}
-
-                {/* Footer: View Full Detail link */}
-                <div className="px-5 py-3 flex justify-between items-center">
-                  {selectedDetail.identity_type !== 'app_registration' && selectedDetail.detail?.id && (
-                    <a href={`/identities/${selectedDetail.detail.id}`}
-                      className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
-                      Open Full Identity Detail →
-                    </a>
-                  )}
-                  <button onClick={() => setSelectedDetail(null)}
-                    className="ml-auto px-3 py-1.5 rounded text-xs font-medium bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700">
-                    Close
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Footer Legend */}
       <div className="mt-4 text-[10px] text-gray-400 dark:text-slate-500">

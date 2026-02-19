@@ -227,11 +227,62 @@ def get_stats():
         # but keep for backwards compat — use None for now
         previous_run = None
 
-        return jsonify({
+        # Workload exposure summary
+        workload_exposure = None
+        try:
+            cats = ("service_principal", "managed_identity_system", "managed_identity_user")
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE NOT COALESCE(i.is_microsoft_system, false)) AS total,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 80 AND NOT COALESCE(i.is_microsoft_system, false)) AS critical,
+                    COUNT(*) FILTER (WHERE COALESCE(i.owner_status, 'unknown') = 'orphaned' AND NOT COALESCE(i.is_microsoft_system, false)) AS orphaned,
+                    COUNT(*) FILTER (WHERE COALESCE(i.can_escalate, false) AND NOT COALESCE(i.is_microsoft_system, false)) AS can_escalate,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 60 AND COALESCE(i.exposure_score, 0) < 80 AND NOT COALESCE(i.is_microsoft_system, false)) AS we_high,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 35 AND COALESCE(i.exposure_score, 0) < 60 AND NOT COALESCE(i.is_microsoft_system, false)) AS we_medium,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) < 35 AND NOT COALESCE(i.is_microsoft_system, false)) AS we_low,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, 'blind') = 'blind' AND NOT COALESCE(i.is_microsoft_system, false)) AS we_blind,
+                    ROUND(COALESCE(AVG(i.exposure_score) FILTER (WHERE NOT COALESCE(i.is_microsoft_system, false)), 0), 1) AS we_avg
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                  AND i.identity_category IN %s
+            """, (run_ids, cats))
+            we_row = cursor.fetchone()
+            anomalies_unresolved = 0
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM workload_anomaly_events
+                    WHERE discovery_run_id = ANY(%s) AND NOT resolved
+                """, (run_ids,))
+                anomalies_unresolved = cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+            workload_exposure = {
+                'total': we_row[0] or 0,
+                'critical': we_row[1] or 0,
+                'orphaned': we_row[2] or 0,
+                'can_escalate': we_row[3] or 0,
+                'anomalies_unresolved': anomalies_unresolved,
+                'exposure_distribution': {
+                    'critical': we_row[1] or 0,
+                    'high': we_row[4] or 0,
+                    'medium': we_row[5] or 0,
+                    'low': we_row[6] or 0,
+                },
+                'blind_count': we_row[7] or 0,
+                'avg_exposure_score': float(we_row[8] or 0),
+            }
+        except Exception:
+            pass
+
+        result = {
             "latest_run": latest,
             "previous_run": previous_run,
             "total_discovery_runs": total_runs,
-        })
+        }
+        if workload_exposure:
+            result["workload_exposure"] = workload_exposure
+
+        return jsonify(result)
 
     finally:
         cursor.close()
@@ -1089,6 +1140,8 @@ def save_app_settings():
         'retention_soar_days', 'retention_notifications_days',
         'retention_enabled',
         'copilot_api_key',
+        'p2_telemetry_enabled',
+        'retention_signin_events_days', 'retention_workload_anomalies_days',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
@@ -2987,25 +3040,42 @@ def get_attack_surface_score():
         top_blast_radius = [{"identity_id": row[0], "display_name": row[1] or '', "identity_category": row[2],
                              "sub_count": row[3]} for row in cursor.fetchall()]
 
+        # T0/T1 inline condition (privilege_tier is computed, not a real column)
+        _T0T1_COND = """(
+            EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                AND LOWER(era.role_name) IN (
+                    'global administrator','privileged role administrator',
+                    'privileged authentication administrator',
+                    'application administrator','cloud application administrator',
+                    'hybrid identity administrator','domain name administrator',
+                    'external identity provider administrator',
+                    'user administrator','exchange administrator',
+                    'sharepoint administrator','teams administrator',
+                    'security administrator','conditional access administrator',
+                    'authentication administrator','helpdesk administrator'
+                ))
+            OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator'))
+        )"""
+
         # Stale privileged (dormant T0/T1)
         cursor.execute(f"""
             SELECT i.identity_id, i.display_name, COALESCE(i.identity_category, '') as identity_category,
-                   COALESCE(i.activity_status, 'unknown') as activity_status,
-                   COALESCE(i.privilege_tier, 99) as privilege_tier
+                   COALESCE(i.activity_status, 'unknown') as activity_status
             FROM identities i WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
               AND i.activity_status IN ('stale','never_used','inactive')
-              AND COALESCE(i.privilege_tier, 99) <= 1
-            ORDER BY COALESCE(i.privilege_tier, 99) ASC LIMIT 5
+              AND {_T0T1_COND}
+            LIMIT 5
         """, (run_ids,))
         stale_privileged = [{"identity_id": row[0], "display_name": row[1] or '', "identity_category": row[2],
-                             "activity_status": row[3], "privilege_tier": row[4]} for row in cursor.fetchall()]
+                             "activity_status": row[3]} for row in cursor.fetchall()]
 
         # Privileged NHIs (T0/T1 that are SPN or MI)
         cursor.execute(f"""
             SELECT COUNT(*) FROM identities i
             WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
             AND COALESCE(i.identity_category, '') IN ('service_principal','managed_identity_system','managed_identity_user')
-            AND COALESCE(i.privilege_tier, 99) <= 1
+            AND {_T0T1_COND}
         """, (run_ids,))
         privileged_nhi_count = cursor.fetchone()[0] or 0
 
@@ -3044,30 +3114,37 @@ def get_attack_surface_score():
         # PIM adoption: distinct identities with PIM eligible assignments vs T0/T1 count
         pim_adoption_pct = 0
         try:
+            cursor.execute("SAVEPOINT gov_pim")
             cursor.execute("""
                 SELECT COUNT(DISTINCT identity_db_id) FROM pim_eligible_assignments
             """)
             pim_count = cursor.fetchone()[0] or 0
             pim_adoption_pct = round((pim_count / max(t0t1_count, 1)) * 100, 1) if t0t1_count > 0 else 0
+            cursor.execute("RELEASE SAVEPOINT gov_pim")
         except Exception:
-            pass
+            try: cursor.execute("ROLLBACK TO SAVEPOINT gov_pim")
+            except Exception: pass
 
         # Average remediation days
         avg_remediation_days = None
         try:
+            cursor.execute("SAVEPOINT gov_rem")
             cursor.execute("""
                 SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/86400)
                 FROM remediation_actions WHERE status = 'resolved'
             """)
             avg_val = cursor.fetchone()[0]
             avg_remediation_days = round(avg_val, 1) if avg_val is not None else None
+            cursor.execute("RELEASE SAVEPOINT gov_rem")
         except Exception:
-            pass
+            try: cursor.execute("ROLLBACK TO SAVEPOINT gov_rem")
+            except Exception: pass
 
         # Privileged under review + access reviews done
         privileged_under_review_pct = 0
         access_reviews_done = 0
         try:
+            cursor.execute("SAVEPOINT gov_rev")
             cursor.execute("SELECT COUNT(*) FROM access_reviews WHERE status = 'completed'")
             access_reviews_done = cursor.fetchone()[0] or 0
             cursor.execute("""
@@ -3078,8 +3155,10 @@ def get_attack_surface_score():
             """)
             reviewed = cursor.fetchone()[0] or 0
             privileged_under_review_pct = round((reviewed / max(t0t1_count, 1)) * 100, 1)
+            cursor.execute("RELEASE SAVEPOINT gov_rev")
         except Exception:
-            pass
+            try: cursor.execute("ROLLBACK TO SAVEPOINT gov_rev")
+            except Exception: pass
 
         governance = {
             "ownership_coverage_pct": ownership_coverage_pct,
@@ -3090,6 +3169,65 @@ def get_attack_surface_score():
             "privileged_under_review_pct": min(privileged_under_review_pct, 100),
             "access_reviews_done": access_reviews_done,
         }
+
+        # ── Workload Exposure Aggregate ─────────────────────────────
+        workload_agg = None
+        try:
+            cursor.execute("SAVEPOINT wl_agg")
+            cursor.execute(f"""
+                SELECT
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 80) as exp_critical,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 60 AND COALESCE(i.exposure_score, 0) < 80) as exp_high,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 35 AND COALESCE(i.exposure_score, 0) < 60) as exp_medium,
+                    COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) < 35) as exp_low,
+                    ROUND(COALESCE(AVG(i.privilege_score), 0), 1) as avg_privilege,
+                    ROUND(COALESCE(AVG(i.credential_risk_score), 0), 1) as avg_cred,
+                    ROUND(COALESCE(AVG(i.exposure_subscore), 0), 1) as avg_exposure,
+                    ROUND(COALESCE(AVG(i.lifecycle_score), 0), 1) as avg_lifecycle,
+                    ROUND(COALESCE(AVG(i.visibility_score), 0), 1) as avg_visibility,
+                    ROUND(COALESCE(AVG(i.exposure_score), 0), 1) as avg_total,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') = 'active') as lc_active,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') = 'possibly_active') as lc_possibly,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') = 'likely_dormant') as lc_likely_dormant,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') = 'dormant') as lc_dormant,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, 'blind') = 'blind') as lc_blind,
+                    COUNT(*) FILTER (WHERE COALESCE(i.can_escalate, false)) as flag_can_escalate,
+                    COUNT(*) FILTER (WHERE COALESCE(i.cross_subscription, false)) as flag_cross_sub,
+                    COUNT(*) FILTER (WHERE COALESCE(i.owner_status, 'unknown') = 'orphaned') as flag_orphaned,
+                    COUNT(*) FILTER (WHERE COALESCE(i.effective_scope_flag, '') = 'tenant') as scope_tenant,
+                    COUNT(*) FILTER (WHERE COALESCE(i.effective_scope_flag, '') = 'management_group') as scope_mg,
+                    COUNT(*) FILTER (WHERE COALESCE(i.effective_scope_flag, '') = 'subscription') as scope_sub,
+                    COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') IN ('likely_dormant', 'blind')
+                        AND COALESCE(i.exposure_score, 0) >= 35) as zombie_count,
+                    COUNT(*) as wl_total
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                  AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                  {HIDE_MICROSOFT_SQL}
+            """, (run_ids,))
+            wr = cursor.fetchone()
+            cursor.execute("RELEASE SAVEPOINT wl_agg")
+            workload_agg = {
+                "total": wr[22] or 0,
+                "exposure_distribution": {"critical": wr[0] or 0, "high": wr[1] or 0, "medium": wr[2] or 0, "low": wr[3] or 0},
+                "component_averages": {
+                    "privilege": float(wr[4] or 0), "credential_risk": float(wr[5] or 0),
+                    "exposure": float(wr[6] or 0), "lifecycle": float(wr[7] or 0),
+                    "visibility": float(wr[8] or 0), "total": float(wr[9] or 0),
+                },
+                "lifecycle_distribution": {
+                    "active": wr[10] or 0, "possibly_active": wr[11] or 0,
+                    "likely_dormant": wr[12] or 0, "dormant": wr[13] or 0, "blind": wr[14] or 0,
+                },
+                "flags": {"can_escalate": wr[15] or 0, "cross_subscription": wr[16] or 0, "orphaned": wr[17] or 0},
+                "scope_distribution": {"tenant": wr[18] or 0, "management_group": wr[19] or 0, "subscription": wr[20] or 0},
+                "zombie_count": wr[21] or 0,
+            }
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT wl_agg")
+            except Exception:
+                pass
 
         # ── Data Integrity ────────────────────────────────────────
         data_completeness_pct = round((has_risk_score / total) * 100, 1) if total > 0 else 0
@@ -3169,6 +3307,7 @@ def get_attack_surface_score():
             "governance": governance,
             "data_integrity": data_integrity,
             "ciso_summary": ciso_summary,
+            "workload_exposure": workload_agg,
         })
     finally:
         cursor.close()
@@ -14877,8 +15016,6 @@ def get_workload_stats():
         except Exception:
             pass
 
-        cursor.close()
-
         spn_count = int(id_stats.get('spn_count') or 0)
         mi_count = int(id_stats.get('mi_count') or 0)
         ar_total = int(ar_stats.get('ar_total') or 0)
@@ -14893,7 +15030,57 @@ def get_workload_stats():
                  float(ar_stats.get('ar_avg') or 0) * ar_total) /
                 (id_total_for_avg + ar_total), 1)
 
-        return jsonify({
+        # P2 telemetry stats (if enabled)
+        p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+        telemetry = None
+        if p2_enabled:
+            try:
+                cursor.execute("""
+                    SELECT
+                        COALESCE(SUM(s.total_sign_ins), 0) AS total_sign_ins_30d,
+                        COUNT(DISTINCT s.identity_db_id) FILTER (WHERE s.total_sign_ins > 0) AS active_identities,
+                        COALESCE(SUM(s.risk_sign_ins), 0) AS risky_sign_ins,
+                        COALESCE(SUM(s.ca_failures), 0) AS ca_failures
+                    FROM workload_activity_stats s
+                    WHERE s.discovery_run_id = ANY(%s)
+                """, (run_ids,))
+                t_row = dict(cursor.fetchone())
+
+                # Dormant confirmed = identities with P2 data where total_sign_ins = 0
+                cursor.execute("""
+                    SELECT COUNT(*) AS dormant_confirmed
+                    FROM identities i
+                    WHERE i.discovery_run_id = ANY(%s)
+                      AND i.identity_category IN %s
+                      AND NOT COALESCE(i.is_microsoft_system, false)
+                      AND COALESCE(i.lifecycle_state, '') = 'dormant'
+                """, (run_ids, cats))
+                dormant = cursor.fetchone()[0] or 0
+
+                # Anomaly counts
+                cursor.execute("""
+                    SELECT COUNT(*) AS total_anomalies,
+                           COUNT(*) FILTER (WHERE NOT resolved) AS unresolved
+                    FROM workload_anomaly_events
+                    WHERE discovery_run_id = ANY(%s)
+                """, (run_ids,))
+                anom = dict(cursor.fetchone())
+
+                telemetry = {
+                    'total_sign_ins_30d': int(t_row.get('total_sign_ins_30d') or 0),
+                    'active_identities': int(t_row.get('active_identities') or 0),
+                    'dormant_confirmed': dormant,
+                    'risky_sign_ins': int(t_row.get('risky_sign_ins') or 0),
+                    'ca_failures': int(t_row.get('ca_failures') or 0),
+                    'anomaly_count': int(anom.get('total_anomalies') or 0),
+                    'unresolved_anomalies': int(anom.get('unresolved') or 0),
+                }
+            except Exception:
+                telemetry = None
+
+        cursor.close()
+
+        result = {
             'total': total,
             'by_type': {
                 'spn': spn_count,
@@ -14909,7 +15096,12 @@ def get_workload_stats():
             'by_risk': by_risk,
             'avg_exposure_score': avg_exp,
             'top_findings': top_findings,
-        })
+            'p2_enabled': p2_enabled,
+        }
+        if telemetry:
+            result['telemetry'] = telemetry
+
+        return jsonify(result)
     finally:
         db.close()
 
@@ -15077,6 +15269,43 @@ def get_workload_list():
                     r['created_datetime'] = r['created_datetime'].isoformat()
                 items.append(r)
 
+        # Enrich with P2 telemetry data if enabled
+        p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+        if p2_enabled and items:
+            try:
+                # Batch-fetch activity stats for identities (not app_regs)
+                id_db_ids = [int(it['id']) for it in items if it.get('source_table') == 'identities']
+                if id_db_ids:
+                    ph = ','.join(['%s'] * len(id_db_ids))
+                    cursor.execute(f"""
+                        SELECT identity_db_id, total_sign_ins
+                        FROM workload_activity_stats
+                        WHERE identity_db_id IN ({ph})
+                        ORDER BY period_end DESC
+                    """, id_db_ids)
+                    p2_map = {}
+                    for r in cursor.fetchall():
+                        dbid = r['identity_db_id']
+                        if dbid not in p2_map:
+                            p2_map[dbid] = r['total_sign_ins']
+
+                    # Batch-fetch anomaly counts
+                    cursor.execute(f"""
+                        SELECT identity_db_id, COUNT(*) AS cnt
+                        FROM workload_anomaly_events
+                        WHERE identity_db_id IN ({ph}) AND NOT resolved
+                        GROUP BY identity_db_id
+                    """, id_db_ids)
+                    anom_map = {r['identity_db_id']: r['cnt'] for r in cursor.fetchall()}
+
+                    for it in items:
+                        if it.get('source_table') == 'identities':
+                            db_id = int(it['id'])
+                            it['sign_ins_30d'] = p2_map.get(db_id)
+                            it['anomaly_count'] = anom_map.get(db_id, 0)
+            except Exception:
+                pass  # Tables may not exist
+
         cursor.close()
 
         # Sort in Python (merging two tables)
@@ -15092,7 +15321,7 @@ def get_workload_list():
         total = len(items)
         paged = items[offset:offset + limit]
 
-        return jsonify({'items': paged, 'total': total})
+        return jsonify({'items': paged, 'total': total, 'p2_enabled': p2_enabled})
     finally:
         db.close()
 
@@ -15180,6 +15409,24 @@ def get_workload_detail(workload_id):
                 if ar.get(key) and hasattr(ar[key], 'isoformat'):
                     ar[key] = ar[key].isoformat()
 
+            # Extract permissions from app reg data
+            app_reg_permissions = []
+            for perm in (ar.get('required_permissions') or []):
+                app_reg_permissions.append({
+                    'permission_name': perm.get('permission_name') or perm.get('name', ''),
+                    'permission_description': perm.get('description', ''),
+                    'resource_name': perm.get('resource_name', ''),
+                    'risk_level': perm.get('risk_level', 'low'),
+                })
+
+            # Build signals from findings
+            from collections import defaultdict
+            signal_map = defaultdict(list)
+            for f in findings:
+                signal_map[f.get('component', 'general')].append(f.get('title', ''))
+
+            p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+
             cursor.close()
             return jsonify({
                 'identity_type': 'app_registration',
@@ -15190,6 +15437,9 @@ def get_workload_detail(workload_id):
                 'detail': ar,
                 'linked_spn': linked_spn,
                 'recommendations': recommendations,
+                'permissions': app_reg_permissions,
+                'signals': dict(signal_map),
+                'p2_enabled': p2_enabled,
             })
 
         else:
@@ -15230,10 +15480,24 @@ def get_workload_detail(workload_id):
 
             # Owners
             cursor.execute("""
-                SELECT owner_display_name, owner_upn, owner_id
+                SELECT owner_display_name, owner_upn, owner_object_id
                 FROM sp_ownership WHERE identity_db_id = %s
             """, (db_id,))
             owners = [dict(r) for r in cursor.fetchall()]
+
+            # Graph API permissions
+            permissions = []
+            try:
+                cursor.execute("SAVEPOINT sp_perms")
+                cursor.execute("""
+                    SELECT permission_name, permission_description, resource_name, risk_level
+                    FROM graph_api_permissions WHERE identity_db_id = %s
+                    ORDER BY CASE risk_level WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END
+                """, (db_id,))
+                permissions = [dict(r) for r in cursor.fetchall()]
+                cursor.execute("RELEASE SAVEPOINT sp_perms")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_perms")
 
             # Findings
             findings = db.get_spn_exposure_findings(db_id)
@@ -15305,8 +15569,69 @@ def get_workload_detail(workload_id):
                 if r.get('created_on') and hasattr(r['created_on'], 'isoformat'):
                     r['created_on'] = r['created_on'].isoformat()
 
+            # P2 telemetry enrichment
+            p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+            activity_stats_data = None
+            anomalies_list = []
+            if p2_enabled:
+                try:
+                    cursor.execute("SAVEPOINT sp_p2")
+                    cursor.execute("""
+                        SELECT total_sign_ins, successful_sign_ins, failed_sign_ins,
+                               unique_resources, unique_ips, off_hours_pct, peak_hour,
+                               avg_daily_sign_ins, risk_sign_ins, ca_failures
+                        FROM workload_activity_stats
+                        WHERE identity_db_id = %s
+                        ORDER BY period_end DESC LIMIT 1
+                    """, (db_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        activity_stats_data = dict(row)
+
+                    cursor.execute("""
+                        SELECT id, anomaly_type, severity, title, created_at, resolved
+                        FROM workload_anomaly_events
+                        WHERE identity_db_id = %s
+                        ORDER BY created_at DESC LIMIT 20
+                    """, (db_id,))
+                    for r in cursor.fetchall():
+                        ar = dict(r)
+                        if ar.get('created_at') and hasattr(ar['created_at'], 'isoformat'):
+                            ar['created_at'] = ar['created_at'].isoformat()
+                        anomalies_list.append(ar)
+
+                    # Recent sign-in events
+                    cursor.execute("""
+                        SELECT sign_in_id, created_datetime, status,
+                               resource_display_name, ip_address,
+                               location_city, location_country,
+                               risk_level, conditional_access_status
+                        FROM workload_signin_events
+                        WHERE identity_db_id = %s
+                        ORDER BY created_datetime DESC LIMIT 20
+                    """, (db_id,))
+                    recent_signins = []
+                    for r in cursor.fetchall():
+                        si = dict(r)
+                        if si.get('created_datetime') and hasattr(si['created_datetime'], 'isoformat'):
+                            si['created_datetime'] = si['created_datetime'].isoformat()
+                        recent_signins.append(si)
+                    cursor.execute("RELEASE SAVEPOINT sp_p2")
+                except Exception:
+                    try:
+                        cursor.execute("ROLLBACK TO SAVEPOINT sp_p2")
+                    except Exception:
+                        pass
+                    recent_signins = []
+
+            # Build signals from findings
+            from collections import defaultdict
+            signal_map = defaultdict(list)
+            for f in findings:
+                signal_map[f.get('component', 'general')].append(f.get('title', ''))
+
             cursor.close()
-            return jsonify({
+            result = {
                 'identity_type': id_type,
                 'display_name': identity.get('display_name'),
                 'exposure': exposure,
@@ -15317,10 +15642,20 @@ def get_workload_detail(workload_id):
                 'entra_roles': entra_roles,
                 'credentials': credentials,
                 'owners': owners,
+                'permissions': permissions,
                 'blast_radius': blast_radius,
                 'critical_roles': critical_roles,
                 'recommendations': recommendations,
-            })
+                'signals': dict(signal_map),
+                'p2_enabled': p2_enabled,
+            }
+            if activity_stats_data:
+                result['activity_stats'] = activity_stats_data
+            if anomalies_list:
+                result['anomalies'] = anomalies_list
+            if p2_enabled and recent_signins:
+                result['recent_signins'] = recent_signins
+            return jsonify(result)
     finally:
         db.close()
 
@@ -15367,5 +15702,123 @@ def get_workload_findings():
 
         cursor.close()
         return jsonify({'findings': findings})
+    finally:
+        db.close()
+
+
+# ─── Workload Anomaly Endpoints ────────────────────────────────────────
+
+def get_workload_anomalies():
+    """GET /api/workload-identities/anomalies — List workload behavioral anomalies."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'anomalies': [], 'total': 0})
+
+        atype = request.args.get('type')
+        severity = request.args.get('severity')
+        identity_id = request.args.get('identity_id')
+        resolved = request.args.get('resolved')
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+
+        where = ["a.discovery_run_id = ANY(%s)"]
+        params = [run_ids]
+
+        if atype:
+            where.append("a.anomaly_type = %s")
+            params.append(atype)
+        if severity:
+            where.append("a.severity = %s")
+            params.append(severity)
+        if identity_id:
+            where.append("a.identity_id = %s")
+            params.append(identity_id)
+        if resolved is not None:
+            where.append("a.resolved = %s")
+            params.append(resolved.lower() == 'true')
+
+        where_sql = " AND ".join(where)
+
+        cursor.execute(f"SELECT COUNT(*) FROM workload_anomaly_events a WHERE {where_sql}", params)
+        total = cursor.fetchone()['count']
+
+        cursor.execute(f"""
+            SELECT a.id, a.identity_db_id, a.identity_id, a.anomaly_type,
+                   a.severity, a.title, a.description, a.evidence,
+                   a.baseline, a.detected_value, a.resolved, a.resolved_at,
+                   a.resolved_by, a.created_at
+            FROM workload_anomaly_events a
+            WHERE {where_sql}
+            ORDER BY CASE a.severity
+                WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5
+            END, a.created_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        anomalies = []
+        for r in cursor.fetchall():
+            row = dict(r)
+            if row.get('created_at') and hasattr(row['created_at'], 'isoformat'):
+                row['created_at'] = row['created_at'].isoformat()
+            if row.get('resolved_at') and hasattr(row['resolved_at'], 'isoformat'):
+                row['resolved_at'] = row['resolved_at'].isoformat()
+            anomalies.append(row)
+
+        cursor.close()
+        return jsonify({'anomalies': anomalies, 'total': total})
+    finally:
+        db.close()
+
+
+def get_workload_anomaly_stats():
+    """GET /api/workload-identities/anomalies/stats — Anomaly summary counts."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'total': 0, 'unresolved': 0, 'by_type': {}, 'by_severity': {},
+            })
+
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE NOT resolved) AS unresolved
+            FROM workload_anomaly_events
+            WHERE discovery_run_id = ANY(%s)
+        """, (run_ids,))
+        counts = dict(cursor.fetchone())
+
+        cursor.execute("""
+            SELECT anomaly_type, COUNT(*) AS c
+            FROM workload_anomaly_events
+            WHERE discovery_run_id = ANY(%s) AND NOT resolved
+            GROUP BY anomaly_type
+        """, (run_ids,))
+        by_type = {r['anomaly_type']: r['c'] for r in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT severity, COUNT(*) AS c
+            FROM workload_anomaly_events
+            WHERE discovery_run_id = ANY(%s) AND NOT resolved
+            GROUP BY severity
+        """, (run_ids,))
+        by_severity = {r['severity']: r['c'] for r in cursor.fetchall()}
+
+        cursor.close()
+        return jsonify({
+            'total': counts.get('total', 0),
+            'unresolved': counts.get('unresolved', 0),
+            'by_type': by_type,
+            'by_severity': by_severity,
+        })
     finally:
         db.close()

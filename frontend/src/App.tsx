@@ -50,6 +50,7 @@ import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
 import WorkloadIdentities from './pages/WorkloadIdentities';
+import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
@@ -258,6 +259,7 @@ function AppContent() {
                   <Route path="/groups" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
                   <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
                   <Route path="/workload-identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentities /></ErrorBoundary>} />
+                  <Route path="/workload-identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentityDetail /></ErrorBoundary>} />
                   <Route path="/spns" element={<Navigate to="/workload-identities?type=spn" replace />} />
                   <Route path="/app-registrations" element={<Navigate to="/workload-identities?type=app_reg" replace />} />
                   <Route path="/rbac-hygiene" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RbacHygiene /></ErrorBoundary>} />

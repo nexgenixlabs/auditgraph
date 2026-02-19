@@ -43,15 +43,42 @@ const PILLAR_KEYS = Object.keys(PILLAR_META);
 
 // ─── Types ──────────────────────────────────────────────────────────
 interface PillarData { score: number; weight: number; detail: Record<string, number>; }
+interface WorkloadExposureAgg {
+  total: number;
+  exposure_distribution: { critical: number; high: number; medium: number; low: number };
+  component_averages: {
+    privilege: number; credential_risk: number; exposure: number;
+    lifecycle: number; visibility: number; total: number;
+  };
+  lifecycle_distribution: {
+    active: number; possibly_active: number; likely_dormant: number;
+    dormant: number; blind: number;
+  };
+  flags: { can_escalate: number; cross_subscription: number; orphaned: number };
+  scope_distribution: { tenant: number; management_group: number; subscription: number };
+  zombie_count: number;
+}
 interface AttackSurfaceData {
   score: number; grade: string; severity: string;
   pillars: Record<string, PillarData>;
   total_identities: number;
   nhi_breakdown?: any; attack_opportunities?: any;
   governance?: any; data_integrity?: any; ciso_summary?: string;
+  workload_exposure?: WorkloadExposureAgg;
 }
 interface StatsRun { id: number; completed_at: string | null; total_identities: number; critical_count: number; high_count: number; medium_count: number; }
-interface StatsResponse { total_discovery_runs: number; latest_run: StatsRun | null; previous_run?: StatsRun | null; }
+interface StatsResponse {
+  total_discovery_runs: number;
+  latest_run: StatsRun | null;
+  previous_run?: StatsRun | null;
+  workload_exposure?: {
+    total: number;
+    critical: number;
+    orphaned: number;
+    can_escalate: number;
+    anomalies_unresolved: number;
+  };
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────
 function scoreColor(s: number) { return s <= 30 ? C.good : s <= 60 ? C.warning : C.critical; }
@@ -131,6 +158,7 @@ export default function Overview() {
   const atk = as?.attack_opportunities;
   const gov = as?.governance;
   const di = as?.data_integrity;
+  const we = as?.workload_exposure;
   const plan = insights?.risk_reduction_plan ?? [];
   const improvPot = plan.reduce((s: number, i: any) => s + (i.estimated_risk_reduction_pct ?? 0), 0);
   const delta30d = prevScore; // null if no history, positive = worsened, negative = improved
@@ -333,6 +361,82 @@ export default function Overview() {
               subtitle="Can alter access policies directly" severity="critical" />
           </div>
 
+          {/* Workload Exposure Summary — enriched */}
+          {!!we && we.total > 0 && (
+            <div style={fadeIn(400)}>
+              <Card style={{ marginTop: 22 }}>
+                <SectionLabel accent right={
+                  <Link to="/workload-identities" style={{ fontSize: 11, fontFamily: F.mono, color: C.accent, textDecoration: 'none' }}>
+                    Deep Dive →
+                  </Link>
+                }>Workload Exposure</SectionLabel>
+
+                {/* Row 1: Exposure distribution bar + stat chips */}
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                    Exposure Distribution
+                  </div>
+                  <StackedBar segments={[
+                    { value: we.exposure_distribution.critical, color: C.critical, label: `Critical ${we.exposure_distribution.critical}` },
+                    { value: we.exposure_distribution.high, color: C.high, label: `High ${we.exposure_distribution.high}` },
+                    { value: we.exposure_distribution.medium, color: C.warning, label: `Medium ${we.exposure_distribution.medium}` },
+                    { value: we.exposure_distribution.low, color: C.good, label: `Low ${we.exposure_distribution.low}` },
+                  ]} />
+                  <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
+                    <CountChip label="Avg Score" value={we.component_averages.total} color={we.component_averages.total >= 50 ? C.critical : C.good} />
+                    <CountChip label="Can Escalate" value={we.flags.can_escalate} color={we.flags.can_escalate > 0 ? C.critical : C.textTer} />
+                    <CountChip label="Orphaned" value={we.flags.orphaned} color={we.flags.orphaned > 0 ? C.high : C.textTer} />
+                  </div>
+                </div>
+
+                {/* Row 2: Component averages (5 mini bars) */}
+                <div style={{ marginTop: 18 }}>
+                  <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
+                    Component Averages
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+                    {([
+                      ['Privilege', we.component_averages.privilege, 40, C.critical],
+                      ['Credential', we.component_averages.credential_risk, 25, C.high],
+                      ['Exposure', we.component_averages.exposure, 20, C.warning],
+                      ['Lifecycle', we.component_averages.lifecycle, 10, C.info],
+                      ['Visibility', we.component_averages.visibility, 5, C.purple],
+                    ] as [string, number, number, string][]).map(([lbl, val, max, clr]) => (
+                      <div key={lbl} style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 9, fontFamily: F.mono, color: C.textTer, marginBottom: 3 }}>{lbl}</div>
+                        <MiniBar value={(val / max) * 100} color={clr} />
+                        <div style={{ fontSize: 11, fontFamily: F.mono, fontWeight: 700, color: clr, marginTop: 3 }}>
+                          {val.toFixed(1)}<span style={{ fontSize: 8, color: C.textDim }}>/{max}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Row 3: Lifecycle distribution */}
+                <div style={{ marginTop: 18 }}>
+                  <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                    Lifecycle State
+                  </div>
+                  <StackedBar segments={[
+                    { value: we.lifecycle_distribution.active, color: C.good, label: `Active ${we.lifecycle_distribution.active}` },
+                    { value: we.lifecycle_distribution.possibly_active, color: C.info, label: `Possible ${we.lifecycle_distribution.possibly_active}` },
+                    { value: we.lifecycle_distribution.likely_dormant, color: C.warning, label: `Likely Dormant ${we.lifecycle_distribution.likely_dormant}` },
+                    { value: we.lifecycle_distribution.dormant, color: C.high, label: `Dormant ${we.lifecycle_distribution.dormant}` },
+                    { value: we.lifecycle_distribution.blind, color: C.critical, label: `Blind ${we.lifecycle_distribution.blind}` },
+                  ]} />
+                </div>
+
+                {/* Row 4: Key risk flags */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 14 }}>
+                  <StatCell label="Zombies" value={we.zombie_count} color={we.zombie_count > 0 ? C.critical : C.textTer} />
+                  <StatCell label="Cross-Sub" value={we.flags.cross_subscription} color={we.flags.cross_subscription > 0 ? C.high : C.textTer} />
+                  <StatCell label="Tenant Scope" value={we.scope_distribution.tenant} color={we.scope_distribution.tenant > 0 ? C.critical : C.textTer} />
+                </div>
+              </Card>
+            </div>
+          )}
+
           {/* NHI Dominance */}
           <div style={fadeIn(450)}>
             <Card style={{ marginTop: 22 }}>
@@ -358,9 +462,9 @@ export default function Overview() {
                   <StatCell label="Total SPNs" value={nhi?.service_principal ?? 0} color={C.textSec} />
                   <StatCell label="Unowned" value={insights?.action_items?.unowned_spn_count ?? 0} color={C.critical} />
                   <StatCell label="High Priv" value={atk?.privileged_nhi_count ?? 0} color={C.high} />
-                  <StatCell label="Used 24h" value={di?.total_scanned ?? '—'} color={C.good} />
+                  <StatCell label="Avg Exposure" value={we?.component_averages?.total != null ? we.component_averages.total.toFixed(1) : '—'} color={we?.component_averages?.total != null && we.component_averages.total >= 50 ? C.critical : C.good} />
                   <StatCell label="Expiring" value={insights?.action_items?.expiring_credential_count ?? 0} color={C.warning} />
-                  <StatCell label="PIM" value={`${gov?.pim_adoption_pct ?? 0}%`} color={C.purple} />
+                  <StatCell label="Zombies" value={we?.zombie_count ?? 0} color={(we?.zombie_count ?? 0) > 0 ? C.critical : C.textTer} />
                 </div>
               </div>
             </Card>

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { CATEGORY_DISPLAY_ORDER } from '../constants/metrics';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { CATEGORY_DISPLAY_ORDER, EXPOSURE_LEVEL_CONFIG } from '../constants/metrics';
 import { DASHBOARD_TABS, type DashboardTab, COLORS } from '../constants/design';
 import { useConnection } from '../contexts/ConnectionContext';
 
@@ -43,6 +43,12 @@ interface StatsResponse {
     high_count: number;
     medium_count: number;
   } | null;
+  workload_exposure?: {
+    total: number; critical: number; orphaned: number;
+    can_escalate: number; anomalies_unresolved: number;
+    exposure_distribution?: { critical: number; high: number; medium: number; low: number };
+    blind_count?: number; avg_exposure_score?: number;
+  };
 }
 
 interface MonitoredResources {
@@ -456,6 +462,27 @@ export default function Dashboard() {
                   <RiskVelocityChart transitions={velocityData.transitions} retention={velocityData.retention} />
                 )}
               </div>
+              {/* Workload Exposure Summary */}
+              {stats?.workload_exposure && stats.workload_exposure.total > 0 && (
+                <div className="bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>
+                      Workload Identity Exposure
+                    </h3>
+                    <Link to="/workload-identities" className="text-xs font-medium hover:underline"
+                      style={{ color: COLORS.brand }}>View All →</Link>
+                  </div>
+                  {stats.workload_exposure.exposure_distribution && (
+                    <ExposureDistributionBar distribution={stats.workload_exposure.exposure_distribution} total={stats.workload_exposure.total} />
+                  )}
+                  <div className="grid grid-cols-4 gap-3 mt-3">
+                    <MiniStat label="Total" value={stats.workload_exposure.total} />
+                    <MiniStat label="Avg Score" value={stats.workload_exposure.avg_exposure_score ?? '—'} warn={(stats.workload_exposure.avg_exposure_score ?? 0) >= 50} />
+                    <MiniStat label="Orphaned" value={stats.workload_exposure.orphaned} warn={stats.workload_exposure.orphaned > 0} />
+                    <MiniStat label="Can Escalate" value={stats.workload_exposure.can_escalate} warn={stats.workload_exposure.can_escalate > 0} />
+                  </div>
+                </div>
+              )}
               {/* Row 3: Heat Map + Donut (2 col) */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <RiskHeatMap categories={categoryCards} />
@@ -506,7 +533,7 @@ export default function Dashboard() {
           {activeTab === 'usage' && (
             <div className="space-y-6">
               {/* Usage summary cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Dormant Identities</div>
                   <div className="text-2xl font-extrabold" style={{ color: (posture?.dormant_count ?? 0) > 0 ? '#F97316' : '#22C55E' }}>{posture?.dormant_count ?? 0}</div>
@@ -526,6 +553,13 @@ export default function Dashboard() {
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Active Identities</div>
                   <div className="text-2xl font-extrabold" style={{ color: COLORS.brandLight }}>{Math.max((latest?.total_identities ?? 0) - (posture?.dormant_count ?? 0), 0)}</div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Used within 90 days</div>
+                </div>
+                <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+                  <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Avg Exposure</div>
+                  <div className="text-2xl font-extrabold" style={{ color: (stats?.workload_exposure?.avg_exposure_score ?? 0) >= 50 ? '#EF4444' : '#22C55E' }}>
+                    {stats?.workload_exposure?.avg_exposure_score ?? '—'}
+                  </div>
+                  <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Workload identities</div>
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -612,6 +646,53 @@ export default function Dashboard() {
         saving={prefsSaving}
         dirty={prefsDirty}
       />
+    </div>
+  );
+}
+
+// ── Inline helpers for workload exposure ─────────────────────────────
+
+function ExposureDistributionBar({ distribution, total }: { distribution: { critical: number; high: number; medium: number; low: number }; total: number }) {
+  const segments = [
+    { key: 'critical', count: distribution.critical },
+    { key: 'high', count: distribution.high },
+    { key: 'medium', count: distribution.medium },
+    { key: 'low', count: distribution.low },
+  ];
+  return (
+    <div>
+      <div className="flex h-5 rounded-md overflow-hidden" style={{ backgroundColor: COLORS.borderLight }}>
+        {segments.filter(s => s.count > 0).map(s => {
+          const cfg = EXPOSURE_LEVEL_CONFIG[s.key];
+          const w = total > 0 ? (s.count / total) * 100 : 0;
+          return (
+            <div key={s.key} style={{ width: `${w}%`, backgroundColor: cfg.color, transition: 'width 0.8s ease' }}
+              className="flex items-center justify-center" title={`${cfg.label}: ${s.count}`}>
+              {w > 14 && <span className="text-[9px] font-bold text-white">{s.count}</span>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex gap-3 mt-1.5">
+        {segments.map(s => {
+          const cfg = EXPOSURE_LEVEL_CONFIG[s.key];
+          return (
+            <span key={s.key} className="text-[10px] flex items-center gap-1" style={{ color: COLORS.textSecondary }}>
+              <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: cfg.color }} />
+              {cfg.label} {s.count}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) {
+  return (
+    <div className="text-center p-2 rounded-lg" style={{ backgroundColor: warn ? '#FEF2F2' : '#F8FAFC', border: `1px solid ${warn ? '#FECACA' : COLORS.border}` }}>
+      <div className="text-lg font-extrabold" style={{ color: warn ? '#EF4444' : COLORS.textPrimary }}>{value}</div>
+      <div className="text-[10px] uppercase tracking-wider" style={{ color: COLORS.textMuted }}>{label}</div>
     </div>
   );
 }

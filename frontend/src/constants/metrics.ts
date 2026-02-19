@@ -260,17 +260,18 @@ export function getExposureLevel(score: number): string {
   return 'low';
 }
 
-export const EXPOSURE_LEVEL_CONFIG: Record<string, { label: string; color: string; badgeClass: string }> = {
-  critical: { label: 'Critical', color: '#ef4444', badgeClass: 'bg-red-100 text-red-700' },
-  high:     { label: 'High',     color: '#f97316', badgeClass: 'bg-orange-100 text-orange-700' },
-  medium:   { label: 'Medium',   color: '#eab308', badgeClass: 'bg-yellow-100 text-yellow-700' },
-  low:      { label: 'Low',      color: '#22c55e', badgeClass: 'bg-green-100 text-green-700' },
+export const EXPOSURE_LEVEL_CONFIG: Record<string, { label: string; color: string; badgeClass: string; min: number; max: number }> = {
+  critical: { label: 'Critical', color: '#ef4444', badgeClass: 'bg-red-100 text-red-700',    min: 80, max: 100 },
+  high:     { label: 'High',     color: '#f97316', badgeClass: 'bg-orange-100 text-orange-700', min: 60, max: 79 },
+  medium:   { label: 'Medium',   color: '#eab308', badgeClass: 'bg-yellow-100 text-yellow-700', min: 35, max: 59 },
+  low:      { label: 'Low',      color: '#22c55e', badgeClass: 'bg-green-100 text-green-700',  min: 0,  max: 34 },
 };
 
 export const LIFECYCLE_STATE_CONFIG: Record<string, { label: string; badgeClass: string; tooltip: string }> = {
   active:          { label: 'Active',          badgeClass: 'bg-green-100 text-green-700',  tooltip: 'High-confidence activity detected' },
   possibly_active: { label: 'Possibly Active', badgeClass: 'bg-blue-100 text-blue-700',   tooltip: 'Some activity signals detected' },
   likely_dormant:  { label: 'Likely Dormant',  badgeClass: 'bg-orange-100 text-orange-700', tooltip: 'Weak activity signals — likely unused' },
+  dormant:         { label: 'Dormant',         badgeClass: 'bg-red-100 text-red-700',     tooltip: 'Confirmed dormant — zero sign-ins in 30 days (P2 verified)' },
   blind:           { label: 'Visibility Gap',  badgeClass: 'bg-gray-100 text-gray-600',   tooltip: 'No telemetry — cannot determine usage' },
 };
 
@@ -287,6 +288,17 @@ export const SCOPE_FLAG_CONFIG: Record<string, { label: string; badgeClass: stri
   subscription:     { label: 'Subscription', badgeClass: 'bg-orange-100 text-orange-700' },
   resource_group:   { label: 'RG',          badgeClass: 'bg-yellow-100 text-yellow-700' },
   resource:         { label: 'Resource',    badgeClass: 'bg-green-100 text-green-700' },
+};
+
+// ── Workload Exposure Score Helpers ───────────────────────────────────
+
+export const LIFECYCLE_BAR_COLORS: Record<string, string> = {
+  active: '#36D986', possibly_active: '#4E9FFF', likely_dormant: '#FFB938',
+  dormant: '#FF8C42', blind: '#FF4D4D',
+};
+
+export const COMPONENT_MAX: Record<string, number> = {
+  privilege: 40, credential_risk: 25, exposure: 20, lifecycle: 10, visibility: 5,
 };
 
 // ── Workload Identity Type Config ────────────────────────────────────
