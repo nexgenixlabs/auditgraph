@@ -333,11 +333,18 @@ export default function Dashboard() {
             )}
           </button>
           <button
-            onClick={() => navigate('/identities')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border transition hover:bg-gray-50"
-            style={{ borderColor: COLORS.border, color: COLORS.textPrimary }}
+            onClick={() => { setActiveTab('exposure'); setTimeout(() => document.getElementById('anomaly-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100); }}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border transition"
+            style={{ borderColor: '#f59e0b', color: '#f59e0b' }}
+            onMouseEnter={e => { (e.currentTarget as any).style.backgroundColor = 'rgba(245,158,11,0.08)'; }}
+            onMouseLeave={e => { (e.currentTarget as any).style.backgroundColor = 'transparent'; }}
           >
-            View All Identities
+            View Alerts
+            {(anomalyData?.unresolved_count ?? 0) > 0 && (
+              <span className="inline-flex items-center justify-center px-1.5 py-0.5 text-xs font-bold rounded-full" style={{ backgroundColor: 'rgba(245,158,11,0.15)', color: '#f59e0b', minWidth: 20 }}>
+                {anomalyData?.unresolved_count}
+              </span>
+            )}
             <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
           </button>
           {schedulerInfo && (
@@ -439,7 +446,9 @@ export default function Dashboard() {
           {activeTab === 'exposure' && (
             <div className="space-y-6">
               {/* Row 1: Anomaly Alerts (full width — promoted to top) */}
-              <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
+              <div id="anomaly-alerts">
+                <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
+              </div>
               {/* Row 2: Trend + Escalation Tracker (2 col) */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {trends.length >= 2 && <RiskTrendChart data={trends} />}
