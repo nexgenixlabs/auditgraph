@@ -73,6 +73,7 @@ export default function Overview() {
   const [driftData, setDriftData] = useState<any>(null);
   const [prevScore, setPrevScore] = useState<number | null>(null);
   const [expandedPillar, setExpandedPillar] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState('risk');
 
   useEffect(() => { setTimeout(() => setMounted(true), 50); }, []);
 
@@ -220,237 +221,279 @@ export default function Overview() {
           padding: '10px 32px', borderTop: `1px solid ${C.border}`, background: 'rgba(0,0,0,0.25)',
           display: 'flex', gap: 20, fontSize: 11, fontFamily: F.mono, color: C.textTer,
         }}>
-          <CoverageChip label="Azure" connected={cloudCov?.azure?.connected} detail={cloudCov?.azure?.connected ? `${cloudCov.azure.subs} sub${cloudCov.azure.subs !== 1 ? 's' : ''}` : undefined} />
-          <CoverageChip label="AWS" connected={cloudCov?.aws?.connected} detail={cloudCov?.aws?.connected && cloudCov.aws.subs ? `${cloudCov.aws.subs} acct${cloudCov.aws.subs !== 1 ? 's' : ''}` : undefined} />
-          <CoverageChip label="GCP" connected={cloudCov?.gcp?.connected} detail={cloudCov?.gcp?.connected && cloudCov.gcp.subs ? `${cloudCov.gcp.subs} proj${cloudCov.gcp.subs !== 1 ? 's' : ''}` : undefined} />
+          {cloudCov?.azure?.connected && <CoverageChip label="Azure" connected detail={`${cloudCov.azure.subs} sub${cloudCov.azure.subs !== 1 ? 's' : ''}`} />}
+          {cloudCov?.aws?.connected && <CoverageChip label="AWS" connected detail={cloudCov.aws.subs ? `${cloudCov.aws.subs} acct${cloudCov.aws.subs !== 1 ? 's' : ''}` : undefined} />}
+          {cloudCov?.gcp?.connected && <CoverageChip label="GCP" connected detail={cloudCov.gcp.subs ? `${cloudCov.gcp.subs} proj${cloudCov.gcp.subs !== 1 ? 's' : ''}` : undefined} />}
           <span style={{ marginLeft: 'auto' }}>
             {di?.last_scan ? new Date(di.last_scan).toLocaleString() : '—'}
           </span>
         </div>
       </div>
 
-      {/* ═══ Section 2: Risk Radar + Pillar Breakdown ═══ */}
-      <div style={{ ...fadeIn(200), display: 'grid', gridTemplateColumns: '280px 1fr', gap: 22, marginTop: 22 }}>
-        {/* Radar */}
-        <Card>
-          <SectionLabel>Risk Radar</SectionLabel>
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}>
-            <RadarChart pillars={pillars} />
-          </div>
-        </Card>
+      {/* ═══ Tab Bar ═══ */}
+      <div style={{
+        ...fadeIn(200), display: 'flex', gap: 0, marginTop: 22,
+        borderBottom: `1px solid ${C.border}`,
+      }}>
+        {([
+          { key: 'risk', label: 'Risk Posture' },
+          { key: 'remediation', label: 'Remediation' },
+          { key: 'compliance', label: 'Compliance' },
+          { key: 'governance', label: 'Governance' },
+          { key: 'trends', label: 'Trends' },
+        ] as const).map(tab => (
+          <button key={tab.key} onClick={() => setActiveTab(tab.key)} style={{
+            padding: '10px 20px', fontSize: 12, fontFamily: F.mono, fontWeight: activeTab === tab.key ? 600 : 400,
+            color: activeTab === tab.key ? C.text : C.textTer,
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            borderBottom: activeTab === tab.key ? `2px solid ${C.info}` : '2px solid transparent',
+            transition: 'all 0.2s',
+          }}
+          onMouseEnter={e => { if (activeTab !== tab.key) (e.currentTarget as any).style.color = C.textSec; }}
+          onMouseLeave={e => { if (activeTab !== tab.key) (e.currentTarget as any).style.color = C.textTer; }}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        {/* Pillar Breakdown */}
-        <Card>
-          <SectionLabel right={<span style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer }}>WEIGHTED MODEL</span>}>
-            Pillar Breakdown
-          </SectionLabel>
-          <div style={{ marginTop: 12 }}>
-            {PILLAR_KEYS.map(k => {
-              const p = pillars[k];
-              const meta = PILLAR_META[k];
-              if (!p) return null;
-              const isOpen = expandedPillar === k;
-              return (
-                <div key={k}>
-                  <button onClick={() => setExpandedPillar(isOpen ? null : k)} style={{
-                    display: 'grid', gridTemplateColumns: '110px 40px 1fr 44px auto', alignItems: 'center', gap: 10,
-                    width: '100%', padding: '8px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                    background: isOpen ? C.accentGlow : 'transparent', textAlign: 'left',
-                    transition: 'background 0.2s',
-                  }}
-                  onMouseEnter={e => { if (!isOpen) (e.currentTarget as any).style.background = `${C.surface}`; }}
-                  onMouseLeave={e => { if (!isOpen) (e.currentTarget as any).style.background = 'transparent'; }}>
-                    <span style={{ fontSize: 12, color: C.text, fontWeight: 500, fontFamily: F.body }}>{meta.label}</span>
-                    <span style={{ fontSize: 14, fontFamily: F.mono, fontWeight: 700, color: scoreColor(p.score) }}>{p.score}</span>
-                    <MiniBar value={p.score} color={scoreColor(p.score)} />
-                    <span style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer }}>{meta.weight}%</span>
-                    <span style={{ fontSize: 10, fontFamily: F.mono, color: C.textSec }}>
-                      {Object.entries(p.detail || {}).map(([dk,dv]) => `${dv} ${dk.replace(/_/g,' ')}`).slice(0,1).join('')}
-                    </span>
-                  </button>
-                  {isOpen && (
-                    <div style={{
-                      margin: '4px 10px 8px', padding: '10px 14px', borderRadius: 8,
-                      background: C.accentGlow, border: `1px solid ${C.accentBorder}`,
-                    }}>
-                      <div style={{ fontSize: 10, fontFamily: F.mono, color: C.accent, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
-                        {meta.label} — Risk Drivers
-                      </div>
-                      {Object.entries(p.detail || {}).map(([dk, dv]) => (
-                        <div key={dk} style={{ fontSize: 12, fontFamily: F.body, color: C.textSec, padding: '2px 0' }}>
-                          <span style={{ color: C.text, fontFamily: F.mono, fontWeight: 600 }}>{String(dv)}</span>
-                          {' '}{dk.replace(/_/g, ' ')}
+      {/* ═══ Tab Content ═══ */}
+
+      {/* ── Risk Posture Tab ── */}
+      {activeTab === 'risk' && (
+        <>
+          {/* Risk Radar + Pillar Breakdown */}
+          <div style={{ ...fadeIn(250), display: 'grid', gridTemplateColumns: '280px 1fr', gap: 22, marginTop: 22 }}>
+            <Card>
+              <SectionLabel>Risk Radar</SectionLabel>
+              <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}>
+                <RadarChart pillars={pillars} />
+              </div>
+            </Card>
+            <Card>
+              <SectionLabel right={<span style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer }}>WEIGHTED MODEL</span>}>
+                Pillar Breakdown
+              </SectionLabel>
+              <div style={{ marginTop: 12 }}>
+                {PILLAR_KEYS.map(k => {
+                  const p = pillars[k];
+                  const meta = PILLAR_META[k];
+                  if (!p) return null;
+                  const isOpen = expandedPillar === k;
+                  return (
+                    <div key={k}>
+                      <button onClick={() => setExpandedPillar(isOpen ? null : k)} style={{
+                        display: 'grid', gridTemplateColumns: '110px 40px 1fr 44px auto', alignItems: 'center', gap: 10,
+                        width: '100%', padding: '8px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                        background: isOpen ? C.accentGlow : 'transparent', textAlign: 'left',
+                        transition: 'background 0.2s',
+                      }}
+                      onMouseEnter={e => { if (!isOpen) (e.currentTarget as any).style.background = `${C.surface}`; }}
+                      onMouseLeave={e => { if (!isOpen) (e.currentTarget as any).style.background = 'transparent'; }}>
+                        <span style={{ fontSize: 12, color: C.text, fontWeight: 500, fontFamily: F.body }}>{meta.label}</span>
+                        <span style={{ fontSize: 14, fontFamily: F.mono, fontWeight: 700, color: scoreColor(p.score) }}>{p.score}</span>
+                        <MiniBar value={p.score} color={scoreColor(p.score)} />
+                        <span style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer }}>{meta.weight}%</span>
+                        <span style={{ fontSize: 10, fontFamily: F.mono, color: C.textSec }}>
+                          {Object.entries(p.detail || {}).map(([dk,dv]) => `${dv} ${dk.replace(/_/g,' ')}`).slice(0,1).join('')}
+                        </span>
+                      </button>
+                      {isOpen && (
+                        <div style={{
+                          margin: '4px 10px 8px', padding: '10px 14px', borderRadius: 8,
+                          background: C.accentGlow, border: `1px solid ${C.accentBorder}`,
+                        }}>
+                          <div style={{ fontSize: 10, fontFamily: F.mono, color: C.accent, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                            {meta.label} — Risk Drivers
+                          </div>
+                          {Object.entries(p.detail || {}).map(([dk, dv]) => (
+                            <div key={dk} style={{ fontSize: 12, fontFamily: F.body, color: C.textSec, padding: '2px 0' }}>
+                              <span style={{ color: C.text, fontFamily: F.mono, fontWeight: 600 }}>{String(dv)}</span>
+                              {' '}{dk.replace(/_/g, ' ')}
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          </div>
+
+          {/* Attack Opportunity Snapshot */}
+          <div style={{ ...fadeIn(350), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
+            <AttackCard title="Privileged NHIs" value={atk?.privileged_nhi_count ?? 0}
+              subtitle={`${pct(atk?.privileged_nhi_count ?? 0, latest?.total_identities ?? 1)}% of high privilege from machines`}
+              severity="critical" />
+            <AttackCard title="Dormant Privileged" value={atk?.dormant_privileged_count ?? 0}
+              subtitle="Unused >90 days with active roles" severity="high" />
+            <AttackCard title="Subscription Access" value={atk?.multi_sub_count ?? 0}
+              subtitle="Contributor+ at subscription scope" severity="warning" />
+            <AttackCard title="RBAC Modifiers" value={atk?.rbac_modifier_count ?? 0}
+              subtitle="Can alter access policies directly" severity="critical" />
+          </div>
+
+          {/* NHI Dominance */}
+          <div style={fadeIn(450)}>
+            <Card style={{ marginTop: 22 }}>
+              <SectionLabel>NHI Dominance</SectionLabel>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                  Privilege Distribution
+                </div>
+                <StackedBar segments={[
+                  { value: nhi?.nhi_pct ?? 0, color: C.high, label: `Non-Human ${nhi?.nhi_pct ?? 0}%` },
+                  { value: 100 - (nhi?.nhi_pct ?? 0), color: C.info, label: `Human ${100 - (nhi?.nhi_pct ?? 0)}%` },
+                ]} />
+
+                <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, marginTop: 14 }}>
+                  Ownership Risk
+                </div>
+                <StackedBar segments={[
+                  { value: gov?.ownership_coverage_pct != null ? (100 - gov.ownership_coverage_pct) : 100, color: C.critical, label: `NHI Unowned ${gov?.ownership_coverage_pct != null ? (100 - gov.ownership_coverage_pct) : 100}%` },
+                  { value: gov?.ownership_coverage_pct ?? 0, color: C.good, label: `Owned ${gov?.ownership_coverage_pct ?? 0}%` },
+                ]} />
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 14 }}>
+                  <StatCell label="Total SPNs" value={nhi?.service_principal ?? 0} color={C.textSec} />
+                  <StatCell label="Unowned" value={insights?.action_items?.unowned_spn_count ?? 0} color={C.critical} />
+                  <StatCell label="High Priv" value={atk?.privileged_nhi_count ?? 0} color={C.high} />
+                  <StatCell label="Used 24h" value={di?.total_scanned ?? '—'} color={C.good} />
+                  <StatCell label="Expiring" value={insights?.action_items?.expiring_credential_count ?? 0} color={C.warning} />
+                  <StatCell label="PIM" value={`${gov?.pim_adoption_pct ?? 0}%`} color={C.purple} />
+                </div>
+              </div>
+            </Card>
+          </div>
+        </>
+      )}
+
+      {/* ── Remediation Tab ── */}
+      {activeTab === 'remediation' && (
+        <div style={fadeIn(250)}>
+          <Card style={{ marginTop: 22 }}>
+            <SectionLabel accent right={
+              <span style={{ fontSize: 12, fontFamily: F.mono, color: C.accent, fontWeight: 700 }}>
+                Potential Gain: <span style={{ textShadow: `0 0 12px ${C.accent}40` }}>+{improvPot} pts</span>
+              </span>
+            }>
+              Highest Impact Remediation
+            </SectionLabel>
+            <div style={{ marginTop: 14 }}>
+              {plan.length === 0 ? (
+                <div style={{ fontSize: 12, color: C.textTer, padding: 16, textAlign: 'center', fontFamily: F.body }}>
+                  No remediation items — run a discovery scan to generate recommendations
+                </div>
+              ) : plan.slice(0, 5).map((item: any, i: number) => (
+                <RemediationRow key={i} rank={i + 1} item={item} />
+              ))}
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* ── Compliance Tab ── */}
+      {activeTab === 'compliance' && (
+        <div style={fadeIn(250)}>
+          <Card style={{ marginTop: 22 }}>
+            <SectionLabel right={
+              <Badge label="Identity Controls Only" color={C.critical} />
+            }>
+              Compliance Posture
+            </SectionLabel>
+            <ComplianceSection compliance={compliance} remPct={remSum?.completion_pct} saGovPct={gov?.dormant_cleanup_pct} />
+          </Card>
+        </div>
+      )}
+
+      {/* ── Governance Tab ── */}
+      {activeTab === 'governance' && (
+        <div style={{ ...fadeIn(250), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
+          <GovCard icon={<GovIcon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />}
+            label="Ownership Coverage" value={`${gov?.ownership_coverage_pct ?? 0}%`}
+            target="80%" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />
+          <GovCard icon={<GovIcon d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />}
+            label="PIM Coverage" value={`${gov?.pim_adoption_pct ?? 0}%`}
+            target="90%" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />
+          <GovCard icon={<GovIcon d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5h6M9 14l2 2 4-4" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />}
+            label="Privileged Under Review" value={`${gov?.privileged_under_review_pct ?? 0}%`}
+            target="100%" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />
+          <GovCard icon={<GovIcon d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />}
+            label="Access Reviews Done" value={`${gov?.access_reviews_done ?? 0}`}
+            target="95%" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />
+        </div>
+      )}
+
+      {/* ── Trends Tab ── */}
+      {activeTab === 'trends' && (
+        <>
+          {/* Risk Movement */}
+          <div style={fadeIn(250)}>
+            <Card style={{ marginTop: 22 }}>
+              <SectionLabel>Risk Movement — 30 Days</SectionLabel>
+              <div style={{ marginTop: 12 }}>
+                <MovementRow label="Critical Identities" prev={prev?.critical_count} curr={latest?.critical_count} />
+                <MovementRow label="High-Risk Identities" prev={prev?.high_count} curr={latest?.high_count} />
+                <MovementRow label="Total Identities" prev={prev?.total_identities} curr={latest?.total_identities} />
+                {driftData && (
+                  <>
+                    <MovementRow label="New Identities" prev={0} curr={driftData.new_identities_count ?? 0} />
+                    <MovementRow label="Removed" prev={0} curr={driftData.removed_identities_count ?? 0} inverted />
+                  </>
+                )}
+              </div>
+              {/* Warning block */}
+              {(atk?.privileged_nhi_count > 0 || atk?.rbac_modifier_count > 0) && (
+                <div style={{
+                  marginTop: 14, padding: '10px 14px', borderRadius: 8,
+                  background: `${C.critical}06`, border: `1px solid ${C.critical}12`,
+                }}>
+                  <div style={{ fontSize: 9, fontFamily: F.mono, color: C.critical, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 6, fontWeight: 700 }}>
+                    If No Action Taken
+                  </div>
+                  {atk?.privileged_nhi_count > 0 && (
+                    <div style={{ fontSize: 12, color: C.textSec, fontFamily: F.body, padding: '2px 0' }}>
+                      {atk.privileged_nhi_count} privileged NHIs remain without review
                     </div>
                   )}
+                  {atk?.rbac_modifier_count > 0 && (
+                    <div style={{ fontSize: 12, color: C.textSec, fontFamily: F.body, padding: '2px 0' }}>
+                      {atk.rbac_modifier_count} RBAC modifiers unreviewed
+                    </div>
+                  )}
+                  <div style={{ fontSize: 12, color: C.textSec, fontFamily: F.body, padding: '2px 0' }}>
+                    Estimated breach impact: <span style={{ color: C.high, fontWeight: 600 }}>Moderate–High</span>
+                  </div>
                 </div>
-              );
-            })}
+              )}
+            </Card>
           </div>
-        </Card>
-      </div>
 
-      {/* ═══ Section 3: Attack Opportunity Snapshot ═══ */}
-      <div style={{ ...fadeIn(300), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
-        <AttackCard title="Privileged NHIs" value={atk?.privileged_nhi_count ?? 0}
-          subtitle={`${pct(atk?.privileged_nhi_count ?? 0, latest?.total_identities ?? 1)}% of high privilege from machines`}
-          severity="critical" />
-        <AttackCard title="Dormant Privileged" value={atk?.dormant_privileged_count ?? 0}
-          subtitle="Unused >90 days with active roles" severity="high" />
-        <AttackCard title="Subscription Access" value={atk?.multi_sub_count ?? 0}
-          subtitle="Contributor+ at subscription scope" severity="warning" />
-        <AttackCard title="RBAC Modifiers" value={atk?.rbac_modifier_count ?? 0}
-          subtitle="Can alter access policies directly" severity="critical" />
-      </div>
-
-      {/* ═══ Section 4: Risk Reduction Plan ═══ */}
-      <div style={fadeIn(400)}>
-        <Card style={{ marginTop: 22 }}>
-          <SectionLabel accent right={
-            <span style={{ fontSize: 12, fontFamily: F.mono, color: C.accent, fontWeight: 700 }}>
-              Potential Gain: <span style={{ textShadow: `0 0 12px ${C.accent}40` }}>+{improvPot} pts</span>
+          {/* Data Integrity Footer */}
+          <div style={{
+            ...fadeIn(350), marginTop: 22, padding: '12px 20px', borderRadius: 14,
+            background: C.card, border: `1px solid ${C.border}`,
+            display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+            fontSize: 10, fontFamily: F.mono, color: C.textTer,
+          }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%', background: C.good,
+                boxShadow: `0 0 8px ${C.good}60`, display: 'inline-block',
+              }} />
+              <span>Confidence: <span style={{ color: C.text }}>{di?.confidence || 'High'}</span></span>
             </span>
-          }>
-            Highest Impact Remediation
-          </SectionLabel>
-          <div style={{ marginTop: 14 }}>
-            {plan.length === 0 ? (
-              <div style={{ fontSize: 12, color: C.textTer, padding: 16, textAlign: 'center', fontFamily: F.body }}>
-                No remediation items — run a discovery scan to generate recommendations
-              </div>
-            ) : plan.slice(0, 5).map((item: any, i: number) => (
-              <RemediationRow key={i} rank={i + 1} item={item} />
-            ))}
+            <span style={{ color: C.textDim }}>·</span>
+            <span>Last Scan: <span style={{ color: C.textSec }}>{di?.last_scan ? new Date(di.last_scan).toUTCString().replace('GMT','UTC') : '—'}</span></span>
+            <span style={{ color: C.textDim }}>·</span>
+            <span>Sources: <span style={{ color: C.textSec }}>Azure RBAC, Entra ID, Graph API</span></span>
+            <span style={{ color: C.textDim }}>·</span>
+            <span>Duration: <span style={{ color: C.textSec }}>{di?.scan_duration_seconds ? `${di.scan_duration_seconds}s` : '—'}</span></span>
+            <span style={{ color: C.textDim }}>·</span>
+            <span>Completeness: <span style={{ color: C.textSec }}>{di?.data_completeness_pct ?? '—'}%</span></span>
           </div>
-        </Card>
-      </div>
-
-      {/* ═══ Section 5: Risk Movement + NHI Dominance ═══ */}
-      <div style={{ ...fadeIn(500), display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 22, marginTop: 22 }}>
-        {/* Risk Movement */}
-        <Card>
-          <SectionLabel>Risk Movement — 30 Days</SectionLabel>
-          <div style={{ marginTop: 12 }}>
-            <MovementRow label="Critical Identities" prev={prev?.critical_count} curr={latest?.critical_count} />
-            <MovementRow label="High-Risk Identities" prev={prev?.high_count} curr={latest?.high_count} />
-            <MovementRow label="Total Identities" prev={prev?.total_identities} curr={latest?.total_identities} />
-            {driftData && (
-              <>
-                <MovementRow label="New Identities" prev={0} curr={driftData.new_identities_count ?? 0} />
-                <MovementRow label="Removed" prev={0} curr={driftData.removed_identities_count ?? 0} inverted />
-              </>
-            )}
-          </div>
-          {/* Warning block */}
-          {(atk?.privileged_nhi_count > 0 || atk?.rbac_modifier_count > 0) && (
-            <div style={{
-              marginTop: 14, padding: '10px 14px', borderRadius: 8,
-              background: `${C.critical}06`, border: `1px solid ${C.critical}12`,
-            }}>
-              <div style={{ fontSize: 9, fontFamily: F.mono, color: C.critical, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 6, fontWeight: 700 }}>
-                If No Action Taken
-              </div>
-              {atk?.privileged_nhi_count > 0 && (
-                <div style={{ fontSize: 12, color: C.textSec, fontFamily: F.body, padding: '2px 0' }}>
-                  {atk.privileged_nhi_count} privileged NHIs remain without review
-                </div>
-              )}
-              {atk?.rbac_modifier_count > 0 && (
-                <div style={{ fontSize: 12, color: C.textSec, fontFamily: F.body, padding: '2px 0' }}>
-                  {atk.rbac_modifier_count} RBAC modifiers unreviewed
-                </div>
-              )}
-              <div style={{ fontSize: 12, color: C.textSec, fontFamily: F.body, padding: '2px 0' }}>
-                Estimated breach impact: <span style={{ color: C.high, fontWeight: 600 }}>Moderate–High</span>
-              </div>
-            </div>
-          )}
-        </Card>
-
-        {/* NHI Dominance */}
-        <Card>
-          <SectionLabel>NHI Dominance</SectionLabel>
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
-              Privilege Distribution
-            </div>
-            <StackedBar segments={[
-              { value: nhi?.nhi_pct ?? 0, color: C.high, label: `Non-Human ${nhi?.nhi_pct ?? 0}%` },
-              { value: 100 - (nhi?.nhi_pct ?? 0), color: C.info, label: `Human ${100 - (nhi?.nhi_pct ?? 0)}%` },
-            ]} />
-
-            <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, marginTop: 14 }}>
-              Ownership Risk
-            </div>
-            <StackedBar segments={[
-              { value: gov?.ownership_coverage_pct != null ? (100 - gov.ownership_coverage_pct) : 100, color: C.critical, label: `NHI Unowned ${gov?.ownership_coverage_pct != null ? (100 - gov.ownership_coverage_pct) : 100}%` },
-              { value: gov?.ownership_coverage_pct ?? 0, color: C.good, label: `Owned ${gov?.ownership_coverage_pct ?? 0}%` },
-            ]} />
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 14 }}>
-              <StatCell label="Total SPNs" value={nhi?.service_principal ?? 0} color={C.textSec} />
-              <StatCell label="Unowned" value={insights?.action_items?.unowned_spn_count ?? 0} color={C.critical} />
-              <StatCell label="High Priv" value={atk?.privileged_nhi_count ?? 0} color={C.high} />
-              <StatCell label="Used 24h" value={di?.total_scanned ?? '—'} color={C.good} />
-              <StatCell label="Expiring" value={insights?.action_items?.expiring_credential_count ?? 0} color={C.warning} />
-              <StatCell label="PIM" value={`${gov?.pim_adoption_pct ?? 0}%`} color={C.purple} />
-            </div>
-          </div>
-        </Card>
-      </div>
-
-      {/* ═══ Section 6: Compliance Posture ═══ */}
-      <div style={fadeIn(600)}>
-        <Card style={{ marginTop: 22 }}>
-          <SectionLabel right={
-            <Badge label="Identity Controls Only" color={C.critical} />
-          }>
-            Compliance Posture
-          </SectionLabel>
-          <ComplianceSection compliance={compliance} remPct={remSum?.completion_pct} saGovPct={gov?.dormant_cleanup_pct} />
-        </Card>
-      </div>
-
-      {/* ═══ Section 7: Governance Maturity ═══ */}
-      <div style={{ ...fadeIn(700), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
-        <GovCard icon={<GovIcon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />}
-          label="Ownership Coverage" value={`${gov?.ownership_coverage_pct ?? 0}%`}
-          target="80%" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />
-        <GovCard icon={<GovIcon d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />}
-          label="PIM Coverage" value={`${gov?.pim_adoption_pct ?? 0}%`}
-          target="90%" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />
-        <GovCard icon={<GovIcon d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5h6M9 14l2 2 4-4" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />}
-          label="Privileged Under Review" value={`${gov?.privileged_under_review_pct ?? 0}%`}
-          target="100%" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />
-        <GovCard icon={<GovIcon d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />}
-          label="Access Reviews Done" value={`${gov?.access_reviews_done ?? 0}`}
-          target="95%" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />
-      </div>
-
-      {/* ═══ Section 8: Data Integrity Footer ═══ */}
-      <div style={{
-        ...fadeIn(800), marginTop: 22, padding: '12px 20px', borderRadius: 14,
-        background: C.card, border: `1px solid ${C.border}`,
-        display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
-        fontSize: 10, fontFamily: F.mono, color: C.textTer,
-      }}>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <span style={{
-            width: 6, height: 6, borderRadius: '50%', background: C.good,
-            boxShadow: `0 0 8px ${C.good}60`, display: 'inline-block',
-          }} />
-          <span>Confidence: <span style={{ color: C.text }}>{di?.confidence || 'High'}</span></span>
-        </span>
-        <span style={{ color: C.textDim }}>·</span>
-        <span>Last Scan: <span style={{ color: C.textSec }}>{di?.last_scan ? new Date(di.last_scan).toUTCString().replace('GMT','UTC') : '—'}</span></span>
-        <span style={{ color: C.textDim }}>·</span>
-        <span>Sources: <span style={{ color: C.textSec }}>Azure RBAC, Entra ID, Graph API</span></span>
-        <span style={{ color: C.textDim }}>·</span>
-        <span>Duration: <span style={{ color: C.textSec }}>{di?.scan_duration_seconds ? `${di.scan_duration_seconds}s` : '—'}</span></span>
-        <span style={{ color: C.textDim }}>·</span>
-        <span>Completeness: <span style={{ color: C.textSec }}>{di?.data_completeness_pct ?? '—'}%</span></span>
-      </div>
+        </>
+      )}
     </div>
   );
 }
