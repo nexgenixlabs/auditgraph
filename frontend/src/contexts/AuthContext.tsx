@@ -53,7 +53,9 @@ function resolveApiUrl(url: string): string {
 
 /** Detect which portal we're running in based on current URL path. */
 function detectPortal(): PortalContext {
-  return window.location.pathname.startsWith('/admin') ? 'admin' : 'client';
+  if (window.location.pathname.startsWith('/admin')) return 'admin';
+  if (window.location.hostname.startsWith('admin.')) return 'admin';
+  return 'client';
 }
 
 /** Get localStorage key names for a given portal context. */
