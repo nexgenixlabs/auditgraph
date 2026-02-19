@@ -414,13 +414,17 @@ export default function Overview() {
 
       {/* ═══ Section 7: Governance Maturity ═══ */}
       <div style={{ ...fadeIn(700), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
-        <GovCard icon="\uD83D\uDC64" label="Ownership Coverage" value={`${gov?.ownership_coverage_pct ?? 0}%`}
+        <GovCard icon={<GovIcon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" />}
+          label="Ownership Coverage" value={`${gov?.ownership_coverage_pct ?? 0}%`}
           target="80%" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />
-        <GovCard icon="\uD83D\uDD12" label="PIM Coverage" value={`${gov?.pim_adoption_pct ?? 0}%`}
+        <GovCard icon={<GovIcon d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" />}
+          label="PIM Coverage" value={`${gov?.pim_adoption_pct ?? 0}%`}
           target="90%" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />
-        <GovCard icon="\uD83D\uDCCB" label="Privileged Under Review" value={`${gov?.privileged_under_review_pct ?? 0}%`}
+        <GovCard icon={<GovIcon d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5h6M9 14l2 2 4-4" />}
+          label="Privileged Under Review" value={`${gov?.privileged_under_review_pct ?? 0}%`}
           target="100%" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />
-        <GovCard icon="\u2705" label="Access Reviews Done" value={`${gov?.access_reviews_done ?? 0}`}
+        <GovCard icon={<GovIcon d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3" />}
+          label="Access Reviews Done" value={`${gov?.access_reviews_done ?? 0}`}
           target="95%" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />
       </div>
 
@@ -794,11 +798,25 @@ function ComplianceRing({ pct: percent, size = 52 }: { pct: number; size?: numbe
   );
 }
 
-const TIER_CONFIG: Record<string, { icon: string; label: string }> = {
-  core: { icon: '\uD83C\uDFDB', label: 'CORE GOVERNANCE' },
-  industry: { icon: '\uD83C\uDFE5', label: 'INDUSTRY' },
-  privacy: { icon: '\uD83C\uDF0D', label: 'PRIVACY' },
-  benchmark: { icon: '\uD83D\uDD12', label: 'BENCHMARK' },
+// SVG icon helpers for consistent rendering (no emoji)
+const TierIcon = ({ d }: { d: string }) => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.textTer} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d={d} />
+  </svg>
+);
+const TIER_ICONS: Record<string, React.ReactNode> = {
+  core: <TierIcon d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6M9 9h.01M15 9h.01" />,
+  industry: <TierIcon d="M19 21V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v16M3 21h18M9 7h1M9 11h1M9 15h1M14 7h1M14 11h1M14 15h1" />,
+  privacy: <TierIcon d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10A15 15 0 0 1 12 2z" />,
+  benchmark: <TierIcon d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" />,
+  fallback: <TierIcon d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5h6" />,
+};
+
+const TIER_CONFIG: Record<string, { label: string }> = {
+  core: { label: 'CORE GOVERNANCE' },
+  industry: { label: 'INDUSTRY' },
+  privacy: { label: 'PRIVACY' },
+  benchmark: { label: 'BENCHMARK' },
 };
 
 function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; remPct?: number; saGovPct?: number }) {
@@ -815,12 +833,13 @@ function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; 
   return (
     <div style={{ marginTop: 14 }}>
       {Object.entries(tiers).map(([tier, fws]) => {
-        const tc = TIER_CONFIG[tier] || { icon: '📋', label: tier.toUpperCase() };
+        const tc = TIER_CONFIG[tier] || { label: tier.toUpperCase() };
+        const tierIcon = TIER_ICONS[tier] || TIER_ICONS.fallback;
         return (
           <div key={tier} style={{ marginBottom: 16 }}>
             {/* Tier divider */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-              <span style={{ fontSize: 14 }}>{tc.icon}</span>
+              <span style={{ display: 'inline-flex', opacity: 0.7 }}>{tierIcon}</span>
               <span style={{ fontSize: 10, fontFamily: F.mono, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, color: C.textTer }}>{tc.label}</span>
               <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${C.border}, transparent)` }} />
             </div>
@@ -871,13 +890,21 @@ function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; 
   );
 }
 
-function GovCard({ icon, label, value, target, color }: { icon: string; label: string; value: string; target: string; color: string }) {
+function GovIcon({ d }: { d: string }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.textTer} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d={d} />
+    </svg>
+  );
+}
+
+function GovCard({ icon, label, value, target, color }: { icon: React.ReactNode; label: string; value: string; target: string; color: string }) {
   return (
     <div style={{
       background: C.card, border: `1px solid ${C.border}`, borderRadius: 14,
       padding: 20, textAlign: 'center',
     }}>
-      <div style={{ fontSize: 16, opacity: 0.6, marginBottom: 6 }}>{icon}</div>
+      <div style={{ display: 'flex', justifyContent: 'center', opacity: 0.6, marginBottom: 6 }}>{icon}</div>
       <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
         {label}
       </div>
