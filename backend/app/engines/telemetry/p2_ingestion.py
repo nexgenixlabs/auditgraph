@@ -32,17 +32,23 @@ class P2TelemetryService:
         session = self._get_graph_client()
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # Build identity_id → db_id lookup from current run
+        # Build object_id → db_id lookup from current run
+        # Graph sign-in events use servicePrincipalId which is the SP's object_id, not appId
         cursor = self.db.conn.cursor()
         cursor.execute(
-            "SELECT id, identity_id FROM identities WHERE discovery_run_id = %s",
+            "SELECT id, object_id, identity_id FROM identities WHERE discovery_run_id = %s",
             (run_id,)
         )
-        id_map = {row[1]: row[0] for row in cursor.fetchall()}
+        id_map = {}
+        for row in cursor.fetchall():
+            if row[1]:  # object_id (primary match for sign-in events)
+                id_map[row[1]] = row[0]
+            if row[2]:  # identity_id / appId (fallback)
+                id_map[row[2]] = row[0]
         cursor.close()
 
         url = (
-            "https://graph.microsoft.com/v1.0/auditLogs/signIns"
+            "https://graph.microsoft.com/beta/auditLogs/signIns"
             f"?$filter=signInEventTypes/any(t:t eq 'servicePrincipal') and createdDateTime ge {cutoff}"
             "&$top=999"
             "&$orderby=createdDateTime desc"
@@ -51,7 +57,7 @@ class P2TelemetryService:
         total_ingested = 0
         while url:
             try:
-                resp = session.get(url, timeout=30)
+                resp = session.get(url, timeout=120)
                 if resp.status_code != 200:
                     print(f"  ⚠️ Graph sign-in API error: {resp.status_code} — {resp.text[:200]}")
                     break
