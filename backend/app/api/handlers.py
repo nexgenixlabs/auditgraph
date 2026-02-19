@@ -1103,7 +1103,6 @@ def save_app_settings():
     errors = []
     for key, value in data.items():
         if key not in VALID_KEYS:
-            errors.append(f"Unknown setting: {key}")
             continue
 
         value = str(value).strip()

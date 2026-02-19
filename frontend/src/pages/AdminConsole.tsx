@@ -44,7 +44,7 @@ function AdminLogin() {
     setError(null);
     setLoading(true);
     try {
-      const userData = await login(username, password);
+      const userData = await login(username, password, undefined, 'admin');
       const portalRole = userData?.portal_role;
       if (!portalRole || !(ALL_PORTAL_ROLES as string[]).includes(portalRole)) {
         setError('Access denied. This portal is for platform administrators only.');
