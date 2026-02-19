@@ -9453,10 +9453,20 @@ def simulate_risk(identity_id):
 
 # ─── Phase 52: Azure Resource Discovery ──────────────────────────
 
+_resource_tables_ensured = False
+
+def _ensure_resource_tables(db):
+    global _resource_tables_ensured
+    if not _resource_tables_ensured:
+        db._ensure_azure_storage_accounts_table()
+        db._ensure_azure_key_vaults_table()
+        _resource_tables_ensured = True
+
 def get_resources():
     """GET /api/resources — list storage accounts + key vaults with filters."""
     db = _db()
     try:
+        _ensure_resource_tables(db)
         tenant_id = _tenant_id()
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
@@ -9598,6 +9608,7 @@ def get_resource_stats():
     """GET /api/resources/stats — summary counts for dashboard. Supports ?resource_type= filter."""
     db = _db()
     try:
+        _ensure_resource_tables(db)
         tenant_id = _tenant_id()
         resource_type = request.args.get('resource_type', '')
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
@@ -9746,6 +9757,7 @@ def get_resource_detail(resource_id):
     if not resource_id.startswith('/'):
         resource_id = '/' + resource_id
     db = _db()
+    _ensure_resource_tables(db)
     try:
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
@@ -10200,6 +10212,7 @@ def get_data_security_summary():
     """GET /api/data-security/summary — component-based risk summary across storage + vaults."""
     db = _db()
     try:
+        _ensure_resource_tables(db)
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
