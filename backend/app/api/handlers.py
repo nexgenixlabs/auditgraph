@@ -14413,7 +14413,7 @@ def get_client_invoice(invoice_id):
 # ─── RBAC Hygiene Endpoints ────────────────────────────────────────────
 
 def get_rbac_hygiene_summary():
-    """GET /api/rbac-hygiene/summary — latest hygiene scan summary + score."""
+    """GET /api/rbac-hygiene/summary — latest hygiene scan summary + score (v2)."""
     db = _db()
     try:
         latest = db.get_rbac_hygiene_latest()
@@ -14425,6 +14425,10 @@ def get_rbac_hygiene_summary():
                 'total_findings': 0,
                 'by_rule': {},
                 'by_severity': {},
+                'exposure_index': {},
+                'tier_distribution': {},
+                'executive': {},
+                'drift': {'has_previous': False},
                 'analyzed_at': None,
                 'has_data': False,
             })
@@ -14436,6 +14440,10 @@ def get_rbac_hygiene_summary():
             'total_findings': latest['total_findings'],
             'by_rule': summary.get('by_rule', {}),
             'by_severity': summary.get('by_severity', {}),
+            'exposure_index': summary.get('exposure_index', {}),
+            'tier_distribution': summary.get('tier_distribution', {}),
+            'executive': summary.get('executive', {}),
+            'drift': summary.get('drift', {'has_previous': False}),
             'analyzed_at': latest['created_at'].isoformat() if latest.get('created_at') else None,
             'has_data': True,
         })
@@ -14492,7 +14500,7 @@ def get_rbac_hygiene_findings():
 
 
 def run_rbac_hygiene_scan():
-    """POST /api/rbac-hygiene/scan — trigger a fresh RBAC hygiene analysis."""
+    """POST /api/rbac-hygiene/scan — trigger a fresh RBAC hygiene analysis (v2)."""
     db = _db()
     try:
         from app.engines.rbac_hygiene import RbacHygieneEngine
@@ -14505,6 +14513,8 @@ def run_rbac_hygiene_scan():
             'grade': result['grade'],
             'total_findings': result['total_findings'],
             'total_assignments': result['total_assignments'],
+            'exposure_index': result.get('exposure_index', {}),
+            'tier_distribution': result.get('tier_distribution', {}),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500

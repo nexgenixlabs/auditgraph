@@ -7528,7 +7528,7 @@ class Database:
     # ─── RBAC Hygiene Methods ────────────────────────────────────────
 
     def save_rbac_hygiene_scan(self, result: dict, run_id=None) -> int:
-        """Persist an RBAC hygiene scan result."""
+        """Persist an RBAC hygiene scan result (v2 with exposure/executive/drift)."""
         _ensure_rbac_hygiene_table(self.conn)
         cursor = self.conn.cursor()
         import json as _json
@@ -7536,6 +7536,10 @@ class Database:
             'by_rule': result.get('by_rule', {}),
             'by_severity': result.get('by_severity', {}),
             'grade': result.get('grade', 'F'),
+            'exposure_index': result.get('exposure_index', {}),
+            'tier_distribution': result.get('tier_distribution', {}),
+            'executive': result.get('executive', {}),
+            'drift': result.get('drift', {}),
         }
         cursor.execute("""
             INSERT INTO rbac_hygiene_scans
