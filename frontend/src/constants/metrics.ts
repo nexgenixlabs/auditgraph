@@ -241,6 +241,62 @@ export const CATEGORY_LABELS_MULTI: Record<string, Record<string, string>> = {
   gcp:   { human_user: 'User', service_principal: 'Service Acct', guest: 'External' },
 };
 
+// ── SPN Exposure Intelligence ────────────────────────────────────────
+
+export const SPN_EXPOSURE_COMPONENTS: Record<string, { label: string; max: number; color: string }> = {
+  privilege:       { label: 'Privilege',       max: 40, color: '#ef4444' },
+  credential_risk: { label: 'Credential Risk', max: 25, color: '#f97316' },
+  exposure:        { label: 'Exposure',        max: 20, color: '#eab308' },
+  lifecycle:       { label: 'Lifecycle',        max: 10, color: '#8b5cf6' },
+  visibility:      { label: 'Visibility',      max: 5,  color: '#6b7280' },
+};
+
+export const EXPOSURE_THRESHOLDS = { critical: 80, high: 60, medium: 35, low: 0 } as const;
+
+export function getExposureLevel(score: number): string {
+  if (score >= EXPOSURE_THRESHOLDS.critical) return 'critical';
+  if (score >= EXPOSURE_THRESHOLDS.high) return 'high';
+  if (score >= EXPOSURE_THRESHOLDS.medium) return 'medium';
+  return 'low';
+}
+
+export const EXPOSURE_LEVEL_CONFIG: Record<string, { label: string; color: string; badgeClass: string }> = {
+  critical: { label: 'Critical', color: '#ef4444', badgeClass: 'bg-red-100 text-red-700' },
+  high:     { label: 'High',     color: '#f97316', badgeClass: 'bg-orange-100 text-orange-700' },
+  medium:   { label: 'Medium',   color: '#eab308', badgeClass: 'bg-yellow-100 text-yellow-700' },
+  low:      { label: 'Low',      color: '#22c55e', badgeClass: 'bg-green-100 text-green-700' },
+};
+
+export const LIFECYCLE_STATE_CONFIG: Record<string, { label: string; badgeClass: string; tooltip: string }> = {
+  active:          { label: 'Active',          badgeClass: 'bg-green-100 text-green-700',  tooltip: 'High-confidence activity detected' },
+  possibly_active: { label: 'Possibly Active', badgeClass: 'bg-blue-100 text-blue-700',   tooltip: 'Some activity signals detected' },
+  likely_dormant:  { label: 'Likely Dormant',  badgeClass: 'bg-orange-100 text-orange-700', tooltip: 'Weak activity signals — likely unused' },
+  blind:           { label: 'Visibility Gap',  badgeClass: 'bg-gray-100 text-gray-600',   tooltip: 'No telemetry — cannot determine usage' },
+};
+
+export const OWNER_STATUS_CONFIG: Record<string, { label: string; badgeClass: string }> = {
+  owned:        { label: 'Owned',        badgeClass: 'bg-green-100 text-green-700' },
+  single_owner: { label: 'Single Owner', badgeClass: 'bg-yellow-100 text-yellow-700' },
+  orphaned:     { label: 'Orphaned',     badgeClass: 'bg-red-100 text-red-700' },
+  unknown:      { label: 'Unknown',      badgeClass: 'bg-gray-100 text-gray-500' },
+};
+
+export const SCOPE_FLAG_CONFIG: Record<string, { label: string; badgeClass: string }> = {
+  tenant:           { label: 'Tenant',      badgeClass: 'bg-red-100 text-red-700' },
+  management_group: { label: 'Mgmt Group',  badgeClass: 'bg-red-100 text-red-700' },
+  subscription:     { label: 'Subscription', badgeClass: 'bg-orange-100 text-orange-700' },
+  resource_group:   { label: 'RG',          badgeClass: 'bg-yellow-100 text-yellow-700' },
+  resource:         { label: 'Resource',    badgeClass: 'bg-green-100 text-green-700' },
+};
+
+// ── Workload Identity Type Config ────────────────────────────────────
+
+export const WORKLOAD_TYPE_CONFIG: Record<string, { label: string; badgeClass: string; shortLabel: string }> = {
+  spn:              { label: 'Service Principal', badgeClass: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300', shortLabel: 'SPN' },
+  app_registration: { label: 'App Registration',  badgeClass: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300', shortLabel: 'APP' },
+  managed_identity: { label: 'Managed Identity',  badgeClass: 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300', shortLabel: 'MI' },
+};
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 export function safeLower(v: any): string {

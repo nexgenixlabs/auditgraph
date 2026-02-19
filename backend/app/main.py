@@ -232,6 +232,10 @@ from app.api.handlers import (
     get_rbac_hygiene_findings,
     run_rbac_hygiene_scan,
     get_rbac_hygiene_history,
+    get_workload_stats,
+    get_workload_list,
+    get_workload_detail,
+    get_workload_findings,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -1401,6 +1405,23 @@ def create_app():
     @app.get("/api/app-registrations/<app_id>")
     def app_reg_detail(app_id):
         return get_app_reg_detail(app_id)
+
+    # Workload Identity Exposure (Unified)
+    @app.get("/api/workload-identities/stats")
+    def workload_stats():
+        return get_workload_stats()
+
+    @app.get("/api/workload-identities/findings")
+    def workload_findings():
+        return get_workload_findings()
+
+    @app.get("/api/workload-identities")
+    def workload_list():
+        return get_workload_list()
+
+    @app.get("/api/workload-identities/<path:workload_id>")
+    def workload_detail(workload_id):
+        return get_workload_detail(workload_id)
 
     # Phase 72: Data Retention
     @app.get("/api/system/storage")

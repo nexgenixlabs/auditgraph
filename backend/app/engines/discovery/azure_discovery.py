@@ -268,6 +268,15 @@ class AzureDiscoveryEngine:
         saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map, pim_map, ca_policies)
         print(f"  ✓ Saved {saved_count} identities")
 
+        # Step 9a: Compute Workload Identity Exposure Scores
+        print("\n🎯 Computing workload identity exposure scores...")
+        try:
+            self._compute_workload_exposure(run_id)
+        except Exception as e:
+            print(f"  ✗ Workload exposure computation error: {e}")
+            import traceback
+            traceback.print_exc()
+
         # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
         print("\n🗄️  Discovering Azure Resources...")
         storage_accounts = self._discover_storage_accounts()
@@ -2680,7 +2689,155 @@ class AzureDiscoveryEngine:
         self.db.sweep_microsoft_flag(run_id)
 
         return saved_count
-    
+
+    def _compute_workload_exposure(self, run_id):
+        """Batch-compute exposure scores for all workload identities (SPNs, MIs, App Regs)."""
+        from app.engines.risk.spn_risk_engine import WorkloadExposureEngine
+        from psycopg2.extras import RealDictCursor as RDC
+
+        engine = WorkloadExposureEngine()
+        cursor = self.db.conn.cursor(cursor_factory=RDC)
+
+        # ── Part 1: SPN + Managed Identity scoring ──────────────────
+        cursor.execute("""
+            SELECT id, identity_id, object_id, display_name, identity_category,
+                   risk_level, risk_score, activity_status, last_sign_in,
+                   created_datetime, service_principal_type, credential_risk,
+                   ca_coverage_status, enabled, sign_in_audience
+            FROM identities
+            WHERE discovery_run_id = %s
+              AND identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+              AND NOT COALESCE(is_microsoft_system, false)
+        """, (run_id,))
+        spn_rows = cursor.fetchall()
+
+        roles_map = {}
+        entra_map = {}
+        creds_map = {}
+        perms_map = {}
+        owners_map = {}
+        pim_map = {}
+
+        if spn_rows:
+            db_ids = [row['id'] for row in spn_rows]
+            ph = ','.join(['%s'] * len(db_ids))
+
+            # Batch-fetch roles
+            cursor.execute(f"SELECT identity_db_id, role_name, scope_type, scope, created_on FROM role_assignments WHERE identity_db_id IN ({ph})", db_ids)
+            for r in cursor.fetchall():
+                roles_map.setdefault(r['identity_db_id'], []).append(dict(r))
+
+            # Batch-fetch entra roles
+            cursor.execute(f"SELECT identity_db_id, role_name, risk_level FROM entra_role_assignments WHERE identity_db_id IN ({ph})", db_ids)
+            for r in cursor.fetchall():
+                entra_map.setdefault(r['identity_db_id'], []).append(dict(r))
+
+            # Batch-fetch credentials
+            cursor.execute(f"SELECT identity_db_id, credential_type, start_datetime, end_datetime, display_name, key_id FROM credentials WHERE identity_db_id IN ({ph})", db_ids)
+            for r in cursor.fetchall():
+                creds_map.setdefault(r['identity_db_id'], []).append(dict(r))
+
+            # Batch-fetch permissions
+            cursor.execute(f"SELECT identity_db_id, permission_id, permission_name, permission_type FROM graph_api_permissions WHERE identity_db_id IN ({ph})", db_ids)
+            for r in cursor.fetchall():
+                perms_map.setdefault(r['identity_db_id'], []).append(dict(r))
+
+            # Batch-fetch owners
+            cursor.execute(f"SELECT identity_db_id, owner_display_name, owner_upn FROM sp_ownership WHERE identity_db_id IN ({ph})", db_ids)
+            for r in cursor.fetchall():
+                owners_map.setdefault(r['identity_db_id'], []).append(dict(r))
+
+            # Batch-fetch PIM data
+            try:
+                cursor.execute(f"SELECT identity_db_id, role_name, start_datetime FROM pim_eligible_assignments WHERE identity_db_id IN ({ph})", db_ids)
+                for r in cursor.fetchall():
+                    pim_map.setdefault(r['identity_db_id'], {'eligible': [], 'activations': []})
+                    pim_map[r['identity_db_id']]['eligible'].append(dict(r))
+                cursor.execute(f"SELECT identity_db_id, role_name, start_datetime FROM pim_activations WHERE identity_db_id IN ({ph})", db_ids)
+                for r in cursor.fetchall():
+                    pim_map.setdefault(r['identity_db_id'], {'eligible': [], 'activations': []})
+                    pim_map[r['identity_db_id']]['activations'].append(dict(r))
+            except Exception:
+                pass  # PIM tables may not exist
+
+        scored = 0
+        critical_count = 0
+        for row in (spn_rows or []):
+            db_id = row['id']
+            identity_data = dict(row)
+            cat = (identity_data.get('identity_category') or '').lower()
+            result = engine.compute_exposure(
+                identity_data,
+                roles_map.get(db_id, []),
+                entra_map.get(db_id, []),
+                creds_map.get(db_id, []),
+                perms_map.get(db_id, []),
+                owners_map.get(db_id, []),
+                pim_map.get(db_id, {}),
+                identity_type=cat,
+            )
+            self.db.save_spn_exposure(db_id, result, result.get('findings', []), run_id)
+            scored += 1
+            if result['scores']['total'] >= 80:
+                critical_count += 1
+
+        print(f"  ✓ Computed exposure for {scored} SPNs/MIs ({critical_count} critical)")
+
+        # ── Part 2: App Registration scoring ─────────────────────────
+        try:
+            cursor.execute("""
+                SELECT id, app_id, display_name, sign_in_audience, owner_count,
+                       owners, has_service_principal, linked_spn_id,
+                       spn_last_sign_in, spn_activity_status, created_datetime,
+                       high_risk_permissions, required_permissions,
+                       application_permission_count, credential_details,
+                       has_expired_credential, has_expiring_soon,
+                       has_localhost_redirect, has_http_redirect
+                FROM app_registrations
+                WHERE discovery_run_id = %s
+            """, (run_id,))
+            app_reg_rows = cursor.fetchall()
+        except Exception:
+            app_reg_rows = []
+
+        if app_reg_rows:
+            # Build linked SPN lookup maps
+            linked_spn_ids = set()
+            for ar in app_reg_rows:
+                if ar.get('linked_spn_id'):
+                    linked_spn_ids.add(ar['linked_spn_id'])
+
+            linked_roles_map = {}
+            linked_entra_map = {}
+            if linked_spn_ids:
+                lph = ','.join(['%s'] * len(linked_spn_ids))
+                lids = list(linked_spn_ids)
+                cursor.execute(f"SELECT identity_db_id, role_name, scope_type, scope, created_on FROM role_assignments WHERE identity_db_id IN ({lph})", lids)
+                for r in cursor.fetchall():
+                    linked_roles_map.setdefault(r['identity_db_id'], []).append(dict(r))
+                cursor.execute(f"SELECT identity_db_id, role_name, risk_level FROM entra_role_assignments WHERE identity_db_id IN ({lph})", lids)
+                for r in cursor.fetchall():
+                    linked_entra_map.setdefault(r['identity_db_id'], []).append(dict(r))
+
+            ar_scored = 0
+            ar_critical = 0
+            for ar in app_reg_rows:
+                ar_data = dict(ar)
+                spn_id = ar_data.get('linked_spn_id')
+                result = engine.compute_app_reg_exposure(
+                    ar_data,
+                    linked_spn_roles=linked_roles_map.get(spn_id, []) if spn_id else [],
+                    linked_spn_entra_roles=linked_entra_map.get(spn_id, []) if spn_id else [],
+                )
+                self.db.save_app_reg_exposure(ar_data['id'], result, result.get('findings', []), run_id)
+                ar_scored += 1
+                if result['scores']['total'] >= 80:
+                    ar_critical += 1
+
+            print(f"  ✓ Computed exposure for {ar_scored} App Registrations ({ar_critical} critical)")
+
+        cursor.close()
+
     def _create_result(self, identities: List[Dict], role_assignments: List[Dict], run_id: int) -> DiscoveryResult:
         service_principals = [i for i in identities if i['identity_type'] == 'service_principal']
         users = [i for i in identities if i['identity_type'] == 'user']

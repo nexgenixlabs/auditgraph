@@ -168,6 +168,8 @@ class Database:
     _risk_factors_col_ensured = False
     _permission_plane_col_ensured = False
     _ms_flag_backfilled = False
+    _spn_exposure_ensured = False
+    _app_reg_exposure_ensured = False
 
     def backfill_microsoft_flag(self):
         """Startup backfill of is_microsoft_system for ALL data.
@@ -8677,6 +8679,327 @@ class Database:
         ids = [row[0] for row in cursor.fetchall()]
         cursor.close()
         return ids
+
+    # ─── SPN Exposure Intelligence ──────────────────────────────────
+
+    def _ensure_spn_exposure(self):
+        """Add exposure columns to identities + create spn_exposure_findings table."""
+        if Database._spn_exposure_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            # 17 new columns on identities
+            exposure_cols = [
+                ('exposure_score', 'INTEGER DEFAULT 0'),
+                ('exposure_components', "JSONB DEFAULT '{}'::jsonb"),
+                ('privilege_score', 'INTEGER DEFAULT 0'),
+                ('credential_risk_score', 'INTEGER DEFAULT 0'),
+                ('exposure_subscore', 'INTEGER DEFAULT 0'),
+                ('lifecycle_score', 'INTEGER DEFAULT 0'),
+                ('visibility_score', 'INTEGER DEFAULT 0'),
+                ('activity_confidence', 'INTEGER DEFAULT 0'),
+                ('lifecycle_state', "VARCHAR(20) DEFAULT 'blind'"),
+                ('can_escalate', 'BOOLEAN DEFAULT FALSE'),
+                ('effective_scope_flag', "VARCHAR(30) DEFAULT 'resource'"),
+                ('credential_age_days', 'INTEGER DEFAULT 0'),
+                ('owner_status', "VARCHAR(20) DEFAULT 'unknown'"),
+                ('federated_trust', 'BOOLEAN DEFAULT FALSE'),
+                ('cross_subscription', 'BOOLEAN DEFAULT FALSE'),
+                ('exposure_computed_at', 'TIMESTAMP'),
+                ('critical_exposure_overrides', "JSONB DEFAULT '[]'::jsonb"),
+            ]
+            for col, coltype in exposure_cols:
+                try:
+                    cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col} {coltype}")
+                except Exception:
+                    self.conn.rollback()
+
+            # spn_exposure_findings table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS spn_exposure_findings (
+                    id SERIAL PRIMARY KEY,
+                    identity_db_id BIGINT NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+                    discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    finding_type VARCHAR(50) NOT NULL,
+                    severity VARCHAR(20) NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    evidence JSONB DEFAULT '{}',
+                    remediation TEXT,
+                    component VARCHAR(30),
+                    score_impact INTEGER DEFAULT 0,
+                    tenant_id INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_identity ON spn_exposure_findings(identity_db_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_run ON spn_exposure_findings(discovery_run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_tenant ON spn_exposure_findings(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_severity ON spn_exposure_findings(severity)")
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ SPN exposure schema error: {e}")
+        finally:
+            cursor.close()
+        Database._spn_exposure_ensured = True
+
+    def save_spn_exposure(self, identity_db_id, exposure_data, findings, run_id):
+        """Save computed exposure data: UPDATE identities + INSERT findings."""
+        self._ensure_spn_exposure()
+        cursor = self.conn.cursor()
+        try:
+            scores = exposure_data.get('scores', {})
+            flags = exposure_data.get('flags', {})
+            activity = exposure_data.get('activity_inference', {})
+            overrides = exposure_data.get('critical_overrides', [])
+
+            import json as _json
+            cursor.execute("""
+                UPDATE identities SET
+                    exposure_score = %s,
+                    exposure_components = %s,
+                    privilege_score = %s,
+                    credential_risk_score = %s,
+                    exposure_subscore = %s,
+                    lifecycle_score = %s,
+                    visibility_score = %s,
+                    activity_confidence = %s,
+                    lifecycle_state = %s,
+                    can_escalate = %s,
+                    effective_scope_flag = %s,
+                    credential_age_days = %s,
+                    owner_status = %s,
+                    federated_trust = %s,
+                    cross_subscription = %s,
+                    exposure_computed_at = NOW(),
+                    critical_exposure_overrides = %s
+                WHERE id = %s
+            """, (
+                scores.get('total', 0),
+                _json.dumps(scores),
+                scores.get('privilege', 0),
+                scores.get('credential_risk', 0),
+                scores.get('exposure', 0),
+                scores.get('lifecycle', 0),
+                scores.get('visibility', 0),
+                activity.get('confidence', 0),
+                flags.get('lifecycle_state', 'blind'),
+                flags.get('can_escalate', False),
+                flags.get('effective_scope_flag', 'resource'),
+                flags.get('credential_age_days', 0),
+                flags.get('owner_status', 'unknown'),
+                flags.get('federated_trust', False),
+                flags.get('cross_subscription', False),
+                _json.dumps(overrides),
+                identity_db_id,
+            ))
+
+            # Delete old findings for this identity+run, then insert new
+            cursor.execute(
+                "DELETE FROM spn_exposure_findings WHERE identity_db_id = %s AND discovery_run_id = %s",
+                (identity_db_id, run_id))
+
+            tenant_id = self._tenant_id or 1
+            for f in findings:
+                evidence_json = _json.dumps(f.get('evidence', {}))
+                cursor.execute("""
+                    INSERT INTO spn_exposure_findings
+                        (identity_db_id, discovery_run_id, finding_type, severity,
+                         title, description, evidence, remediation, component,
+                         score_impact, tenant_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    identity_db_id, run_id, f.get('finding_type', ''),
+                    f.get('severity', 'info'), f.get('title', ''),
+                    f.get('description', ''), evidence_json,
+                    f.get('remediation', ''), f.get('component', ''),
+                    f.get('score_impact', 0), tenant_id,
+                ))
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ save_spn_exposure error: {e}")
+        finally:
+            cursor.close()
+
+    def get_spn_exposure_findings(self, identity_db_id):
+        """Get exposure findings for a single identity, ordered by severity."""
+        self._ensure_spn_exposure()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        severity_order = "CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END"
+        cursor.execute(f"""
+            SELECT finding_type, severity, title, description, evidence,
+                   remediation, component, score_impact, created_at
+            FROM spn_exposure_findings
+            WHERE identity_db_id = %s
+            ORDER BY {severity_order}, score_impact DESC
+        """, (identity_db_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('created_at') and hasattr(r['created_at'], 'isoformat'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
+    # ─── App Registration Exposure Intelligence ──────────────────────
+
+    def _ensure_app_reg_exposure(self):
+        """Add 17 exposure columns to app_registrations + create app_reg_exposure_findings table."""
+        if Database._app_reg_exposure_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            exposure_cols = [
+                ('exposure_score', 'INTEGER DEFAULT 0'),
+                ('exposure_components', "JSONB DEFAULT '{}'::jsonb"),
+                ('privilege_score', 'INTEGER DEFAULT 0'),
+                ('credential_risk_score', 'INTEGER DEFAULT 0'),
+                ('exposure_subscore', 'INTEGER DEFAULT 0'),
+                ('lifecycle_score', 'INTEGER DEFAULT 0'),
+                ('visibility_score', 'INTEGER DEFAULT 0'),
+                ('activity_confidence', 'INTEGER DEFAULT 0'),
+                ('lifecycle_state', "VARCHAR(20) DEFAULT 'blind'"),
+                ('can_escalate', 'BOOLEAN DEFAULT FALSE'),
+                ('effective_scope_flag', "VARCHAR(30) DEFAULT 'resource'"),
+                ('credential_age_days', 'INTEGER DEFAULT 0'),
+                ('owner_status', "VARCHAR(20) DEFAULT 'unknown'"),
+                ('federated_trust', 'BOOLEAN DEFAULT FALSE'),
+                ('cross_subscription', 'BOOLEAN DEFAULT FALSE'),
+                ('exposure_computed_at', 'TIMESTAMP'),
+                ('critical_exposure_overrides', "JSONB DEFAULT '[]'::jsonb"),
+            ]
+            for col, coltype in exposure_cols:
+                try:
+                    cursor.execute(f"ALTER TABLE app_registrations ADD COLUMN IF NOT EXISTS {col} {coltype}")
+                except Exception:
+                    self.conn.rollback()
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS app_reg_exposure_findings (
+                    id SERIAL PRIMARY KEY,
+                    app_reg_id BIGINT NOT NULL REFERENCES app_registrations(id) ON DELETE CASCADE,
+                    discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    finding_type VARCHAR(50) NOT NULL,
+                    severity VARCHAR(20) NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    evidence JSONB DEFAULT '{}',
+                    remediation TEXT,
+                    component VARCHAR(30),
+                    score_impact INTEGER DEFAULT 0,
+                    tenant_id INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_appreg ON app_reg_exposure_findings(app_reg_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_run ON app_reg_exposure_findings(discovery_run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_tenant ON app_reg_exposure_findings(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_severity ON app_reg_exposure_findings(severity)")
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ App reg exposure schema error: {e}")
+        finally:
+            cursor.close()
+        Database._app_reg_exposure_ensured = True
+
+    def save_app_reg_exposure(self, app_reg_id, exposure_data, findings, run_id):
+        """Save computed exposure data: UPDATE app_registrations + INSERT findings."""
+        self._ensure_app_reg_exposure()
+        cursor = self.conn.cursor()
+        try:
+            scores = exposure_data.get('scores', {})
+            flags = exposure_data.get('flags', {})
+            activity = exposure_data.get('activity_inference', {})
+            overrides = exposure_data.get('critical_overrides', [])
+
+            import json as _json
+            cursor.execute("""
+                UPDATE app_registrations SET
+                    exposure_score = %s,
+                    exposure_components = %s,
+                    privilege_score = %s,
+                    credential_risk_score = %s,
+                    exposure_subscore = %s,
+                    lifecycle_score = %s,
+                    visibility_score = %s,
+                    activity_confidence = %s,
+                    lifecycle_state = %s,
+                    can_escalate = %s,
+                    effective_scope_flag = %s,
+                    credential_age_days = %s,
+                    owner_status = %s,
+                    federated_trust = %s,
+                    cross_subscription = %s,
+                    exposure_computed_at = NOW(),
+                    critical_exposure_overrides = %s
+                WHERE id = %s
+            """, (
+                scores.get('total', 0),
+                _json.dumps(scores),
+                scores.get('privilege', 0),
+                scores.get('credential_risk', 0),
+                scores.get('exposure', 0),
+                scores.get('lifecycle', 0),
+                scores.get('visibility', 0),
+                activity.get('confidence', 0),
+                flags.get('lifecycle_state', 'blind'),
+                flags.get('can_escalate', False),
+                flags.get('effective_scope_flag', 'resource'),
+                flags.get('credential_age_days', 0),
+                flags.get('owner_status', 'unknown'),
+                flags.get('federated_trust', False),
+                flags.get('cross_subscription', False),
+                _json.dumps(overrides),
+                app_reg_id,
+            ))
+
+            cursor.execute(
+                "DELETE FROM app_reg_exposure_findings WHERE app_reg_id = %s AND discovery_run_id = %s",
+                (app_reg_id, run_id))
+
+            tenant_id = self._tenant_id or 1
+            for f in findings:
+                evidence_json = _json.dumps(f.get('evidence', {}))
+                cursor.execute("""
+                    INSERT INTO app_reg_exposure_findings
+                        (app_reg_id, discovery_run_id, finding_type, severity,
+                         title, description, evidence, remediation, component,
+                         score_impact, tenant_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    app_reg_id, run_id, f.get('finding_type', ''),
+                    f.get('severity', 'info'), f.get('title', ''),
+                    f.get('description', ''), evidence_json,
+                    f.get('remediation', ''), f.get('component', ''),
+                    f.get('score_impact', 0), tenant_id,
+                ))
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ save_app_reg_exposure error: {e}")
+        finally:
+            cursor.close()
+
+    def get_app_reg_exposure_findings(self, app_reg_id):
+        """Get exposure findings for a single app registration, ordered by severity."""
+        self._ensure_app_reg_exposure()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        severity_order = "CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END"
+        cursor.execute(f"""
+            SELECT finding_type, severity, title, description, evidence,
+                   remediation, component, score_impact, created_at
+            FROM app_reg_exposure_findings
+            WHERE app_reg_id = %s
+            ORDER BY {severity_order}, score_impact DESC
+        """, (app_reg_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('created_at') and hasattr(r['created_at'], 'isoformat'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
 
 
 # ─── Access Review V2 Helper Functions ────────────────────────────────

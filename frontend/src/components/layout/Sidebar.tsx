@@ -127,11 +127,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked, canMan
             navigateTo: '/identities?cloud=azure',
             defaultOpen: true,
             items: [
-              { to: '/spns', label: 'Service Principals', icon: spnIcon },
-              { to: '/app-registrations', label: 'App Registrations', icon: appRegIcon },
+              { to: '/workload-identities', label: 'Workload Identities', icon: spnIcon },
               { to: '/identities?cloud=azure&identity_category=human_user', label: 'Human Users', icon: humanIcon },
               { to: '/identities?cloud=azure&identity_category=guest', label: 'Guest Users', icon: guestIcon },
-              { to: '/identities?cloud=azure&identity_category=managed_identity_user', label: 'Managed Identities', icon: managedIcon },
             ],
           } as NavSubGroup,
           {

@@ -12230,9 +12230,10 @@ def _generate_auditor_questions(identity, roles, credentials, entra_roles):
 
 
 def get_spn_stats():
-    """GET /api/spns/stats — SPN dashboard summary cards."""
+    """GET /api/spns/stats — SPN dashboard summary cards with exposure intelligence."""
     db = _db()
     try:
+        db._ensure_spn_exposure()
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
@@ -12244,6 +12245,9 @@ def get_spn_stats():
                 'expired_credentials': 0, 'expiring_soon': 0,
                 'by_category': {}, 'by_risk': {},
                 'by_activity': {}, 'by_blast_radius': {},
+                'exposure_critical': 0, 'can_escalate_count': 0,
+                'orphaned_privileged': 0, 'blind_count': 0,
+                'cross_sub_count': 0, 'avg_exposure_score': 0,
             })
 
         base = "FROM identities i WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s"
@@ -12320,6 +12324,21 @@ def get_spn_stats():
             br = _compute_blast_radius(roles_list)
             blast_counts[br] = blast_counts.get(br, 0) + 1
 
+        # Exposure intelligence stats (custom only)
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 80) as exposure_critical,
+                COUNT(*) FILTER (WHERE COALESCE(i.can_escalate, false) = true) as can_escalate_count,
+                COUNT(*) FILTER (WHERE COALESCE(i.owner_status, 'unknown') = 'orphaned'
+                                  AND COALESCE(i.privilege_score, 0) > 0) as orphaned_privileged,
+                COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, 'blind') = 'blind') as blind_count,
+                COUNT(*) FILTER (WHERE COALESCE(i.cross_subscription, false) = true) as cross_sub_count,
+                COALESCE(ROUND(AVG(COALESCE(i.exposure_score, 0))), 0) as avg_exposure_score
+            {base}
+            {HIDE_MICROSOFT_SQL}
+        """, params)
+        exposure_stats = dict(cursor.fetchone())
+
         cursor.close()
 
         return jsonify({
@@ -12330,20 +12349,27 @@ def get_spn_stats():
             'high_risk': by_risk.get('high', 0),
             'expired_credentials': cred['expired'],
             'expiring_soon': cred['expiring_soon'],
-            'no_credentials': cred['no_credentials'],
+            'no_credentials': cred.get('no_credentials', 0),
             'by_risk': by_risk,
             'by_category': by_category,
             'by_activity': by_activity,
             'by_blast_radius': blast_counts,
+            'exposure_critical': exposure_stats.get('exposure_critical', 0),
+            'can_escalate_count': exposure_stats.get('can_escalate_count', 0),
+            'orphaned_privileged': exposure_stats.get('orphaned_privileged', 0),
+            'blind_count': exposure_stats.get('blind_count', 0),
+            'cross_sub_count': exposure_stats.get('cross_sub_count', 0),
+            'avg_exposure_score': int(exposure_stats.get('avg_exposure_score', 0)),
         })
     finally:
         db.close()
 
 
 def get_spn_list():
-    """GET /api/spns — SPN list with blast radius + critical roles."""
+    """GET /api/spns — SPN list with blast radius, critical roles, and exposure data."""
     db = _db()
     try:
+        db._ensure_spn_exposure()
         tenant_id = _tenant_id()
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
@@ -12356,6 +12382,11 @@ def get_spn_list():
         hide_ms = request.args.get('hide_microsoft', 'true').lower() == 'true'
         sort_by = request.args.get('sort', 'risk_score')
         sort_dir = request.args.get('dir', 'desc')
+        # New exposure filters
+        exposure_level = request.args.get('exposure_level', '')
+        lifecycle_state = request.args.get('lifecycle_state', '')
+        can_escalate_filter = request.args.get('can_escalate', '')
+        owner_status_filter = request.args.get('owner_status', '')
 
         cursor = db.conn.cursor()
         run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
@@ -12390,6 +12421,24 @@ def get_spn_list():
             like = f"%{search_q.lower()}%"
             params.extend([like, like])
 
+        # Exposure filters
+        if exposure_level == 'critical':
+            where.append(" AND COALESCE(i.exposure_score, 0) >= 80")
+        elif exposure_level == 'high':
+            where.append(" AND COALESCE(i.exposure_score, 0) >= 60 AND COALESCE(i.exposure_score, 0) < 80")
+        elif exposure_level == 'medium':
+            where.append(" AND COALESCE(i.exposure_score, 0) >= 35 AND COALESCE(i.exposure_score, 0) < 60")
+        elif exposure_level == 'low':
+            where.append(" AND COALESCE(i.exposure_score, 0) < 35")
+        if lifecycle_state:
+            where.append(" AND COALESCE(i.lifecycle_state, 'blind') = %s")
+            params.append(lifecycle_state)
+        if can_escalate_filter == 'true':
+            where.append(" AND COALESCE(i.can_escalate, false) = true")
+        if owner_status_filter:
+            where.append(" AND COALESCE(i.owner_status, 'unknown') = %s")
+            params.append(owner_status_filter)
+
         # Count total
         count_sql = f"SELECT COUNT(*) FROM identities i {''.join(where)}"
         cursor.execute(count_sql, params)
@@ -12401,6 +12450,9 @@ def get_spn_list():
             'credential_risk': 'i.credential_risk', 'next_expiry': 'i.next_expiry',
             'activity_status': 'i.activity_status', 'risk_level': 'i.risk_level',
             'created_datetime': 'i.created_datetime',
+            'exposure_score': 'COALESCE(i.exposure_score, 0)',
+            'privilege_score': 'COALESCE(i.privilege_score, 0)',
+            'credential_age_days': 'COALESCE(i.credential_age_days, 0)',
         }
         order_col = allowed_sorts.get(sort_by, 'i.risk_score')
         order_dir = 'ASC' if sort_dir == 'asc' else 'DESC'
@@ -12414,18 +12466,49 @@ def get_spn_list():
         # Map base identity data
         spns = [_map_identity_row(r) for r in rows]
 
-        # Enrich with blast_radius and critical_roles for each SPN
+        # Enrich with blast_radius, critical_roles, and exposure data
         if spns:
-            # Get identity IDs → db IDs mapping
             id_list = [s['identity_id'] for s in spns]
             placeholders = ','.join(['%s'] * len(id_list))
             cursor.execute(f"""
-                SELECT i.identity_id, i.id FROM identities i
+                SELECT i.identity_id, i.id,
+                       COALESCE(i.exposure_score, 0) as exposure_score,
+                       COALESCE(i.privilege_score, 0) as privilege_score,
+                       COALESCE(i.credential_risk_score, 0) as credential_risk_score,
+                       COALESCE(i.exposure_subscore, 0) as exposure_subscore,
+                       COALESCE(i.lifecycle_score, 0) as lifecycle_score,
+                       COALESCE(i.visibility_score, 0) as visibility_score,
+                       COALESCE(i.lifecycle_state, 'blind') as lifecycle_state,
+                       COALESCE(i.can_escalate, false) as can_escalate,
+                       COALESCE(i.effective_scope_flag, 'resource') as effective_scope_flag,
+                       COALESCE(i.owner_status, 'unknown') as owner_status,
+                       COALESCE(i.credential_age_days, 0) as credential_age_days,
+                       COALESCE(i.cross_subscription, false) as cross_subscription,
+                       COALESCE(i.activity_confidence, 0) as activity_confidence
+                FROM identities i
                 WHERE i.discovery_run_id = ANY(%s) AND i.identity_id IN ({placeholders})
             """, [run_ids] + id_list)
+            exposure_map = {}
             id_map = {}
             for row in cursor.fetchall():
-                id_map[row[0]] = row[1]
+                iid = row[0]
+                db_id = row[1]
+                id_map[iid] = db_id
+                exposure_map[iid] = {
+                    'exposure_score': row[2],
+                    'privilege_score': row[3],
+                    'credential_risk_score': row[4],
+                    'exposure_subscore': row[5],
+                    'lifecycle_score': row[6],
+                    'visibility_score': row[7],
+                    'lifecycle_state': row[8],
+                    'can_escalate': row[9],
+                    'effective_scope_flag': row[10],
+                    'owner_status': row[11],
+                    'credential_age_days': row[12],
+                    'cross_subscription': row[13],
+                    'activity_confidence': row[14],
+                }
 
             if id_map:
                 db_ids = list(id_map.values())
@@ -12461,6 +12544,9 @@ def get_spn_list():
                     all_roles = rbac_roles + [{'role_name': e['role_name'], 'scope_type': 'directory', 'scope': '/'} for e in entra_roles]
                     spn['blast_radius'] = _compute_blast_radius(rbac_roles)
                     spn['critical_roles'] = _extract_critical_roles(all_roles)
+                    # Merge exposure data
+                    exp_data = exposure_map.get(spn['identity_id'], {})
+                    spn.update(exp_data)
 
         cursor.close()
         return jsonify({'spns': spns, 'count': len(spns), 'total': total})
@@ -12469,9 +12555,10 @@ def get_spn_list():
 
 
 def get_spn_detail(identity_id):
-    """GET /api/spns/<identity_id> — Full SPN detail with risk summary + recommendations."""
+    """GET /api/spns/<identity_id> — Full SPN detail with exposure intelligence."""
     db = _db()
     try:
+        db._ensure_spn_exposure()
         tenant_id = _tenant_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
@@ -12528,6 +12615,32 @@ def get_spn_detail(identity_id):
         rbac_for_blast = [{'role_name': r.get('role_name'), 'scope_type': r.get('scope_type'), 'scope': r.get('scope')} for r in roles]
         all_for_critical = rbac_for_blast + [{'role_name': e.get('role_name'), 'scope_type': 'directory', 'scope': '/'} for e in entra_roles]
 
+        # Build exposure object from persisted columns
+        exposure = {
+            'total': identity_dict.get('exposure_score', 0) or 0,
+            'privilege': identity_dict.get('privilege_score', 0) or 0,
+            'credential_risk': identity_dict.get('credential_risk_score', 0) or 0,
+            'exposure': identity_dict.get('exposure_subscore', 0) or 0,
+            'lifecycle': identity_dict.get('lifecycle_score', 0) or 0,
+            'visibility': identity_dict.get('visibility_score', 0) or 0,
+            'can_escalate': identity_dict.get('can_escalate', False),
+            'effective_scope_flag': identity_dict.get('effective_scope_flag', 'resource'),
+            'lifecycle_state': identity_dict.get('lifecycle_state', 'blind'),
+            'owner_status': identity_dict.get('owner_status', 'unknown'),
+            'federated_trust': identity_dict.get('federated_trust', False),
+            'cross_subscription': identity_dict.get('cross_subscription', False),
+            'credential_age_days': identity_dict.get('credential_age_days', 0) or 0,
+            'critical_overrides': identity_dict.get('critical_exposure_overrides', []) or [],
+        }
+
+        activity_inference = {
+            'confidence': identity_dict.get('activity_confidence', 0) or 0,
+            'classification': identity_dict.get('lifecycle_state', 'blind'),
+        }
+
+        # Get findings
+        findings = db.get_spn_exposure_findings(db_id)
+
         return jsonify({
             'identity': identity_dict,
             'roles': roles,
@@ -12541,6 +12654,9 @@ def get_spn_detail(identity_id):
             'recommendations': _generate_recommendations(identity_dict, roles, credentials, entra_roles),
             'attacker_narrative': _generate_attacker_narrative(identity_dict, roles, credentials, entra_roles),
             'auditor_questions': _generate_auditor_questions(identity_dict, roles, credentials, entra_roles),
+            'exposure': exposure,
+            'findings': findings,
+            'activity_inference': activity_inference,
         })
     finally:
         db.close()
@@ -14660,5 +14776,597 @@ def get_rbac_hygiene_history():
         limit = min(request.args.get('limit', 10, type=int), 50)
         history = db.get_rbac_hygiene_history(limit=limit)
         return jsonify({'history': history})
+    finally:
+        db.close()
+
+
+# ─── Workload Identity Exposure (Unified) ─────────────────────────────
+
+def get_workload_stats():
+    """GET /api/workload-identities/stats — Unified stats across SPNs, MIs, and App Regs."""
+    db = _db()
+    try:
+        db._ensure_spn_exposure()
+        db._ensure_app_reg_exposure()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+
+        empty = {
+            'total': 0,
+            'by_type': {'spn': 0, 'managed_identity': 0, 'app_registration': 0},
+            'exposure_critical': 0, 'can_escalate_count': 0,
+            'orphaned_count': 0, 'blind_count': 0,
+            'stale_credentials': 0, 'zombie_count': 0,
+            'by_risk': {}, 'avg_exposure_score': 0,
+            'top_findings': [],
+        }
+        if not run_ids:
+            cursor.close()
+            return jsonify(empty)
+
+        # SPN + MI stats from identities table
+        cats = SPN_CATEGORIES
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE i.identity_category = 'service_principal' AND NOT COALESCE(i.is_microsoft_system, false)) as spn_count,
+                COUNT(*) FILTER (WHERE i.identity_category IN ('managed_identity_system', 'managed_identity_user')) as mi_count,
+                COUNT(*) FILTER (WHERE COALESCE(i.exposure_score, 0) >= 80 AND NOT COALESCE(i.is_microsoft_system, false)) as exposure_critical_id,
+                COUNT(*) FILTER (WHERE COALESCE(i.can_escalate, false) AND NOT COALESCE(i.is_microsoft_system, false)) as can_escalate_id,
+                COUNT(*) FILTER (WHERE COALESCE(i.owner_status, 'unknown') = 'orphaned' AND NOT COALESCE(i.is_microsoft_system, false)) as orphaned_id,
+                COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, 'blind') = 'blind' AND NOT COALESCE(i.is_microsoft_system, false)) as blind_id,
+                COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') IN ('likely_dormant', 'blind') AND COALESCE(i.credential_age_days, 0) > 365 AND NOT COALESCE(i.is_microsoft_system, false)) as stale_creds_id,
+                COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, '') IN ('likely_dormant', 'blind') AND COALESCE(i.exposure_score, 0) >= 35 AND NOT COALESCE(i.is_microsoft_system, false)) as zombie_id,
+                COALESCE(AVG(i.exposure_score) FILTER (WHERE NOT COALESCE(i.is_microsoft_system, false)), 0) as avg_exp_id
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.identity_category IN %s
+        """, (run_ids, cats))
+        id_stats = dict(cursor.fetchone())
+
+        # App reg stats
+        cursor.execute("""
+            SELECT
+                COUNT(*) as ar_total,
+                COUNT(*) FILTER (WHERE COALESCE(a.exposure_score, 0) >= 80) as ar_critical,
+                COUNT(*) FILTER (WHERE COALESCE(a.can_escalate, false)) as ar_escalate,
+                COUNT(*) FILTER (WHERE COALESCE(a.owner_status, 'unknown') = 'orphaned') as ar_orphaned,
+                COUNT(*) FILTER (WHERE COALESCE(a.lifecycle_state, 'blind') = 'blind') as ar_blind,
+                COUNT(*) FILTER (WHERE COALESCE(a.credential_age_days, 0) > 365) as ar_stale_creds,
+                COUNT(*) FILTER (WHERE COALESCE(a.lifecycle_state, '') IN ('likely_dormant', 'blind') AND COALESCE(a.exposure_score, 0) >= 35) as ar_zombie,
+                COALESCE(AVG(a.exposure_score), 0) as ar_avg
+            FROM app_registrations a
+            WHERE a.discovery_run_id = ANY(%s)
+        """, (run_ids,))
+        ar_stats = dict(cursor.fetchone())
+
+        # Risk distribution for identities (custom only)
+        cursor.execute("""
+            SELECT COALESCE(i.risk_level, 'info') as rl, COUNT(*) as c
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.identity_category IN %s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+            GROUP BY rl
+        """, (run_ids, cats))
+        by_risk = {r['rl']: r['c'] for r in cursor.fetchall()}
+
+        # Top findings from both tables
+        top_findings = []
+        try:
+            cursor.execute("""
+                (SELECT f.finding_type, f.severity, f.title, f.score_impact, i.display_name,
+                        'spn' as source_type
+                 FROM spn_exposure_findings f
+                 JOIN identities i ON i.id = f.identity_db_id
+                 WHERE f.discovery_run_id = ANY(%s) AND f.severity IN ('critical', 'high')
+                 ORDER BY f.score_impact DESC
+                 LIMIT 5)
+                UNION ALL
+                (SELECT f.finding_type, f.severity, f.title, f.score_impact, a.display_name,
+                        'app_reg' as source_type
+                 FROM app_reg_exposure_findings f
+                 JOIN app_registrations a ON a.id = f.app_reg_id
+                 WHERE f.discovery_run_id = ANY(%s) AND f.severity IN ('critical', 'high')
+                 ORDER BY f.score_impact DESC
+                 LIMIT 5)
+                ORDER BY score_impact DESC
+                LIMIT 10
+            """, (run_ids, run_ids))
+            top_findings = [dict(r) for r in cursor.fetchall()]
+        except Exception:
+            pass
+
+        cursor.close()
+
+        spn_count = int(id_stats.get('spn_count') or 0)
+        mi_count = int(id_stats.get('mi_count') or 0)
+        ar_total = int(ar_stats.get('ar_total') or 0)
+        total = spn_count + mi_count + ar_total
+
+        # Weighted avg exposure score
+        id_total_for_avg = spn_count + mi_count
+        avg_exp = 0
+        if id_total_for_avg + ar_total > 0:
+            avg_exp = round(
+                (float(id_stats.get('avg_exp_id') or 0) * id_total_for_avg +
+                 float(ar_stats.get('ar_avg') or 0) * ar_total) /
+                (id_total_for_avg + ar_total), 1)
+
+        return jsonify({
+            'total': total,
+            'by_type': {
+                'spn': spn_count,
+                'managed_identity': mi_count,
+                'app_registration': ar_total,
+            },
+            'exposure_critical': int(id_stats.get('exposure_critical_id') or 0) + int(ar_stats.get('ar_critical') or 0),
+            'can_escalate_count': int(id_stats.get('can_escalate_id') or 0) + int(ar_stats.get('ar_escalate') or 0),
+            'orphaned_count': int(id_stats.get('orphaned_id') or 0) + int(ar_stats.get('ar_orphaned') or 0),
+            'blind_count': int(id_stats.get('blind_id') or 0) + int(ar_stats.get('ar_blind') or 0),
+            'stale_credentials': int(id_stats.get('stale_creds_id') or 0) + int(ar_stats.get('ar_stale_creds') or 0),
+            'zombie_count': int(id_stats.get('zombie_id') or 0) + int(ar_stats.get('ar_zombie') or 0),
+            'by_risk': by_risk,
+            'avg_exposure_score': avg_exp,
+            'top_findings': top_findings,
+        })
+    finally:
+        db.close()
+
+
+def get_workload_list():
+    """GET /api/workload-identities — Unified list of SPNs, MIs, and App Registrations."""
+    db = _db()
+    try:
+        db._ensure_spn_exposure()
+        db._ensure_app_reg_exposure()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'items': [], 'total': 0})
+
+        wtype = request.args.get('type', 'all')
+        exposure_level = request.args.get('exposure_level')
+        lifecycle_state = request.args.get('lifecycle_state')
+        owner_status = request.args.get('owner_status')
+        can_escalate = request.args.get('can_escalate')
+        search = request.args.get('search', '').strip()
+        sort_col = request.args.get('sort', 'exposure_score')
+        sort_dir = request.args.get('dir', 'desc').lower()
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        hide_ms = request.args.get('hide_microsoft', 'true').lower() == 'true'
+
+        items = []
+
+        # ── Query identities (SPNs + MIs) ─────────────────────────
+        include_spn = wtype in ('all', 'spn')
+        include_mi = wtype in ('all', 'managed_identity')
+        include_ar = wtype in ('all', 'app_reg')
+
+        if include_spn or include_mi:
+            cat_filter = []
+            if include_spn:
+                cat_filter.append('service_principal')
+            if include_mi:
+                cat_filter.extend(['managed_identity_system', 'managed_identity_user'])
+
+            where_parts = [
+                "i.discovery_run_id = ANY(%s)",
+                "i.identity_category IN %s",
+            ]
+            params = [run_ids, tuple(cat_filter)]
+
+            if hide_ms:
+                where_parts.append("NOT COALESCE(i.is_microsoft_system, false)")
+
+            if exposure_level:
+                ranges = {'critical': (80, 100), 'high': (60, 79), 'medium': (35, 59), 'low': (0, 34)}
+                rng = ranges.get(exposure_level)
+                if rng:
+                    where_parts.append(f"COALESCE(i.exposure_score, 0) BETWEEN {rng[0]} AND {rng[1]}")
+
+            if lifecycle_state:
+                where_parts.append("COALESCE(i.lifecycle_state, 'blind') = %s")
+                params.append(lifecycle_state)
+
+            if owner_status:
+                where_parts.append("COALESCE(i.owner_status, 'unknown') = %s")
+                params.append(owner_status)
+
+            if can_escalate == 'true':
+                where_parts.append("COALESCE(i.can_escalate, false) = true")
+
+            if search:
+                where_parts.append("i.display_name ILIKE %s")
+                params.append(f'%{search}%')
+
+            where_sql = " AND ".join(where_parts)
+            cursor.execute(f"""
+                SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                       i.risk_level, i.risk_score, i.activity_status,
+                       COALESCE(i.exposure_score, 0) as exposure_score,
+                       COALESCE(i.privilege_score, 0) as privilege_score,
+                       COALESCE(i.credential_risk_score, 0) as credential_risk_score,
+                       COALESCE(i.exposure_subscore, 0) as exposure_subscore,
+                       COALESCE(i.lifecycle_score, 0) as lifecycle_score,
+                       COALESCE(i.visibility_score, 0) as visibility_score,
+                       COALESCE(i.lifecycle_state, 'blind') as lifecycle_state,
+                       COALESCE(i.can_escalate, false) as can_escalate,
+                       COALESCE(i.owner_status, 'unknown') as owner_status,
+                       COALESCE(i.effective_scope_flag, 'resource') as effective_scope_flag,
+                       COALESCE(i.cross_subscription, false) as cross_subscription,
+                       COALESCE(i.credential_age_days, 0) as credential_age_days,
+                       i.created_datetime
+                FROM identities i
+                WHERE {where_sql}
+            """, params)
+
+            for row in cursor.fetchall():
+                r = dict(row)
+                cat = r.get('identity_category', '')
+                if cat == 'service_principal':
+                    r['identity_type'] = 'spn'
+                elif cat in ('managed_identity_system', 'managed_identity_user'):
+                    r['identity_type'] = 'managed_identity'
+                else:
+                    r['identity_type'] = 'spn'
+                r['source_table'] = 'identities'
+                r['workload_id'] = str(r['id'])
+                if r.get('created_datetime') and hasattr(r['created_datetime'], 'isoformat'):
+                    r['created_datetime'] = r['created_datetime'].isoformat()
+                items.append(r)
+
+        # ── Query app_registrations ────────────────────────────────
+        if include_ar:
+            ar_where = ["a.discovery_run_id = ANY(%s)"]
+            ar_params = [run_ids]
+
+            if exposure_level:
+                ranges = {'critical': (80, 100), 'high': (60, 79), 'medium': (35, 59), 'low': (0, 34)}
+                rng = ranges.get(exposure_level)
+                if rng:
+                    ar_where.append(f"COALESCE(a.exposure_score, 0) BETWEEN {rng[0]} AND {rng[1]}")
+
+            if lifecycle_state:
+                ar_where.append("COALESCE(a.lifecycle_state, 'blind') = %s")
+                ar_params.append(lifecycle_state)
+
+            if owner_status:
+                ar_where.append("COALESCE(a.owner_status, 'unknown') = %s")
+                ar_params.append(owner_status)
+
+            if can_escalate == 'true':
+                ar_where.append("COALESCE(a.can_escalate, false) = true")
+
+            if search:
+                ar_where.append("a.display_name ILIKE %s")
+                ar_params.append(f'%{search}%')
+
+            ar_where_sql = " AND ".join(ar_where)
+            cursor.execute(f"""
+                SELECT a.id, a.app_id as identity_id, a.display_name,
+                       a.risk_level, a.risk_score, a.spn_activity_status as activity_status,
+                       COALESCE(a.exposure_score, 0) as exposure_score,
+                       COALESCE(a.privilege_score, 0) as privilege_score,
+                       COALESCE(a.credential_risk_score, 0) as credential_risk_score,
+                       COALESCE(a.exposure_subscore, 0) as exposure_subscore,
+                       COALESCE(a.lifecycle_score, 0) as lifecycle_score,
+                       COALESCE(a.visibility_score, 0) as visibility_score,
+                       COALESCE(a.lifecycle_state, 'blind') as lifecycle_state,
+                       COALESCE(a.can_escalate, false) as can_escalate,
+                       COALESCE(a.owner_status, 'unknown') as owner_status,
+                       COALESCE(a.effective_scope_flag, 'resource') as effective_scope_flag,
+                       COALESCE(a.cross_subscription, false) as cross_subscription,
+                       COALESCE(a.credential_age_days, 0) as credential_age_days,
+                       a.sign_in_audience, a.owner_count, a.has_service_principal,
+                       a.created_datetime
+                FROM app_registrations a
+                WHERE {ar_where_sql}
+            """, ar_params)
+
+            for row in cursor.fetchall():
+                r = dict(row)
+                r['identity_type'] = 'app_registration'
+                r['identity_category'] = 'app_registration'
+                r['source_table'] = 'app_registrations'
+                r['workload_id'] = str(r['id'])
+                if r.get('created_datetime') and hasattr(r['created_datetime'], 'isoformat'):
+                    r['created_datetime'] = r['created_datetime'].isoformat()
+                items.append(r)
+
+        cursor.close()
+
+        # Sort in Python (merging two tables)
+        valid_sorts = {
+            'exposure_score', 'privilege_score', 'credential_risk_score',
+            'lifecycle_score', 'visibility_score', 'display_name', 'risk_score',
+        }
+        if sort_col not in valid_sorts:
+            sort_col = 'exposure_score'
+        reverse = sort_dir != 'asc'
+        items.sort(key=lambda x: (x.get(sort_col) or 0) if sort_col != 'display_name' else (x.get('display_name') or '').lower(), reverse=reverse)
+
+        total = len(items)
+        paged = items[offset:offset + limit]
+
+        return jsonify({'items': paged, 'total': total})
+    finally:
+        db.close()
+
+
+def get_workload_detail(workload_id):
+    """GET /api/workload-identities/<workload_id>?type=spn|managed_identity|app_reg"""
+    wtype = request.args.get('type', 'spn')
+    db = _db()
+    try:
+        db._ensure_spn_exposure()
+        db._ensure_app_reg_exposure()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        if wtype == 'app_reg':
+            # Fetch app registration detail
+            cursor.execute("""
+                SELECT * FROM app_registrations
+                WHERE id = %s AND discovery_run_id = ANY(%s)
+            """, (int(workload_id), run_ids))
+            ar = cursor.fetchone()
+            if not ar:
+                cursor.close()
+                return jsonify({'error': 'App registration not found'}), 404
+            ar = dict(ar)
+
+            # Get exposure findings
+            findings = db.get_app_reg_exposure_findings(int(workload_id))
+
+            # Build exposure object
+            exposure = {
+                'total': ar.get('exposure_score') or 0,
+                'privilege': ar.get('privilege_score') or 0,
+                'credential_risk': ar.get('credential_risk_score') or 0,
+                'exposure': ar.get('exposure_subscore') or 0,
+                'lifecycle': ar.get('lifecycle_score') or 0,
+                'visibility': ar.get('visibility_score') or 0,
+                'can_escalate': ar.get('can_escalate', False),
+                'effective_scope_flag': ar.get('effective_scope_flag', 'resource'),
+                'lifecycle_state': ar.get('lifecycle_state', 'blind'),
+                'owner_status': ar.get('owner_status', 'unknown'),
+                'federated_trust': ar.get('federated_trust', False),
+                'cross_subscription': ar.get('cross_subscription', False),
+                'credential_age_days': ar.get('credential_age_days', 0),
+                'critical_overrides': ar.get('critical_exposure_overrides') or [],
+            }
+
+            activity_inference = {
+                'confidence': ar.get('activity_confidence') or 0,
+                'classification': ar.get('lifecycle_state') or 'blind',
+            }
+
+            # Linked SPN info
+            linked_spn = None
+            if ar.get('linked_spn_id'):
+                cursor.execute("""
+                    SELECT id, identity_id, display_name, risk_level, activity_status
+                    FROM identities WHERE id = %s
+                """, (ar['linked_spn_id'],))
+                spn_row = cursor.fetchone()
+                if spn_row:
+                    linked_spn = dict(spn_row)
+
+            # Auto-generate recommendations
+            recommendations = []
+            if (ar.get('owner_count') or 0) == 0:
+                recommendations.append({'priority': 'critical', 'action': 'Assign an owner to this app registration'})
+            if ar.get('has_expired_credential'):
+                recommendations.append({'priority': 'high', 'action': 'Remove or rotate expired credentials'})
+            if (ar.get('application_permission_count') or 0) > 5:
+                recommendations.append({'priority': 'high', 'action': 'Review and reduce application permissions'})
+            if ar.get('has_localhost_redirect'):
+                recommendations.append({'priority': 'medium', 'action': 'Remove localhost redirect URIs'})
+            if ar.get('has_http_redirect'):
+                recommendations.append({'priority': 'medium', 'action': 'Upgrade redirect URIs to HTTPS'})
+            if not ar.get('has_service_principal'):
+                recommendations.append({'priority': 'info', 'action': 'Verify if this registration is still needed'})
+
+            # Serialize datetimes
+            for key in ('created_datetime', 'next_expiry', 'spn_last_sign_in', 'created_at', 'exposure_computed_at'):
+                if ar.get(key) and hasattr(ar[key], 'isoformat'):
+                    ar[key] = ar[key].isoformat()
+
+            cursor.close()
+            return jsonify({
+                'identity_type': 'app_registration',
+                'display_name': ar.get('display_name'),
+                'exposure': exposure,
+                'findings': findings,
+                'activity_inference': activity_inference,
+                'detail': ar,
+                'linked_spn': linked_spn,
+                'recommendations': recommendations,
+            })
+
+        else:
+            # SPN or Managed Identity — fetch from identities table
+            cursor.execute("""
+                SELECT i.* FROM identities i
+                WHERE i.id = %s AND i.discovery_run_id = ANY(%s)
+            """, (int(workload_id), run_ids))
+            identity = cursor.fetchone()
+            if not identity:
+                cursor.close()
+                return jsonify({'error': 'Identity not found'}), 404
+            identity = dict(identity)
+
+            db_id = identity['id']
+
+            # Roles
+            cursor.execute("""
+                SELECT role_name, scope_type, scope, created_on
+                FROM role_assignments WHERE identity_db_id = %s
+            """, (db_id,))
+            roles = [dict(r) for r in cursor.fetchall()]
+
+            # Entra roles
+            cursor.execute("""
+                SELECT role_name, risk_level
+                FROM entra_role_assignments WHERE identity_db_id = %s
+            """, (db_id,))
+            entra_roles = [dict(r) for r in cursor.fetchall()]
+
+            # Credentials
+            cursor.execute("""
+                SELECT credential_type, start_datetime, end_datetime, display_name, key_id
+                FROM credentials WHERE identity_db_id = %s
+                ORDER BY end_datetime DESC NULLS LAST
+            """, (db_id,))
+            credentials = [dict(r) for r in cursor.fetchall()]
+
+            # Owners
+            cursor.execute("""
+                SELECT owner_display_name, owner_upn, owner_id
+                FROM sp_ownership WHERE identity_db_id = %s
+            """, (db_id,))
+            owners = [dict(r) for r in cursor.fetchall()]
+
+            # Findings
+            findings = db.get_spn_exposure_findings(db_id)
+
+            # Build exposure
+            exposure = {
+                'total': identity.get('exposure_score') or 0,
+                'privilege': identity.get('privilege_score') or 0,
+                'credential_risk': identity.get('credential_risk_score') or 0,
+                'exposure': identity.get('exposure_subscore') or 0,
+                'lifecycle': identity.get('lifecycle_score') or 0,
+                'visibility': identity.get('visibility_score') or 0,
+                'can_escalate': identity.get('can_escalate', False),
+                'effective_scope_flag': identity.get('effective_scope_flag', 'resource'),
+                'lifecycle_state': identity.get('lifecycle_state', 'blind'),
+                'owner_status': identity.get('owner_status', 'unknown'),
+                'federated_trust': identity.get('federated_trust', False),
+                'cross_subscription': identity.get('cross_subscription', False),
+                'credential_age_days': identity.get('credential_age_days', 0),
+                'critical_overrides': identity.get('critical_exposure_overrides') or [],
+            }
+
+            activity_inference = {
+                'confidence': identity.get('activity_confidence') or 0,
+                'classification': identity.get('lifecycle_state') or 'blind',
+            }
+
+            # Blast radius
+            blast_radius = _compute_blast_radius(roles)
+
+            # Critical roles
+            critical_roles = []
+            for r in roles:
+                rn = (r.get('role_name') or '').lower()
+                if rn in {'owner', 'contributor', 'user access administrator'}:
+                    critical_roles.append(r.get('role_name', ''))
+            for er in entra_roles:
+                rn = (er.get('role_name') or '').lower()
+                if rn in {'global administrator', 'privileged role administrator'}:
+                    critical_roles.append(er.get('role_name', ''))
+
+            # Recommendations
+            recommendations = []
+            if identity.get('owner_status') == 'orphaned':
+                recommendations.append({'priority': 'critical', 'action': 'Assign an owner to this identity'})
+            if identity.get('can_escalate'):
+                recommendations.append({'priority': 'critical', 'action': 'Review and reduce privileged role assignments'})
+            if identity.get('lifecycle_state') in ('blind', 'likely_dormant'):
+                recommendations.append({'priority': 'high', 'action': 'Investigate usage and consider disabling if dormant'})
+            if identity.get('credential_age_days', 0) > 365:
+                recommendations.append({'priority': 'high', 'action': 'Rotate credentials (oldest is over 1 year)'})
+
+            # Determine identity_type
+            cat = (identity.get('identity_category') or '').lower()
+            if cat in ('managed_identity_system', 'managed_identity_user'):
+                id_type = 'managed_identity'
+            else:
+                id_type = 'spn'
+
+            # Serialize datetimes
+            for key in ('created_datetime', 'last_sign_in', 'exposure_computed_at'):
+                if identity.get(key) and hasattr(identity[key], 'isoformat'):
+                    identity[key] = identity[key].isoformat()
+            for c in credentials:
+                for k in ('start_datetime', 'end_datetime'):
+                    if c.get(k) and hasattr(c[k], 'isoformat'):
+                        c[k] = c[k].isoformat()
+            for r in roles:
+                if r.get('created_on') and hasattr(r['created_on'], 'isoformat'):
+                    r['created_on'] = r['created_on'].isoformat()
+
+            cursor.close()
+            return jsonify({
+                'identity_type': id_type,
+                'display_name': identity.get('display_name'),
+                'exposure': exposure,
+                'findings': findings,
+                'activity_inference': activity_inference,
+                'detail': identity,
+                'roles': roles,
+                'entra_roles': entra_roles,
+                'credentials': credentials,
+                'owners': owners,
+                'blast_radius': blast_radius,
+                'critical_roles': critical_roles,
+                'recommendations': recommendations,
+            })
+    finally:
+        db.close()
+
+
+def get_workload_findings():
+    """GET /api/workload-identities/findings — Top findings across all workload identities."""
+    db = _db()
+    try:
+        db._ensure_spn_exposure()
+        db._ensure_app_reg_exposure()
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'findings': []})
+
+        limit = min(request.args.get('limit', 10, type=int), 50)
+
+        try:
+            cursor.execute("""
+                (SELECT f.finding_type, f.severity, f.title, f.description,
+                        f.score_impact, f.component, i.display_name as identity_name,
+                        'spn' as identity_type
+                 FROM spn_exposure_findings f
+                 JOIN identities i ON i.id = f.identity_db_id
+                 WHERE f.discovery_run_id = ANY(%s))
+                UNION ALL
+                (SELECT f.finding_type, f.severity, f.title, f.description,
+                        f.score_impact, f.component, a.display_name as identity_name,
+                        'app_registration' as identity_type
+                 FROM app_reg_exposure_findings f
+                 JOIN app_registrations a ON a.id = f.app_reg_id
+                 WHERE f.discovery_run_id = ANY(%s))
+                ORDER BY CASE severity
+                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5
+                END, score_impact DESC
+                LIMIT %s
+            """, (run_ids, run_ids, limit))
+            findings = [dict(r) for r in cursor.fetchall()]
+        except Exception:
+            findings = []
+
+        cursor.close()
+        return jsonify({'findings': findings})
     finally:
         db.close()

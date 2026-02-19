@@ -49,6 +49,7 @@ import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
+import WorkloadIdentities from './pages/WorkloadIdentities';
 import Subscriptions from './pages/Subscriptions';
 import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
@@ -256,8 +257,9 @@ function AppContent() {
                   <Route path="/role-mining" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RoleMining /></ErrorBoundary>} />
                   <Route path="/groups" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
                   <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
-                  <Route path="/spns" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SPNDashboard /></ErrorBoundary>} />
-                  <Route path="/app-registrations" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AppRegistrations /></ErrorBoundary>} />
+                  <Route path="/workload-identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentities /></ErrorBoundary>} />
+                  <Route path="/spns" element={<Navigate to="/workload-identities?type=spn" replace />} />
+                  <Route path="/app-registrations" element={<Navigate to="/workload-identities?type=app_reg" replace />} />
                   <Route path="/rbac-hygiene" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RbacHygiene /></ErrorBoundary>} />
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
