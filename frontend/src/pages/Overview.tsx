@@ -414,16 +414,16 @@ export default function Overview() {
 
       {/* ═══ Section 7: Governance Maturity ═══ */}
       <div style={{ ...fadeIn(700), display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginTop: 22 }}>
-        <GovCard icon={<GovIcon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" />}
+        <GovCard icon={<GovIcon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />}
           label="Ownership Coverage" value={`${gov?.ownership_coverage_pct ?? 0}%`}
           target="80%" color={sevColor(govSev(gov?.ownership_coverage_pct ?? 0, 80))} />
-        <GovCard icon={<GovIcon d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" />}
+        <GovCard icon={<GovIcon d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />}
           label="PIM Coverage" value={`${gov?.pim_adoption_pct ?? 0}%`}
           target="90%" color={sevColor(govSev(gov?.pim_adoption_pct ?? 0, 90))} />
-        <GovCard icon={<GovIcon d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5h6M9 14l2 2 4-4" />}
+        <GovCard icon={<GovIcon d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5h6M9 14l2 2 4-4" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />}
           label="Privileged Under Review" value={`${gov?.privileged_under_review_pct ?? 0}%`}
           target="100%" color={sevColor(govSev(gov?.privileged_under_review_pct ?? 0, 100))} />
-        <GovCard icon={<GovIcon d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3" />}
+        <GovCard icon={<GovIcon d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />}
           label="Access Reviews Done" value={`${gov?.access_reviews_done ?? 0}`}
           target="95%" color={sevColor(govSev((gov?.access_reviews_done ?? 0) > 0 ? 62 : 0, 95))} />
       </div>
@@ -800,7 +800,7 @@ function ComplianceRing({ pct: percent, size = 52 }: { pct: number; size?: numbe
 
 // SVG icon helpers for consistent rendering (no emoji)
 const TierIcon = ({ d }: { d: string }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.textTer} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.textSec} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d={d} />
   </svg>
 );
@@ -839,7 +839,7 @@ function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; 
           <div key={tier} style={{ marginBottom: 16 }}>
             {/* Tier divider */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-              <span style={{ display: 'inline-flex', opacity: 0.7 }}>{tierIcon}</span>
+              <span style={{ display: 'inline-flex' }}>{tierIcon}</span>
               <span style={{ fontSize: 10, fontFamily: F.mono, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, color: C.textTer }}>{tc.label}</span>
               <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${C.border}, transparent)` }} />
             </div>
@@ -890,9 +890,9 @@ function ComplianceSection({ compliance, remPct, saGovPct }: { compliance: any; 
   );
 }
 
-function GovIcon({ d }: { d: string }) {
+function GovIcon({ d, color }: { d: string; color?: string }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.textTer} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={color || C.textSec} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d={d} />
     </svg>
   );
@@ -904,7 +904,7 @@ function GovCard({ icon, label, value, target, color }: { icon: React.ReactNode;
       background: C.card, border: `1px solid ${C.border}`, borderRadius: 14,
       padding: 20, textAlign: 'center',
     }}>
-      <div style={{ display: 'flex', justifyContent: 'center', opacity: 0.6, marginBottom: 6 }}>{icon}</div>
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 6 }}>{icon}</div>
       <div style={{ fontSize: 10, fontFamily: F.mono, color: C.textTer, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
         {label}
       </div>
