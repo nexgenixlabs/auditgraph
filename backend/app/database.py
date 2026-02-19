@@ -2018,6 +2018,7 @@ class Database:
         'scheduler_interval_hours', 'org_name',
         'slack_webhook_url', 'teams_webhook_url', 'slack_events', 'teams_events',
         'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
+        'p2_telemetry_enabled',
     ])
 
     def get_system_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:

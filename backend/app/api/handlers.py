@@ -15031,7 +15031,7 @@ def get_workload_stats():
                 (id_total_for_avg + ar_total), 1)
 
         # P2 telemetry stats (if enabled)
-        p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
         telemetry = None
         if p2_enabled:
             try:
@@ -15270,7 +15270,7 @@ def get_workload_list():
                 items.append(r)
 
         # Enrich with P2 telemetry data if enabled
-        p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
         if p2_enabled and items:
             try:
                 # Batch-fetch activity stats for identities (not app_regs)
@@ -15425,7 +15425,7 @@ def get_workload_detail(workload_id):
             for f in findings:
                 signal_map[f.get('component', 'general')].append(f.get('title', ''))
 
-            p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+            p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
 
             cursor.close()
             return jsonify({
@@ -15570,7 +15570,7 @@ def get_workload_detail(workload_id):
                     r['created_on'] = r['created_on'].isoformat()
 
             # P2 telemetry enrichment
-            p2_enabled = db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+            p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
             activity_stats_data = None
             anomalies_list = []
             if p2_enabled:

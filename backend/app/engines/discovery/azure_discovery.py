@@ -279,7 +279,7 @@ class AzureDiscoveryEngine:
 
         # Step 9a-ii: P2 Telemetry Ingestion (if enabled)
         try:
-            p2_enabled = self.db.get_system_setting('p2_telemetry_enabled', 'false') == 'true'
+            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', tenant_id=self.db._tenant_id) == 'true'
             if p2_enabled:
                 print("\n📊 Ingesting P2 sign-in telemetry...")
                 from app.engines.telemetry.p2_ingestion import P2TelemetryService
