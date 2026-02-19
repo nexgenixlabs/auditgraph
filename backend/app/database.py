@@ -8713,6 +8713,7 @@ class Database:
                     cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col} {coltype}")
                 except Exception:
                     self.conn.rollback()
+                    self.set_tenant_context(self._tenant_id)
 
             # spn_exposure_findings table
             cursor.execute("""
@@ -8739,6 +8740,8 @@ class Database:
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()
+            # Restore tenant context lost by rollback
+            self.set_tenant_context(self._tenant_id)
             print(f"  ⚠️ SPN exposure schema error: {e}")
         finally:
             cursor.close()
@@ -8874,6 +8877,7 @@ class Database:
                     cursor.execute(f"ALTER TABLE app_registrations ADD COLUMN IF NOT EXISTS {col} {coltype}")
                 except Exception:
                     self.conn.rollback()
+                    self.set_tenant_context(self._tenant_id)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS app_reg_exposure_findings (
@@ -8899,6 +8903,8 @@ class Database:
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()
+            # Restore tenant context lost by rollback
+            self.set_tenant_context(self._tenant_id)
             print(f"  ⚠️ App reg exposure schema error: {e}")
         finally:
             cursor.close()
