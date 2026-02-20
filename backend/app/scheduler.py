@@ -160,8 +160,17 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
 
     if connected:
         logger.info(f"  Found {len(connected)} connected connection(s) for {tenant_name}")
+        any_ran = False
         for conn in connected:
+            meta = conn.get('metadata') or {}
+            if not meta.get('client_secret'):
+                logger.warning(f"  ⚠ Connection '{conn.get('label')}' (id={conn['id']}) missing client_secret in metadata — skipping")
+                continue
             _run_connection_discovery(db_tenant_id, tenant_name, conn, scan_mode)
+            any_ran = True
+        if not any_ran:
+            logger.info(f"  All connections skipped (missing credentials), trying legacy settings for {tenant_name}")
+            _run_legacy_settings_discovery(db_tenant_id, tenant_name, scan_mode)
     else:
         # Fallback: legacy settings-based credentials
         logger.info(f"  No cloud_connections found, trying legacy settings for {tenant_name}")

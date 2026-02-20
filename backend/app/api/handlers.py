@@ -9084,12 +9084,16 @@ def get_client_connections():
                 settings = db.get_settings(tenant_id=tid)
                 azure_tid = (settings.get('azure_tenant_id') or '').strip()
                 azure_cid = (settings.get('azure_client_id') or '').strip()
+                azure_secret = (settings.get('azure_client_secret') or '').strip()
                 if azure_tid:
+                    meta = {'migrated_from_settings': True}
+                    if azure_secret:
+                        meta['client_secret'] = azure_secret
                     conn = db.create_cloud_connection(
                         tenant_id=tid, cloud='azure', label='Primary',
                         entra_tenant_id=azure_tid, client_id=azure_cid,
                         connection_type='entra',
-                        metadata={'migrated_from_settings': True},
+                        metadata=meta,
                     )
                     # Mark as connected since it was already working
                     db.update_cloud_connection(conn['id'], status='connected',
