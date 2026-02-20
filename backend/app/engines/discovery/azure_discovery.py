@@ -2776,6 +2776,7 @@ class AzureDiscoveryEngine:
 
             # Batch-fetch PIM data
             try:
+                cursor.execute("SAVEPOINT pim_fetch")
                 cursor.execute(f"SELECT identity_db_id, role_name, start_datetime FROM pim_eligible_assignments WHERE identity_db_id IN ({ph})", db_ids)
                 for r in cursor.fetchall():
                     pim_map.setdefault(r['identity_db_id'], {'eligible': [], 'activations': []})
@@ -2784,12 +2785,14 @@ class AzureDiscoveryEngine:
                 for r in cursor.fetchall():
                     pim_map.setdefault(r['identity_db_id'], {'eligible': [], 'activations': []})
                     pim_map[r['identity_db_id']]['activations'].append(dict(r))
+                cursor.execute("RELEASE SAVEPOINT pim_fetch")
             except Exception:
-                pass  # PIM tables may not exist
+                cursor.execute("ROLLBACK TO SAVEPOINT pim_fetch")
 
             # Batch-fetch P2 activity stats (if available)
             p2_stats_map = {}
             try:
+                cursor.execute("SAVEPOINT p2_fetch")
                 cursor.execute(f"""
                     SELECT identity_db_id, total_sign_ins, successful_sign_ins,
                            failed_sign_ins, unique_resources, unique_ips,
@@ -2803,8 +2806,9 @@ class AzureDiscoveryEngine:
                     dbid = r['identity_db_id']
                     if dbid not in p2_stats_map:
                         p2_stats_map[dbid] = dict(r)
+                cursor.execute("RELEASE SAVEPOINT p2_fetch")
             except Exception:
-                pass  # Table may not exist yet
+                cursor.execute("ROLLBACK TO SAVEPOINT p2_fetch")
 
         scored = 0
         critical_count = 0
@@ -2832,6 +2836,7 @@ class AzureDiscoveryEngine:
 
         # ── Part 2: App Registration scoring ─────────────────────────
         try:
+            cursor.execute("SAVEPOINT appreg_fetch")
             cursor.execute("""
                 SELECT id, app_id, display_name, sign_in_audience, owner_count,
                        owners, has_service_principal, linked_spn_id,
@@ -2844,7 +2849,9 @@ class AzureDiscoveryEngine:
                 WHERE discovery_run_id = %s
             """, (run_id,))
             app_reg_rows = cursor.fetchall()
+            cursor.execute("RELEASE SAVEPOINT appreg_fetch")
         except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT appreg_fetch")
             app_reg_rows = []
 
         if app_reg_rows:
