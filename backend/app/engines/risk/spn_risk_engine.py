@@ -116,7 +116,7 @@ class WorkloadExposureEngine:
         # ── Component 4: Lifecycle (max 10) ─────────────────────────
         if is_managed_identity:
             lc_score, lc_findings, owner_status = self._score_lifecycle(
-                identity_data, creds, owns)
+                identity_data, creds, owns, p2_stats=p2_stats)
             # System-assigned MIs are bound to their parent resource
             cat = (identity_data.get('identity_category') or '').lower()
             if cat == 'managed_identity_system' and owner_status == 'orphaned':
@@ -126,7 +126,7 @@ class WorkloadExposureEngine:
                 lc_score = max(lc_score - 10, 0)
         else:
             lc_score, lc_findings, owner_status = self._score_lifecycle(
-                identity_data, creds, owns)
+                identity_data, creds, owns, p2_stats=p2_stats)
         scores['lifecycle'] = min(lc_score, 10)
         findings.extend(lc_findings)
         flags['owner_status'] = owner_status
@@ -729,7 +729,7 @@ class WorkloadExposureEngine:
 
     # ── Lifecycle Scoring ───────────────────────────────────────────
 
-    def _score_lifecycle(self, identity_data, credentials, owners):
+    def _score_lifecycle(self, identity_data, credentials, owners, p2_stats=None):
         score = 0
         findings = []
 
@@ -752,42 +752,59 @@ class WorkloadExposureEngine:
         else:
             owner_status = 'owned'
 
-        # Dormant check
-        activity = (identity_data.get('activity_status') or '').lower()
-        last_sign_in = identity_data.get('last_sign_in')
+        # P2 telemetry overrides stale activity_status from ARM discovery
+        p2_active = (p2_stats is not None and p2_stats.get('total_sign_ins', 0) > 0)
 
-        days_since_sign_in = None
-        if last_sign_in:
-            if isinstance(last_sign_in, str):
-                try:
-                    ls_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00')).replace(tzinfo=None)
-                    days_since_sign_in = (datetime.utcnow() - ls_dt).days
-                except Exception:
-                    pass
-            elif hasattr(last_sign_in, 'replace'):
-                days_since_sign_in = (datetime.utcnow() - last_sign_in.replace(tzinfo=None)).days
+        # Dormant check — skip if P2 confirms active sign-ins
+        if not p2_active:
+            activity = (identity_data.get('activity_status') or '').lower()
+            last_sign_in = identity_data.get('last_sign_in')
 
-        if days_since_sign_in is not None and days_since_sign_in > 180:
+            days_since_sign_in = None
+            if last_sign_in:
+                if isinstance(last_sign_in, str):
+                    try:
+                        ls_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00')).replace(tzinfo=None)
+                        days_since_sign_in = (datetime.utcnow() - ls_dt).days
+                    except Exception:
+                        pass
+                elif hasattr(last_sign_in, 'replace'):
+                    days_since_sign_in = (datetime.utcnow() - last_sign_in.replace(tzinfo=None)).days
+
+            if days_since_sign_in is not None and days_since_sign_in > 180:
+                score += 8
+                findings.append({
+                    'finding_type': 'dormant_identity',
+                    'severity': 'high',
+                    'title': f'No sign-in for {days_since_sign_in} days',
+                    'description': 'Dormant workload identity with active credentials is a security risk.',
+                    'evidence': {'days_since_sign_in': days_since_sign_in},
+                    'remediation': 'Verify if still needed. Disable or remove if unused.',
+                    'component': 'lifecycle',
+                    'score_impact': 8,
+                })
+            elif activity in ('stale', 'never_used'):
+                score += 8
+                findings.append({
+                    'finding_type': 'stale_identity',
+                    'severity': 'high',
+                    'title': f'Activity status: {activity}',
+                    'description': 'Identity is stale or never used — credentials may be abandoned.',
+                    'evidence': {'activity_status': activity},
+                    'remediation': 'Investigate usage. Remove if confirmed unused.',
+                    'component': 'lifecycle',
+                    'score_impact': 8,
+                })
+        elif p2_stats and p2_stats.get('total_sign_ins', 0) == 0:
+            # P2 available but zero sign-ins — confirmed dormant
             score += 8
             findings.append({
-                'finding_type': 'dormant_identity',
+                'finding_type': 'confirmed_dormant',
                 'severity': 'high',
-                'title': f'No sign-in for {days_since_sign_in} days',
-                'description': 'Dormant workload identity with active credentials is a security risk.',
-                'evidence': {'days_since_sign_in': days_since_sign_in},
-                'remediation': 'Verify if still needed. Disable or remove if unused.',
-                'component': 'lifecycle',
-                'score_impact': 8,
-            })
-        elif activity in ('stale', 'never_used'):
-            score += 8
-            findings.append({
-                'finding_type': 'stale_identity',
-                'severity': 'high',
-                'title': f'Activity status: {activity}',
-                'description': 'Identity is stale or never used — credentials may be abandoned.',
-                'evidence': {'activity_status': activity},
-                'remediation': 'Investigate usage. Remove if confirmed unused.',
+                'title': 'P2 telemetry confirms zero sign-ins',
+                'description': 'Entra ID P2 sign-in logs show no activity — confirmed dormant.',
+                'evidence': {'telemetry_source': 'p2', 'total_sign_ins': 0},
+                'remediation': 'Verified unused. Disable or remove.',
                 'component': 'lifecycle',
                 'score_impact': 8,
             })

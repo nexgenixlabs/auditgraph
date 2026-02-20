@@ -268,16 +268,9 @@ class AzureDiscoveryEngine:
         saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map, pim_map, ca_policies)
         print(f"  ✓ Saved {saved_count} identities")
 
-        # Step 9a: Compute Workload Identity Exposure Scores
-        print("\n🎯 Computing workload identity exposure scores...")
-        try:
-            self._compute_workload_exposure(run_id)
-        except Exception as e:
-            print(f"  ✗ Workload exposure computation error: {e}")
-            import traceback
-            traceback.print_exc()
-
-        # Step 9a-ii: P2 Telemetry Ingestion (if enabled)
+        # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
+        # MUST run before exposure scoring so fresh sign-in data is available
+        p2_enabled = False
         try:
             p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', tenant_id=self.db._tenant_id) == 'true'
             if p2_enabled:
@@ -287,12 +280,27 @@ class AzureDiscoveryEngine:
                 tenant_id = self.db._tenant_id
                 telemetry.ingest_signin_logs(run_id, tenant_id)
                 telemetry.compute_activity_stats(run_id, tenant_id)
-                # Run behavioral anomaly detection
-                from app.engines.telemetry.behavioral_engine import BehavioralAnomalyEngine
-                anomaly_engine = BehavioralAnomalyEngine(self.db)
-                anomaly_engine.detect_anomalies(run_id, tenant_id)
+                print("  ✓ P2 telemetry ingested — activity stats ready for scoring")
         except Exception as e:
             print(f"  ⚠️ P2 telemetry ingestion error: {e}")
+
+        # Step 9a-ii: Compute Workload Identity Exposure Scores (uses P2 data)
+        print("\n🎯 Computing workload identity exposure scores...")
+        try:
+            self._compute_workload_exposure(run_id)
+        except Exception as e:
+            print(f"  ✗ Workload exposure computation error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Step 9a-iii: Behavioral anomaly detection (after scoring)
+        try:
+            if p2_enabled:
+                from app.engines.telemetry.behavioral_engine import BehavioralAnomalyEngine
+                anomaly_engine = BehavioralAnomalyEngine(self.db)
+                anomaly_engine.detect_anomalies(run_id, self.db._tenant_id)
+        except Exception as e:
+            print(f"  ⚠️ Behavioral anomaly detection error: {e}")
 
         # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
         print("\n🗄️  Discovering Azure Resources...")
