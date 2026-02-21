@@ -278,40 +278,70 @@ def _run_legacy_settings_discovery(db_tenant_id: int, tenant_name: str, scan_mod
 
 def _send_change_notification_if_needed(db_tenant_id: int = None):
     """
-    Compare the two most recent discovery runs and send email if changes detected.
-    Called after each successful discovery run.
+    Compare discovery runs PER-CONNECTION and send email if changes detected.
+    Each connection's latest run is compared against that same connection's
+    previous run (not against a different connection's run).
+    Called after each successful tenant discovery cycle.
     """
     try:
         db = Database(tenant_id=db_tenant_id)
 
-        # Get the two most recent completed runs
+        # Get the two most recent completed runs PER CONNECTION
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT id FROM discovery_runs
+            SELECT cloud_connection_id, id,
+                   ROW_NUMBER() OVER (PARTITION BY cloud_connection_id ORDER BY id DESC) as rn
+            FROM discovery_runs
             WHERE status = 'completed'
-            ORDER BY id DESC
-            LIMIT 2
+              AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+            ORDER BY cloud_connection_id, id DESC
         """)
-        runs = cursor.fetchall()
+        rows = cursor.fetchall()
         cursor.close()
 
-        if len(runs) < 2:
-            logger.info("Not enough discovery runs for comparison - skipping change notification")
+        # Group by connection: {conn_id: [run_ids ordered desc]}
+        conn_runs: dict = {}
+        for conn_id, run_id, rn in rows:
+            if rn <= 2:
+                conn_runs.setdefault(conn_id, []).append(run_id)
+
+        # Build per-connection drift pairs
+        pairs = []
+        for conn_id, run_ids in conn_runs.items():
+            if len(run_ids) >= 2:
+                pairs.append((conn_id, run_ids[0], run_ids[1]))
+
+        if not pairs:
+            logger.info("Not enough per-connection discovery runs for comparison - skipping change notification")
             db.close()
             return
 
-        current_run_id = runs[0][0]
-        previous_run_id = runs[1][0]
-
-        logger.info(f"Comparing runs: #{current_run_id} vs #{previous_run_id}")
-
-        # Compare runs for changes
+        # Compare runs per-connection and aggregate changes
         detector = DriftDetector(db)
-        changes = detector.compare_runs(current_run_id, previous_run_id)
+        changes: dict = {
+            'new_identities': [], 'removed_identities': [],
+            'permission_changes': [], 'risk_changes': [], 'credential_changes': [],
+        }
+        latest_current_run_id = 0
+        latest_previous_run_id = 0
+        for conn_id, current_run_id, previous_run_id in pairs:
+            logger.info(f"Comparing runs for connection {conn_id}: #{current_run_id} vs #{previous_run_id}")
+            conn_changes = detector.compare_runs(current_run_id, previous_run_id)
 
-        # Phase 14: Persist drift report
-        report_id = db.save_drift_report(current_run_id, previous_run_id, changes)
-        logger.info(f"Drift report #{report_id} saved for runs #{current_run_id} vs #{previous_run_id}")
+            # Persist per-connection drift report
+            report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes)
+            logger.info(f"Drift report #{report_id} saved for connection {conn_id} (runs #{current_run_id} vs #{previous_run_id})")
+
+            # Aggregate into combined changes
+            for key in changes:
+                changes[key].extend(conn_changes.get(key, []))
+
+            if current_run_id > latest_current_run_id:
+                latest_current_run_id = current_run_id
+                latest_previous_run_id = previous_run_id
+
+        current_run_id = latest_current_run_id
+        previous_run_id = latest_previous_run_id
 
         # Check if there are ANY significant changes (all 5 types)
         new_count = len(changes.get('new_identities', []))

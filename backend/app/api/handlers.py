@@ -4678,24 +4678,44 @@ def get_identity_summary():
         azure_subs = [r[0] for r in cursor.fetchall() if r[0]]
 
         # Also check cloud_subscriptions table for accurate count
-        # (includes subs from ALL connections, not just the latest discovery run)
+        # When connection_id is specified, filter to that connection only
         tid = _tenant_id()
+        conn_id = _connection_id()
         if tid:
-            cursor.execute("""
-                SELECT COUNT(DISTINCT account_id)
-                FROM cloud_subscriptions
-                WHERE tenant_id = %s AND cloud = 'azure'
-                  AND status IN ('active', 'discovered')
-            """, (tid,))
+            if conn_id:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT account_id)
+                    FROM cloud_subscriptions
+                    WHERE tenant_id = %s AND cloud = 'azure'
+                      AND cloud_connection_id = %s
+                      AND status IN ('active', 'discovered')
+                """, (tid, conn_id))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT account_id)
+                    FROM cloud_subscriptions
+                    WHERE tenant_id = %s AND cloud = 'azure'
+                      AND status IN ('active', 'discovered')
+                """, (tid,))
             cs_count = cursor.fetchone()[0] or 0
             # Also get sub IDs from cloud_subscriptions
-            cursor.execute("""
-                SELECT DISTINCT account_id
-                FROM cloud_subscriptions
-                WHERE tenant_id = %s AND cloud = 'azure'
-                  AND status IN ('active', 'discovered')
-                ORDER BY account_id
-            """, (tid,))
+            if conn_id:
+                cursor.execute("""
+                    SELECT DISTINCT account_id
+                    FROM cloud_subscriptions
+                    WHERE tenant_id = %s AND cloud = 'azure'
+                      AND cloud_connection_id = %s
+                      AND status IN ('active', 'discovered')
+                    ORDER BY account_id
+                """, (tid, conn_id))
+            else:
+                cursor.execute("""
+                    SELECT DISTINCT account_id
+                    FROM cloud_subscriptions
+                    WHERE tenant_id = %s AND cloud = 'azure'
+                      AND status IN ('active', 'discovered')
+                    ORDER BY account_id
+                """, (tid,))
             cs_subs = [r[0] for r in cursor.fetchall() if r[0]]
         else:
             cs_count = 0
@@ -15209,7 +15229,9 @@ def get_workload_list():
                        COALESCE(i.effective_scope_flag, 'resource') as effective_scope_flag,
                        COALESCE(i.cross_subscription, false) as cross_subscription,
                        COALESCE(i.credential_age_days, 0) as credential_age_days,
-                       i.created_datetime
+                       i.created_datetime,
+                       i.owner_display_name,
+                       COALESCE(i.owner_count, 0) as owner_count
                 FROM identities i
                 WHERE {where_sql}
             """, params)
@@ -15283,7 +15305,8 @@ def get_workload_list():
                        COALESCE(a.cross_subscription, false) as cross_subscription,
                        COALESCE(a.credential_age_days, 0) as credential_age_days,
                        a.sign_in_audience, a.owner_count, a.has_service_principal,
-                       a.created_datetime
+                       a.created_datetime,
+                       a.primary_owner as owner_display_name
                 FROM app_registrations a
                 WHERE {ar_where_sql}
             """, ar_params)
@@ -15456,6 +15479,16 @@ def get_workload_detail(workload_id):
 
             p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
 
+            # Build owners list from JSONB column
+            ar_owners = []
+            for o in (ar.get('owners') or []):
+                if isinstance(o, dict):
+                    ar_owners.append({
+                        'owner_display_name': o.get('display_name') or o.get('owner_display_name'),
+                        'owner_upn': o.get('user_principal_name') or o.get('owner_upn'),
+                        'owner_object_id': o.get('id') or o.get('owner_object_id'),
+                    })
+
             cursor.close()
             return jsonify({
                 'identity_type': 'app_registration',
@@ -15467,6 +15500,7 @@ def get_workload_detail(workload_id):
                 'linked_spn': linked_spn,
                 'recommendations': recommendations,
                 'permissions': app_reg_permissions,
+                'owners': ar_owners,
                 'signals': dict(signal_map),
                 'p2_enabled': p2_enabled,
             })

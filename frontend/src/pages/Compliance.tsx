@@ -69,17 +69,17 @@ interface IntelligenceData {
 /* ───────── Constants ───────── */
 
 const C = {
-  bg: "#0a0f1a",
-  card: "#1a2332",
-  border: "#2a3444",
-  critical: "#EF4444",
-  warning: "#F59E0B",
-  good: "#22C55E",
-  text: "#F9FAFB",
-  textMuted: "#9CA3AF",
-  textDim: "#6B7280",
-  accent: "#F59E0B",
-  accentBlue: "#3B82F6",
+  bg: 'var(--bg-primary)',
+  card: 'var(--bg-secondary)',
+  border: 'var(--border-default)',
+  critical: '#EF4444',
+  warning: '#F59E0B',
+  good: '#22C55E',
+  text: 'var(--text-primary)',
+  textMuted: 'var(--text-secondary)',
+  textDim: 'var(--text-tertiary)',
+  accent: '#F59E0B',
+  accentBlue: '#3B82F6',
 };
 
 const mono = "'JetBrains Mono', 'Fira Code', monospace";
@@ -101,14 +101,14 @@ function ScoreRing({ pct, size = 88 }: { pct: number; size?: number }) {
 
   return (
     <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#1F2937" strokeWidth="6" />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--bg-elevated)" strokeWidth="6" />
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="6"
         strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
         style={{ transition: "stroke-dashoffset 0.8s ease" }} />
       <g transform={`rotate(90 ${size / 2} ${size / 2})`}>
         <text x={size / 2} y={size / 2 - 4} textAnchor="middle" fill={color}
           fontSize="18" fontWeight="800" fontFamily={mono}>{pct}%</text>
-        <text x={size / 2} y={size / 2 + 12} textAnchor="middle" fill="#9CA3AF"
+        <text x={size / 2} y={size / 2 + 12} textAnchor="middle" fill={C.textMuted}
           fontSize="9" fontFamily={mono}>passing</text>
       </g>
     </svg>
@@ -117,7 +117,7 @@ function ScoreRing({ pct, size = 88 }: { pct: number; size?: number }) {
 
 function MiniBar({ value, color }: { value: number; color: string }) {
   return (
-    <div style={{ height: 6, background: "#1F2937", borderRadius: 3, width: "100%" }}>
+    <div style={{ height: 6, background: 'var(--bg-elevated)', borderRadius: 3, width: "100%" }}>
       <div style={{
         height: "100%", width: `${Math.min(value, 100)}%`, background: color,
         borderRadius: 3, transition: "width 0.8s ease",
@@ -137,7 +137,7 @@ function FrameworkCard({ name, pct, identity, assessed, id, highlight, expanded,
       onClick={onClick}
       title={`Click to ${expanded ? 'collapse' : 'expand'} ${name} controls`}
       style={{
-        background: expanded ? "#141c2b" : highlight ? "#141c2b" : "#111827",
+        background: expanded ? 'var(--bg-hover)' : highlight ? 'var(--bg-hover)' : 'var(--bg-elevated)',
         border: `1px solid ${expanded ? `${color}50` : highlight ? `${color}60` : C.border}`,
         borderRadius: 12,
         padding: "20px 16px",
@@ -154,22 +154,22 @@ function FrameworkCard({ name, pct, identity, assessed, id, highlight, expanded,
       }}
       onMouseEnter={e => {
         (e.currentTarget as HTMLDivElement).style.borderColor = `${color}40`;
-        (e.currentTarget as HTMLDivElement).style.background = "#141c2b";
+        (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)';
       }}
       onMouseLeave={e => {
         (e.currentTarget as HTMLDivElement).style.borderColor = expanded ? `${color}50` : highlight ? `${color}60` : C.border;
-        (e.currentTarget as HTMLDivElement).style.background = expanded || highlight ? "#141c2b" : "#111827";
+        (e.currentTarget as HTMLDivElement).style.background = expanded || highlight ? 'var(--bg-hover)' : 'var(--bg-elevated)';
       }}
     >
       <ScoreRing pct={pct} />
       <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: "#FFFFFF", letterSpacing: "-0.2px", marginBottom: 4 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: C.text, letterSpacing: "-0.2px", marginBottom: 4 }}>
           {name}
         </div>
-        <div style={{ fontSize: 11, fontWeight: 600, color: "#D1D5DB", fontFamily: mono, marginBottom: 2 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', fontFamily: mono, marginBottom: 2 }}>
           {identity} controls
         </div>
-        <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: mono }}>
+        <div style={{ fontSize: 10, color: C.textMuted, fontFamily: mono }}>
           {assessed}
         </div>
       </div>
@@ -186,19 +186,19 @@ function FrameworkCard({ name, pct, identity, assessed, id, highlight, expanded,
 function TierDivider({ icon, label, count }: { icon: string; label: string; count: number }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "28px 0 18px" }}>
-      <div style={{ height: 1, width: 24, background: "linear-gradient(90deg, transparent, #374151)" }} />
+      <div style={{ height: 1, width: 24, background: "linear-gradient(90deg, transparent, var(--border-default))" }} />
       <div style={{
         display: "flex", alignItems: "center", gap: 8, padding: "6px 14px",
-        borderRadius: 6, background: "rgba(255,255,255,0.03)", border: "1px solid #2a3444",
+        borderRadius: 6, background: 'var(--bg-hover)', border: `1px solid ${C.border}`,
       }}>
         <span style={{ fontSize: 13 }}>{icon}</span>
         <span style={{
-          fontSize: 11, fontWeight: 700, color: "#E5E7EB", letterSpacing: "1px",
+          fontSize: 11, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: "1px",
           textTransform: "uppercase", fontFamily: mono,
         }}>{label}</span>
-        <span style={{ fontSize: 10, fontWeight: 600, color: "#6B7280", fontFamily: mono }}>({count})</span>
+        <span style={{ fontSize: 10, fontWeight: 600, color: C.textDim, fontFamily: mono }}>({count})</span>
       </div>
-      <div style={{ flex: 1, height: 1, background: "linear-gradient(90deg, #374151, transparent)" }} />
+      <div style={{ flex: 1, height: 1, background: "linear-gradient(90deg, var(--border-default), transparent)" }} />
     </div>
   );
 }
@@ -227,7 +227,7 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
 
   return (
     <div style={{
-      background: "#0d1420", border: `1px solid ${C.border}`, borderRadius: 12,
+      background: 'var(--bg-secondary)', border: `1px solid ${C.border}`, borderRadius: 12,
       padding: "16px 20px", marginTop: 12,
       animation: "fwExpandIn 0.25s ease",
     }}>
@@ -236,7 +236,7 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
       {/* Summary strip */}
       <div style={{
         display: "flex", gap: 16, marginBottom: 14, padding: "8px 12px",
-        background: "#111827", borderRadius: 8, border: `1px solid ${C.border}`,
+        background: 'var(--bg-elevated)', borderRadius: 8, border: `1px solid ${C.border}`,
       }}>
         {['fail', 'warn', 'pass'].map(s => {
           const meta = STATUS_META[s];
@@ -281,16 +281,16 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
                     onClick={() => !isPass && hasEvidence && setExpandedCtrl(isExpanded ? null : ctrl.control_id)}
                     style={{
                       display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
-                      background: isExpanded ? "#141c2b" : "#111827",
+                      background: isExpanded ? 'var(--bg-hover)' : 'var(--bg-elevated)',
                       border: `1px solid ${isExpanded ? `${meta.color}30` : "transparent"}`,
                       borderRadius: 8, cursor: !isPass && hasEvidence ? "pointer" : "default",
                       transition: "all 0.15s",
                     }}
                     onMouseEnter={e => {
-                      if (!isPass && hasEvidence) (e.currentTarget as HTMLDivElement).style.background = "#141c2b";
+                      if (!isPass && hasEvidence) (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)';
                     }}
                     onMouseLeave={e => {
-                      if (!isExpanded) (e.currentTarget as HTMLDivElement).style.background = "#111827";
+                      if (!isExpanded) (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-elevated)';
                     }}
                     title={!isPass && hasEvidence ? `Click to see ${ctrl.evidence_count} impacted identities` : undefined}
                   >
@@ -308,7 +308,7 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
 
                     {/* Name */}
                     <span style={{
-                      fontSize: 12, color: "#E5E7EB", flex: 1,
+                      fontSize: 12, color: 'var(--text-primary)', flex: 1,
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                     }}>{ctrl.name}</span>
 
@@ -346,7 +346,7 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
                   {isExpanded && hasEvidence && (
                     <div style={{
                       marginLeft: 20, marginTop: 4, marginBottom: 8,
-                      padding: "10px 14px", background: "#0a1018",
+                      padding: "10px 14px", background: 'var(--bg-primary)',
                       border: `1px solid ${C.border}`, borderRadius: 8,
                     }}>
                       <div style={{
@@ -358,8 +358,8 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
 
                       {/* Detail text */}
                       <div style={{
-                        fontSize: 11, color: "#9CA3AF", marginBottom: 10,
-                        padding: "6px 10px", background: "#111827", borderRadius: 6,
+                        fontSize: 11, color: C.textMuted, marginBottom: 10,
+                        padding: "6px 10px", background: 'var(--bg-elevated)', borderRadius: 6,
                         borderLeft: `3px solid ${meta.color}40`,
                       }}>
                         {ctrl.detail}
@@ -377,7 +377,7 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
                               display: "flex", alignItems: "center", gap: 8, padding: "6px 8px",
                               borderRadius: 6, cursor: "pointer", transition: "background 0.15s",
                             }}
-                            onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = "#141c2b"; }}
+                            onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)'; }}
                             onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
                             title={`View ${eid.display_name} detail`}
                           >
@@ -391,7 +391,7 @@ function ControlExpansion({ fw, onIdentityClick }: { fw: IntelFramework; onIdent
 
                             {/* Name */}
                             <span style={{
-                              fontSize: 11, color: "#E5E7EB", flex: 1,
+                              fontSize: 11, color: 'var(--text-primary)', flex: 1,
                               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                             }}>{eid.display_name}</span>
 
@@ -498,12 +498,12 @@ export default function Compliance() {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, color: C.text, padding: "28px 32px" }}>
         <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ height: 28, width: 240, borderRadius: 8, background: "rgba(255,255,255,0.05)", marginBottom: 20 }} />
+          <div style={{ height: 28, width: 240, borderRadius: 8, background: 'var(--bg-active)', marginBottom: 20 }} />
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
             {[1, 2, 3].map(i => (
               <div key={i} style={{
                 height: 180, flex: "1 1 160px", borderRadius: 12,
-                background: "rgba(255,255,255,0.03)", animation: "pulse 1.5s infinite",
+                background: 'var(--bg-hover)', animation: "pulse 1.5s infinite",
               }} />
             ))}
           </div>
@@ -563,7 +563,7 @@ export default function Compliance() {
     }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, color: "#FFFFFF", letterSpacing: "-0.3px" }}>
+        <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, color: C.text, letterSpacing: "-0.3px" }}>
           Compliance Posture
         </h1>
         <span style={{
@@ -574,7 +574,7 @@ export default function Compliance() {
           Identity Controls Only
         </span>
       </div>
-      <p style={{ margin: "0 0 8px", fontSize: 13, color: "#D1D5DB" }}>
+      <p style={{ margin: "0 0 8px", fontSize: 13, color: 'var(--text-secondary)' }}>
         Assessing identity, access, and privilege controls only
       </p>
 
@@ -593,7 +593,7 @@ export default function Compliance() {
               <TierDivider icon={cfg.icon} label={cfg.label} count={fws.length} />
               {tier === 'benchmark' && (
                 <div style={{ padding: "4px 12px 4px 0", marginBottom: 4 }}>
-                  <span style={{ fontSize: 10, color: "#6B7280", fontStyle: "italic" }}>
+                  <span style={{ fontSize: 10, color: C.textDim, fontStyle: "italic" }}>
                     Shown in Risk Monitoring only — not included in executive posture score
                   </span>
                 </div>
@@ -626,33 +626,33 @@ export default function Compliance() {
 
         {/* Bottom Section: Remediation + SA Governance */}
         <div style={{
-          marginTop: 28, paddingTop: 20, borderTop: "1px solid #2a3444",
+          marginTop: 28, paddingTop: 20, borderTop: `1px solid ${C.border}`,
           display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20,
         }}>
           {/* Remediation Progress */}
           <div style={{
             padding: "16px 20px", borderRadius: 10,
-            background: "#111827", border: `1px solid ${C.border}`,
+            background: 'var(--bg-elevated)', border: `1px solid ${C.border}`,
           }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <span style={{ fontSize: 13, fontWeight: 700, color: "#FFFFFF" }}>Remediation Progress</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Remediation Progress</span>
               <span style={{ fontSize: 14, fontWeight: 800, color: C.warning, fontFamily: mono }}>
                 {data.passing > 0 ? Math.round((data.passing / data.total_controls) * 100) : 0}%
               </span>
             </div>
             <MiniBar value={data.passing > 0 ? Math.round((data.passing / data.total_controls) * 100) : 0} color={C.warning} />
             <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 11, fontFamily: mono }}>
-              <span style={{ color: "#9CA3AF" }}>
+              <span style={{ color: C.textMuted }}>
                 Passing: <span style={{ color: C.good, fontWeight: 600 }}>{data.passing}</span>
               </span>
-              <span style={{ color: "#9CA3AF" }}>
+              <span style={{ color: C.textMuted }}>
                 Warnings: <span style={{ color: C.warning, fontWeight: 600 }}>{data.warnings}</span>
               </span>
-              <span style={{ color: "#9CA3AF" }}>
+              <span style={{ color: C.textMuted }}>
                 Failing: <span style={{ color: C.critical, fontWeight: 600 }}>{data.failing}</span>
               </span>
-              <span style={{ color: "#9CA3AF" }}>
-                Root Causes: <span style={{ color: "#FFFFFF", fontWeight: 600 }}>{totalRemediation}</span>
+              <span style={{ color: C.textMuted }}>
+                Root Causes: <span style={{ color: C.text, fontWeight: 600 }}>{totalRemediation}</span>
               </span>
             </div>
           </div>
@@ -660,23 +660,23 @@ export default function Compliance() {
           {/* SA Governance */}
           <div style={{
             padding: "16px 20px", borderRadius: 10,
-            background: "#111827", border: `1px solid ${C.border}`,
+            background: 'var(--bg-elevated)', border: `1px solid ${C.border}`,
           }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <span style={{ fontSize: 13, fontWeight: 700, color: "#FFFFFF" }}>SA Governance Compliance</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>SA Governance Compliance</span>
               <span style={{ fontSize: 14, fontWeight: 800, color: saGov ? (saGov.score >= 50 ? C.warning : C.critical) : C.critical, fontFamily: mono }}>
                 {saGov?.score ?? 0}%
               </span>
             </div>
             <MiniBar value={saGov?.score ?? 0} color={saGov && saGov.score >= 50 ? C.warning : C.critical} />
             <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 11, fontFamily: mono }}>
-              <span style={{ color: "#9CA3AF" }}>
+              <span style={{ color: C.textMuted }}>
                 Passing: <span style={{ color: C.good, fontWeight: 600 }}>{saGov?.passing ?? 0}</span>
               </span>
-              <span style={{ color: "#9CA3AF" }}>
+              <span style={{ color: C.textMuted }}>
                 Warnings: <span style={{ color: C.warning, fontWeight: 600 }}>{saGov?.warnings ?? 0}</span>
               </span>
-              <span style={{ color: "#9CA3AF" }}>
+              <span style={{ color: C.textMuted }}>
                 Failing: <span style={{ color: C.critical, fontWeight: 600 }}>{saGov?.failing ?? 0}</span>
               </span>
             </div>
@@ -686,12 +686,12 @@ export default function Compliance() {
         {/* Overall Summary Bar */}
         <div style={{
           marginTop: 20, padding: "14px 20px", borderRadius: 10,
-          background: "rgba(255,255,255,0.02)", border: `1px solid ${C.border}`,
+          background: 'var(--bg-hover)', border: `1px solid ${C.border}`,
           display: "flex", justifyContent: "space-between", alignItems: "center",
           flexWrap: "wrap", gap: 12,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: "#D1D5DB" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
               Overall Identity Controls Posture:
             </span>
             <span style={{
@@ -709,16 +709,16 @@ export default function Compliance() {
               {overallAvg >= 80 ? 'HEALTHY' : overallAvg >= 50 ? 'NEEDS WORK' : 'AT RISK'}
             </span>
           </div>
-          <div style={{ display: "flex", gap: 14, fontSize: 10, fontFamily: mono, color: "#9CA3AF" }}>
-            <span>Frameworks Active: <span style={{ color: "#FFFFFF", fontWeight: 600 }}>
+          <div style={{ display: "flex", gap: 14, fontSize: 10, fontFamily: mono, color: C.textMuted }}>
+            <span>Frameworks Active: <span style={{ color: C.text, fontWeight: 600 }}>
               {Object.keys(data.frameworks).length}
             </span></span>
-            <span style={{ color: "#374151" }}>|</span>
-            <span>Total Identity Controls: <span style={{ color: "#FFFFFF", fontWeight: 600 }}>
+            <span style={{ color: 'var(--border-default)' }}>|</span>
+            <span>Total Identity Controls: <span style={{ color: C.text, fontWeight: 600 }}>
               {data.total_controls}
             </span></span>
-            <span style={{ color: "#374151" }}>|</span>
-            <span>Last Assessed: <span style={{ color: "#FFFFFF", fontWeight: 600 }}>
+            <span style={{ color: 'var(--border-default)' }}>|</span>
+            <span>Last Assessed: <span style={{ color: C.text, fontWeight: 600 }}>
               {new Date(data.generated_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
             </span></span>
           </div>

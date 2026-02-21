@@ -25,6 +25,8 @@ interface WorkloadRow {
   lifecycle_state: string;
   can_escalate: boolean;
   owner_status: string;
+  owner_display_name?: string | null;
+  owner_count?: number;
   effective_scope_flag: string;
   cross_subscription: boolean;
   credential_age_days: number;
@@ -505,8 +507,13 @@ const WorkloadIdentities: React.FC = () => {
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${lcCfg.badgeClass}`}>{lcCfg.label}</span>
                   </td>
-                  <td className="text-center px-2 py-2">
-                    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${owCfg.badgeClass}`}>{owCfg.label}</span>
+                  <td className="px-2 py-2">
+                    <div className="flex flex-col items-center gap-0.5">
+                      <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${owCfg.badgeClass}`}>{owCfg.label}</span>
+                      {row.owner_display_name && (
+                        <span className="text-[10px] text-gray-500 dark:text-slate-400 truncate max-w-[120px]" title={row.owner_display_name}>{row.owner_display_name}</span>
+                      )}
+                    </div>
                   </td>
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scCfg.badgeClass}`}>{scCfg.label}</span>
