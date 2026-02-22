@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { COLORS } from '../../constants/design';
 
 interface Framework {
@@ -26,9 +27,10 @@ function scoreColor(pct: number): string {
   return '#EF4444';
 }
 
-function MiniDonut({ pct, label, passCount, totalControls, identityControls, totalFrameworkControls }: {
+function MiniDonut({ pct, label, passCount, totalControls, identityControls, totalFrameworkControls, onClick }: {
   pct: number; label: string; passCount: number; totalControls: number;
   identityControls?: number; totalFrameworkControls?: number;
+  onClick?: () => void;
 }) {
   const color = scoreColor(pct);
   const r = 32;
@@ -36,7 +38,7 @@ function MiniDonut({ pct, label, passCount, totalControls, identityControls, tot
   const dashOffset = circumference * (1 - Math.min(pct, 100) / 100);
 
   return (
-    <div className="flex flex-col items-center">
+    <button onClick={onClick} className={`flex flex-col items-center${onClick ? ' cursor-pointer hover:opacity-70 transition' : ''}`}>
       <div className="relative w-20 h-20">
         <svg viewBox="0 0 80 80" className="w-full h-full">
           <circle cx="40" cy="40" r={r} fill="none" stroke="var(--border-subtle)" strokeWidth="6" />
@@ -58,14 +60,14 @@ function MiniDonut({ pct, label, passCount, totalControls, identityControls, tot
           {identityControls} of {totalFrameworkControls} assessed
         </div>
       )}
-    </div>
+    </button>
   );
 }
 
-function SummaryBar({ label, pct }: { label: string; pct: number }) {
+function SummaryBar({ label, pct, onClick }: { label: string; pct: number; onClick?: () => void }) {
   const color = scoreColor(pct);
   return (
-    <div>
+    <button onClick={onClick} className={`text-left w-full${onClick ? ' cursor-pointer hover:opacity-80 transition' : ''}`}>
       <div className="flex items-center justify-between mb-1">
         <span className="text-[11px] font-medium" style={{ color: COLORS.textSecondary }}>{label}</span>
         <span className="text-[11px] font-bold" style={{ color }}>{Math.round(pct)}%</span>
@@ -73,7 +75,7 @@ function SummaryBar({ label, pct }: { label: string; pct: number }) {
       <div className="h-2 rounded-full overflow-hidden" style={{ backgroundColor: COLORS.borderLight }}>
         <div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.min(pct, 100)}%`, backgroundColor: color }} />
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -86,6 +88,7 @@ const TIER_LABELS: Record<string, string> = {
 };
 
 export default function CompliancePostureSummary({ frameworks, remediationPct, saGovernancePct }: CompliancePostureSummaryProps) {
+  const navigate = useNavigate();
   const hasData = (frameworks && frameworks.length > 0) || remediationPct != null || saGovernancePct != null;
   if (!hasData) return null;
 
@@ -129,6 +132,7 @@ export default function CompliancePostureSummary({ frameworks, remediationPct, s
                   totalControls={fw.total_controls ?? 0}
                   identityControls={fw.identity_controls_count}
                   totalFrameworkControls={fw.total_framework_controls}
+                  onClick={() => navigate('/dashboard?tab=governance')}
                 />
               ))}
             </div>
@@ -147,6 +151,7 @@ export default function CompliancePostureSummary({ frameworks, remediationPct, s
                 totalControls={fw.total_controls ?? 0}
                 identityControls={fw.identity_controls_count}
                 totalFrameworkControls={fw.total_framework_controls}
+                onClick={() => navigate('/dashboard?tab=governance')}
               />
             ))}
           </div>
@@ -154,8 +159,8 @@ export default function CompliancePostureSummary({ frameworks, remediationPct, s
 
         {/* Row 2: Summary bars */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t" style={{ borderColor: COLORS.borderLight }}>
-          <SummaryBar label="Remediation Progress" pct={remediationPct ?? 0} />
-          <SummaryBar label="SA Governance Compliance" pct={saGovernancePct ?? 0} />
+          <SummaryBar label="Remediation Progress" pct={remediationPct ?? 0} onClick={() => navigate('/dashboard?tab=governance')} />
+          <SummaryBar label="SA Governance Compliance" pct={saGovernancePct ?? 0} onClick={() => navigate('/service-accounts')} />
         </div>
       </div>
     </div>

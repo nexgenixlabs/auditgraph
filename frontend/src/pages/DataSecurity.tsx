@@ -146,16 +146,18 @@ function ComponentBar({ label, score, max, color }: { label: string; score: numb
   );
 }
 
-function StatCard({ label, value, color, subtitle }: { label: string; value: string | number; color: string; subtitle?: string }) {
+function StatCard({ label, value, color, subtitle, onClick }: { label: string; value: string | number; color: string; subtitle?: string; onClick?: () => void }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div style={{
+    <Tag onClick={onClick} style={{
       background: G.surface, border: `1px solid ${G.surfaceBorder}`, borderRadius: 10,
-      padding: '16px 20px', minWidth: 140, flex: 1,
-    }}>
+      padding: '16px 20px', minWidth: 140, flex: 1, textAlign: 'left' as const,
+      cursor: onClick ? 'pointer' : undefined, transition: 'opacity 0.15s',
+    }} className={onClick ? 'hover:opacity-70' : ''}>
       <div style={{ fontSize: 28, fontWeight: 700, color, fontFamily: G.mono, lineHeight: 1.1 }}>{value}</div>
       <div style={{ fontSize: 11, color: G.textSecondary, marginTop: 4 }}>{label}</div>
       {subtitle && <div style={{ fontSize: 10, color: G.textMuted, marginTop: 2 }}>{subtitle}</div>}
-    </div>
+    </Tag>
   );
 }
 
@@ -249,14 +251,14 @@ export default function DataSecurity() {
       {/* Summary Cards */}
       {summary && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 24 }}>
-          <StatCard label="Total Resources" value={summary.total} color={G.accent} />
-          <StatCard label="Storage Accounts" value={summary.storage_accounts} color="#60A5FA" />
-          <StatCard label="Key Vaults" value={summary.key_vaults} color="#A78BFA" />
+          <StatCard label="Total Resources" value={summary.total} color={G.accent} onClick={() => navigate('/resources')} />
+          <StatCard label="Storage Accounts" value={summary.storage_accounts} color="#60A5FA" onClick={() => navigate('/resources?resource_type=storage_account')} />
+          <StatCard label="Key Vaults" value={summary.key_vaults} color="#A78BFA" onClick={() => navigate('/resources?resource_type=key_vault')} />
           <StatCard label="At Risk" value={summary.at_risk} color={G.severity.critical}
-            subtitle={`${summary.by_risk.critical} critical, ${summary.by_risk.high} high`} />
+            subtitle={`${summary.by_risk.critical} critical, ${summary.by_risk.high} high`} onClick={() => navigate('/resources?risk=critical')} />
           <StatCard label="Avg Risk Score" value={summary.avg_score} color={
             summary.avg_score >= 50 ? G.severity.high : summary.avg_score >= 30 ? G.severity.medium : G.severity.low
-          } />
+          } onClick={() => navigate('/resources')} />
         </div>
       )}
 

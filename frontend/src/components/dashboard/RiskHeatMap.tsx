@@ -89,7 +89,12 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
                   );
                 })}
                 <td className="px-3 py-3 text-center">
-                  <span className="text-sm font-bold text-gray-900">{cat.total}</span>
+                  <button
+                    onClick={() => navigate(`/identities?identity_category=${encodeURIComponent(cat.key)}`)}
+                    className="text-sm font-bold text-gray-900 hover:text-blue-600 transition cursor-pointer"
+                  >
+                    {cat.total}
+                  </button>
                 </td>
               </tr>
             ))}
@@ -102,16 +107,22 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
                 const colors = RISK_SOLID[level];
                 return (
                   <td key={level} className="px-3 py-3 text-center">
-                    <span className={`inline-flex items-center justify-center min-w-[40px] px-2 py-1 rounded-lg text-sm font-bold ${colors.bg} ${colors.text}`}>
+                    <button
+                      onClick={() => navigate(`/identities?risk_level=${encodeURIComponent(level)}`)}
+                      className={`inline-flex items-center justify-center min-w-[40px] px-2 py-1 rounded-lg text-sm font-bold ${colors.bg} ${colors.text} ${colors.hoverBg} transition cursor-pointer`}
+                    >
                       {total}
-                    </span>
+                    </button>
                   </td>
                 );
               })}
               <td className="px-3 py-3 text-center">
-                <span className="text-lg font-bold text-gray-900">
+                <button
+                  onClick={() => navigate('/identities')}
+                  className="text-lg font-bold text-gray-900 hover:text-blue-600 transition cursor-pointer"
+                >
                   {categories.reduce((sum, c) => sum + c.total, 0)}
-                </span>
+                </button>
               </td>
             </tr>
           </tfoot>

@@ -81,6 +81,39 @@ const MOVE_NAV: Record<string, string> = {
   'Removed': '/identities',
 };
 
+// Navigation target mapping for pillar scores
+const PILLAR_NAV: Record<string, string> = {
+  'Effective Privilege': '/identities?risk_level=critical',
+  'Credential Risk': '/spns',
+  'Trust & Federation': '/identities?identity_category=guest',
+  'Usage Dormancy': '/identities?activity_status=stale',
+  'Ownership Governance': '/service-accounts',
+  'External Exposure': '/identities',
+};
+
+// Navigation target mapping for workload exposure metrics
+const WORKLOAD_NAV: Record<string, string> = {
+  'Avg Score': '/workload-identities',
+  'Can Escalate': '/identities?risk_level=critical',
+  'Orphaned': '/service-accounts',
+  'Zombies': '/identities?activity_status=stale',
+  'Cross-Sub': '/identities',
+  'Tenant Scope': '/identities',
+};
+
+// Navigation target mapping for lifecycle states
+const LIFECYCLE_NAV: Record<string, string> = {
+  'Active': '/identities?activity_status=active',
+  'Stale': '/identities?activity_status=stale',
+  'Dormant': '/identities?activity_status=inactive',
+  'Blind': '/workload-identities',
+};
+
+// Navigation target mapping for policy gaps
+const POLICY_GAP_NAV: Record<string, string> = {
+  'Privilege outside PIM': '/identities?risk_level=critical',
+};
+
 // Filter to identity_category mapping for header drill
 const FILTER_NAV: Record<string, string> = {
   All: '/identities',
@@ -97,6 +130,8 @@ interface TenantData {
     scanConfidence: string; sources: string[]; confidenceModelBasis: string;
     scanCoverage: number; dataCompleteness: number; lastUpdatedAgo: string;
     isolationGuarantee: string;
+    organizationName: string;
+    organizationLogo: string | null;
   };
   scoringMethodology: ScoringMethodology;
   scoringContent: ScoringContent;
@@ -346,7 +381,7 @@ async function fetchJson(url: string) {
 }
 
 async function fetchTenantData(wc: (u: string) => string = u => u): Promise<TenantData> {
-  const [as, stats, comp, trends, posture, remed, idSummary] = await Promise.all([
+  const [as, stats, comp, trends, posture, remed, idSummary, settings] = await Promise.all([
     fetchJson(wc('/api/overview/attack-surface-score')).catch(() => null),
     fetchJson(wc('/api/stats')).catch(() => null),
     fetchJson(wc('/api/compliance/intelligence')).catch(() => null),
@@ -354,6 +389,7 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
     fetchJson(wc('/api/dashboard/posture')).catch(() => null),
     fetchJson(wc('/api/remediation-summary')).catch(() => null),
     fetchJson(wc('/api/identity-summary')).catch(() => null),
+    fetchJson(wc('/api/settings')).catch(() => null),
   ]);
 
   const lr = stats?.latest_run || {};
@@ -596,6 +632,8 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
       dataCompleteness: Math.round(di.data_completeness_pct || 100),
       lastUpdatedAgo: di.last_scan ? getTimeAgo(di.last_scan) : 'unknown',
       isolationGuarantee: 'Isolated dataset \u2022 No cross-tenant visibility',
+      organizationName: settings?.settings?.org_name || di.organization_name || di.tenant_name || 'Tenant',
+      organizationLogo: di.organization_logo || null,
     },
     scoringMethodology: {
       url: 'https://docs.auditgraph.ai/scoring-methodology',
@@ -644,7 +682,9 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
       const maxProjected = hasOpenRemediations ? 95 : 100;
       return {
         current: postureScore, grade, tier, previous30d: prevPosture, delta30d,
-        industryAvg: 61, target: 75, potentialGain: finalGain,
+        industryAvg: as?.industry_avg ?? Math.round(100 - (as?.score ?? 50)),
+        target: as?.posture_target ?? (Number(settings?.settings?.posture_target) || Math.min(90, Math.round(postureScore + finalGain))),
+        potentialGain: finalGain,
         projectedNoAction: Math.max(0, postureScore - (delta30d < 0 ? Math.abs(delta30d) : (critCount + highCount > 0 ? 3 : 1))),
         projectedRemediated: Math.min(maxProjected, postureScore + finalGain),
         history,
@@ -751,21 +791,41 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
 // ═══════════════════════════════════════════════════════════════════════
 
 function ScoreRing({ score, grade, size = 110 }: { score: number; grade: string; size?: number }) {
-  const r = (size - 16) / 2;
+  const strokeWidth = Math.max(4, Math.round(size * 0.07));
+  const padding = Math.round(size * 0.05);
+  const r = (size / 2) - strokeWidth - padding;
   const circ = 2 * Math.PI * r;
-  const offset = circ - (score / 100) * circ;
+  const offset = circ * (1 - score / 100);
   const tier = getTier(score);
   const color = getTierColor(tier);
+  const scoreFontSize = Math.min(32, Math.round(size * 0.24));
+  const gradeFontSize = Math.min(13, Math.round(size * 0.12));
+  const cx = size / 2;
+  const cy = size / 2;
+  // Position score + grade as a pair centered in the ring
+  const scoreY = cy - Math.round(size * 0.08);
+  const gradeY = cy + Math.round(size * 0.14);
   return (
-    <svg width={size} height={size} style={{ filter: `drop-shadow(0 0 8px ${color}55)` }}>
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={P.bgActive} strokeWidth={8} />
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={8}
-        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
-        style={{ transform: 'rotate(-90deg)', transformOrigin: '50% 50%', transition: 'stroke-dashoffset 1.5s ease' }} />
-      <text x="50%" y="46%" textAnchor="middle" dominantBaseline="central"
-        style={{ fontFamily: F.data, fontSize: 32, fontWeight: 800, fill: P.textBright }}>{score.toFixed(1)}</text>
-      <text x="50%" y="68%" textAnchor="middle" dominantBaseline="central"
-        style={{ fontFamily: F.data, fontSize: 13, fill: P.textMuted }}>{grade}</text>
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
+      style={{ filter: `drop-shadow(0 0 8px ${color}55)` }}>
+      <circle cx={cx} cy={cy} r={r} fill="none"
+        stroke={P.bgActive} strokeWidth={strokeWidth} />
+      <circle cx={cx} cy={cy} r={r} fill="none"
+        stroke={color} strokeWidth={strokeWidth}
+        strokeDasharray={circ} strokeDashoffset={offset}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${cx} ${cy})`}
+        style={{ transition: 'stroke-dashoffset 1.5s ease' }} />
+      <text x={cx} y={scoreY}
+        textAnchor="middle" dominantBaseline="central"
+        style={{ fontFamily: F.data, fontSize: scoreFontSize, fontWeight: 800, fill: P.textBright }}>
+        {score.toFixed(1)}
+      </text>
+      <text x={cx} y={gradeY}
+        textAnchor="middle" dominantBaseline="central"
+        style={{ fontFamily: F.data, fontSize: gradeFontSize, fill: P.textMuted }}>
+        {grade}
+      </text>
     </svg>
   );
 }
@@ -1200,7 +1260,7 @@ function ComplianceDetailPanel({ state, onClose, openDrill, setDrillPanel }: {
               <CircularGauge value={fw.pct} size={48} color={fwColor} />
               <div>
                 <div style={{ fontFamily: F.ui, fontSize: 16, fontWeight: 700, color: P.textBright }}>{fw.name}</div>
-                <div style={{ fontFamily: F.data, fontSize: 11, color: P.textMuted }}>{fw.passed}/{fw.total} controls passing</div>
+                <div style={{ fontFamily: F.data, fontSize: 11, color: P.textMuted }}><DrillableNumber value={`${fw.passed}/${fw.total}`} label={`${fw.name} controls`} onClick={() => openDrill(`${fw.name} Identities`, '/identities')} /> controls passing</div>
               </div>
             </div>
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: P.textDim, cursor: 'pointer', fontSize: 22, padding: 4 }}>&times;</button>
@@ -1338,7 +1398,7 @@ function ComplianceFrameworkCard({ fw, onOpenDetail, onOpenExport, onDrillFailin
       </TooltipWrap>
       <div style={{ flex: 1 }}>
         <div style={{ fontFamily: F.ui, fontSize: 13, color: P.textLight, fontWeight: 600 }}>{fw.name}</div>
-        <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>{fw.passed}/{fw.total} controls</div>
+        <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}><DrillableNumber value={`${fw.passed}/${fw.total}`} label={`${fw.name} controls`} onClick={onOpenDetail} /> controls</div>
         <div style={{ fontFamily: F.data, fontSize: 10, color: '#ff8c00' }}>
           <span onClick={e => { e.stopPropagation(); onDrillFailing(); }}>
             <DrillableNumber value={fw.failingIdentities} label={`Drill into ${fw.name} failures`} onClick={() => {}} />
@@ -1388,10 +1448,14 @@ function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openComplianceDe
                 </span>
               </div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, flexWrap: 'wrap' }}>
-                {[{ l: 'Industry', v: d.riskScore.industryAvg }, { l: 'Target', v: d.riskScore.target }, { l: 'Potential', v: `+${d.riskScore.potentialGain}` }].map(b => (
+                {[
+                  { l: 'Industry', v: d.riskScore.industryAvg, url: '/identities' },
+                  { l: 'Target', v: d.riskScore.target, url: '/settings' },
+                  { l: 'Potential', v: `+${d.riskScore.potentialGain}`, url: '/identities?risk_level=critical' },
+                ].map(b => (
                   <div key={b.l}>
                     <div style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, textTransform: 'uppercase' }}>{b.l}</div>
-                    <div style={{ fontFamily: F.data, fontSize: 13, color: P.textSub }}>{b.v}</div>
+                    <div style={{ fontFamily: F.data, fontSize: 13, color: P.textSub }}><DrillableNumber value={b.v} label={`${b.l} score`} onClick={() => nav(b.url)} /></div>
                   </div>
                 ))}
               </div>
@@ -1506,7 +1570,7 @@ function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openComplianceDe
                   <>
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 4 }}>
                       <span style={{ fontFamily: F.data, fontSize: 24, fontWeight: 800, color: P.textBright }}><DrillableNumber value={`${m.value}%`} label={`Drill into ${m.label}`} onClick={() => nav(GOV_NAV[m.label] || '/identities')} /></span>
-                      <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>/ {m.target}%</span>
+                      <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>/ <DrillableNumber value={`${m.target}%`} label={`${m.label} target`} onClick={() => nav('/settings')} /></span>
                     </div>
                     <MiniProgressBar value={m.value} max={m.target} color={m.value >= m.target ? '#22c55e' : m.value >= m.target * 0.5 ? '#eab308' : '#ff4444'} height={3} />
                     <div style={{ marginTop: 4 }}><TrendArrow value={m.trend30d} /></div>
@@ -1627,7 +1691,7 @@ function IdentityRiskTab({ d, nav }: { d: TenantData; nav: Nav }) {
                 >
                   <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, width: 12 }}>{expanded ? '\u25BE' : '\u25B8'}</span>
                   <span style={{ fontFamily: F.ui, fontSize: 12, color: P.textLight, flex: 1 }}>{p.name}</span>
-                  <span style={{ fontFamily: F.data, fontSize: 13, fontWeight: 700, color: pc, minWidth: 32, textAlign: 'right' }}>{p.score}</span>
+                  <span style={{ fontFamily: F.data, fontSize: 13, fontWeight: 700, color: pc, minWidth: 32, textAlign: 'right' }}><DrillableNumber value={p.score} label={`Drill into ${p.name}`} onClick={() => nav(PILLAR_NAV[p.name] || '/identities')} /></span>
                   <div style={{ width: 80 }}><MiniProgressBar value={p.score} color={pc} height={4} /></div>
                   <span style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, minWidth: 28 }}>{p.weight}%</span>
                   <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, minWidth: 80 }}>{p.detail}</span>
@@ -1678,15 +1742,15 @@ function IdentityRiskTab({ d, nav }: { d: TenantData; nav: Nav }) {
             { key: 'medium', count: expDist.medium, color: '#eab308' },
             { key: 'low', count: expDist.low, color: '#22c55e' },
           ].map(s => s.count > 0 ? (
-            <div key={s.key} title={`${s.key}: ${s.count}`}
-              style={{ width: `${(s.count / totalExp) * 100}%`, background: s.color, transition: 'width 0.5s ease' }} />
+            <div key={s.key} title={`${s.key}: ${s.count}`} onClick={() => nav(`/workload-identities?risk_level=${s.key}`)}
+              style={{ width: `${(s.count / totalExp) * 100}%`, background: s.color, transition: 'width 0.5s ease', cursor: 'pointer' }} />
           ) : null)}
         </div>
         <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
           {[{ l: 'Avg Score', v: we.avgScore.toFixed(1) }, { l: 'Can Escalate', v: we.canEscalate }, { l: 'Orphaned', v: we.orphaned }].map(s => (
             <div key={s.l}>
               <div style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, textTransform: 'uppercase' }}>{s.l}</div>
-              <div style={{ fontFamily: F.data, fontSize: 18, fontWeight: 700, color: P.textLight }}>{s.v}</div>
+              <div style={{ fontFamily: F.data, fontSize: 18, fontWeight: 700, color: P.textLight }}><DrillableNumber value={s.v} label={`Drill into ${s.l}`} onClick={() => nav(WORKLOAD_NAV[s.l] || '/workload-identities')} /></div>
             </div>
           ))}
         </div>
@@ -1699,7 +1763,7 @@ function IdentityRiskTab({ d, nav }: { d: TenantData; nav: Nav }) {
             return (
               <div key={i} style={{ textAlign: 'center' }}>
                 <div style={{ fontFamily: F.data, fontSize: 9, color: P.textDim, marginBottom: 4 }}>{c.name}</div>
-                <div style={{ fontFamily: F.data, fontSize: 14, fontWeight: 700, color: cc }}>{c.score.toFixed(1)}</div>
+                <div style={{ fontFamily: F.data, fontSize: 14, fontWeight: 700, color: cc }}><DrillableNumber value={c.score.toFixed(1)} label={`Drill into ${c.name}`} onClick={() => nav('/workload-identities')} /></div>
                 <div style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint }}>/{c.max}</div>
                 <MiniProgressBar value={c.score} max={c.max} color={cc} height={3} />
               </div>
@@ -1718,7 +1782,7 @@ function IdentityRiskTab({ d, nav }: { d: TenantData; nav: Nav }) {
               { key: 'Blind', count: lc.blind, color: P.textDim },
             ].map(s => s.count > 0 ? (
               <TooltipWrap key={s.key} content={s.key === 'Blind' ? we.blindTooltip : `${s.key}: ${s.count}`}>
-                <div style={{ width: `${(s.count / totalLc) * 100}%`, background: s.color, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <div onClick={() => nav(LIFECYCLE_NAV[s.key] || '/identities')} style={{ width: `${(s.count / totalLc) * 100}%`, background: s.color, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
                   <span style={{ fontFamily: F.data, fontSize: 8, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{s.key} {s.count}</span>
                 </div>
               </TooltipWrap>
@@ -1731,7 +1795,7 @@ function IdentityRiskTab({ d, nav }: { d: TenantData; nav: Nav }) {
           {[{ l: 'Zombies', v: we.zombies }, { l: 'Cross-Sub', v: we.crossSub }, { l: 'Tenant Scope', v: we.tenantScope }].map(s => (
             <div key={s.l} style={{ padding: '8px 14px', background: P.bgHover, borderRadius: 6 }}>
               <div style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, textTransform: 'uppercase' }}>{s.l}</div>
-              <div style={{ fontFamily: F.data, fontSize: 18, fontWeight: 700, color: P.textLight }}>{s.v}</div>
+              <div style={{ fontFamily: F.data, fontSize: 18, fontWeight: 700, color: P.textLight }}><DrillableNumber value={s.v} label={`Drill into ${s.l}`} onClick={() => nav(WORKLOAD_NAV[s.l] || '/identities')} /></div>
             </div>
           ))}
         </div>
@@ -1826,12 +1890,12 @@ function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
             {[
-              { l: 'Confidence', v: `${r.confidence}%` },
-              { l: 'Est. Days', v: `~${r.estimatedDays}` },
-              { l: 'Automation', v: null, comp: <AutomationBadge level={r.automation} /> },
-              { l: 'Blast Radius', v: `${r.blastRadius.identities} ids \u00B7 ${r.blastRadius.subscriptions} subs \u00B7 ${r.blastRadius.workloads} wklds` },
-              { l: 'Rollback', v: null, comp: <RollbackBadge safety={r.rollbackSafety} /> },
-              { l: 'Pts/Day', v: `${getRiskPerDay(r.gain, r.estimatedDays)} pts/day` },
+              { l: 'Confidence', v: `${r.confidence}%`, drillUrl: null as string | null },
+              { l: 'Est. Days', v: `~${r.estimatedDays}`, drillUrl: null as string | null },
+              { l: 'Automation', v: null as string | null, comp: <AutomationBadge level={r.automation} />, drillUrl: null as string | null },
+              { l: 'Blast Radius', v: null as string | null, drillUrl: '/identities', comp: <span><DrillableNumber value={r.blastRadius.identities} label="Affected identities" onClick={() => nav('/identities')} /> ids &middot; <DrillableNumber value={r.blastRadius.subscriptions} label="Affected subscriptions" onClick={() => nav('/subscriptions')} /> subs &middot; <DrillableNumber value={r.blastRadius.workloads} label="Affected workloads" onClick={() => nav('/workload-identities')} /> wklds</span> },
+              { l: 'Rollback', v: null as string | null, comp: <RollbackBadge safety={r.rollbackSafety} />, drillUrl: null as string | null },
+              { l: 'Pts/Day', v: `${getRiskPerDay(r.gain, r.estimatedDays)} pts/day`, drillUrl: null as string | null },
             ].map((chip, i) => (
               <div key={i} style={{ padding: '6px 8px', background: P.bgHover, borderRadius: 6 }}>
                 <div style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, textTransform: 'uppercase', marginBottom: 2 }}>{chip.l}</div>
@@ -1868,7 +1932,7 @@ function ControlGovernanceTab({ d, nav }: { d: TenantData; nav: Nav }) {
                 <>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
                     <span style={{ fontFamily: F.data, fontSize: 28, fontWeight: 800, color: P.textBright }}><DrillableNumber value={`${m.value}%`} label={`Drill into ${m.label}`} onClick={() => nav(GOV_NAV[m.label] || '/identities')} /></span>
-                    <span style={{ fontFamily: F.data, fontSize: 11, color: P.textDim }}>/ {m.target}%</span>
+                    <span style={{ fontFamily: F.data, fontSize: 11, color: P.textDim }}>/ <DrillableNumber value={`${m.target}%`} label={`${m.label} target`} onClick={() => nav('/settings')} /></span>
                   </div>
                   <MiniProgressBar value={m.value} max={m.target} color={m.value >= m.target ? '#22c55e' : m.value >= m.target * 0.5 ? '#eab308' : '#ff4444'} height={4} />
                   <div style={{ marginTop: 6 }}><TrendArrow value={m.trend30d} /></div>
@@ -1898,7 +1962,7 @@ function ControlGovernanceTab({ d, nav }: { d: TenantData; nav: Nav }) {
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <SeverityDot severity={g.severity} />
                   <span style={{ fontFamily: F.ui, fontSize: 12, color: P.textSub, flex: 1 }}>{g.label}</span>
-                  <span style={{ fontFamily: F.data, fontSize: 11, color: P.textMuted }}>{g.count}</span>
+                  <span style={{ fontFamily: F.data, fontSize: 11, color: P.textMuted }}><DrillableNumber value={g.count} label={`Drill into ${g.label}`} onClick={() => nav(POLICY_GAP_NAV[g.label] || '/identities')} /></span>
                 </div>
               ))}
             </div>
@@ -1910,7 +1974,7 @@ function ControlGovernanceTab({ d, nav }: { d: TenantData; nav: Nav }) {
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <SeverityDot severity={g.severity} />
                   <span style={{ fontFamily: F.ui, fontSize: 12, color: P.textSub, flex: 1 }}>{g.label}</span>
-                  <span style={{ fontFamily: F.data, fontSize: 11, color: P.textMuted }}>{g.count}</span>
+                  <span style={{ fontFamily: F.data, fontSize: 11, color: P.textMuted }}><DrillableNumber value={g.count} label={`Drill into ${g.label}`} onClick={() => nav(POLICY_GAP_NAV[g.label] || '/identities')} /></span>
                 </div>
               ))}
             </div>
@@ -2087,7 +2151,7 @@ function RiskMovementTab({ d, nav }: { d: TenantData; nav: Nav }) {
           {d.trends.movement30d.map((t, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, padding: '6px 0', borderBottom: `1px solid ${P.divider}` }}>
               <span style={{ fontFamily: F.ui, fontSize: 12, color: P.textSub, flex: 1 }}>{t.label}</span>
-              <span style={{ fontFamily: F.data, fontSize: 12, color: P.textDim }}>{t.previous}</span>
+              <span style={{ fontFamily: F.data, fontSize: 12, color: P.textDim }}><DrillableNumber value={t.previous} label={`Previous ${t.label}`} onClick={() => nav(MOVE_NAV[t.label] || '/identities')} /></span>
               <span style={{ fontFamily: F.data, fontSize: 10, color: P.textFaint }}>&rarr;</span>
               <span style={{ fontFamily: F.data, fontSize: 12, color: P.textLight, fontWeight: 600 }}><DrillableNumber value={t.current} label={`Drill into ${t.label}`} onClick={() => nav(MOVE_NAV[t.label] || '/identities')} /></span>
               <span style={{
@@ -2266,20 +2330,27 @@ export default function Overview() {
         <ScoreRing score={d.riskScore.current} grade={d.riskScore.grade} size={80} />
 
         <div style={{ flex: 1 }}>
-          <div style={{ fontFamily: F.ui, fontSize: 18, fontWeight: 700, color: P.textBright }}>AuditGraph</div>
-          <div style={{ fontFamily: F.ui, fontSize: 12, color: P.textMuted }}>Identity Attack Surface Management</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {d.tenant.organizationLogo && (
+              <img src={d.tenant.organizationLogo} alt="" style={{ height: 28, borderRadius: 4 }} />
+            )}
+            <div>
+              <div style={{ fontFamily: F.ui, fontSize: 18, fontWeight: 700, color: P.textBright }}>{d.tenant.organizationName}</div>
+              <div style={{ fontFamily: F.ui, fontSize: 12, color: P.textMuted }}>Identity Attack Surface Management</div>
+            </div>
+          </div>
           <div style={{ display: 'flex', gap: 12, marginTop: 6, alignItems: 'center' }}>
             <RiskTierBadge tier={tier} />
             <span style={{ fontFamily: F.data, fontSize: 10, color: d.riskScore.delta30d >= 0 ? '#22c55e' : '#ff4444' }}>
               {formatDelta(d.riskScore.delta30d)} vs 30d
             </span>
             <span style={{ fontFamily: F.data, fontSize: 10, color: P.textFaint }}>|</span>
-            <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Industry: {d.riskScore.industryAvg}</span>
-            <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Target: {d.riskScore.target}</span>
-            <span style={{ fontFamily: F.data, fontSize: 10, color: '#22c55e' }}>Potential: +{d.riskScore.potentialGain}</span>
+            <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Industry: <DrillableNumber value={d.riskScore.industryAvg} label="Industry average posture" onClick={() => navigate('/identities')} /></span>
+            <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Target: <DrillableNumber value={d.riskScore.target} label="Posture target (configurable in Settings)" onClick={() => navigate('/settings')} /></span>
+            <span style={{ fontFamily: F.data, fontSize: 10, color: '#22c55e' }}>Potential: <DrillableNumber value={`+${d.riskScore.potentialGain}`} label="Potential gain from remediations" onClick={() => setActiveTab('action')} /></span>
           </div>
           <div style={{ marginTop: 4, fontFamily: F.data, fontSize: 10, color: P.textFaint }}>
-            {'\u2022'} {d.tenant.cloud} {'\u2022'} {d.tenant.subscriptions} subs {'\u2022'} {new Date(d.tenant.lastScan).toLocaleString()}
+            {'\u2022'} {d.tenant.cloud} {'\u2022'} <DrillableNumber value={d.tenant.subscriptions} label="View subscriptions" onClick={() => navigate('/subscriptions')} /> subs {'\u2022'} {new Date(d.tenant.lastScan).toLocaleString()}
           </div>
         </div>
 

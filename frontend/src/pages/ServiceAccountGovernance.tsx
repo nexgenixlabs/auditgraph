@@ -319,13 +319,15 @@ export default function ServiceAccountGovernance() {
                className="gov-card gov-card-1 rounded-xl p-4">
             <div>
               <div style={{ color: G.textMuted }} className="text-[10px] uppercase tracking-wider font-medium">Total NHIs</div>
-              <div style={{ color: G.text, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{stats.total}</div>
+              <button onClick={() => { setActiveBand('All'); setPage(0); }} className="cursor-pointer hover:opacity-70 transition">
+                <div style={{ color: G.text, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{stats.total}</div>
+              </button>
               <div className="flex gap-1 mt-3">
                 {['Critical', 'High', 'Medium', 'Low'].map(b => (
-                  <div key={b} className="flex-1 text-center">
+                  <button key={b} className="flex-1 text-center cursor-pointer hover:opacity-70 transition" onClick={() => { setActiveBand(b); setPage(0); }}>
                     <div style={{ color: G.band[b], fontFamily: G.mono }} className="text-sm font-bold">{rd[b] || 0}</div>
                     <div style={{ color: G.textMuted }} className="text-[9px]">{b}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -362,7 +364,7 @@ export default function ServiceAccountGovernance() {
                 const count = gb[g.key] || 0;
                 const pct = stats.total > 0 ? (count / stats.total) * 100 : 0;
                 return (
-                  <div key={g.key}>
+                  <button key={g.key} className="w-full text-left cursor-pointer hover:opacity-70 transition" onClick={() => { setSearch(g.key); setPage(0); }}>
                     <div className="flex justify-between text-[10px]">
                       <span style={{ color: G.govStatus[g.key] }}>{g.label}</span>
                       <span style={{ color: G.textSecondary, fontFamily: G.mono }}>{count}</span>
@@ -371,7 +373,7 @@ export default function ServiceAccountGovernance() {
                       <div style={{ width: `${pct}%`, background: G.govStatus[g.key], transition: 'width 0.6s ease-out' }}
                            className="h-full rounded-full" />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>

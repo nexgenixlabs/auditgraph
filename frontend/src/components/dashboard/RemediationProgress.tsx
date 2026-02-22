@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface RemediationProgressProps {
   open: number;
@@ -12,6 +13,7 @@ interface RemediationProgressProps {
 export default function RemediationProgress({
   open, acknowledged, completed, skipped, total, completion_pct,
 }: RemediationProgressProps) {
+  const navigate = useNavigate();
   if (total === 0) {
     return (
       <div className="bg-white border rounded-xl p-5">
@@ -50,20 +52,20 @@ export default function RemediationProgress({
 
       {/* Status breakdown */}
       <div className="grid grid-cols-2 gap-2">
-        <StatusItem label="Open" count={open} color="text-gray-600" bg="bg-gray-50" />
-        <StatusItem label="Acknowledged" count={acknowledged} color="text-blue-600" bg="bg-blue-50" />
-        <StatusItem label="Completed" count={completed} color="text-green-600" bg="bg-green-50" />
-        <StatusItem label="Skipped" count={skipped} color="text-yellow-700" bg="bg-yellow-50" />
+        <StatusItem label="Open" count={open} color="text-gray-600" bg="bg-gray-50" onClick={() => navigate('/identities?remediation_status=open')} />
+        <StatusItem label="Acknowledged" count={acknowledged} color="text-blue-600" bg="bg-blue-50" onClick={() => navigate('/identities?remediation_status=acknowledged')} />
+        <StatusItem label="Completed" count={completed} color="text-green-600" bg="bg-green-50" onClick={() => navigate('/identities?remediation_status=completed')} />
+        <StatusItem label="Skipped" count={skipped} color="text-yellow-700" bg="bg-yellow-50" onClick={() => navigate('/identities?remediation_status=skipped')} />
       </div>
     </div>
   );
 }
 
-function StatusItem({ label, count, color, bg }: { label: string; count: number; color: string; bg: string }) {
+function StatusItem({ label, count, color, bg, onClick }: { label: string; count: number; color: string; bg: string; onClick?: () => void }) {
   return (
-    <div className={`flex items-center justify-between p-2 rounded-lg ${bg}`}>
+    <button onClick={onClick} className={`flex items-center justify-between p-2 rounded-lg ${bg} w-full text-left hover:opacity-80 transition cursor-pointer`}>
       <span className="text-xs text-gray-700">{label}</span>
       <span className={`text-sm font-bold ${color}`}>{count}</span>
-    </div>
+    </button>
   );
 }

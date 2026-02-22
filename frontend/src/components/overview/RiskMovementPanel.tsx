@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { COLORS, RISK_COLORS } from '../../constants/design';
 
 interface NhiBreakdown {
@@ -41,15 +42,17 @@ interface MetricRow {
   label: string;
   current: number;
   previous?: number;
+  link?: string;
 }
 
 export default function RiskMovementPanel({ trends, nhiBreakdown, previousRun, currentRun, driftCounts }: RiskMovementPanelProps) {
+  const navigate = useNavigate();
   // Build metric rows
   const metrics: MetricRow[] = [
-    { label: 'Critical', current: currentRun?.critical ?? 0, previous: previousRun?.critical },
-    { label: 'High', current: currentRun?.high ?? 0, previous: previousRun?.high },
-    { label: 'New Identities', current: driftCounts?.new ?? 0 },
-    { label: 'Removed Identities', current: driftCounts?.removed ?? 0 },
+    { label: 'Critical', current: currentRun?.critical ?? 0, previous: previousRun?.critical, link: '/identities?risk_level=critical' },
+    { label: 'High', current: currentRun?.high ?? 0, previous: previousRun?.high, link: '/identities?risk_level=high' },
+    { label: 'New Identities', current: driftCounts?.new ?? 0, link: '/drift' },
+    { label: 'Removed Identities', current: driftCounts?.removed ?? 0, link: '/drift' },
   ];
 
   // Compute dormant delta from trends if available
@@ -60,7 +63,7 @@ export default function RiskMovementPanel({ trends, nhiBreakdown, previousRun, c
     const latestActive = latestTrend.critical + latestTrend.high + latestTrend.medium + latestTrend.low;
     const prevActive = prevTrend.critical + prevTrend.high + prevTrend.medium + prevTrend.low;
     const dormantDelta = (latestTrend.total - latestActive) - (prevTrend.total - prevActive);
-    metrics.push({ label: 'Dormant Delta', current: dormantDelta });
+    metrics.push({ label: 'Dormant Delta', current: dormantDelta, link: '/identities?activity_status=dormant' });
   }
 
   const hasWorsened = metrics.some(m => {
@@ -90,7 +93,7 @@ export default function RiskMovementPanel({ trends, nhiBreakdown, previousRun, c
               const worsened = delta != null && delta > 0;
               const improved = delta != null && delta < 0;
               return (
-                <div key={m.label} className="flex items-center justify-between py-1.5 border-b" style={{ borderColor: COLORS.borderLight }}>
+                <div key={m.label} onClick={() => m.link && navigate(m.link)} className={`flex items-center justify-between py-1.5 border-b${m.link ? ' cursor-pointer hover:bg-gray-50 rounded transition' : ''}`} style={{ borderColor: COLORS.borderLight }}>
                   <span className="text-[12px] font-medium" style={{ color: COLORS.textSecondary }}>{m.label}</span>
                   <div className="flex items-center gap-3">
                     <span className="text-[14px] font-bold tabular-nums" style={{ color: COLORS.textPrimary }}>{m.current}</span>
@@ -175,14 +178,23 @@ export default function RiskMovementPanel({ trends, nhiBreakdown, previousRun, c
               </div>
               {/* Legend */}
               <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 mt-3">
-                {donutSegments.map(seg => (
-                  <div key={seg.key} className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: seg.color }} />
-                    <span className="text-[10px]" style={{ color: COLORS.textSecondary }}>
-                      {seg.label} ({seg.value})
-                    </span>
-                  </div>
-                ))}
+                {donutSegments.map(seg => {
+                  const nhiNav: Record<string, string> = {
+                    human: '/identities?identity_category=human_user',
+                    service_principal: '/identities?identity_category=service_principal',
+                    managed_identity_system: '/identities?identity_category=managed_identity_system',
+                    managed_identity_user: '/identities?identity_category=managed_identity_user',
+                    guest: '/identities?identity_category=guest',
+                  };
+                  return (
+                    <button key={seg.key} onClick={() => navigate(nhiNav[seg.key] || '/identities')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
+                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: seg.color }} />
+                      <span className="text-[10px]" style={{ color: COLORS.textSecondary }}>
+                        {seg.label} ({seg.value})
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (

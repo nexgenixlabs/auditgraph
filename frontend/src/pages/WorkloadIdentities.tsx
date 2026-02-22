@@ -321,19 +321,19 @@ const WorkloadIdentities: React.FC = () => {
       {stats && (
         <div className={`grid gap-3 mb-5 ${stats.p2_enabled && stats.telemetry ? 'grid-cols-7' : 'grid-cols-5'}`}>
           {[
-            { label: 'Critical Exposure', value: stats.exposure_critical, color: 'text-red-600 dark:text-red-400', sub: 'Score ≥ 80', show: true },
-            { label: 'Orphaned', value: stats.orphaned_count, color: 'text-orange-600 dark:text-orange-400', sub: 'No owner', show: true },
-            { label: 'Stale Credentials', value: stats.stale_credentials, color: 'text-yellow-600 dark:text-yellow-400', sub: '> 365 days', show: true },
-            { label: 'Can Escalate', value: stats.can_escalate_count, color: 'text-purple-600 dark:text-purple-400', sub: 'Priv escalation', show: true },
-            { label: 'Zombie', value: stats.zombie_count, color: 'text-gray-600 dark:text-gray-400', sub: 'Dormant + risky', show: true },
-            { label: 'Risky Sign-Ins', value: stats.telemetry?.risky_sign_ins ?? 0, color: 'text-red-500 dark:text-red-400', sub: 'P2 risk detection', show: !!stats.p2_enabled && !!stats.telemetry },
-            { label: 'Anomalies', value: stats.telemetry?.unresolved_anomalies ?? 0, color: 'text-violet-600 dark:text-violet-400', sub: 'Unresolved', show: !!stats.p2_enabled && !!stats.telemetry },
+            { label: 'Critical Exposure', value: stats.exposure_critical, color: 'text-red-600 dark:text-red-400', sub: 'Score ≥ 80', show: true, onClick: () => { setExposureLevel('critical'); updateParams('exposure', 'critical'); } },
+            { label: 'Orphaned', value: stats.orphaned_count, color: 'text-orange-600 dark:text-orange-400', sub: 'No owner', show: true, onClick: () => { setOwnerFilter('orphaned'); updateParams('owner', 'orphaned'); } },
+            { label: 'Stale Credentials', value: stats.stale_credentials, color: 'text-yellow-600 dark:text-yellow-400', sub: '> 365 days', show: true, onClick: () => { setLifecycleFilter('stale'); updateParams('lifecycle', 'stale'); } },
+            { label: 'Can Escalate', value: stats.can_escalate_count, color: 'text-purple-600 dark:text-purple-400', sub: 'Priv escalation', show: true, onClick: () => { setCanEscalate(true); updateParams('escalate', 'true'); } },
+            { label: 'Zombie', value: stats.zombie_count, color: 'text-gray-600 dark:text-gray-400', sub: 'Dormant + risky', show: true, onClick: () => { setLifecycleFilter('likely_dormant'); updateParams('lifecycle', 'likely_dormant'); } },
+            { label: 'Risky Sign-Ins', value: stats.telemetry?.risky_sign_ins ?? 0, color: 'text-red-500 dark:text-red-400', sub: 'P2 risk detection', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/workload-identities?risk_level=critical') },
+            { label: 'Anomalies', value: stats.telemetry?.unresolved_anomalies ?? 0, color: 'text-violet-600 dark:text-violet-400', sub: 'Unresolved', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/anomalies') },
           ].filter(c => c.show).map(c => (
-            <div key={c.label} className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3">
+            <button key={c.label} onClick={c.onClick} className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
               <p className="text-xs text-gray-500 dark:text-slate-400">{c.label}</p>
               <p className={`text-2xl font-bold mt-1 ${c.color}`}>{c.value}</p>
               <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">{c.sub}</p>
-            </div>
+            </button>
           ))}
         </div>
       )}
@@ -345,7 +345,7 @@ const WorkloadIdentities: React.FC = () => {
           <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3">
             <h3 className="text-xs font-semibold text-gray-700 dark:text-slate-300 mb-2">Risk Distribution</h3>
             {['critical', 'high', 'medium', 'low', 'info'].map(level => (
-              <div key={level} className="flex items-center justify-between py-0.5">
+              <button key={level} className="flex items-center justify-between py-0.5 w-full cursor-pointer hover:opacity-70 transition" onClick={() => { setRiskLevel(level); updateParams('risk_level', level); }}>
                 <span className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-slate-400 capitalize">
                   <span className={`w-2 h-2 rounded-full ${SEV_COLOR[level] || 'bg-gray-300'}`} />
                   {level}
@@ -353,7 +353,7 @@ const WorkloadIdentities: React.FC = () => {
                 <span className="text-xs font-medium text-gray-700 dark:text-slate-300">
                   {stats.by_risk[level] || 0}
                 </span>
-              </div>
+              </button>
             ))}
             <div className="mt-2 pt-2 border-t border-gray-100 dark:border-slate-700">
               <div className="flex items-center justify-between">

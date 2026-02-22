@@ -257,7 +257,7 @@ export default function Resources() {
               onClick={() => setTypeFilter('key_vault')}
               active={typeFilter === 'key_vault'}
             />
-            <StatCard label="Total Resources" value={stats.total} color="blue" />
+            <StatCard label="Total Resources" value={stats.total} color="blue" onClick={() => { setTypeFilter(''); setRiskFilter(''); }} />
             <StatCard label="At Risk" value={stats.at_risk} color="red" subtitle={`${stats.by_risk.critical || 0} critical, ${stats.by_risk.high || 0} high`} onClick={() => setRiskFilter('critical')} />
           </div>
 
@@ -269,12 +269,14 @@ export default function Resources() {
                 value={stats.rotation_compliance.keys_stale}
                 color={stats.rotation_compliance.keys_stale > 0 ? 'red' : 'green'}
                 subtitle={`of ${stats.rotation_compliance.total_storage} storage accounts`}
+                onClick={() => { setTypeFilter('storage_account'); setRiskFilter('high'); }}
               />
               <StatCard
                 label="Avg Key Age"
                 value={stats.rotation_compliance.avg_key_age_days}
                 color={stats.rotation_compliance.avg_key_age_days > 90 ? 'red' : 'green'}
                 subtitle="days"
+                onClick={() => setTypeFilter('storage_account')}
               />
               <div />
               <div />
@@ -319,18 +321,21 @@ export default function Resources() {
                 value={(stats.expiry_summary.secrets.expired || 0) + (stats.expiry_summary.keys.expired || 0) + (stats.expiry_summary.certs.expired || 0)}
                 color={(stats.expiry_summary.secrets.expired + stats.expiry_summary.keys.expired + stats.expiry_summary.certs.expired) > 0 ? 'red' : 'green'}
                 subtitle={`${stats.expiry_summary.secrets.expired}s ${stats.expiry_summary.keys.expired}k ${stats.expiry_summary.certs.expired}c`}
+                onClick={() => { setTypeFilter('key_vault'); setRiskFilter('critical'); }}
               />
               <StatCard
                 label="Expiring Soon"
                 value={(stats.expiry_summary.secrets.expiring_soon || 0) + (stats.expiry_summary.keys.expiring_soon || 0) + (stats.expiry_summary.certs.expiring_soon || 0)}
                 color={(stats.expiry_summary.secrets.expiring_soon + stats.expiry_summary.keys.expiring_soon + stats.expiry_summary.certs.expiring_soon) > 0 ? 'red' : 'green'}
                 subtitle="within 30 days"
+                onClick={() => { setTypeFilter('key_vault'); setRiskFilter('high'); }}
               />
               <StatCard
                 label="Vault Items"
                 value={(stats.expiry_summary.secrets.total || 0) + (stats.expiry_summary.keys.total || 0) + (stats.expiry_summary.certs.total || 0)}
                 color="blue"
                 subtitle={`${stats.expiry_summary.secrets.total}s ${stats.expiry_summary.keys.total}k ${stats.expiry_summary.certs.total}c`}
+                onClick={() => setTypeFilter('key_vault')}
               />
               <div />
             </div>

@@ -1142,6 +1142,7 @@ def save_app_settings():
         'copilot_api_key',
         'p2_telemetry_enabled',
         'retention_signin_events_days', 'retention_workload_anomalies_days',
+        'posture_target',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
@@ -2929,7 +2930,10 @@ def get_attack_surface_score():
                     AND (credential_expiration IS NULL OR credential_expiration >= NOW() + INTERVAL '30 days')) as healthy_creds,
 
                 -- Data completeness
-                COUNT(*) FILTER (WHERE risk_score IS NOT NULL) as has_risk_score
+                COUNT(*) FILTER (WHERE risk_score IS NOT NULL) as has_risk_score,
+
+                -- Average risk score (source of truth for industry comparison)
+                ROUND(COALESCE(AVG(i.risk_score), 0)::numeric, 1) as avg_risk_score
 
             FROM identities i
             WHERE i.discovery_run_id = ANY(%s)
@@ -2958,6 +2962,7 @@ def get_attack_surface_score():
         nhi_guest_count = r[18] or 0
         healthy_creds = r[19] or 0
         has_risk_score = r[20] or 0
+        avg_risk_score = float(r[21] or 0)
 
         # P1: Effective Privilege — target < 1% at T0
         priv_pct = (t0t1_count / total_excl) * 100
@@ -3248,12 +3253,29 @@ def get_attack_surface_score():
             pass
 
         confidence = 'High' if data_completeness_pct >= 90 else ('Medium' if data_completeness_pct >= 60 else 'Low')
+        tid = _tenant_id()
+        org_name = db.get_setting('org_name', tenant_id=tid) if tid else None
+        org_logo = db.get_setting('org_logo', tenant_id=tid) if tid else None
+        # Resolve tenant name from tenants table as fallback
+        tenant_name = None
+        if tid:
+            try:
+                cursor.execute("SELECT name FROM tenants WHERE id = %s", (tid,))
+                tn_row = cursor.fetchone()
+                if tn_row:
+                    tenant_name = tn_row[0]
+            except Exception:
+                pass
         data_integrity = {
             "confidence": confidence,
             "last_scan": last_scan,
             "total_scanned": r[0] or 0,
             "data_completeness_pct": data_completeness_pct,
             "scan_duration_seconds": scan_duration_seconds,
+            "tenant_id": tid,
+            "tenant_name": tenant_name,
+            "organization_name": org_name or tenant_name,
+            "organization_logo": org_logo,
         }
 
         # ── CISO Summary ─────────────────────────────────────────
@@ -3289,10 +3311,18 @@ def get_attack_surface_score():
             parts.append(f"{tenant_scope} identities have tenant-wide scope — apply least privilege.")
         ciso_summary = ' '.join(parts)
 
+        # Compute industry_avg as posture equivalent of the tenant's mean identity risk score
+        # avg_risk_score is 0-100 (higher = riskier), posture = 100 - attack_surface_score
+        # Industry avg is the mean posture across all scored identities in this tenant
+        industry_avg_posture = round(100 - avg_risk_score) if avg_risk_score > 0 else None
+        posture_target_setting = db.get_setting('posture_target', tenant_id=tid) if tid else None
+
         return jsonify({
             "score": score,
             "grade": grade,
             "severity": severity,
+            "industry_avg": industry_avg_posture,
+            "posture_target": int(posture_target_setting) if posture_target_setting else None,
             "pillars": {
                 "effective_privilege": {"score": round(p1, 1), "weight": 30, "detail": {"t0": t0_count, "t0t1": t0t1_count, "total": total_excl}},
                 "credential_risk": {"score": round(p2, 1), "weight": 20, "detail": {"expired": expired_creds, "expiring": expiring_creds, "with_creds": has_creds, "healthy": healthy_creds}},

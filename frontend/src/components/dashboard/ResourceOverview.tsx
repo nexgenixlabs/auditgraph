@@ -83,7 +83,7 @@ export default function ResourceOverview() {
           <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200">Azure Resources</h3>
           <p className="text-[10px] text-gray-500">Storage Accounts & Key Vaults</p>
         </div>
-        <span className="text-2xl font-bold text-gray-800 dark:text-slate-200">{stats.total}</span>
+        <button onClick={() => navigate('/resources')} className="text-2xl font-bold text-gray-800 dark:text-slate-200 cursor-pointer hover:opacity-70 transition">{stats.total}</button>
       </div>
 
       {/* Resource type split */}
@@ -125,10 +125,10 @@ export default function ResourceOverview() {
           </div>
           <div className="flex gap-2 mt-1">
             {riskEntries.map(e => (
-              <span key={e.level} className="text-[9px] text-gray-500">
+              <button key={e.level} onClick={() => navigate(`/resources?risk=${e.level}`)} className="text-[9px] text-gray-500 cursor-pointer hover:opacity-70 transition">
                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${RISK_COLORS[e.level]} mr-0.5`} />
                 {e.count} {e.level}
-              </span>
+              </button>
             ))}
           </div>
         </div>
@@ -140,7 +140,7 @@ export default function ResourceOverview() {
           <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">Compliance Score</div>
           <div className="flex gap-3">
             {compliance.storage?.total_resources > 0 && (
-              <div className="flex items-center gap-1.5">
+              <button onClick={() => navigate('/resources?resource_type=storage_account')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
                 <div className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border-2" style={{
                   borderColor: compliance.storage.score >= 80 ? '#22c55e' : compliance.storage.score >= 50 ? '#eab308' : '#ef4444',
                   color: compliance.storage.score >= 80 ? '#16a34a' : compliance.storage.score >= 50 ? '#ca8a04' : '#dc2626',
@@ -148,10 +148,10 @@ export default function ResourceOverview() {
                   {compliance.storage.score}%
                 </div>
                 <span className="text-[10px] text-gray-500">Storage</span>
-              </div>
+              </button>
             )}
             {compliance.key_vault?.total_resources > 0 && (
-              <div className="flex items-center gap-1.5">
+              <button onClick={() => navigate('/resources?resource_type=key_vault')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
                 <div className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border-2" style={{
                   borderColor: compliance.key_vault.score >= 80 ? '#22c55e' : compliance.key_vault.score >= 50 ? '#eab308' : '#ef4444',
                   color: compliance.key_vault.score >= 80 ? '#16a34a' : compliance.key_vault.score >= 50 ? '#ca8a04' : '#dc2626',
@@ -159,7 +159,7 @@ export default function ResourceOverview() {
                   {compliance.key_vault.score}%
                 </div>
                 <span className="text-[10px] text-gray-500">Key Vault</span>
-              </div>
+              </button>
             )}
           </div>
         </div>

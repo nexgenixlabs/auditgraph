@@ -566,6 +566,7 @@ export default function AppRegistrations() {
             label="Total App Registrations"
             value={stats.total}
             color="blue"
+            onClick={() => { setRiskFilter(''); setCredFilter(''); setAudienceFilter(''); setSearch(''); }}
           />
           <StatCard
             label="Critical / High Risk"
@@ -580,6 +581,7 @@ export default function AppRegistrations() {
             value={stats.ownerless}
             color={stats.ownerless > 0 ? 'orange' : 'green'}
             subtitle="No registered owner"
+            onClick={() => setSearch(search === 'ownerless' ? '' : 'ownerless')}
           />
           <StatCard
             label="Expired Credentials"
@@ -594,6 +596,8 @@ export default function AppRegistrations() {
             value={stats.multi_tenant}
             color={stats.multi_tenant > 0 ? 'purple' : 'gray'}
             subtitle={stats.third_party > 0 ? `${stats.third_party} third-party` : undefined}
+            onClick={() => setAudienceFilter(audienceFilter === 'AzureADMultipleOrgs' ? '' : 'AzureADMultipleOrgs')}
+            active={audienceFilter === 'AzureADMultipleOrgs'}
           />
         </div>
       )}

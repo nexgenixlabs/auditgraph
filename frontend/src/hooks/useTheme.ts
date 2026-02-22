@@ -2,19 +2,19 @@ import { useThemeContext } from '../contexts/ThemeContext';
 
 /**
  * Thin wrapper around ThemeContext.
- * `dark` is true when theme is 'dark', false for 'natural'.
- * `toggle` cycles between dark and natural.
+ * `dark` is true when theme is 'obsidian', false for 'arctic'.
+ * `toggle` cycles between obsidian and arctic.
  */
 export function useTheme() {
   const { theme, setTheme } = useThemeContext();
 
   const toggle = () => {
-    setTheme(theme === 'dark' ? 'natural' : 'dark');
+    setTheme(theme === 'obsidian' ? 'arctic' : 'obsidian');
   };
 
   return {
     theme,
-    dark: theme === 'dark',
+    dark: theme === 'obsidian',
     setTheme,
     toggle,
   };

@@ -10,19 +10,25 @@ export const COLORS = {
   brandLight: 'var(--accent-primary)',
   background: 'var(--bg-primary)',
   card: 'var(--bg-secondary)',
+  elevated: 'var(--bg-elevated)',
   textPrimary: 'var(--text-primary)',
   textSecondary: 'var(--text-secondary)',
   textMuted: 'var(--text-tertiary)',
   border: 'var(--border-default)',
   borderLight: 'var(--border-subtle)',
+  borderStrong: 'var(--border-strong)',
+  accentPrimary: 'var(--accent-primary)',
+  accentSuccess: 'var(--accent-success)',
+  accentWarning: 'var(--accent-warning)',
+  accentDanger: 'var(--accent-danger)',
 } as const;
 
 export const RISK_COLORS = {
-  critical:   { color: '#DC2626', bg: 'var(--tint-red)' },
-  high:       { color: '#F97316', bg: 'var(--tint-orange)' },
-  medium:     { color: '#FACC15', bg: 'var(--tint-yellow)' },
-  low:        { color: '#22C55E', bg: 'var(--tint-green)' },
-  info:       { color: '#3B82F6', bg: 'var(--tint-blue)' },
+  critical:   { color: 'var(--accent-danger)',  bg: 'var(--tint-red)' },
+  high:       { color: 'var(--accent-warning)', bg: 'var(--tint-orange)' },
+  medium:     { color: '#FACC15',               bg: 'var(--tint-yellow)' },
+  low:        { color: 'var(--accent-success)',  bg: 'var(--tint-green)' },
+  info:       { color: 'var(--accent-primary)',  bg: 'var(--tint-blue)' },
 } as const;
 
 export const FRAMEWORK_COLORS = {

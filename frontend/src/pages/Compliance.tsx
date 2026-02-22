@@ -630,10 +630,10 @@ export default function Compliance() {
           display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20,
         }}>
           {/* Remediation Progress */}
-          <div style={{
-            padding: "16px 20px", borderRadius: 10,
-            background: 'var(--bg-elevated)', border: `1px solid ${C.border}`,
-          }}>
+          <button onClick={() => navigate('/dashboard?tab=governance')} style={{
+            padding: "16px 20px", borderRadius: 10, textAlign: 'left' as const, width: '100%',
+            background: 'var(--bg-elevated)', border: `1px solid ${C.border}`, cursor: 'pointer', transition: 'opacity 0.15s',
+          }} className="hover:opacity-70">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Remediation Progress</span>
               <span style={{ fontSize: 14, fontWeight: 800, color: C.warning, fontFamily: mono }}>
@@ -655,13 +655,13 @@ export default function Compliance() {
                 Root Causes: <span style={{ color: C.text, fontWeight: 600 }}>{totalRemediation}</span>
               </span>
             </div>
-          </div>
+          </button>
 
           {/* SA Governance */}
-          <div style={{
-            padding: "16px 20px", borderRadius: 10,
-            background: 'var(--bg-elevated)', border: `1px solid ${C.border}`,
-          }}>
+          <button onClick={() => navigate('/service-accounts')} style={{
+            padding: "16px 20px", borderRadius: 10, textAlign: 'left' as const, width: '100%',
+            background: 'var(--bg-elevated)', border: `1px solid ${C.border}`, cursor: 'pointer', transition: 'opacity 0.15s',
+          }} className="hover:opacity-70">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>SA Governance Compliance</span>
               <span style={{ fontSize: 14, fontWeight: 800, color: saGov ? (saGov.score >= 50 ? C.warning : C.critical) : C.critical, fontFamily: mono }}>
@@ -680,7 +680,7 @@ export default function Compliance() {
                 Failing: <span style={{ color: C.critical, fontWeight: 600 }}>{saGov?.failing ?? 0}</span>
               </span>
             </div>
-          </div>
+          </button>
         </div>
 
         {/* Overall Summary Bar */}

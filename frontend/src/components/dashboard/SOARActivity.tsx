@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../../contexts/ConnectionContext';
 
 interface SoarAction {
@@ -45,6 +46,7 @@ function timeAgo(dateStr: string): string {
 }
 
 export default function SOARActivity() {
+  const navigate = useNavigate();
   const { withConnection, selectedConnectionId } = useConnection();
   const [actions, setActions] = useState<SoarAction[]>([]);
   const [stats, setStats] = useState<SoarStats | null>(null);
@@ -88,15 +90,15 @@ export default function SOARActivity() {
         <h3 className="text-sm font-semibold text-gray-900">SOAR Activity</h3>
         {stats && (
           <div className="flex items-center gap-2 text-[10px]">
-            <span className="px-1.5 py-0.5 rounded bg-green-50 text-green-700 font-medium">
+            <button onClick={() => navigate('/settings#soar')} className="px-1.5 py-0.5 rounded bg-green-50 text-green-700 font-medium hover:bg-green-100 transition cursor-pointer">
               {stats.success_count} ok
-            </span>
+            </button>
             {stats.failed_count > 0 && (
-              <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-700 font-medium">
+              <button onClick={() => navigate('/settings#soar')} className="px-1.5 py-0.5 rounded bg-red-50 text-red-700 font-medium hover:bg-red-100 transition cursor-pointer">
                 {stats.failed_count} fail
-              </span>
+              </button>
             )}
-            <span className="text-gray-400">{stats.recent_24h} / 24h</span>
+            <button onClick={() => navigate('/activity?type=soar')} className="text-gray-400 hover:text-gray-600 transition cursor-pointer">{stats.recent_24h} / 24h</button>
           </div>
         )}
       </div>
@@ -110,7 +112,7 @@ export default function SOARActivity() {
           {actions.map(a => {
             const badge = INTEGRATION_BADGES[a.integration] || INTEGRATION_BADGES.internal;
             return (
-              <div key={a.id} className="flex items-center gap-2 text-xs">
+              <div key={a.id} onClick={() => a.identity_id ? navigate(`/identities/${a.identity_id}`) : navigate('/activity?type=soar')} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-gray-50 rounded -mx-1 px-1 transition">
                 <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${STATUS_DOT[a.status] || 'bg-gray-400'}`} />
                 <span className={`px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${badge.bg} ${badge.color}`}>
                   {badge.label}

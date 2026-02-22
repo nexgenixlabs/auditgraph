@@ -9,13 +9,13 @@ interface ExpirySummary {
   timeline: Array<{ vault: string; item: string; type: string; expires_on: string }>;
 }
 
-function MiniCard({ label, total, expired, expiringSoon }: { label: string; total: number; expired: number; expiringSoon: number }) {
+function MiniCard({ label, total, expired, expiringSoon, onClick }: { label: string; total: number; expired: number; expiringSoon: number; onClick?: () => void }) {
   const color = expired > 0 ? 'border-red-200 bg-red-50 dark:bg-red-900/20 dark:border-red-800' :
     expiringSoon > 0 ? 'border-orange-200 bg-orange-50 dark:bg-orange-900/20 dark:border-orange-800' :
     'border-green-200 bg-green-50 dark:bg-green-900/20 dark:border-green-800';
 
   return (
-    <div className={`border rounded-lg p-3 ${color}`}>
+    <button onClick={onClick} className={`border rounded-lg p-3 ${color} text-left w-full${onClick ? ' cursor-pointer hover:shadow-sm transition' : ''}`}>
       <div className="text-lg font-bold text-gray-800 dark:text-slate-200">{total}</div>
       <div className="text-[10px] font-medium text-gray-600 dark:text-slate-400 uppercase tracking-wider">{label}</div>
       <div className="flex gap-2 mt-1.5 text-[10px]">
@@ -23,7 +23,7 @@ function MiniCard({ label, total, expired, expiringSoon }: { label: string; tota
         {expiringSoon > 0 && <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded font-semibold">{expiringSoon} expiring</span>}
         {expired === 0 && expiringSoon === 0 && total > 0 && <span className="text-green-600 font-medium">All OK</span>}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -61,18 +61,21 @@ export default function ExpiryTracker() {
           <p className="text-[10px] text-gray-500">Secrets, Keys & Certificates lifecycle</p>
         </div>
         {(totalExpired > 0 || totalExpiring > 0) && (
-          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-            totalExpired > 0 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'
-          }`}>
+          <button
+            onClick={() => navigate('/resources?resource_type=key_vault')}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer hover:opacity-70 transition ${
+              totalExpired > 0 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'
+            }`}
+          >
             {totalExpired > 0 ? `${totalExpired} Expired` : `${totalExpiring} Expiring`}
-          </span>
+          </button>
         )}
       </div>
 
       <div className="grid grid-cols-3 gap-2 mb-3">
-        <MiniCard label="Secrets" total={data.secrets?.total || 0} expired={data.secrets?.expired || 0} expiringSoon={(data.secrets?.expiring_7d || 0) + (data.secrets?.expiring_30d || 0)} />
-        <MiniCard label="Keys" total={data.keys?.total || 0} expired={data.keys?.expired || 0} expiringSoon={(data.keys?.expiring_7d || 0) + (data.keys?.expiring_30d || 0)} />
-        <MiniCard label="Certificates" total={data.certs?.total || 0} expired={data.certs?.expired || 0} expiringSoon={(data.certs?.expiring_7d || 0) + (data.certs?.expiring_30d || 0)} />
+        <MiniCard label="Secrets" total={data.secrets?.total || 0} expired={data.secrets?.expired || 0} expiringSoon={(data.secrets?.expiring_7d || 0) + (data.secrets?.expiring_30d || 0)} onClick={() => navigate('/resources?resource_type=key_vault')} />
+        <MiniCard label="Keys" total={data.keys?.total || 0} expired={data.keys?.expired || 0} expiringSoon={(data.keys?.expiring_7d || 0) + (data.keys?.expiring_30d || 0)} onClick={() => navigate('/resources?resource_type=key_vault')} />
+        <MiniCard label="Certificates" total={data.certs?.total || 0} expired={data.certs?.expired || 0} expiringSoon={(data.certs?.expiring_7d || 0) + (data.certs?.expiring_30d || 0)} onClick={() => navigate('/resources?resource_type=key_vault')} />
       </div>
 
       {/* Upcoming expirations timeline (top 5) */}

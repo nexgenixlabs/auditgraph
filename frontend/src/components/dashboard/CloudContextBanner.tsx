@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface MonitoredResources {
   azure: { subscriptions: number; subscription_ids: string[] };
@@ -45,6 +46,7 @@ function getCount(cloud: string, res: MonitoredResources): number {
 }
 
 export default function CloudContextBanner({ monitoredResources }: CloudContextBannerProps) {
+  const navigate = useNavigate();
   const clouds = (['azure', 'aws', 'gcp'] as const).map(cloud => ({
     cloud,
     count: getCount(cloud, monitoredResources),
@@ -76,9 +78,12 @@ export default function CloudContextBanner({ monitoredResources }: CloudContextB
                 {c.label}
               </span>
               {c.connected ? (
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${c.bgColor} ${c.textColor} border ${c.borderColor}`}>
+                <button
+                  onClick={() => navigate(`/identities?cloud=${c.cloud}`)}
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${c.bgColor} ${c.textColor} border ${c.borderColor} hover:opacity-70 transition cursor-pointer`}
+                >
                   {c.count} {c.resourceLabel}
-                </span>
+                </button>
               ) : (
                 <span className="text-[10px] text-gray-400">Not connected</span>
               )}

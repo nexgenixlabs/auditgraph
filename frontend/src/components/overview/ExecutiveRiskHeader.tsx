@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { COLORS, RISK_COLORS, scoreToColor } from '../../constants/design';
 import ArcGauge from './ArcGauge';
 
@@ -52,6 +53,7 @@ export default function ExecutiveRiskHeader({
   score, grade, totalIdentities, criticalCount, highCount, previousCritical,
   cisoSummary, lastScan, pillars, nhiBreakdown, improvementPotential, cloudCoverage,
 }: ExecutiveRiskHeaderProps) {
+  const navigate = useNavigate();
   const criticalDelta = previousCritical != null ? criticalCount - previousCritical : undefined;
 
   return (
@@ -73,11 +75,11 @@ export default function ExecutiveRiskHeader({
 
         {/* Key metrics row */}
         <div className="flex items-center gap-8 flex-wrap">
-          <Metric label="Identities" value={totalIdentities} color="text-white" />
-          <Metric label="Critical" value={criticalCount} color={RISK_COLORS.critical.color} />
-          <Metric label="High" value={highCount} color={RISK_COLORS.high.color} />
+          <Metric label="Identities" value={totalIdentities} color="text-white" onClick={() => navigate('/identities')} />
+          <Metric label="Critical" value={criticalCount} color={RISK_COLORS.critical.color} onClick={() => navigate('/identities?risk_level=critical')} />
+          <Metric label="High" value={highCount} color={RISK_COLORS.high.color} onClick={() => navigate('/identities?risk_level=high')} />
           {nhiBreakdown && (
-            <Metric label="NHI %" value={`${Math.round(nhiBreakdown.nhi_pct)}%`} color="#60A5FA" />
+            <Metric label="NHI %" value={`${Math.round(nhiBreakdown.nhi_pct)}%`} color="#60A5FA" onClick={() => navigate('/workload-identities')} />
           )}
           {criticalDelta != null && (
             <div>
@@ -100,8 +102,16 @@ export default function ExecutiveRiskHeader({
             {PILLAR_LABELS.map(p => {
               const pillar = pillars[p.key];
               if (!pillar) return null;
+              const pillarNav: Record<string, string> = {
+                effective_privilege: '/identities?risk_level=critical',
+                credential_risk: '/spns',
+                trust_federation: '/identities?identity_category=guest',
+                usage_dormancy: '/identities?activity_status=stale',
+                ownership_governance: '/service-accounts',
+                external_exposure: '/identities',
+              };
               return (
-                <div key={p.key} className="flex-1">
+                <button key={p.key} className="flex-1 cursor-pointer hover:opacity-70 transition text-left" onClick={() => navigate(pillarNav[p.key] || '/identities')}>
                   <div className="flex items-center justify-between mb-0.5">
                     <span className="text-[9px] uppercase tracking-wider text-slate-500">{p.short}</span>
                     <span className="text-[10px] font-bold" style={{ color: scoreToColor(pillar.score) }}>{Math.round(pillar.score)}</span>
@@ -109,7 +119,7 @@ export default function ExecutiveRiskHeader({
                   <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: '#334155' }}>
                     <div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.min(pillar.score, 100)}%`, backgroundColor: scoreToColor(pillar.score) }} />
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -151,13 +161,14 @@ export default function ExecutiveRiskHeader({
   );
 }
 
-function Metric({ label, value, color }: { label: string; value: number | string; color: string }) {
+function Metric({ label, value, color, onClick }: { label: string; value: number | string; color: string; onClick?: () => void }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div>
+    <Tag onClick={onClick} className={onClick ? 'cursor-pointer hover:opacity-70 transition text-left' : ''}>
       <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-0.5">{label}</div>
       <div className="text-xl font-bold" style={{ color: color.startsWith('text-') ? undefined : color }}>
         {value}
       </div>
-    </div>
+    </Tag>
   );
 }

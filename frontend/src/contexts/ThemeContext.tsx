@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 
-export type ThemeName = 'dark' | 'natural';
+export type ThemeName = 'obsidian' | 'arctic';
 
 interface ThemeContextValue {
   theme: ThemeName;
@@ -12,8 +12,9 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 function getStoredTheme(): ThemeName {
   const stored = localStorage.getItem('auditgraph-theme');
   // Migrate legacy values
-  if (stored === 'obsidian' || stored === 'carbon') return 'dark';
-  return stored === 'natural' ? 'natural' : 'dark';
+  if (stored === 'dark' || stored === 'carbon') return 'obsidian';
+  if (stored === 'natural' || stored === 'light') return 'arctic';
+  return stored === 'arctic' ? 'arctic' : 'obsidian';
 }
 
 function applyTheme(t: ThemeName) {
@@ -41,7 +42,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === 'auditgraph-theme') {
-        const next: ThemeName = e.newValue === 'natural' ? 'natural' : 'dark';
+        const next: ThemeName = e.newValue === 'arctic' ? 'arctic' : 'obsidian';
         setThemeState(next);
         applyTheme(next);
       }

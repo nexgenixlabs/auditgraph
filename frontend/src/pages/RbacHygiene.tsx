@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 
@@ -179,6 +179,7 @@ function RuleIcon({ rule }: { rule: string }) {
 }
 
 export default function RbacHygiene() {
+  const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const { withConnection, selectedConnectionId } = useConnection();
 
@@ -311,6 +312,7 @@ export default function RbacHygiene() {
             sublabel="T1+T2 without PIM"
             color={riskColor(exec?.standing_priv_ratio ?? 0)}
             detail={`PIM coverage: ${exec?.pim_coverage ?? 0}%`}
+            onClick={() => navigate('/identities?privilege_tier=0')}
           />
 
           {/* CISO Card 2: Broad Scope */}
@@ -320,6 +322,7 @@ export default function RbacHygiene() {
             sublabel="Subscription+ scope"
             color={riskColor(exec?.broad_scope_ratio ?? 0)}
             detail={`${exec?.total_identities ?? 0} unique identities`}
+            onClick={() => navigate('/identities?risk_level=high')}
           />
 
           {/* CISO Card 3: Unhealthy Principals */}
@@ -329,6 +332,7 @@ export default function RbacHygiene() {
             sublabel="Identities with findings"
             color={riskColor(exec?.unhealthy_ratio ?? 0)}
             detail={`${summary.total_findings} total findings`}
+            onClick={() => navigate('/identities?risk_level=critical')}
           />
         </div>
       )}
@@ -853,19 +857,21 @@ function SourceBadge({ source }: { source: string }) {
   );
 }
 
-function CisoCard({ label, value, sublabel, color, detail }: {
-  label: string; value: string; sublabel: string; color: string; detail: string;
+function CisoCard({ label, value, sublabel, color, detail, onClick }: {
+  label: string; value: string; sublabel: string; color: string; detail: string; onClick?: () => void;
 }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div style={{
+    <Tag onClick={onClick} style={{
       background: G.surface, border: `1px solid ${G.surfaceBorder}`, borderRadius: 10, padding: 20,
-      borderLeft: `3px solid ${color}`,
-    }}>
+      borderLeft: `3px solid ${color}`, textAlign: 'left' as const,
+      cursor: onClick ? 'pointer' : undefined, transition: 'opacity 0.15s', width: '100%',
+    }} className={onClick ? 'hover:opacity-70' : ''}>
       <div style={{ fontSize: 12, color: G.textSecondary, marginBottom: 4 }}>{label}</div>
       <div style={{ fontSize: 28, fontWeight: 700, fontFamily: G.mono, color, marginBottom: 2 }}>{value}</div>
       <div style={{ fontSize: 11, color: G.textMuted }}>{sublabel}</div>
       <div style={{ fontSize: 11, color: G.textSecondary, marginTop: 8 }}>{detail}</div>
-    </div>
+    </Tag>
   );
 }
 

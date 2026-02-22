@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { COLORS } from '../../constants/design';
 
 interface GovernanceData {
@@ -32,6 +33,13 @@ const INDICATORS: IndicatorConfig[] = [
   { key: 'access_reviews_done', label: 'Access Reviews Done', unit: '', greenThreshold: 1, amberThreshold: 0 },
 ];
 
+const INDICATOR_NAV: Record<string, string> = {
+  ownership_coverage_pct: '/service-accounts',
+  pim_adoption_pct: '/identities',
+  privileged_under_review_pct: '/access-reviews',
+  access_reviews_done: '/access-reviews',
+};
+
 function getTrafficLight(value: number | null, config: IndicatorConfig): string {
   if (value == null) return '#94A3B8'; // gray
   if (config.invertCompare) {
@@ -45,6 +53,7 @@ function getTrafficLight(value: number | null, config: IndicatorConfig): string 
 }
 
 export default function GovernanceMaturityIndicators({ governance }: GovernanceMaturityIndicatorsProps) {
+  const navigate = useNavigate();
   if (!governance) return null;
 
   return (
@@ -56,11 +65,13 @@ export default function GovernanceMaturityIndicators({ governance }: GovernanceM
           const value = rawValue != null ? (typeof rawValue === 'number' ? rawValue : null) : null;
           const color = getTrafficLight(value, config);
           const displayValue = value != null ? (config.unit === 'd' ? value.toFixed(1) : Math.round(value)) : '—';
+          const navTarget = INDICATOR_NAV[config.key];
 
           return (
-            <div
+            <button
               key={config.key}
-              className="bg-white rounded-xl p-4 text-center"
+              onClick={() => navTarget && navigate(navTarget)}
+              className="bg-white rounded-xl p-4 text-center cursor-pointer hover:shadow-md transition"
               style={{ border: `1px solid ${COLORS.border}` }}
             >
               {/* Traffic light dot */}
@@ -78,7 +89,7 @@ export default function GovernanceMaturityIndicators({ governance }: GovernanceM
               {config.target && (
                 <div className="text-[9px] mt-1 font-medium" style={{ color: COLORS.textMuted }}>Target: {config.target}</div>
               )}
-            </div>
+            </button>
           );
         })}
       </div>
