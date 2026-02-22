@@ -923,9 +923,9 @@ const WorkloadIdentityDetail: React.FC = () => {
       </div>
 
       {/* Link to full identity detail (for SPN/MI) */}
-      {data.identity_type !== 'app_registration' && !!data.detail?.id && (
+      {data.identity_type !== 'app_registration' && !!data.detail?.identity_id && (
         <div className="text-center">
-          <a href={`/identities/${data.detail.id}`}
+          <a href={`/identities/${encodeURIComponent(data.detail.identity_id)}`}
             className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
             Open Full Identity Detail (Legacy View) →
           </a>
