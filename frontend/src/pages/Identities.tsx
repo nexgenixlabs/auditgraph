@@ -958,7 +958,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 9; // checkbox + 8 V2 primary columns
+  const colSpan = 10; // checkbox + 9 V2 primary columns
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1378,6 +1378,7 @@ export default function IdentitiesPage() {
                 <SortHeader label="Scope" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Credentials" field="credential_health" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
@@ -1459,6 +1460,15 @@ export default function IdentitiesPage() {
                             <span className="text-[10px] text-gray-400">{i.credential_count}</span>
                           )}
                         </div>
+                      )}
+                    </td>
+
+                    {/* Created */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {i.created_datetime ? (
+                        <span className="text-gray-600">{formatDate(i.created_datetime)}</span>
+                      ) : (
+                        <span className="text-[10px] text-gray-400 italic">—</span>
                       )}
                     </td>
 

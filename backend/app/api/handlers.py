@@ -32,6 +32,9 @@ IS_MICROSOFT_SQL = "COALESCE(i.is_microsoft_system, false)"
 # HIDE_MICROSOFT_SQL: AND NOT clause to exclude Microsoft first-party identities
 HIDE_MICROSOFT_SQL = "\n    AND NOT COALESCE(i.is_microsoft_system, false)\n"
 
+# HIDE_DELETED_SQL: AND clause to exclude soft-deleted identities by default
+HIDE_DELETED_SQL = "\n    AND i.deleted_at IS NULL\n"
+
 
 def _db() -> Database:
     """Create a Database connection with RLS tenant context from JWT.
@@ -311,6 +314,7 @@ def get_identities():
     limit = request.args.get("limit", type=int)
     offset = request.args.get("offset", default=0, type=int)
     hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
+    show_deleted = request.args.get('show_deleted', 'false').lower() == 'true'
 
     cursor = db.conn.cursor()
 
@@ -322,6 +326,9 @@ def get_identities():
 
         query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"
         params = [run_ids]
+
+        if not show_deleted:
+            query += HIDE_DELETED_SQL
 
         if hide_microsoft:
             query += HIDE_MICROSOFT_SQL
@@ -433,7 +440,10 @@ def get_identity_details(identity_id: str):
                    i.risk_factors,
                    -- Evidence fields (Pillar 5)
                    i.discovery_run_id,
-                   dr.completed_at as run_completed_at
+                   dr.completed_at as run_completed_at,
+                   -- Status resolver fields
+                   i.enabled,
+                   i.deleted_at
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -446,10 +456,21 @@ def get_identity_details(identity_id: str):
         if not row:
             return jsonify({"error": "Identity not found"}), 404
 
+        from app.engines.status_resolver import resolve_status, STATUS_DISPLAY
+
         identity_db_id = row[0]
         display_name = row[2] or ''
         identity_type = row[3] or ''
         normalized_category = _normalize_category_key(row[4] or '')
+
+        # Status resolver fields (row[32]=enabled, row[33]=deleted_at)
+        enabled_val = row[32] if row[32] is not None else True
+        deleted_at_val = row[33]
+        resolved_status = resolve_status({
+            'status': row[20] or 'active',
+            'enabled': enabled_val,
+            'deleted_at': deleted_at_val,
+        })
 
         identity = {
             "db_id": identity_db_id,
@@ -473,7 +494,10 @@ def get_identity_details(identity_id: str):
             "tenant_or_org_id": row[17],
             "source": row[18] or "entra",
             "is_federated": row[19] or False,
-            "status": row[20] or "active",
+            "status": resolved_status,
+            "status_display": STATUS_DISPLAY.get(resolved_status, STATUS_DISPLAY['unknown']),
+            "enabled": enabled_val,
+            "deleted_at": deleted_at_val.isoformat() if deleted_at_val else None,
             "last_seen_auth": row[21].isoformat() if row[21] else None,
             # Ownership fields
             "owner_display_name": row[22],
@@ -735,10 +759,12 @@ def get_drift_report(run_id: int):
 
         previous_run_id = prev_row[0]
         detector = DriftDetector(db)
-        changes = detector.compare_runs(run_id, previous_run_id)
+        result = detector.compare_runs_v2(run_id, previous_run_id)
+        changes = result['legacy']
+        events = result['events']
 
         # Persist for future use
-        db.save_drift_report(run_id, previous_run_id, changes)
+        db.save_drift_report(run_id, previous_run_id, changes, events=events)
 
         return jsonify({
             "current_run_id": run_id,
@@ -748,8 +774,9 @@ def get_drift_report(run_id: int):
             "permission_changes_count": len(changes.get('permission_changes', [])),
             "risk_changes_count": len(changes.get('risk_changes', [])),
             "credential_changes_count": len(changes.get('credential_changes', [])),
-            "total_changes": sum(len(v) for v in changes.values()),
+            "total_changes": sum(len(v) for v in changes.values() if isinstance(v, list)),
             "changes": changes,
+            "events": events,
         })
     finally:
         db.close()
@@ -1982,7 +2009,8 @@ def _identity_list_select():
                 ELSE 'none'
             END as effective_scope,
             COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
-            COALESCE(i.permission_plane, 'entra_id') as permission_plane
+            COALESCE(i.permission_plane, 'entra_id') as permission_plane,
+            i.deleted_at
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -1990,10 +2018,21 @@ def _identity_list_select():
 
 def _map_identity_row(row):
     """Maps a raw DB row tuple from _identity_list_select() to the API response dict."""
+    from app.engines.status_resolver import resolve_status, STATUS_DISPLAY
+
     display_name = row[1] or ''
     identity_type = row[2] or ''
     raw_category = row[3] or ''
     normalized_category = _normalize_category_key(raw_category)
+
+    # Canonical status via resolver
+    enabled_val = row[32] if row[32] is not None else True
+    deleted_at_val = row[46] if len(row) > 46 else None
+    resolved = resolve_status({
+        'status': row[23] or 'active',
+        'enabled': enabled_val,
+        'deleted_at': deleted_at_val,
+    })
 
     return {
         "identity_id": row[0],
@@ -2020,7 +2059,9 @@ def _map_identity_row(row):
         "tenant_or_org_id": row[20],
         "source": row[21] or "entra",
         "is_federated": row[22] or False,
-        "status": row[23] or "active",
+        "status": resolved,
+        "status_display": STATUS_DISPLAY.get(resolved, STATUS_DISPLAY['unknown']),
+        "deleted_at": deleted_at_val.isoformat() if deleted_at_val else None,
         "last_seen_auth": row[24].isoformat() if row[24] else None,
         "last_sign_in": row[25].isoformat() if row[25] else None,
         "owner_display_name": row[26],
@@ -2029,7 +2070,7 @@ def _map_identity_row(row):
         "api_permission_count": int(row[29] or 0),
         "app_role_count": int(row[30] or 0),
         "graph_max_risk": row[31] or "info",
-        "enabled": row[32] if row[32] is not None else True,
+        "enabled": enabled_val,
         "last_sign_in": row[33].isoformat() if row[33] else None,
         "privilege_tier": int(row[34]) if row[34] is not None else 3,
         "pim_eligible_count": int(row[35] or 0),
@@ -15329,7 +15370,8 @@ def get_workload_list():
                        COALESCE(i.credential_age_days, 0) as credential_age_days,
                        i.created_datetime,
                        i.owner_display_name,
-                       COALESCE(i.owner_count, 0) as owner_count
+                       COALESCE(i.owner_count, 0) as owner_count,
+                       i.last_sign_in
                 FROM identities i
                 WHERE {where_sql}
             """, params)
@@ -15345,8 +15387,9 @@ def get_workload_list():
                     r['identity_type'] = 'spn'
                 r['source_table'] = 'identities'
                 r['workload_id'] = str(r['id'])
-                if r.get('created_datetime') and hasattr(r['created_datetime'], 'isoformat'):
-                    r['created_datetime'] = r['created_datetime'].isoformat()
+                for _dk in ('created_datetime', 'last_sign_in'):
+                    if r.get(_dk) and hasattr(r[_dk], 'isoformat'):
+                        r[_dk] = r[_dk].isoformat()
                 items.append(r)
 
         # ── Query app_registrations ────────────────────────────────
@@ -15448,11 +15491,26 @@ def get_workload_list():
                     """, id_db_ids)
                     anom_map = {r['identity_db_id']: r['cnt'] for r in cursor.fetchall()}
 
+                    # Batch-fetch latest sign-in datetime from P2 events
+                    cursor.execute(f"""
+                        SELECT identity_db_id, MAX(created_datetime) AS latest_sign_in
+                        FROM workload_signin_events
+                        WHERE identity_db_id IN ({ph})
+                        GROUP BY identity_db_id
+                    """, id_db_ids)
+                    signin_map = {}
+                    for r in cursor.fetchall():
+                        if r['latest_sign_in']:
+                            signin_map[r['identity_db_id']] = r['latest_sign_in'].isoformat()
+
                     for it in items:
                         if it.get('source_table') == 'identities':
                             db_id = int(it['id'])
                             it['sign_ins_30d'] = p2_map.get(db_id)
                             it['anomaly_count'] = anom_map.get(db_id, 0)
+                            # Backfill last_sign_in from P2 events if Graph API didn't provide it
+                            if not it.get('last_sign_in') and db_id in signin_map:
+                                it['last_sign_in'] = signin_map[db_id]
             except Exception:
                 pass  # Tables may not exist
 
@@ -15462,11 +15520,16 @@ def get_workload_list():
         valid_sorts = {
             'exposure_score', 'privilege_score', 'credential_risk_score',
             'lifecycle_score', 'visibility_score', 'display_name', 'risk_score',
+            'created_datetime', 'last_sign_in',
         }
         if sort_col not in valid_sorts:
             sort_col = 'exposure_score'
         reverse = sort_dir != 'asc'
-        items.sort(key=lambda x: (x.get(sort_col) or 0) if sort_col != 'display_name' else (x.get('display_name') or '').lower(), reverse=reverse)
+        str_sorts = {'display_name', 'created_datetime', 'last_sign_in'}
+        if sort_col in str_sorts:
+            items.sort(key=lambda x: (x.get(sort_col) or '').lower() if sort_col == 'display_name' else (x.get(sort_col) or ''), reverse=reverse)
+        else:
+            items.sort(key=lambda x: x.get(sort_col) or 0, reverse=reverse)
 
         total = len(items)
         paged = items[offset:offset + limit]
@@ -15784,6 +15847,10 @@ def get_workload_detail(workload_id):
                     except Exception:
                         pass
                     recent_signins = []
+
+            # Backfill last_sign_in from P2 events if Graph API didn't provide it
+            if p2_enabled and not identity.get('last_sign_in') and recent_signins:
+                identity['last_sign_in'] = recent_signins[0].get('created_datetime')
 
             # Build signals from findings
             from collections import defaultdict

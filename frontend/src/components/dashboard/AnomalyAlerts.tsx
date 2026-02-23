@@ -32,6 +32,7 @@ const TYPE_LABELS: Record<string, string> = {
   credential_surge: 'Credential Surge',
   off_hours_pim: 'Off-Hours PIM',
   excessive_pim_usage: 'Excessive PIM',
+  ghost_identity: 'Ghost Identity',
 };
 
 function timeAgo(dateStr: string): string {

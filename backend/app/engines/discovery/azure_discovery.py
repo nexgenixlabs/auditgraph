@@ -280,6 +280,7 @@ class AzureDiscoveryEngine:
                 tenant_id = self.db._tenant_id
                 telemetry.ingest_signin_logs(run_id, tenant_id)
                 telemetry.compute_activity_stats(run_id, tenant_id)
+                telemetry.backfill_last_sign_in(run_id)
                 print("  ✓ P2 telemetry ingested — activity stats ready for scoring")
         except Exception as e:
             print(f"  ⚠️ P2 telemetry ingestion error: {e}")

@@ -94,6 +94,8 @@ interface IdentityDetailsResponse {
     api_permission_count?: number;
     app_role_count?: number;
     status?: string;
+    status_display?: { label: string; badge_class: string };
+    deleted_at?: string | null;
     ca_coverage_status?: string | null;
     ca_mfa_enforced?: boolean;
   };
@@ -817,11 +819,13 @@ export default function IdentityDetail() {
                 <div className="text-gray-500">Status</div>
                 <div>
                   <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    identity.status === 'active' || identity.enabled !== false
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-red-100 text-red-700'
+                    identity.status_display?.badge_class ||
+                    (identity.status === 'active' ? 'bg-green-100 text-green-700' :
+                     identity.status === 'disabled' ? 'bg-red-100 text-red-700' :
+                     identity.status === 'deleted' ? 'bg-gray-100 text-gray-500' :
+                     'bg-yellow-100 text-yellow-700')
                   }`}>
-                    {identity.status === 'active' || identity.enabled !== false ? 'Active' : 'Disabled'}
+                    {identity.status_display?.label || identity.status || 'Unknown'}
                   </span>
                 </div>
 
@@ -1505,6 +1509,7 @@ export default function IdentityDetail() {
                         credential_surge: 'Credential Surge',
                         off_hours_pim: 'Off-Hours PIM',
                         excessive_pim_usage: 'Excessive PIM',
+                        ghost_identity: 'Ghost Identity',
                       };
                       return (
                         <div key={a.id} className={`rounded-xl border p-4 ${severityColors[a.severity] || 'border-gray-200 bg-gray-50'}`}>

@@ -116,6 +116,8 @@ interface SPNDetail {
   };
   findings: ExposureFinding[];
   activity_inference: { confidence: number; classification: string };
+  status?: string;
+  status_display?: { label: string; badge_class: string };
 }
 
 type SortField = 'exposure_score' | 'display_name' | 'privilege_score' | 'credential_risk_score' | 'next_expiry' | 'activity_status';
@@ -255,8 +257,18 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
                   Exposure: {exp.total}/100
                 </span>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${lcConfig.badgeClass}`}>
-                  {lcConfig.label}
+                  Activity: {lcConfig.label}
                 </span>
+                {!!detail && (
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    detail.status_display?.badge_class ||
+                    (detail.status === 'active' ? 'bg-green-100 text-green-700' :
+                     detail.status === 'disabled' ? 'bg-red-100 text-red-700' :
+                     'bg-gray-100 text-gray-500')
+                  }`}>
+                    {detail.status_display?.label || detail.status || 'Active'}
+                  </span>
+                )}
                 {!!exp.can_escalate && (
                   <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white">CAN ESCALATE</span>
                 )}

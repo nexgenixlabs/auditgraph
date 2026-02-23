@@ -29,13 +29,25 @@ interface IdentityData {
   change_reason?: string;
 }
 
+interface DriftEvent {
+  event_type: string;
+  severity: string;
+  identity_id: string;
+  display_name: string;
+  description: string;
+  details: Record<string, unknown>;
+  timestamp: string;
+}
+
 interface FullDriftReport {
   current_run_id: number;
   previous_run_id: number;
   total_changes: number;
+  events?: DriftEvent[];
   changes: {
     new_identities: IdentityData[];
     removed_identities: IdentityData[];
+    microsoft_removed_identities?: IdentityData[];
     permission_changes: Array<{
       identity: IdentityData;
       added_roles: string[];
@@ -102,6 +114,7 @@ export default function DriftHistory() {
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     new_identities: true,
     removed_identities: true,
+    microsoft_removed_identities: false,
     permission_changes: true,
     risk_changes: true,
     credential_changes: true,
@@ -404,6 +417,14 @@ function DetailView({
       icon: '-',
     },
     {
+      key: 'microsoft_removed_identities',
+      label: 'Microsoft Removed',
+      count: detail.changes.microsoft_removed_identities?.length || 0,
+      color: 'text-gray-600',
+      bgHeader: 'bg-gray-100',
+      icon: 'M',
+    },
+    {
       key: 'permission_changes',
       label: 'Permission Changes',
       count: detail.changes.permission_changes?.length || 0,
@@ -475,6 +496,9 @@ function DetailView({
               {section.key === 'removed_identities' && (
                 <RemovedIdentitiesSection items={detail.changes.removed_identities} />
               )}
+              {section.key === 'microsoft_removed_identities' && (
+                <MicrosoftRemovedSection items={detail.changes.microsoft_removed_identities || []} />
+              )}
               {section.key === 'permission_changes' && (
                 <PermissionChangesSection items={detail.changes.permission_changes} />
               )}
@@ -541,6 +565,30 @@ function RemovedIdentitiesSection({ items }: { items: IdentityData[] }) {
           {!!item.change_reason && (
             <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
           )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MicrosoftRemovedSection({ items }: { items: IdentityData[] }) {
+  return (
+    <div className="space-y-2">
+      <div className="text-xs text-gray-500 mb-2">
+        Microsoft first-party identities removed from tenant. These are typically managed by Microsoft and are informational only.
+      </div>
+      {items.map((item, i) => (
+        <div key={item.identity_id || i} className="flex items-center gap-3 text-sm">
+          <span className="text-gray-400 font-mono font-bold">M</span>
+          <Link
+            to={`/identities?hide_microsoft=false&search=${encodeURIComponent(item.display_name || '')}`}
+            className="text-gray-600 hover:text-blue-600 hover:underline"
+            onClick={e => e.stopPropagation()}
+          >
+            {item.display_name || item.identity_id}
+          </Link>
+          <span className="text-gray-300">·</span>
+          <span className="text-xs text-gray-400">{categoryLabel(item.identity_category)}</span>
         </div>
       ))}
     </div>

@@ -167,6 +167,7 @@ class Database:
 
     _risk_factors_col_ensured = False
     _permission_plane_col_ensured = False
+    _deleted_at_col_ensured = False
     _ms_flag_backfilled = False
     _spn_exposure_ensured = False
     _app_reg_exposure_ensured = False
@@ -248,6 +249,34 @@ class Database:
         finally:
             cursor.close()
         Database._ms_flag_backfilled = True
+
+    def ensure_deleted_at_column(self):
+        """Startup migration: add deleted_at column for identity soft-delete + drift events."""
+        if Database._deleted_at_col_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_identities_deleted_at ON identities(deleted_at) WHERE deleted_at IS NOT NULL")
+            self.conn.commit()
+            Database._deleted_at_col_ensured = True
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ deleted_at migration error: {e}")
+        finally:
+            cursor.close()
+        # Also ensure drift_reports.events column
+        if not Database._drift_events_col_ensured:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS events JSONB DEFAULT '[]'::jsonb")
+                self.conn.commit()
+                Database._drift_events_col_ensured = True
+            except Exception as e:
+                self.conn.rollback()
+                print(f"  ⚠️ drift events column migration error: {e}")
+            finally:
+                cursor.close()
 
     def ensure_permission_plane_column(self):
         """Startup migration: add permission_plane column and backfill existing data."""
@@ -346,13 +375,31 @@ class Database:
                 self.conn.rollback()
             Database._permission_plane_col_ensured = True
 
+        # Ensure deleted_at column exists for soft-delete
+        if not Database._deleted_at_col_ensured:
+            try:
+                cursor.execute("SAVEPOINT deleted_at_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_identities_deleted_at ON identities(deleted_at) WHERE deleted_at IS NOT NULL")
+                cursor.execute("RELEASE SAVEPOINT deleted_at_ddl")
+                self.conn.commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT deleted_at_ddl")
+                except Exception:
+                    self.conn.rollback()
+            Database._deleted_at_col_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
         # Calculate normalized fields for multi-cloud support
         identity_type_normalized = self._get_normalized_type(identity_data)
         is_federated = identity_data.get("is_federated", False) or identity_data.get("identity_category") == "guest"
-        status = "active" if identity_data.get("enabled", True) else "disabled"
+
+        # Use canonical status resolver
+        from app.engines.status_resolver import resolve_status
+        status = resolve_status(identity_data)
 
         cursor.execute(
             """
@@ -465,6 +512,8 @@ class Database:
                 app_owner_org_id = EXCLUDED.app_owner_org_id,
 
                 permission_plane = EXCLUDED.permission_plane,
+
+                deleted_at = NULL,
 
                 created_at = NOW()
             RETURNING id
@@ -1857,9 +1906,26 @@ class Database:
     # Phase 14: Drift Detection & Change Tracking
     # ========================================================================
 
-    def save_drift_report(self, current_run_id: int, previous_run_id: int, changes: Dict) -> int:
+    _drift_events_col_ensured = False
+
+    def save_drift_report(self, current_run_id: int, previous_run_id: int,
+                          changes: Dict, events: list = None) -> int:
         """Persist a drift comparison result. Returns drift_report ID."""
         cursor = self.conn.cursor()
+
+        # Ensure events JSONB column exists
+        if not Database._drift_events_col_ensured:
+            try:
+                cursor.execute("SAVEPOINT drift_events_ddl")
+                cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS events JSONB DEFAULT '[]'::jsonb")
+                cursor.execute("RELEASE SAVEPOINT drift_events_ddl")
+                self.conn.commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT drift_events_ddl")
+                except Exception:
+                    self.conn.rollback()
+            Database._drift_events_col_ensured = True
 
         new_count = len(changes.get('new_identities', []))
         removed_count = len(changes.get('removed_identities', []))
@@ -1868,14 +1934,16 @@ class Database:
         cred_count = len(changes.get('credential_changes', []))
         total = new_count + removed_count + perm_count + risk_count + cred_count
 
+        events_json = json.dumps(events or [], default=str)
+
         cursor.execute("""
             INSERT INTO drift_reports (
                 current_run_id, previous_run_id,
                 new_identities_count, removed_identities_count,
                 permission_changes_count, risk_changes_count,
                 credential_changes_count, total_changes,
-                changes, tenant_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                changes, events, tenant_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (current_run_id, previous_run_id) DO UPDATE SET
                 new_identities_count = EXCLUDED.new_identities_count,
                 removed_identities_count = EXCLUDED.removed_identities_count,
@@ -1884,12 +1952,13 @@ class Database:
                 credential_changes_count = EXCLUDED.credential_changes_count,
                 total_changes = EXCLUDED.total_changes,
                 changes = EXCLUDED.changes,
+                events = EXCLUDED.events,
                 created_at = NOW()
             RETURNING id
         """, (
             current_run_id, previous_run_id,
             new_count, removed_count, perm_count, risk_count, cred_count, total,
-            json.dumps(changes, default=str), self._tenant_id
+            json.dumps(changes, default=str), events_json, self._tenant_id
         ))
 
         report_id = cursor.fetchone()[0]

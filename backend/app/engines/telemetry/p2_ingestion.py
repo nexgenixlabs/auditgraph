@@ -208,3 +208,32 @@ class P2TelemetryService:
             return 0
         finally:
             cursor.close()
+
+    def backfill_last_sign_in(self, run_id):
+        """Update identities.last_sign_in from P2 sign-in events where Graph API didn't provide it."""
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE identities i
+                SET last_sign_in = sub.latest,
+                    last_seen_auth = COALESCE(i.last_seen_auth, sub.latest)
+                FROM (
+                    SELECT identity_db_id, MAX(created_datetime) AS latest
+                    FROM workload_signin_events
+                    WHERE discovery_run_id = %s AND identity_db_id IS NOT NULL
+                    GROUP BY identity_db_id
+                ) sub
+                WHERE i.id = sub.identity_db_id
+                  AND i.last_sign_in IS NULL
+            """, (run_id,))
+            updated = cursor.rowcount
+            self.db.conn.commit()
+            if updated:
+                print(f"  ✓ Backfilled last_sign_in for {updated} identities from P2 telemetry")
+            return updated
+        except Exception as e:
+            self.db.conn.rollback()
+            print(f"  ⚠️ last_sign_in backfill error: {e}")
+            return 0
+        finally:
+            cursor.close()

@@ -320,21 +320,26 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
         detector = DriftDetector(db)
         changes: dict = {
             'new_identities': [], 'removed_identities': [],
+            'microsoft_removed_identities': [],
             'permission_changes': [], 'risk_changes': [], 'credential_changes': [],
         }
+        all_events: list = []
         latest_current_run_id = 0
         latest_previous_run_id = 0
         for conn_id, current_run_id, previous_run_id in pairs:
             logger.info(f"Comparing runs for connection {conn_id}: #{current_run_id} vs #{previous_run_id}")
-            conn_changes = detector.compare_runs(current_run_id, previous_run_id)
+            result = detector.compare_runs_v2(current_run_id, previous_run_id)
+            conn_changes = result['legacy']
+            conn_events = result['events']
 
-            # Persist per-connection drift report
-            report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes)
+            # Persist per-connection drift report with typed events
+            report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes, events=conn_events)
             logger.info(f"Drift report #{report_id} saved for connection {conn_id} (runs #{current_run_id} vs #{previous_run_id})")
 
             # Aggregate into combined changes
             for key in changes:
                 changes[key].extend(conn_changes.get(key, []))
+            all_events.extend(conn_events)
 
             if current_run_id > latest_current_run_id:
                 latest_current_run_id = current_run_id
@@ -415,6 +420,9 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
 
         # Phase 30: Generate in-app notifications
         _generate_notifications(current_run_id, changes, db)
+
+        # Ghost identity detection (disabled/deleted identities retaining roles)
+        _run_ghost_detection(current_run_id, db)
 
         # Phase 40: Run anomaly detection
         _run_anomaly_detection(current_run_id, previous_run_id, db)
@@ -632,6 +640,30 @@ def _generate_notifications(current_run_id: int, changes: dict, db: Database):
 
     except Exception as e:
         logger.error(f"Error generating notifications: {e}")
+
+
+def _run_ghost_detection(current_run_id: int, db: Database):
+    """Detect disabled/deleted identities retaining active role assignments."""
+    try:
+        from app.engines.ghost_detector import GhostIdentityDetector
+        ghost_detector = GhostIdentityDetector(db)
+        ghost_anomalies = ghost_detector.detect(current_run_id)
+        if ghost_anomalies:
+            count = db.save_anomalies(current_run_id, ghost_anomalies)
+            logger.info(f"Ghost detection: {count} ghost identities found for run #{current_run_id}")
+            _generate_anomaly_notifications(current_run_id, ghost_anomalies, db)
+            critical_ghosts = [a for a in ghost_anomalies if a.get('severity') == 'critical']
+            if critical_ghosts:
+                _dispatch_notification('anomaly_detected', {
+                    'title': f'{len(critical_ghosts)} Critical Ghost Identities Detected',
+                    'description': f'Run #{current_run_id}: {", ".join(a["identity_name"] for a in critical_ghosts[:3])} retain active roles despite being disabled/deleted',
+                    'severity': 'critical',
+                }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+        else:
+            logger.info(f"Ghost detection: no ghost identities found for run #{current_run_id}")
+    except Exception as e:
+        logger.error(f"Ghost detection failed: {e}")
+        logger.exception(e)
 
 
 def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Database):

@@ -31,6 +31,7 @@ interface WorkloadRow {
   cross_subscription: boolean;
   credential_age_days: number;
   created_datetime: string;
+  last_sign_in?: string | null;
   sign_ins_30d?: number | null;
   anomaly_count?: number;
 }
@@ -81,6 +82,18 @@ const SEV_BADGE: Record<string, string> = {
   medium: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300',
   low: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
 };
+
+function formatDate(d?: string | null): string {
+  if (!d) return '—';
+  try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
+  catch { return d; }
+}
+
+function formatDateTime(d?: string | null): string {
+  if (!d) return '—';
+  try { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+  catch { return d; }
+}
 
 function exposureColor(score: number): string {
   if (score >= 80) return 'text-red-600 dark:text-red-400';
@@ -455,6 +468,12 @@ const WorkloadIdentities: React.FC = () => {
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Lifecycle</th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Owner</th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Scope</th>
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-24" onClick={() => handleSort('created_datetime')}>
+                Created <SortIcon col="created_datetime" />
+              </th>
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-28" onClick={() => handleSort('last_sign_in')}>
+                Last Sign-In <SortIcon col="last_sign_in" />
+              </th>
               {!!stats?.p2_enabled && (
                 <>
                   <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-[72px]">Sign-Ins</th>
@@ -466,12 +485,12 @@ const WorkloadIdentities: React.FC = () => {
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={stats?.p2_enabled ? 10 : 8} className="text-center py-8">
+              <tr><td colSpan={stats?.p2_enabled ? 12 : 10} className="text-center py-8">
                 <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
               </td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={stats?.p2_enabled ? 10 : 8} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No workload identities found</td></tr>
+              <tr><td colSpan={stats?.p2_enabled ? 12 : 10} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No workload identities found</td></tr>
             )}
             {!loading && items.map(row => {
               const lcCfg = LIFECYCLE_STATE_CONFIG[row.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
@@ -517,6 +536,16 @@ const WorkloadIdentities: React.FC = () => {
                   </td>
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scCfg.badgeClass}`}>{scCfg.label}</span>
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <span className="text-xs text-gray-600 dark:text-slate-300">{formatDate(row.created_datetime)}</span>
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    {row.last_sign_in ? (
+                      <span className="text-xs text-gray-600 dark:text-slate-300">{formatDateTime(row.last_sign_in)}</span>
+                    ) : (
+                      <span className="text-[10px] text-gray-400 dark:text-slate-500 italic">Unknown</span>
+                    )}
                   </td>
                   {!!stats?.p2_enabled && (
                     <>

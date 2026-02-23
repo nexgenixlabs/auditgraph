@@ -272,6 +272,7 @@ def create_app():
         _db_init._ensure_identity_subscription_access_table()
         _db_init.backfill_microsoft_flag()
         _db_init.ensure_permission_plane_column()
+        _db_init.ensure_deleted_at_column()
         _db_init._ensure_spn_exposure()
         _db_init._ensure_app_reg_exposure()
         _db_init._ensure_workload_telemetry_tables()
