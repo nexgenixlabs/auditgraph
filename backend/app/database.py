@@ -171,6 +171,7 @@ class Database:
     _ms_flag_backfilled = False
     _spn_exposure_ensured = False
     _app_reg_exposure_ensured = False
+    _ice_columns_ensured = False
 
     def backfill_microsoft_flag(self):
         """Startup backfill of is_microsoft_system for ALL data.
@@ -390,6 +391,29 @@ class Database:
                     self.conn.rollback()
             Database._deleted_at_col_ensured = True
 
+        # Ensure ICE (Identity Correlation Engine) columns exist
+        if not Database._ice_columns_ensured:
+            try:
+                cursor.execute("SAVEPOINT ice_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS upn VARCHAR(500)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS employee_id_entra VARCHAR(255)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS department VARCHAR(255)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS manager_id VARCHAR(255)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS manager_upn VARCHAR(500)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS job_title VARCHAR(255)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS account_category VARCHAR(50)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_identities_upn ON identities(upn)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_identities_employee_id ON identities(employee_id_entra)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_identities_account_category ON identities(account_category)")
+                cursor.execute("RELEASE SAVEPOINT ice_ddl")
+                self.conn.commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT ice_ddl")
+                except Exception:
+                    self.conn.rollback()
+            Database._ice_columns_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -451,7 +475,16 @@ class Database:
 
                 permission_plane,
 
-                tenant_id
+                tenant_id,
+
+                -- ICE columns
+                upn,
+                employee_id_entra,
+                department,
+                manager_id,
+                manager_upn,
+                job_title,
+                account_category
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -465,7 +498,8 @@ class Database:
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s,
                 %s,
-                %s
+                %s,
+                %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -514,6 +548,15 @@ class Database:
                 permission_plane = EXCLUDED.permission_plane,
 
                 deleted_at = NULL,
+
+                -- ICE columns
+                upn = EXCLUDED.upn,
+                employee_id_entra = EXCLUDED.employee_id_entra,
+                department = EXCLUDED.department,
+                manager_id = EXCLUDED.manager_id,
+                manager_upn = EXCLUDED.manager_upn,
+                job_title = EXCLUDED.job_title,
+                account_category = EXCLUDED.account_category,
 
                 created_at = NOW()
             RETURNING id
@@ -571,6 +614,15 @@ class Database:
                 identity_data.get("permission_plane", "entra_id"),
 
                 self._tenant_id,
+
+                # ICE columns
+                identity_data.get("upn"),
+                identity_data.get("employee_id_entra"),
+                identity_data.get("department"),
+                identity_data.get("manager_id"),
+                identity_data.get("manager_upn"),
+                identity_data.get("job_title"),
+                identity_data.get("account_category"),
             ),
         )
 
@@ -1851,6 +1903,22 @@ class Database:
         """, (use_run_ids,))
         ca_row = cursor.fetchone() or {}
 
+        # Ghost identities (disabled/deleted retaining active role assignments)
+        ghost_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id) AS ghost_count
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                  AND (i.deleted_at IS NOT NULL OR i.enabled = false
+                       OR COALESCE(i.status, 'active') IN ('disabled', 'deleted'))
+                  AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                       OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
+            """, (use_run_ids,))
+            ghost_count = cursor.fetchone()['ghost_count'] or 0
+        except Exception:
+            pass
+
         cursor.close()
 
         return {
@@ -1863,6 +1931,7 @@ class Database:
                 "high": run.get("high_count", 0),
                 "medium": run.get("medium_count", 0),
                 "low": run.get("low_count", 0),
+                "ghost_count": ghost_count,
             },
             "previous_run": {
                 "total_identities": prev_run["total_identities"] if prev_run else None,
@@ -4421,6 +4490,120 @@ class Database:
         cursor.close()
         return db_id
 
+    def update_resource_risk_scores(self, run_id: int, resource_id: str, resource_type: str, data: dict):
+        """Write enhanced risk scores back to the main resource table so list/detail views are consistent."""
+        table = 'azure_storage_accounts' if resource_type == 'storage_account' else 'azure_key_vaults'
+        cursor = self.conn.cursor()
+        cursor.execute(f"""
+            UPDATE {table}
+            SET risk_score = %s,
+                risk_level = %s,
+                risk_components = %s,
+                blast_radius_score = %s,
+                critical_overrides = %s
+            WHERE discovery_run_id = %s AND resource_id = %s
+        """, (
+            data.get('risk_score', 0),
+            data.get('risk_level', 'info'),
+            json.dumps(data.get('risk_components', {})),
+            data.get('blast_radius_score', 0),
+            json.dumps(data.get('critical_overrides', [])),
+            run_id,
+            resource_id,
+        ))
+        self.conn.commit()
+        cursor.close()
+
+    # ──────────────────────────────────────────────────────────
+    # Resource Findings Table
+    # ──────────────────────────────────────────────────────────
+
+    _resource_findings_ensured = False
+
+    def _ensure_resource_findings_table(self):
+        """Create resource_findings table for queryable per-driver findings."""
+        if Database._resource_findings_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS resource_findings (
+                id SERIAL PRIMARY KEY,
+                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                resource_id TEXT NOT NULL,
+                resource_type VARCHAR(30) NOT NULL,
+                component VARCHAR(50) NOT NULL,
+                finding_key VARCHAR(200) NOT NULL,
+                finding_title TEXT NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                severity VARCHAR(20) NOT NULL DEFAULT 'low',
+                is_critical_override BOOLEAN NOT NULL DEFAULT false,
+                metadata JSONB DEFAULT '{}',
+                tenant_id INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(discovery_run_id, resource_id, finding_key)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_resource ON resource_findings(resource_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_run ON resource_findings(discovery_run_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_severity ON resource_findings(severity)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_component ON resource_findings(component)")
+        self.conn.commit()
+        cursor.close()
+        Database._resource_findings_ensured = True
+
+    def save_resource_findings(self, run_id: int, resource_id: str, resource_type: str,
+                                findings: list, tenant_id: int = None):
+        """Upsert findings extracted from risk_components for a resource."""
+        self._ensure_resource_findings_table()
+        if not findings:
+            return
+        cursor = self.conn.cursor()
+        tid = tenant_id or self._tenant_id
+        for f in findings:
+            cursor.execute("""
+                INSERT INTO resource_findings
+                    (discovery_run_id, resource_id, resource_type, component,
+                     finding_key, finding_title, points, severity,
+                     is_critical_override, metadata, tenant_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (discovery_run_id, resource_id, finding_key)
+                DO UPDATE SET points = EXCLUDED.points,
+                             severity = EXCLUDED.severity,
+                             finding_title = EXCLUDED.finding_title,
+                             is_critical_override = EXCLUDED.is_critical_override,
+                             metadata = EXCLUDED.metadata
+            """, (
+                run_id, resource_id, resource_type, f['component'],
+                f['finding_key'], f['finding_title'], f['points'], f['severity'],
+                f['is_critical_override'], json.dumps(f.get('metadata', {})), tid,
+            ))
+        self.conn.commit()
+        cursor.close()
+
+    def get_resource_findings(self, resource_id: str, run_ids: list = None):
+        """Get findings for a resource, optionally filtered by run IDs."""
+        self._ensure_resource_findings_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if run_ids:
+            cursor.execute("""
+                SELECT * FROM resource_findings
+                WHERE resource_id = %s AND discovery_run_id = ANY(%s)
+                ORDER BY points DESC, component
+            """, (resource_id, run_ids))
+        else:
+            cursor.execute("""
+                SELECT * FROM resource_findings
+                WHERE resource_id = %s
+                ORDER BY created_at DESC, points DESC
+                LIMIT 100
+            """, (resource_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
     def get_resource_risk_trend(self, resource_id: str, limit: int = 10) -> list:
         """Get risk history for a resource, most recent first."""
         self._ensure_resource_risk_history_table()
@@ -6461,14 +6644,25 @@ class Database:
 
     def get_identity_anomalies(self, identity_id: str, limit=20) -> list:
         """Get anomalies for a specific identity across all runs."""
+        return self.get_identity_anomalies_multi([identity_id], limit=limit)
+
+    def get_identity_anomalies_multi(self, identity_ids: list, limit=20) -> list:
+        """Get anomalies matching any of the given identity IDs.
+
+        Handles the mismatch where some anomaly sources store Entra string
+        identity_id and others store DB integer id.
+        """
         self._ensure_anomalies_table()
+        if not identity_ids:
+            return []
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
+        placeholders = ','.join(['%s'] * len(identity_ids))
+        cursor.execute(f"""
             SELECT * FROM anomalies
-            WHERE identity_id = %s
+            WHERE identity_id IN ({placeholders})
             ORDER BY created_at DESC
             LIMIT %s
-        """, (identity_id, limit))
+        """, (*identity_ids, limit))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -9341,6 +9535,321 @@ class Database:
             cursor.close()
 
 
+    # ─── ICE: Identity Correlation CRUD ──────────────────────────────────
+
+    def save_human_identity(self, tenant_id, display_name, employee_id=None,
+                            department=None, manager_id=None):
+        """Create or update a human identity. Returns id."""
+        _ensure_human_identities_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                INSERT INTO human_identities (tenant_id, display_name, employee_id, department, manager_id)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (tenant_id, display_name, employee_id, department, manager_id))
+            row = cursor.fetchone()
+            if row:
+                self.conn.commit()
+                return row['id']
+            # Find existing by employee_id or display_name
+            if employee_id:
+                cursor.execute(
+                    "SELECT id FROM human_identities WHERE tenant_id = %s AND employee_id = %s LIMIT 1",
+                    (tenant_id, employee_id))
+            else:
+                cursor.execute(
+                    "SELECT id FROM human_identities WHERE tenant_id = %s AND display_name = %s LIMIT 1",
+                    (tenant_id, display_name))
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute("""
+                    UPDATE human_identities SET display_name = %s, department = %s,
+                    manager_id = %s, updated_at = NOW() WHERE id = %s
+                """, (display_name, department, manager_id, existing['id']))
+                self.conn.commit()
+                return existing['id']
+            self.conn.commit()
+            return None
+        finally:
+            cursor.close()
+
+    def save_identity_link(self, tenant_id, human_identity_id, identity_db_id,
+                           account_type, account_upn, account_object_id,
+                           account_enabled, link_method, link_confidence):
+        """Create or update an identity link. Returns id."""
+        _ensure_identity_links_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                INSERT INTO identity_links (
+                    tenant_id, human_identity_id, identity_db_id, account_type,
+                    account_upn, account_object_id, account_enabled,
+                    link_method, link_confidence
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tenant_id, account_object_id) DO UPDATE SET
+                    human_identity_id = EXCLUDED.human_identity_id,
+                    identity_db_id = EXCLUDED.identity_db_id,
+                    account_type = EXCLUDED.account_type,
+                    account_upn = EXCLUDED.account_upn,
+                    account_enabled = EXCLUDED.account_enabled,
+                    link_method = EXCLUDED.link_method,
+                    link_confidence = EXCLUDED.link_confidence
+                RETURNING id
+            """, (tenant_id, human_identity_id, identity_db_id, account_type,
+                  account_upn, account_object_id, account_enabled,
+                  link_method, link_confidence))
+            row = cursor.fetchone()
+            self.conn.commit()
+            return row['id'] if row else None
+        finally:
+            cursor.close()
+
+    def get_human_identities(self, tenant_id, limit=50, offset=0, search=None):
+        """List human identities with linked account counts."""
+        _ensure_human_identities_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            where = "WHERE h.tenant_id = %s"
+            params = [tenant_id]
+            if search:
+                where += " AND (h.display_name ILIKE %s OR h.employee_id ILIKE %s)"
+                params += [f'%{search}%', f'%{search}%']
+            cursor.execute(f"""
+                SELECT h.*, COUNT(l.id) as account_count,
+                    COALESCE(json_agg(json_build_object(
+                        'id', l.id, 'account_type', l.account_type,
+                        'account_upn', l.account_upn, 'account_enabled', l.account_enabled,
+                        'link_confidence', l.link_confidence, 'verified', l.verified
+                    )) FILTER (WHERE l.id IS NOT NULL), '[]') as accounts
+                FROM human_identities h
+                LEFT JOIN identity_links l ON l.human_identity_id = h.id
+                {where}
+                GROUP BY h.id
+                ORDER BY h.display_name
+                LIMIT %s OFFSET %s
+            """, params + [limit, offset])
+            results = cursor.fetchall()
+            # Get total count
+            cursor.execute(f"SELECT COUNT(*) as cnt FROM human_identities h {where}", params)
+            total = cursor.fetchone()['cnt']
+            return [dict(r) for r in results], total
+        finally:
+            cursor.close()
+
+    def get_human_identity_detail(self, human_id):
+        """Get a single human identity with all linked accounts."""
+        _ensure_human_identities_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT h.* FROM human_identities h WHERE h.id = %s
+            """, (human_id,))
+            human = cursor.fetchone()
+            if not human:
+                return None
+            cursor.execute("""
+                SELECT l.*, i.display_name as identity_name, i.risk_score,
+                    i.risk_level, i.identity_category, i.enabled as identity_enabled,
+                    i.activity_status, i.last_sign_in
+                FROM identity_links l
+                LEFT JOIN identities i ON i.id = l.identity_db_id
+                WHERE l.human_identity_id = %s
+                ORDER BY l.account_type
+            """, (human_id,))
+            accounts = [dict(r) for r in cursor.fetchall()]
+            result = dict(human)
+            result['accounts'] = accounts
+            return result
+        finally:
+            cursor.close()
+
+    def save_orphaned_finding(self, finding_dict):
+        """Save an orphaned privileged account finding. Upserts on open status."""
+        _ensure_orphaned_findings_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                INSERT INTO orphaned_privileged_findings (
+                    tenant_id, discovery_run_id, human_identity_id,
+                    regular_link_id, privileged_link_id,
+                    regular_upn, regular_object_id,
+                    privileged_upn, privileged_object_id,
+                    severity, azure_roles, role_count,
+                    highest_role_privilege, subscription_count,
+                    has_activity_after_disable, days_since_regular_disabled,
+                    status, compliance_reference, days_out_of_compliance,
+                    remediation_commands
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (tenant_id, privileged_object_id) WHERE status = 'open'
+                DO UPDATE SET
+                    discovery_run_id = EXCLUDED.discovery_run_id,
+                    severity = EXCLUDED.severity,
+                    azure_roles = EXCLUDED.azure_roles,
+                    role_count = EXCLUDED.role_count,
+                    highest_role_privilege = EXCLUDED.highest_role_privilege,
+                    subscription_count = EXCLUDED.subscription_count,
+                    has_activity_after_disable = EXCLUDED.has_activity_after_disable,
+                    days_since_regular_disabled = EXCLUDED.days_since_regular_disabled,
+                    days_out_of_compliance = EXCLUDED.days_out_of_compliance,
+                    remediation_commands = EXCLUDED.remediation_commands,
+                    updated_at = NOW()
+                RETURNING id
+            """, (
+                finding_dict['tenant_id'],
+                finding_dict.get('discovery_run_id'),
+                finding_dict.get('human_identity_id'),
+                finding_dict.get('regular_link_id'),
+                finding_dict.get('privileged_link_id'),
+                finding_dict.get('regular_upn'),
+                finding_dict.get('regular_object_id'),
+                finding_dict.get('privileged_upn'),
+                finding_dict.get('privileged_object_id'),
+                finding_dict.get('severity', 'high'),
+                finding_dict.get('azure_roles', []),
+                finding_dict.get('role_count', 0),
+                finding_dict.get('highest_role_privilege'),
+                finding_dict.get('subscription_count', 0),
+                finding_dict.get('has_activity_after_disable', False),
+                finding_dict.get('days_since_regular_disabled'),
+                finding_dict.get('status', 'open'),
+                finding_dict.get('compliance_reference', 'HIPAA §164.312(a)(2)(iii)'),
+                finding_dict.get('days_out_of_compliance', 0),
+                json.dumps(finding_dict.get('remediation_commands', {})),
+            ))
+            row = cursor.fetchone()
+            self.conn.commit()
+            return row['id'] if row else None
+        finally:
+            cursor.close()
+
+    def get_orphaned_findings(self, tenant_id, limit=50, offset=0,
+                              status=None, severity=None):
+        """List orphaned privileged account findings."""
+        _ensure_orphaned_findings_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            where = "WHERE f.tenant_id = %s"
+            params = [tenant_id]
+            if status:
+                where += " AND f.status = %s"
+                params.append(status)
+            if severity:
+                where += " AND f.severity = %s"
+                params.append(severity)
+            cursor.execute(f"""
+                SELECT f.*, h.display_name as human_name, h.employee_id
+                FROM orphaned_privileged_findings f
+                LEFT JOIN human_identities h ON h.id = f.human_identity_id
+                {where}
+                ORDER BY
+                    CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,
+                    f.created_at DESC
+                LIMIT %s OFFSET %s
+            """, params + [limit, offset])
+            results = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(f"SELECT COUNT(*) as cnt FROM orphaned_privileged_findings f {where}", params)
+            total = cursor.fetchone()['cnt']
+            return results, total
+        finally:
+            cursor.close()
+
+    def get_orphaned_finding_detail(self, finding_id):
+        """Get a single orphaned finding with linked identity details."""
+        _ensure_orphaned_findings_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT f.*, h.display_name as human_name, h.employee_id,
+                    h.department, h.manager_id,
+                    rl.account_upn as regular_account_upn,
+                    rl.account_enabled as regular_account_enabled,
+                    pl.account_upn as privileged_account_upn,
+                    pl.account_enabled as privileged_account_enabled,
+                    ri.risk_score as regular_risk_score,
+                    pi.risk_score as privileged_risk_score,
+                    pi.risk_level as privileged_risk_level,
+                    pi.last_sign_in as privileged_last_sign_in
+                FROM orphaned_privileged_findings f
+                LEFT JOIN human_identities h ON h.id = f.human_identity_id
+                LEFT JOIN identity_links rl ON rl.id = f.regular_link_id
+                LEFT JOIN identity_links pl ON pl.id = f.privileged_link_id
+                LEFT JOIN identities ri ON ri.id = rl.identity_db_id
+                LEFT JOIN identities pi ON pi.id = pl.identity_db_id
+                WHERE f.id = %s
+            """, (finding_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            cursor.close()
+
+    def update_orphaned_finding_status(self, finding_id, new_status, user_id=None,
+                                       remediation_action=None):
+        """Update the lifecycle status of an orphaned finding."""
+        _ensure_orphaned_findings_table(self.conn)
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            sets = ["status = %s", "updated_at = NOW()"]
+            params = [new_status]
+            if new_status == 'acknowledged':
+                sets += ["acknowledged_at = NOW()", "acknowledged_by = %s"]
+                params.append(str(user_id) if user_id else None)
+            elif new_status == 'remediated':
+                sets += ["remediated_at = NOW()", "remediated_by = %s", "remediation_action = %s"]
+                params += [str(user_id) if user_id else None, remediation_action]
+            elif new_status == 'suppressed':
+                sets += ["suppressed_at = NOW()", "suppressed_by = %s", "suppression_reason = %s"]
+                params += [str(user_id) if user_id else None, remediation_action]
+            params.append(finding_id)
+            cursor.execute(f"""
+                UPDATE orphaned_privileged_findings SET {', '.join(sets)}
+                WHERE id = %s RETURNING id
+            """, params)
+            row = cursor.fetchone()
+            self.conn.commit()
+            return row is not None
+        finally:
+            cursor.close()
+
+    def delete_identity_link(self, link_id):
+        """Delete an identity link. Cleans up orphaned human_identities."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            # Get human_identity_id before deleting
+            cursor.execute("SELECT human_identity_id FROM identity_links WHERE id = %s", (link_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            human_id = row['human_identity_id']
+            cursor.execute("DELETE FROM identity_links WHERE id = %s", (link_id,))
+            # Clean up if this was the last link
+            cursor.execute("SELECT COUNT(*) as cnt FROM identity_links WHERE human_identity_id = %s", (human_id,))
+            if cursor.fetchone()['cnt'] == 0:
+                cursor.execute("DELETE FROM human_identities WHERE id = %s", (human_id,))
+            self.conn.commit()
+            return True
+        finally:
+            cursor.close()
+
+    def verify_identity_link(self, link_id, verified_by):
+        """Mark an identity link as verified."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                UPDATE identity_links SET verified = TRUE, verified_at = NOW(), verified_by = %s
+                WHERE id = %s RETURNING id
+            """, (verified_by, link_id))
+            row = cursor.fetchone()
+            self.conn.commit()
+            return row is not None
+        finally:
+            cursor.close()
+
+
 # ─── Access Review V2 Helper Functions ────────────────────────────────
 
 _PRIVILEGED_ROLES = {
@@ -9767,3 +10276,157 @@ def _ensure_rbac_hygiene_table(conn):
     conn.commit()
     cursor.close()
     _rbac_hygiene_ensured = True
+
+
+# ─── ICE: Identity Correlation Engine Tables ─────────────────────────
+
+_human_identities_ensured = False
+
+def _ensure_human_identities_table(conn):
+    """Create human_identities table for linking multiple accounts to a real person."""
+    global _human_identities_ensured
+    if _human_identities_ensured:
+        return
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS human_identities (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                display_name VARCHAR(500),
+                employee_id VARCHAR(255),
+                department VARCHAR(255),
+                manager_id VARCHAR(255),
+                employment_status VARCHAR(50) DEFAULT 'active',
+                status_determined_at TIMESTAMPTZ,
+                status_source VARCHAR(100),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_human_identities_tenant ON human_identities(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_human_identities_employee ON human_identities(employee_id)")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  ⚠️ human_identities table creation error: {e}")
+    finally:
+        cursor.close()
+    _human_identities_ensured = True
+
+
+_identity_links_ensured = False
+
+def _ensure_identity_links_table(conn):
+    """Create identity_links table for mapping accounts to human identities."""
+    global _identity_links_ensured
+    if _identity_links_ensured:
+        return
+    _ensure_human_identities_table(conn)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_links (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                human_identity_id INTEGER NOT NULL REFERENCES human_identities(id) ON DELETE CASCADE,
+                identity_db_id INTEGER REFERENCES identities(id) ON DELETE SET NULL,
+                account_type VARCHAR(50) NOT NULL,
+                account_upn VARCHAR(500),
+                account_object_id VARCHAR(255),
+                account_enabled BOOLEAN DEFAULT TRUE,
+                link_method VARCHAR(50) NOT NULL DEFAULT 'naming_convention',
+                link_confidence DECIMAL(5,2) DEFAULT 0,
+                linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                linked_by VARCHAR(255),
+                verified BOOLEAN DEFAULT FALSE,
+                verified_at TIMESTAMPTZ,
+                verified_by VARCHAR(255),
+                UNIQUE(tenant_id, account_object_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_tenant ON identity_links(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_human ON identity_links(human_identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_identity ON identity_links(identity_db_id)")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  ⚠️ identity_links table creation error: {e}")
+    finally:
+        cursor.close()
+    _identity_links_ensured = True
+
+
+_orphaned_findings_ensured = False
+
+def _ensure_orphaned_findings_table(conn):
+    """Create orphaned_privileged_findings table for orphaned account detection results."""
+    global _orphaned_findings_ensured
+    if _orphaned_findings_ensured:
+        return
+    _ensure_identity_links_table(conn)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS orphaned_privileged_findings (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                human_identity_id INTEGER REFERENCES human_identities(id) ON DELETE CASCADE,
+                regular_link_id INTEGER REFERENCES identity_links(id) ON DELETE SET NULL,
+                privileged_link_id INTEGER REFERENCES identity_links(id) ON DELETE SET NULL,
+                regular_upn VARCHAR(500),
+                regular_object_id VARCHAR(255),
+                privileged_upn VARCHAR(500),
+                privileged_object_id VARCHAR(255),
+                severity VARCHAR(20) NOT NULL DEFAULT 'high',
+                azure_roles TEXT[],
+                role_count INTEGER DEFAULT 0,
+                highest_role_privilege VARCHAR(100),
+                subscription_count INTEGER DEFAULT 0,
+                has_activity_after_disable BOOLEAN DEFAULT FALSE,
+                days_since_regular_disabled INTEGER,
+                status VARCHAR(50) NOT NULL DEFAULT 'open',
+                acknowledged_at TIMESTAMPTZ,
+                acknowledged_by VARCHAR(255),
+                remediated_at TIMESTAMPTZ,
+                remediated_by VARCHAR(255),
+                remediation_action TEXT,
+                suppressed_at TIMESTAMPTZ,
+                suppressed_by VARCHAR(255),
+                suppression_reason TEXT,
+                compliance_reference VARCHAR(255) DEFAULT 'HIPAA §164.312(a)(2)(iii)',
+                days_out_of_compliance INTEGER DEFAULT 0,
+                remediation_commands JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_tenant ON orphaned_privileged_findings(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_status ON orphaned_privileged_findings(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_severity ON orphaned_privileged_findings(severity)")
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_orphaned_findings_open_unique
+            ON orphaned_privileged_findings(tenant_id, privileged_account_object_id)
+            WHERE status = 'open'
+        """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        # The partial unique index references privileged_account_object_id but column is privileged_object_id
+        # Retry with correct column name
+        try:
+            cursor2 = conn.cursor()
+            cursor2.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_orphaned_findings_open_unique
+                ON orphaned_privileged_findings(tenant_id, privileged_object_id)
+                WHERE status = 'open'
+            """)
+            conn.commit()
+            cursor2.close()
+        except Exception:
+            conn.rollback()
+        print(f"  ⚠️ orphaned_privileged_findings table creation note: {e}")
+    finally:
+        cursor.close()
+    _orphaned_findings_ensured = True

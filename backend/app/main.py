@@ -140,6 +140,7 @@ from app.api.handlers import (
     get_resource_stats,
     get_resource_detail,
     get_resource_access,
+    get_resource_findings,
     get_resource_anomalies,
     get_resource_expiry_summary,
     get_resource_compliance_summary,
@@ -168,6 +169,7 @@ from app.api.handlers import (
     health_check,
     prometheus_metrics,
     get_system_health,
+    check_resource_integrity,
     get_portal_users_list,
     get_spn_stats,
     get_spn_list,
@@ -239,6 +241,20 @@ from app.api.handlers import (
     get_workload_findings,
     get_workload_anomalies,
     get_workload_anomaly_stats,
+    # ICE: Identity Correlation Engine
+    get_correlation_linked_identities,
+    get_correlation_linked_identity_detail,
+    post_correlation_link,
+    delete_correlation_link,
+    verify_correlation_link,
+    get_orphaned_findings_list,
+    get_orphaned_finding_detail_handler,
+    acknowledge_orphaned_finding,
+    remediate_orphaned_finding,
+    suppress_orphaned_finding,
+    get_correlation_config,
+    save_correlation_config,
+    get_dashboard_identity_correlation,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -295,6 +311,11 @@ def create_app():
     @app.get("/api/system/health")
     def system_health():
         return get_system_health()
+
+    @app.get("/api/system/resource-integrity")
+    @require_role('admin')
+    def resource_integrity():
+        return check_resource_integrity()
 
     # -----------------------
     # Authentication (Phase 31)
@@ -1350,6 +1371,11 @@ def create_app():
     def resources_access(resource_id):
         return get_resource_access(resource_id)
 
+    @app.get("/api/resources/<path:resource_id>/findings")
+    @require_role('compliance', 'reader', 'admin')
+    def resources_findings(resource_id):
+        return get_resource_findings(resource_id)
+
     @app.get("/api/resources/<path:resource_id>/anomalies")
     @require_role('compliance', 'reader', 'admin')
     def resources_anomalies(resource_id):
@@ -1572,6 +1598,68 @@ def create_app():
     @app.get("/api/identities/<path:identity_id>/subscriptions")
     def identity_subscriptions(identity_id):
         return get_identity_subscriptions(identity_id)
+
+    # -----------------------
+    # ICE: Identity Correlation Engine
+    # -----------------------
+    @app.get("/api/correlation/linked")
+    def correlation_linked():
+        return get_correlation_linked_identities()
+
+    @app.get("/api/correlation/linked/<int:human_id>")
+    def correlation_linked_detail(human_id):
+        return get_correlation_linked_identity_detail(human_id)
+
+    @app.post("/api/correlation/link")
+    @require_role('admin', 'security_admin')
+    def correlation_link_create():
+        return post_correlation_link()
+
+    @app.delete("/api/correlation/link/<int:link_id>")
+    @require_role('admin', 'security_admin')
+    def correlation_link_delete(link_id):
+        return delete_correlation_link(link_id)
+
+    @app.put("/api/correlation/link/<int:link_id>/verify")
+    @require_role('admin', 'security_admin')
+    def correlation_link_verify(link_id):
+        return verify_correlation_link(link_id)
+
+    @app.get("/api/findings/orphaned-privileged")
+    def findings_orphaned():
+        return get_orphaned_findings_list()
+
+    @app.get("/api/findings/orphaned-privileged/<int:finding_id>")
+    def findings_orphaned_detail(finding_id):
+        return get_orphaned_finding_detail_handler(finding_id)
+
+    @app.put("/api/findings/orphaned-privileged/<int:finding_id>/acknowledge")
+    @require_role('admin', 'security_admin', 'auditor')
+    def findings_orphaned_acknowledge(finding_id):
+        return acknowledge_orphaned_finding(finding_id)
+
+    @app.put("/api/findings/orphaned-privileged/<int:finding_id>/remediate")
+    @require_role('admin', 'security_admin')
+    def findings_orphaned_remediate(finding_id):
+        return remediate_orphaned_finding(finding_id)
+
+    @app.put("/api/findings/orphaned-privileged/<int:finding_id>/suppress")
+    @require_role('admin', 'security_admin')
+    def findings_orphaned_suppress(finding_id):
+        return suppress_orphaned_finding(finding_id)
+
+    @app.get("/api/correlation/config")
+    def correlation_config_get():
+        return get_correlation_config()
+
+    @app.put("/api/correlation/config")
+    @require_role('admin')
+    def correlation_config_save():
+        return save_correlation_config()
+
+    @app.get("/api/dashboard/identity-correlation")
+    def dashboard_identity_correlation():
+        return get_dashboard_identity_correlation()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

@@ -17,6 +17,7 @@ import json
 from psycopg2.extras import RealDictCursor
 from app.database import Database
 from app.engines.drift_detector import DriftDetector
+from app.engines.data_security import compute_sas_risk, score_storage_account, score_key_vault
 from app.api.auth import generate_access_token, generate_refresh_token, hash_refresh_token, VALID_PORTAL_ROLES
 
 load_dotenv(".env.local")
@@ -277,10 +278,46 @@ def get_stats():
         except Exception:
             pass
 
+        # Ghost identities: disabled/deleted but retaining role assignments
+        ghost_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                  AND (i.deleted_at IS NOT NULL OR i.enabled = false
+                       OR COALESCE(i.status, 'active') IN ('disabled', 'deleted'))
+                  AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                       OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
+            """, (run_ids,))
+            ghost_count = cursor.fetchone()[0] or 0
+        except Exception:
+            pass
+
+        # Disabled/deleted counts (regardless of role assignments)
+        disabled_count = 0
+        deleted_count = 0
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE i.enabled = false AND i.deleted_at IS NULL) AS disabled,
+                    COUNT(*) FILTER (WHERE i.deleted_at IS NOT NULL) AS deleted
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+            """, (run_ids,))
+            row = cursor.fetchone()
+            disabled_count = row[0] or 0
+            deleted_count = row[1] or 0
+        except Exception:
+            pass
+
         result = {
             "latest_run": latest,
             "previous_run": previous_run,
             "total_discovery_runs": total_runs,
+            "ghost_count": ghost_count,
+            "disabled_count": disabled_count,
+            "deleted_count": deleted_count,
         }
         if workload_exposure:
             result["workload_exposure"] = workload_exposure
@@ -7966,11 +8003,32 @@ def resolve_anomaly_handler(anomaly_id):
 
 
 def get_identity_anomalies_handler(identity_id):
-    """GET /api/identities/<id>/anomalies — anomalies for a specific identity."""
+    """GET /api/identities/<id>/anomalies — anomalies for a specific identity.
+
+    The route parameter can be either an Entra UUID or a DB integer id.
+    The anomalies table stores Entra string identity_id (UUID).
+    We resolve both forms and query by all matching identifiers.
+    """
     db = _db()
     try:
         limit = min(int(request.args.get('limit', 20)), 100)
-        anomalies = db.get_identity_anomalies(identity_id, limit=limit)
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        search_ids = [str(identity_id)]
+        # Try to resolve DB integer id → Entra UUID, or Entra UUID → DB id
+        try:
+            db_int_id = int(identity_id)
+            cursor.execute("SELECT identity_id FROM identities WHERE id = %s", (db_int_id,))
+            row = cursor.fetchone()
+            if row and row['identity_id'] and row['identity_id'] != str(identity_id):
+                search_ids.append(row['identity_id'])
+        except (ValueError, TypeError):
+            # identity_id is a UUID string — also look up the DB integer id
+            cursor.execute("SELECT id FROM identities WHERE identity_id = %s ORDER BY id DESC LIMIT 1", (identity_id,))
+            row = cursor.fetchone()
+            if row and str(row['id']) != identity_id:
+                search_ids.append(str(row['id']))
+        cursor.close()
+        anomalies = db.get_identity_anomalies_multi(search_ids, limit=limit)
         return jsonify({'anomalies': anomalies, 'count': len(anomalies)})
     finally:
         db.close()
@@ -9696,6 +9754,34 @@ def _ensure_resource_tables(db):
         db._ensure_resource_risk_history_table()
         _resource_tables_ensured = True
 
+def _classify_network(resource):
+    """Classify network posture: 'disabled', 'restricted', or 'public'.
+
+    Key Vault with public_network_access='Disabled' → 'disabled'
+    default_network_action='Deny' → 'restricted'
+    default_network_action='Allow' with IP/VNet/PE rules → 'restricted'
+    default_network_action='Allow' with no rules → 'public'
+    """
+    pub_access = str(resource.get('public_network_access', 'Enabled'))
+    default_action = str(resource.get('default_network_action', 'Allow'))
+
+    # Key Vault specific: public_network_access=Disabled overrides everything
+    if pub_access == 'Disabled':
+        return 'disabled'
+
+    if default_action == 'Deny':
+        return 'restricted'
+
+    # Allow but with restrictions
+    has_ip = (resource.get('ip_rules_count') or 0) > 0
+    has_vnet = (resource.get('vnet_rules_count') or 0) > 0
+    has_pe = (resource.get('private_endpoint_count') or 0) > 0
+    if has_ip or has_vnet or has_pe:
+        return 'restricted'
+
+    return 'public'
+
+
 def get_resources():
     """GET /api/resources — list storage accounts + key vaults with filters."""
     db = _db()
@@ -9738,7 +9824,11 @@ def get_resources():
                        COALESCE(risk_components, '{}') AS risk_components,
                        COALESCE(blast_radius_score, 0) AS blast_radius_score,
                        COALESCE(critical_overrides, '[]') AS critical_overrides,
-                       tags, created_at
+                       tags, created_at,
+                       default_network_action, NULL::text AS public_network_access,
+                       COALESCE(ip_rules_count, 0) AS ip_rules_count,
+                       COALESCE(vnet_rules_count, 0) AS vnet_rules_count,
+                       COALESCE(private_endpoint_count, 0) AS private_endpoint_count
                 FROM azure_storage_accounts
                 WHERE discovery_run_id = ANY(%s)
             """)
@@ -9767,7 +9857,11 @@ def get_resources():
                        COALESCE(risk_components, '{}') AS risk_components,
                        COALESCE(blast_radius_score, 0) AS blast_radius_score,
                        COALESCE(critical_overrides, '[]') AS critical_overrides,
-                       tags, created_at
+                       tags, created_at,
+                       default_network_action, public_network_access,
+                       COALESCE(ip_rules_count, 0) AS ip_rules_count,
+                       COALESCE(vnet_rules_count, 0) AS vnet_rules_count,
+                       COALESCE(private_endpoint_count, 0) AS private_endpoint_count
                 FROM azure_key_vaults
                 WHERE discovery_run_id = ANY(%s)
             """)
@@ -9827,6 +9921,7 @@ def get_resources():
                         r[jf] = json.loads(r[jf])
                     except Exception:
                         r[jf] = {} if jf in ('tags', 'key_config', 'risk_components') else []
+            r['network_classification'] = _classify_network(r)
             resources.append(r)
 
         # Batch risk trend lookup (last 2 snapshots per resource for delta)
@@ -10061,60 +10156,7 @@ def get_resource_detail(resource_id):
 
         # SAS risk assessment for storage accounts
         if resource.get('resource_type') == 'storage_account':
-            factors = []
-            recommendations = []
-            if resource.get('shared_key_access') is True:
-                factors.append('Shared key access is enabled')
-                recommendations.append('Disable shared key access and use Azure AD authentication')
-            if not resource.get('sas_policy_enabled'):
-                factors.append('No SAS expiration policy configured')
-                recommendations.append('Configure a SAS expiration policy to limit token lifetimes')
-            if resource.get('public_blob_access') is True:
-                factors.append('Public blob access is enabled')
-                recommendations.append('Disable public blob access unless required')
-            if resource.get('key_rotation_stale') is True:
-                factors.append('Storage keys have not been rotated in >90 days')
-                recommendations.append('Rotate storage account keys every 90 days')
-            if resource.get('shared_key_access') is True and not resource.get('diagnostic_logging_enabled'):
-                factors.append('No diagnostic logging — shared key/SAS usage is unauditable')
-                recommendations.append('Enable diagnostic settings (StorageRead/Write/Delete) to Log Analytics or Event Hub')
-            if resource.get('diagnostic_logging_enabled') and resource.get('shared_key_access') is True:
-                factors.append('Shared key access enabled with logging — SAS tokens can be generated but usage is tracked')
-
-            level = 'low'
-            if len(factors) >= 4:
-                level = 'critical'
-            elif len(factors) >= 3:
-                level = 'high'
-            elif len(factors) >= 2:
-                level = 'medium'
-            elif len(factors) >= 1:
-                level = 'medium'
-
-            # Compute auditability status
-            has_shared_key = resource.get('shared_key_access') is True
-            has_diag = resource.get('diagnostic_logging_enabled') is True
-            has_sas_policy = resource.get('sas_policy_enabled') is True
-            if not has_shared_key:
-                audit_status = 'compliant'
-                audit_label = 'Azure AD Only — Fully Auditable'
-            elif has_shared_key and has_diag and has_sas_policy:
-                audit_status = 'auditable'
-                audit_label = 'Shared Key + Logging + SAS Policy — Auditable'
-            elif has_shared_key and has_diag:
-                audit_status = 'partial'
-                audit_label = 'Shared Key + Logging — Partially Auditable (no SAS policy)'
-            else:
-                audit_status = 'unauditable'
-                audit_label = 'Shared Key without Logging — Unauditable'
-
-            resource['sas_risk'] = {
-                'level': level,
-                'factors': factors,
-                'recommendations': recommendations,
-                'audit_status': audit_status,
-                'audit_label': audit_label,
-            }
+            resource['sas_risk'] = compute_sas_risk(resource)
 
         # Risk trend data (last 10 runs)
         try:
@@ -10132,7 +10174,129 @@ def get_resource_detail(resource_id):
             resource['risk_trend_delta'] = 0
             resource['risk_trend_direction'] = 'stable'
 
+        # Include findings from resource_findings table
+        try:
+            resource['findings'] = db.get_resource_findings(resource_id, run_ids)
+        except Exception:
+            resource['findings'] = []
+
+        # Network classification
+        resource['network_classification'] = _classify_network(resource)
+
+        # Score integrity check: re-score and compare with stored score
+        try:
+            stored_score = resource.get('risk_score', 0)
+            if resource.get('resource_type') == 'storage_account':
+                fresh_score, _, _, _, _ = score_storage_account(resource)
+            else:
+                fresh_score, _, _, _, _ = score_key_vault(resource)
+            # Identity exposure adds up to 25 pts on top of base score, so allow that margin
+            diff = abs(stored_score - fresh_score)
+            if diff <= 25:
+                resource['_score_integrity'] = 'consistent'
+            else:
+                resource['_score_integrity'] = 'drift_detected'
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Score drift on {resource_id}: stored={stored_score}, fresh_base={fresh_score}, diff={diff}"
+                )
+        except Exception:
+            resource['_score_integrity'] = 'check_failed'
+
         return jsonify(resource)
+    finally:
+        db.close()
+
+
+def check_resource_integrity():
+    """GET /api/system/resource-integrity — re-score all resources and check for drift."""
+    db = _db()
+    _ensure_resource_tables(db)
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'total': 0, 'consistent': 0, 'drifted': 0, 'errors': 0, 'details': []})
+
+        # Fetch all storage accounts
+        cursor.execute("SELECT * FROM azure_storage_accounts WHERE discovery_run_id = ANY(%s)", (run_ids,))
+        storage_rows = cursor.fetchall()
+        # Fetch all key vaults
+        cursor.execute("SELECT * FROM azure_key_vaults WHERE discovery_run_id = ANY(%s)", (run_ids,))
+        kv_rows = cursor.fetchall()
+        cursor.close()
+
+        results = {'total': 0, 'consistent': 0, 'drifted': 0, 'errors': 0, 'details': []}
+
+        for row in storage_rows:
+            r = dict(row)
+            results['total'] += 1
+            try:
+                fresh_score, _, _, _, _ = score_storage_account(r)
+                stored_score = r.get('risk_score', 0)
+                diff = abs(stored_score - fresh_score)
+                status = 'consistent' if diff <= 25 else 'drift_detected'
+                if status == 'consistent':
+                    results['consistent'] += 1
+                else:
+                    results['drifted'] += 1
+                    results['details'].append({
+                        'resource_id': r.get('resource_id'),
+                        'name': r.get('name'),
+                        'type': 'storage_account',
+                        'stored_score': stored_score,
+                        'fresh_base_score': fresh_score,
+                        'diff': diff,
+                    })
+            except Exception:
+                results['errors'] += 1
+
+        for row in kv_rows:
+            r = dict(row)
+            results['total'] += 1
+            try:
+                fresh_score, _, _, _, _ = score_key_vault(r)
+                stored_score = r.get('risk_score', 0)
+                diff = abs(stored_score - fresh_score)
+                status = 'consistent' if diff <= 25 else 'drift_detected'
+                if status == 'consistent':
+                    results['consistent'] += 1
+                else:
+                    results['drifted'] += 1
+                    results['details'].append({
+                        'resource_id': r.get('resource_id'),
+                        'name': r.get('name'),
+                        'type': 'key_vault',
+                        'stored_score': stored_score,
+                        'fresh_base_score': fresh_score,
+                        'diff': diff,
+                    })
+            except Exception:
+                results['errors'] += 1
+
+        return jsonify(results)
+    finally:
+        db.close()
+
+
+def get_resource_findings(resource_id):
+    """GET /api/resources/<path:resource_id>/findings — queryable findings for a resource."""
+    if not resource_id.startswith('/'):
+        resource_id = '/' + resource_id
+    db = _db()
+    _ensure_resource_tables(db)
+    try:
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        cursor.close()
+        if not run_ids:
+            return jsonify({'findings': [], 'count': 0})
+
+        findings = db.get_resource_findings(resource_id, run_ids)
+        return jsonify({'findings': findings, 'count': len(findings)})
     finally:
         db.close()
 
@@ -10186,10 +10350,10 @@ def get_resource_access(resource_id):
         # Note: tenant filtering is already handled via run_ids (which belong to the tenant)
         params = [run_ids, resource_id, resource_id]
 
-        # RBAC access
+        # RBAC access — include enabled/deleted_at/status for ghost detection
         cursor.execute(f"""
             SELECT i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
-                   i.object_id,
+                   i.object_id, i.enabled, i.deleted_at, i.status,
                    ra.role_name, ra.scope, ra.scope_type
             FROM identities i
             JOIN role_assignments ra ON ra.identity_db_id = i.id
@@ -10206,6 +10370,20 @@ def get_resource_access(resource_id):
             entry = dict(r)
             entry['access_type'] = 'rbac'
             entry['over_privileged'] = entry.get('role_name', '') in OVER_PRIV_ROLES and entry.get('scope', '') == resource_id
+            # Ghost detection: disabled/deleted identity retaining access
+            is_ghost = (entry.get('deleted_at') is not None
+                        or entry.get('enabled') is False
+                        or entry.get('status') in ('disabled', 'deleted'))
+            entry['is_ghost'] = is_ghost
+            if entry.get('deleted_at'):
+                entry['account_state'] = 'deleted'
+            elif entry.get('enabled') is False:
+                entry['account_state'] = 'disabled'
+            else:
+                entry['account_state'] = entry.get('status') or 'active'
+            # Serialize deleted_at for JSON
+            if entry.get('deleted_at'):
+                entry['deleted_at'] = entry['deleted_at'].isoformat()
             # Classify access source by comparing assignment scope to resource_id
             scope = entry.get('scope', '')
             if scope == resource_id:
@@ -10259,7 +10437,8 @@ def get_resource_access(resource_id):
                 placeholders = ','.join(['%s'] * len(policy_object_ids))
                 id_params = [run_ids] + policy_object_ids
                 cursor.execute(f"""
-                    SELECT id, display_name, identity_category, risk_level, risk_score, object_id
+                    SELECT id, display_name, identity_category, risk_level, risk_score, object_id,
+                           enabled, deleted_at, status
                     FROM identities
                     WHERE discovery_run_id = ANY(%s) AND object_id IN ({placeholders})
                 """, id_params)
@@ -10268,6 +10447,16 @@ def get_resource_access(resource_id):
                 for pol in policies:
                     oid = pol.get('object_id', '')
                     identity_info = identity_map.get(oid, {})
+                    is_ghost = (identity_info.get('deleted_at') is not None
+                                or identity_info.get('enabled') is False
+                                or identity_info.get('status') in ('disabled', 'deleted'))
+                    if identity_info.get('deleted_at'):
+                        acct_state = 'deleted'
+                    elif identity_info.get('enabled') is False:
+                        acct_state = 'disabled'
+                    else:
+                        acct_state = identity_info.get('status') or 'active'
+                    del_at = identity_info.get('deleted_at')
                     entry = {
                         'id': identity_info.get('id'),
                         'display_name': identity_info.get('display_name', f'Unknown ({oid[:8]}...)'),
@@ -10278,6 +10467,9 @@ def get_resource_access(resource_id):
                         'access_type': 'access_policy',
                         'over_privileged': False,
                         'permissions_summary': pol.get('permissions', {}),
+                        'is_ghost': is_ghost,
+                        'account_state': acct_state,
+                        'deleted_at': del_at.isoformat() if del_at else None,
                     }
                     policy_access.append(entry)
                     if identity_info.get('id'):
@@ -10291,6 +10483,7 @@ def get_resource_access(resource_id):
         for entry in rbac_access:
             src = entry.get('access_source', 'unknown')
             source_counts[src] = source_counts.get(src, 0) + 1
+        ghost_count = sum(1 for e in rbac_access + policy_access if e.get('is_ghost'))
         return jsonify({
             'resource_id': resource_id,
             'rbac_access': rbac_access,
@@ -10298,6 +10491,7 @@ def get_resource_access(resource_id):
             'count': len(rbac_access) + len(policy_access),
             'blast_radius': blast_radius,
             'access_source_breakdown': source_counts,
+            'ghost_count': ghost_count,
         })
     finally:
         db.close()
@@ -16048,5 +16242,281 @@ def get_workload_anomaly_stats():
             'by_type': by_type,
             'by_severity': by_severity,
         })
+    finally:
+        db.close()
+
+
+# ============================================================================
+# ICE: Identity Correlation Engine
+# ============================================================================
+
+def get_correlation_linked_identities():
+    """GET /api/correlation/linked — list linked human identities."""
+    db = _db()
+    try:
+        tid = _tenant_id()
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        search = request.args.get('search')
+        results, total = db.get_human_identities(tid, limit, offset, search)
+        return jsonify({'items': results, 'total': total})
+    finally:
+        db.close()
+
+
+def get_correlation_linked_identity_detail(human_id):
+    """GET /api/correlation/linked/<id> — detail for a human identity."""
+    db = _db()
+    try:
+        detail = db.get_human_identity_detail(human_id)
+        if not detail:
+            return jsonify({'error': 'Not found'}), 404
+        return jsonify(detail)
+    finally:
+        db.close()
+
+
+def post_correlation_link():
+    """POST /api/correlation/link — manually link two accounts."""
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        tid = _tenant_id()
+        regular_id = data.get('regular_identity_db_id')
+        privileged_id = data.get('privileged_identity_db_id')
+        if not regular_id or not privileged_id:
+            return jsonify({'error': 'regular_identity_db_id and privileged_identity_db_id required'}), 400
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("SELECT id, display_name, object_id, upn, employee_id_entra, department, manager_id, enabled FROM identities WHERE id = %s", (regular_id,))
+            reg = cursor.fetchone()
+            cursor.execute("SELECT id, display_name, object_id, upn, enabled FROM identities WHERE id = %s", (privileged_id,))
+            priv = cursor.fetchone()
+        finally:
+            cursor.close()
+
+        if not reg or not priv:
+            return jsonify({'error': 'One or both identities not found'}), 404
+
+        human_id = db.save_human_identity(
+            tenant_id=tid,
+            display_name=reg['display_name'],
+            employee_id=reg.get('employee_id_entra'),
+            department=reg.get('department'),
+            manager_id=reg.get('manager_id'),
+        )
+        if not human_id:
+            return jsonify({'error': 'Failed to create human identity'}), 500
+
+        user = getattr(g, 'current_user', None)
+        linked_by = user.get('username', 'manual') if user else 'manual'
+
+        db.save_identity_link(tid, human_id, regular_id, 'regular',
+                              reg.get('upn'), reg.get('object_id'),
+                              reg.get('enabled', True), 'manual', 100.0)
+        db.save_identity_link(tid, human_id, privileged_id, 'privileged',
+                              priv.get('upn'), priv.get('object_id'),
+                              priv.get('enabled', True), 'manual', 100.0)
+
+        _log(db, 'correlation_link', f'Manually linked {reg["display_name"]} accounts', {
+            'regular_id': regular_id, 'privileged_id': privileged_id})
+        return jsonify({'human_identity_id': human_id, 'status': 'linked'}), 201
+    finally:
+        db.close()
+
+
+def delete_correlation_link(link_id):
+    """DELETE /api/correlation/link/<id> — unlink an account."""
+    db = _db()
+    try:
+        ok = db.delete_identity_link(link_id)
+        if not ok:
+            return jsonify({'error': 'Link not found'}), 404
+        _log(db, 'correlation_unlink', f'Removed identity link {link_id}')
+        return jsonify({'status': 'deleted'})
+    finally:
+        db.close()
+
+
+def verify_correlation_link(link_id):
+    """PUT /api/correlation/link/<id>/verify — verify a link."""
+    db = _db()
+    try:
+        user = getattr(g, 'current_user', None)
+        verified_by = user.get('username', 'unknown') if user else 'unknown'
+        ok = db.verify_identity_link(link_id, verified_by)
+        if not ok:
+            return jsonify({'error': 'Link not found'}), 404
+        _log(db, 'correlation_verify', f'Verified identity link {link_id}')
+        return jsonify({'status': 'verified'})
+    finally:
+        db.close()
+
+
+# ── Orphaned Findings ──
+
+def get_orphaned_findings_list():
+    """GET /api/findings/orphaned-privileged — list orphaned findings."""
+    db = _db()
+    try:
+        tid = _tenant_id()
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        status = request.args.get('status')
+        severity = request.args.get('severity')
+        results, total = db.get_orphaned_findings(tid, limit, offset, status, severity)
+        return jsonify({'items': results, 'total': total})
+    finally:
+        db.close()
+
+
+def get_orphaned_finding_detail_handler(finding_id):
+    """GET /api/findings/orphaned-privileged/<id> — finding detail."""
+    db = _db()
+    try:
+        detail = db.get_orphaned_finding_detail(finding_id)
+        if not detail:
+            return jsonify({'error': 'Not found'}), 404
+        return jsonify(detail)
+    finally:
+        db.close()
+
+
+def acknowledge_orphaned_finding(finding_id):
+    """PUT /api/findings/orphaned-privileged/<id>/acknowledge"""
+    db = _db()
+    try:
+        user = getattr(g, 'current_user', None)
+        uid = user.get('id') if user else None
+        ok = db.update_orphaned_finding_status(finding_id, 'acknowledged', uid)
+        if not ok:
+            return jsonify({'error': 'Not found'}), 404
+        _log(db, 'finding_acknowledge', f'Acknowledged orphaned finding {finding_id}')
+        return jsonify({'status': 'acknowledged'})
+    finally:
+        db.close()
+
+
+def remediate_orphaned_finding(finding_id):
+    """PUT /api/findings/orphaned-privileged/<id>/remediate"""
+    db = _db()
+    try:
+        user = getattr(g, 'current_user', None)
+        uid = user.get('id') if user else None
+        data = request.get_json(force=True) if request.is_json else {}
+        action = data.get('remediation_action', 'manual')
+        ok = db.update_orphaned_finding_status(finding_id, 'remediated', uid, action)
+        if not ok:
+            return jsonify({'error': 'Not found'}), 404
+        _log(db, 'finding_remediate', f'Remediated orphaned finding {finding_id}', {'action': action})
+        return jsonify({'status': 'remediated'})
+    finally:
+        db.close()
+
+
+def suppress_orphaned_finding(finding_id):
+    """PUT /api/findings/orphaned-privileged/<id>/suppress"""
+    db = _db()
+    try:
+        user = getattr(g, 'current_user', None)
+        uid = user.get('id') if user else None
+        data = request.get_json(force=True) if request.is_json else {}
+        reason = data.get('reason', '')
+        ok = db.update_orphaned_finding_status(finding_id, 'suppressed', uid, reason)
+        if not ok:
+            return jsonify({'error': 'Not found'}), 404
+        _log(db, 'finding_suppress', f'Suppressed orphaned finding {finding_id}', {'reason': reason})
+        return jsonify({'status': 'suppressed'})
+    finally:
+        db.close()
+
+
+# ── Correlation Config ──
+
+def get_correlation_config():
+    """GET /api/correlation/config — get ICE settings."""
+    from app.engines.correlation.identity_correlator import DEFAULT_CONFIG
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("SELECT key, value FROM settings WHERE key LIKE 'ice_%%'")
+            saved = {r['key']: r['value'] for r in cursor.fetchall()}
+        finally:
+            cursor.close()
+        config = dict(DEFAULT_CONFIG)
+        config.update(saved)
+        return jsonify(config)
+    finally:
+        db.close()
+
+
+def save_correlation_config():
+    """PUT /api/correlation/config — save ICE settings."""
+    from app.engines.correlation.identity_correlator import DEFAULT_CONFIG
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        cursor = db.conn.cursor()
+        try:
+            for key in DEFAULT_CONFIG:
+                if key in data:
+                    cursor.execute("""
+                        INSERT INTO settings (key, value, tenant_id)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (key, tenant_id) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                    """, (key, str(data[key]), _tenant_id()))
+            db.conn.commit()
+        finally:
+            cursor.close()
+        _log(db, 'correlation_config', 'Updated ICE configuration')
+        return jsonify({'status': 'saved'})
+    finally:
+        db.close()
+
+
+# ── Dashboard Summary ──
+
+def get_dashboard_identity_correlation():
+    """GET /api/dashboard/identity-correlation — summary stats for dashboard."""
+    db = _db()
+    try:
+        tid = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            # Count linked humans
+            cursor.execute("SELECT COUNT(*) as cnt FROM human_identities WHERE tenant_id = %s", (tid,))
+            humans = cursor.fetchone()['cnt']
+
+            # Count links
+            cursor.execute("SELECT COUNT(*) as cnt FROM identity_links WHERE tenant_id = %s", (tid,))
+            links = cursor.fetchone()['cnt']
+
+            # Count open findings by severity
+            cursor.execute("""
+                SELECT severity, COUNT(*) as cnt
+                FROM orphaned_privileged_findings
+                WHERE tenant_id = %s AND status = 'open'
+                GROUP BY severity
+            """, (tid,))
+            findings_by_severity = {r['severity']: r['cnt'] for r in cursor.fetchall()}
+
+            # Total open findings
+            total_findings = sum(findings_by_severity.values())
+
+            return jsonify({
+                'humans_linked': humans,
+                'total_links': links,
+                'open_findings': total_findings,
+                'findings_by_severity': findings_by_severity,
+            })
+        except Exception:
+            return jsonify({
+                'humans_linked': 0, 'total_links': 0,
+                'open_findings': 0, 'findings_by_severity': {},
+            })
+        finally:
+            cursor.close()
     finally:
         db.close()

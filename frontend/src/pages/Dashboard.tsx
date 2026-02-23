@@ -43,6 +43,9 @@ interface StatsResponse {
     high_count: number;
     medium_count: number;
   } | null;
+  ghost_count?: number;
+  disabled_count?: number;
+  deleted_count?: number;
   workload_exposure?: {
     total: number; critical: number; orphaned: number;
     can_escalate: number; anomalies_unresolved: number;
@@ -574,7 +577,7 @@ export default function Dashboard() {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <RoleUsageChart statuses={roleUsage?.statuses || {}} byRisk={roleUsage?.by_risk || {}} total={roleUsage?.total || 0} />
-                <QuickActions criticalCount={latest?.critical_count ?? 0} expiringCount={posture?.expiring_credentials_count ?? 0} dormantCount={posture?.dormant_count ?? 0} />
+                <QuickActions criticalCount={latest?.critical_count ?? 0} expiringCount={posture?.expiring_credentials_count ?? 0} dormantCount={posture?.dormant_count ?? 0} ghostCount={stats?.ghost_count ?? 0} />
               </div>
             </div>
           )}

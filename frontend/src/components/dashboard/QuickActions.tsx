@@ -5,9 +5,10 @@ interface QuickActionsProps {
   criticalCount: number;
   expiringCount?: number;
   dormantCount?: number;
+  ghostCount?: number;
 }
 
-export default function QuickActions({ criticalCount, expiringCount = 0, dormantCount = 0 }: QuickActionsProps) {
+export default function QuickActions({ criticalCount, expiringCount = 0, dormantCount = 0, ghostCount = 0 }: QuickActionsProps) {
   const navigate = useNavigate();
 
   const actions = [
@@ -51,17 +52,17 @@ export default function QuickActions({ criticalCount, expiringCount = 0, dormant
       onClick: () => navigate('/identities?activity_status=dormant'),
     },
     {
-      id: 'service_principals',
-      label: 'Service Principals',
-      description: 'App registrations & enterprise apps',
-      count: null,
+      id: 'ghost_access',
+      label: 'Ghost Access',
+      description: 'Disabled/deleted with active roles',
+      count: ghostCount,
       icon: (
         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
         </svg>
       ),
-      color: 'blue',
-      onClick: () => navigate('/identities?identity_category=service_principal'),
+      color: ghostCount > 0 ? 'red' : 'blue',
+      onClick: () => navigate('/identities?status=disabled'),
     },
   ];
 

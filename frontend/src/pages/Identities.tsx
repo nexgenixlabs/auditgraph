@@ -11,6 +11,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS } from '../utils/exportUtils';
 import { maskCredential } from '../utils/maskCredential';
+import { STATUS_BADGE, type IdentityStatus } from '../utils/resolveStatus';
 import IdentityDrawer from '../components/IdentityDrawer';
 import ExposureGraph from '../components/graph/ExposureGraph';
 import {
@@ -22,8 +23,6 @@ import {
   SCOPE_LABELS, CATEGORY_LABELS_MULTI,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
 } from '../constants/metrics';
-
-type IdentityStatus = 'active' | 'disabled' | 'deleted';
 
 interface IdentityRow {
   identity_id: string;
@@ -96,7 +95,8 @@ type SortField =
   | 'last_seen_auth'
   | 'dormant'
   | 'effective_scope'
-  | 'credential_health';
+  | 'credential_health'
+  | 'status';
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -167,6 +167,12 @@ function SortHeader({ label, field, currentField, currentDir, onSort }: {
 function CloudBadge({ cloud }: { cloud?: string }) {
   const c = safeLower(cloud) || 'azure';
   return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${CLOUD_BADGE[c] || CLOUD_BADGE.azure}`}>{c}</span>;
+}
+
+function StatusBadge({ status }: { status?: IdentityStatus }) {
+  const s = (status || 'unknown') as IdentityStatus;
+  const display = STATUS_BADGE[s] || STATUS_BADGE.unknown;
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${display.badge_class}`}>{display.label}</span>;
 }
 
 function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
@@ -743,6 +749,10 @@ export default function IdentitiesPage() {
             aVal = dormOrderAdv[getDormantStatus(a)] || 0;
             bVal = dormOrderAdv[getDormantStatus(b)] || 0;
             break;
+          case 'status': {
+            const stOrder: Record<string, number> = { deleted: 4, disabled: 3, unknown: 2, active: 1 };
+            aVal = stOrder[a.status || 'active'] || 0; bVal = stOrder[b.status || 'active'] || 0; break;
+          }
           case 'risk_level':
           default:
             aVal = RISK_ORDER[safeLower(a.risk_level)] || 0;
@@ -822,6 +832,10 @@ export default function IdentitiesPage() {
           aVal = dormOrder[getDormantStatus(a)] || 0;
           bVal = dormOrder[getDormantStatus(b)] || 0;
           break;
+        case 'status': {
+          const stOrd: Record<string, number> = { deleted: 4, disabled: 3, unknown: 2, active: 1 };
+          aVal = stOrd[a.status || 'active'] || 0; bVal = stOrd[b.status || 'active'] || 0; break;
+        }
         case 'risk_level':
         default:
           aVal = RISK_ORDER[safeLower(a.risk_level)] || 0;
@@ -838,7 +852,7 @@ export default function IdentitiesPage() {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
     else {
       setSortField(field);
-      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health'].includes(field) ? 'desc' : 'asc');
+      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health', 'status'].includes(field) ? 'desc' : 'asc');
     }
   }
 
@@ -958,7 +972,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 10; // checkbox + 9 V2 primary columns
+  const colSpan = 11; // checkbox + 10 primary columns (added Status)
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1378,6 +1392,7 @@ export default function IdentitiesPage() {
                 <SortHeader label="Scope" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Credentials" field="credential_health" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
@@ -1461,6 +1476,11 @@ export default function IdentitiesPage() {
                           )}
                         </div>
                       )}
+                    </td>
+
+                    {/* Status */}
+                    <td className="px-2 py-2">
+                      <StatusBadge status={i.status} />
                     </td>
 
                     {/* Created */}

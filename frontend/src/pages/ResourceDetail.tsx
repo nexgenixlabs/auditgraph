@@ -67,6 +67,7 @@ interface ResourceData {
   private_endpoint_count?: number;
   bypass_settings?: string;
   network_rules?: Record<string, unknown>;
+  network_classification?: 'disabled' | 'restricted' | 'public';
   // Risk trend (Phase 89)
   risk_trend?: Array<{
     risk_score: number;
@@ -99,6 +100,9 @@ interface AccessIdentity {
   permissions_summary?: Record<string, string[]>;
   access_source?: 'direct' | 'resource_group' | 'subscription' | 'management_group' | 'inherited';
   access_source_label?: string;
+  is_ghost?: boolean;
+  account_state?: string;
+  deleted_at?: string | null;
 }
 
 interface ResourceAnomaly {
@@ -278,12 +282,18 @@ export default function ResourceDetail() {
   const rid = searchParams.get('rid') || '';
   const { withConnection } = useConnection();
 
+  // Build resource API path — use raw path (no encodeURIComponent) to avoid
+  // Flask 308 redirect on %2F which strips the Authorization header.
+  const resourcePath = rid.startsWith('/') ? rid.slice(1) : rid;
+
   const [resource, setResource] = useState<ResourceData | null>(null);
   const [rbacAccess, setRbacAccess] = useState<AccessIdentity[]>([]);
   const [policyAccess, setPolicyAccess] = useState<AccessIdentity[]>([]);
   const [blastRadius, setBlastRadius] = useState(0);
+  const [ghostCount, setGhostCount] = useState(0);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessLoaded, setAccessLoaded] = useState(false);
+  const [accessError, setAccessError] = useState(false);
   const [anomalies, setAnomalies] = useState<ResourceAnomaly[]>([]);
   const [anomaliesLoaded, setAnomaliesLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -293,7 +303,7 @@ export default function ResourceDetail() {
   useEffect(() => {
     if (!rid) return;
     setLoading(true);
-    fetch(withConnection(`/api/resources/${encodeURIComponent(rid)}`))
+    fetch(withConnection(`/api/resources/${resourcePath}`))
       .then(r => r.json())
       .then(data => { setResource(data); setLoading(false); })
       .catch(() => setLoading(false));
@@ -303,22 +313,24 @@ export default function ResourceDetail() {
   useEffect(() => {
     if (activeTab !== 'access' || !rid || accessLoaded) return;
     setAccessLoading(true);
-    fetch(withConnection(`/api/resources/${encodeURIComponent(rid)}/access`))
-      .then(r => r.json())
+    setAccessError(false);
+    fetch(withConnection(`/api/resources/${resourcePath}/access`))
+      .then(r => { if (!r.ok) throw new Error('Failed'); return r.json(); })
       .then(data => {
         setRbacAccess(data.rbac_access || []);
         setPolicyAccess(data.policy_access || []);
         setBlastRadius(data.blast_radius || 0);
+        setGhostCount(data.ghost_count || 0);
         setAccessLoaded(true);
         setAccessLoading(false);
       })
-      .catch(() => setAccessLoading(false));
+      .catch(() => { setAccessError(true); setAccessLoading(false); setAccessLoaded(true); });
   }, [activeTab, rid, accessLoaded]);
 
   // Lazy-load intelligence tab anomalies
   useEffect(() => {
     if (activeTab !== 'intelligence' || !rid || anomaliesLoaded) return;
-    fetch(withConnection(`/api/resources/${encodeURIComponent(rid)}/anomalies?limit=50`))
+    fetch(withConnection(`/api/resources/${resourcePath}/anomalies?limit=50`))
       .then(r => r.json())
       .then(data => {
         setAnomalies(data.anomalies || []);
@@ -402,7 +414,7 @@ export default function ResourceDetail() {
         {activeTab === 'overview' && <OverviewTab resource={resource} />}
         {activeTab === 'security' && <SecurityTab resource={resource} />}
         {activeTab === 'network' && <NetworkTab resource={resource} />}
-        {activeTab === 'access' && <AccessTab rbacAccess={rbacAccess} policyAccess={policyAccess} blastRadius={blastRadius} loading={accessLoading} isKeyVault={!isStorage} />}
+        {activeTab === 'access' && <AccessTab rbacAccess={rbacAccess} policyAccess={policyAccess} blastRadius={blastRadius} ghostCount={ghostCount} loading={accessLoading} isKeyVault={!isStorage} error={accessError} resourceType={resource.resource_type} />}
         {activeTab === 'compliance' && <ComplianceTab resource={resource} />}
         {activeTab === 'intelligence' && <IntelligenceTab resource={resource} anomalies={anomalies} />}
       </div>
@@ -464,7 +476,7 @@ function OverviewTab({ resource }: { resource: ResourceData }) {
             <div className={`text-sm font-bold uppercase ${RISK_BADGE[safeLower(resource.risk_level)]?.split(' ')[1] || 'text-gray-600'}`}>
               {resource.risk_level}
             </div>
-            <div className="text-[10px] text-gray-500">{resource.risk_score} / 200 points</div>
+            <div className="text-[10px] text-gray-500">{resource.risk_score} / 100 points</div>
           </div>
         </div>
         {(resource.risk_reasons || []).length > 0 ? (
@@ -791,7 +803,34 @@ function VaultItemInventory({ resource }: { resource: ResourceData }) {
 // ─── Network Tab ──────────────────────────────────────────────────
 
 function NetworkTab({ resource }: { resource: ResourceData }) {
-  const isAllow = resource.default_network_action === 'Allow';
+  const classification = resource.network_classification || (resource.default_network_action === 'Allow' ? 'public' : 'restricted');
+  const isPublic = classification === 'public';
+
+  const summaryConfig: Record<string, { bg: string; title: string; titleColor: string; textColor: string; description: string }> = {
+    disabled: {
+      bg: 'bg-green-50 border border-green-200',
+      title: 'Network Access Disabled',
+      titleColor: 'text-green-800',
+      textColor: 'text-green-700',
+      description: 'Public network access is completely disabled. This resource is only accessible via private endpoints.',
+    },
+    restricted: {
+      bg: 'bg-green-50 border border-green-200',
+      title: 'Network Restricted',
+      titleColor: 'text-green-800',
+      textColor: 'text-green-700',
+      description: `Access is limited to configured IP rules (${resource.ip_rules_count || 0}), VNet rules (${resource.vnet_rules_count || 0}), and private endpoints (${resource.private_endpoint_count || 0}).`,
+    },
+    public: {
+      bg: 'bg-red-50 border border-red-200',
+      title: 'Open to All Networks',
+      titleColor: 'text-red-800',
+      textColor: 'text-red-700',
+      description: 'This resource allows traffic from all networks by default. Consider restricting access using IP rules, VNet rules, or private endpoints.',
+    },
+  };
+
+  const summary = summaryConfig[classification] || summaryConfig.public;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -801,7 +840,7 @@ function NetworkTab({ resource }: { resource: ResourceData }) {
         {/* Default Action */}
         <div className="flex items-center justify-between py-2 border-b border-gray-100">
           <span className="text-sm text-gray-700">Default Action</span>
-          <span className={`px-2 py-0.5 rounded text-xs font-bold ${isAllow ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+          <span className={`px-2 py-0.5 rounded text-xs font-bold ${isPublic ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
             {resource.default_network_action || 'Allow'}
           </span>
         </div>
@@ -810,12 +849,25 @@ function NetworkTab({ resource }: { resource: ResourceData }) {
           <div className="flex items-center justify-between py-2 border-b border-gray-100">
             <span className="text-sm text-gray-700">Public Network Access</span>
             <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+              resource.public_network_access === 'Disabled' ? 'bg-green-100 text-green-700' :
               resource.public_network_access === 'Enabled' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
             }`}>
               {resource.public_network_access || 'Enabled'}
             </span>
           </div>
         )}
+
+        {/* Network Classification Badge */}
+        <div className="flex items-center justify-between py-2 border-b border-gray-100">
+          <span className="text-sm text-gray-700">Classification</span>
+          <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+            classification === 'disabled' ? 'bg-green-100 text-green-700' :
+            classification === 'restricted' ? 'bg-green-100 text-green-700' :
+            'bg-red-100 text-red-700'
+          }`}>
+            {classification === 'disabled' ? 'Disabled' : classification === 'restricted' ? 'Restricted' : 'Public'}
+          </span>
+        </div>
 
         {/* Counters */}
         <div className="flex items-center justify-between py-2 border-b border-gray-100">
@@ -843,24 +895,9 @@ function NetworkTab({ resource }: { resource: ResourceData }) {
 
       <div className="bg-white border border-gray-200 rounded-lg p-4">
         <h3 className="text-sm font-semibold text-gray-800 mb-3">Network Summary</h3>
-        <div className={`rounded-lg p-4 text-sm ${isAllow ? 'bg-red-50 border border-red-200' : 'bg-green-50 border border-green-200'}`}>
-          {isAllow ? (
-            <>
-              <div className="font-semibold text-red-800 mb-1">Open to All Networks</div>
-              <p className="text-red-700 text-xs">
-                This resource allows traffic from all networks by default.
-                Consider restricting access using IP rules, VNet rules, or private endpoints.
-              </p>
-            </>
-          ) : (
-            <>
-              <div className="font-semibold text-green-800 mb-1">Network Restricted</div>
-              <p className="text-green-700 text-xs">
-                Default action is Deny. Access is limited to configured IP rules ({resource.ip_rules_count || 0}),
-                VNet rules ({resource.vnet_rules_count || 0}), and private endpoints ({resource.private_endpoint_count || 0}).
-              </p>
-            </>
-          )}
+        <div className={`rounded-lg p-4 text-sm ${summary.bg}`}>
+          <div className={`font-semibold ${summary.titleColor} mb-1`}>{summary.title}</div>
+          <p className={`${summary.textColor} text-xs`}>{summary.description}</p>
         </div>
       </div>
     </div>
@@ -869,19 +906,34 @@ function NetworkTab({ resource }: { resource: ResourceData }) {
 
 // ─── Access Control Tab ───────────────────────────────────────────
 
-function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault }: {
-  rbacAccess: AccessIdentity[]; policyAccess: AccessIdentity[]; blastRadius: number; loading: boolean; isKeyVault: boolean;
+function AccessTab({ rbacAccess, policyAccess, blastRadius, ghostCount, loading, isKeyVault, error, resourceType }: {
+  rbacAccess: AccessIdentity[]; policyAccess: AccessIdentity[]; blastRadius: number; ghostCount: number; loading: boolean; isKeyVault: boolean;
+  error?: boolean; resourceType?: string;
 }) {
   if (loading) {
     return <div className="flex items-center justify-center h-32 text-gray-400 text-sm">Loading access data...</div>;
   }
 
+  if (error) {
+    return (
+      <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6 text-center">
+        <p className="text-yellow-700 dark:text-yellow-300 text-sm font-medium">Unable to load access data.</p>
+        <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">Identity-resource cross-reference requires a completed discovery run.</p>
+      </div>
+    );
+  }
+
   const total = rbacAccess.length + policyAccess.length;
   if (total === 0) {
+    const emptyHint = resourceType === 'storage_account'
+      ? 'Storage account access may use shared keys or SAS tokens that bypass RBAC. Check the Security tab for SAS risk assessment.'
+      : resourceType === 'key_vault'
+      ? 'Key Vault access may be governed by access policies instead of RBAC. Check vault configuration for access policy-based authorization.'
+      : 'Identities with inherited access through parent scopes may not be shown.';
     return (
       <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg p-6 text-center">
-        <p className="text-gray-500 text-sm">No identities found with access to this resource.</p>
-        <p className="text-xs text-gray-400 mt-1">Identities with inherited access through parent scopes may not be shown.</p>
+        <p className="text-gray-500 text-sm">No identities found with RBAC access to this resource.</p>
+        <p className="text-xs text-gray-400 mt-1">{emptyHint}</p>
       </div>
     );
   }
@@ -927,6 +979,21 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
         )}
       </div>
 
+      {/* Ghost access warning banner */}
+      {ghostCount > 0 && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-red-600 dark:text-red-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+            <span className="text-sm font-semibold text-red-700 dark:text-red-300">
+              {ghostCount} Ghost {ghostCount === 1 ? 'Identity' : 'Identities'} Detected
+            </span>
+          </div>
+          <p className="text-xs text-red-600 dark:text-red-400 mt-1 ml-6">
+            Disabled or deleted identities that still retain active access to this resource. These represent a critical security risk — an attacker who re-enables such an account inherits all its permissions.
+          </p>
+        </div>
+      )}
+
       {/* RBAC Access table */}
       {rbacAccess.length > 0 && (
         <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-lg overflow-hidden">
@@ -947,13 +1014,18 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
               {rbacAccess.map((id, i) => (
-                <tr key={`rbac-${id.id}-${i}`} className={id.over_privileged ? 'bg-red-50/40 dark:bg-red-900/10' : 'hover:bg-blue-50/40'}>
+                <tr key={`rbac-${id.id}-${i}`} className={id.is_ghost ? 'bg-red-50/50 dark:bg-red-900/15' : id.over_privileged ? 'bg-red-50/40 dark:bg-red-900/10' : 'hover:bg-blue-50/40'}>
                   <td className="px-4 py-2">
-                    {id.id ? (
-                      <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
-                    ) : (
-                      <span className="text-gray-600">{id.display_name}</span>
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {id.id ? (
+                        <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
+                      ) : (
+                        <span className="text-gray-600">{id.display_name}</span>
+                      )}
+                      {!!id.is_ghost && (
+                        <span className="px-1.5 py-0.5 bg-red-600 text-white rounded text-[9px] font-bold uppercase" title={`Account ${id.account_state || 'disabled'} — ghost access`}>Ghost</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2">
                     <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300 text-[10px] font-medium">
@@ -973,9 +1045,14 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                     </span>
                   </td>
                   <td className="px-4 py-2">
-                    {id.over_privileged && (
-                      <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-bold">Over-Privileged</span>
-                    )}
+                    <div className="flex flex-wrap gap-1">
+                      {!!id.over_privileged && (
+                        <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-bold">Over-Privileged</span>
+                      )}
+                      {!!id.is_ghost && (
+                        <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-bold">{id.account_state === 'deleted' ? 'Deleted' : 'Disabled'}</span>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -997,17 +1074,23 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                 <th className="px-4 py-2">Category</th>
                 <th className="px-4 py-2">Permissions</th>
                 <th className="px-4 py-2">Risk</th>
+                <th className="px-4 py-2">Flags</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
               {policyAccess.map((id, i) => (
-                <tr key={`pol-${id.id || i}`} className="hover:bg-purple-50/40">
+                <tr key={`pol-${id.id || i}`} className={id.is_ghost ? 'bg-red-50/50 dark:bg-red-900/15' : 'hover:bg-purple-50/40'}>
                   <td className="px-4 py-2">
-                    {id.id ? (
-                      <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
-                    ) : (
-                      <span className="text-gray-600 dark:text-slate-400">{id.display_name}</span>
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {id.id ? (
+                        <Link to={`/identities/${id.id}`} className="text-blue-600 hover:underline font-medium">{id.display_name}</Link>
+                      ) : (
+                        <span className="text-gray-600 dark:text-slate-400">{id.display_name}</span>
+                      )}
+                      {!!id.is_ghost && (
+                        <span className="px-1.5 py-0.5 bg-red-600 text-white rounded text-[9px] font-bold uppercase" title={`Account ${id.account_state || 'disabled'} — ghost access`}>Ghost</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2">
                     <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300 text-[10px] font-medium">
@@ -1029,6 +1112,11 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, loading, isKeyVault 
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(id.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
                       {id.risk_level}
                     </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    {!!id.is_ghost && (
+                      <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-bold">{id.account_state === 'deleted' ? 'Deleted' : 'Disabled'}</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -1059,7 +1147,7 @@ function ComplianceTab({ resource }: { resource: ResourceData }) {
     { key: 'https_only', label: 'HTTPS-Only Transfer', pass: resource.https_only === true },
     { key: 'minimum_tls_version', label: 'TLS 1.2 Minimum', pass: resource.minimum_tls_version === 'TLS1_2' },
     { key: 'customer_managed_keys', label: 'Customer-Managed Encryption Keys', pass: resource.customer_managed_keys === true },
-    { key: 'default_network_action', label: 'Default Network Deny', pass: resource.default_network_action === 'Deny' },
+    { key: 'default_network_action', label: 'Network Restricted', pass: resource.network_classification !== 'public' },
     { key: 'shared_key_access', label: 'Shared Key Access Disabled', pass: resource.shared_key_access === false },
     { key: 'infrastructure_encryption', label: 'Infrastructure Encryption', pass: resource.infrastructure_encryption === true },
     { key: 'cross_tenant_replication', label: 'Cross-Tenant Replication Disabled', pass: resource.allow_cross_tenant_replication === false },
@@ -1073,7 +1161,7 @@ function ComplianceTab({ resource }: { resource: ResourceData }) {
     { key: 'purge_protection', label: 'Purge Protection Enabled', pass: resource.purge_protection === true },
     { key: 'rbac_authorization', label: 'RBAC Authorization', pass: resource.enable_rbac_authorization === true },
     { key: 'expired_secrets', label: 'No Expired Secrets/Keys/Certs', pass: (resource.secrets_expired ?? 0) === 0 && (resource.keys_expired ?? 0) === 0 && (resource.certs_expired ?? 0) === 0 },
-    { key: 'network_access', label: 'Network Restricted', pass: resource.default_network_action === 'Deny' },
+    { key: 'network_access', label: 'Network Restricted', pass: resource.network_classification !== 'public' },
     { key: 'private_endpoints', label: 'Private Endpoints Configured', pass: (resource.private_endpoint_count ?? 0) > 0 },
     { key: 'key_expiry_set', label: 'All Keys Have Expiry Set', pass: (resource.keys_total ?? 0) === 0 || noExpiryKeys === 0 },
     { key: 'secret_expiry_set', label: 'All Secrets Have Expiry Set', pass: (resource.secrets_total ?? 0) === 0 || noExpirySecrets === 0 },

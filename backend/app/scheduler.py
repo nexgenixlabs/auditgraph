@@ -424,6 +424,9 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
         # Ghost identity detection (disabled/deleted identities retaining roles)
         _run_ghost_detection(current_run_id, db)
 
+        # Identity Correlation Engine — link regular ↔ privileged accounts
+        _run_identity_correlation(current_run_id, db)
+
         # Phase 40: Run anomaly detection
         _run_anomaly_detection(current_run_id, previous_run_id, db)
 
@@ -663,6 +666,41 @@ def _run_ghost_detection(current_run_id: int, db: Database):
             logger.info(f"Ghost detection: no ghost identities found for run #{current_run_id}")
     except Exception as e:
         logger.error(f"Ghost detection failed: {e}")
+        logger.exception(e)
+
+
+def _run_identity_correlation(current_run_id: int, db: Database):
+    """Run Identity Correlation Engine: link regular ↔ privileged accounts, detect orphans."""
+    try:
+        from app.engines.correlation.identity_correlator import IdentityCorrelator
+        from app.engines.correlation.orphaned_detector import OrphanedAccountDetector
+
+        correlator = IdentityCorrelator(db)
+        result = correlator.correlate(current_run_id)
+        logger.info(f"ICE correlation: {result}")
+
+        if result.get('status') == 'completed' and result.get('links_created', 0) > 0:
+            detector = OrphanedAccountDetector(db)
+            orphan_anomalies = detector.detect(current_run_id)
+            if orphan_anomalies:
+                count = db.save_anomalies(current_run_id, orphan_anomalies)
+                logger.info(f"ICE orphan detection: {count} orphaned privileged accounts found")
+                _generate_anomaly_notifications(current_run_id, orphan_anomalies, db)
+                critical = [a for a in orphan_anomalies if a.get('severity') == 'critical']
+                if critical:
+                    _dispatch_notification('anomaly_detected', {
+                        'title': f'{len(critical)} Orphaned Privileged Accounts Detected',
+                        'description': (
+                            f'Run #{current_run_id}: '
+                            f'{", ".join(a["identity_name"] for a in critical[:3])} '
+                            f'retain active roles while paired regular accounts are disabled'
+                        ),
+                        'severity': 'critical',
+                    }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+            else:
+                logger.info("ICE orphan detection: no orphaned privileged accounts found")
+    except Exception as e:
+        logger.error(f"Identity correlation failed: {e}")
         logger.exception(e)
 
 

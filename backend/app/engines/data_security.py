@@ -124,6 +124,12 @@ def score_storage_account(data):
 
     # ── Aggregate ─────────────────────────────────────────────────
     total = net_score + auth_score + log_score + dp_score
+
+    # Zero-score guard: if any driver fired but total rounded to 0, set floor to 1
+    has_any_driver = any(comp['drivers'] for comp in components.values())
+    if has_any_driver and total == 0:
+        total = 1
+
     level = 'critical' if critical_overrides else _risk_level(total)
 
     # Build flat risk_reasons for backward compat
@@ -243,6 +249,12 @@ def score_key_vault(data):
 
     # ── Aggregate ─────────────────────────────────────────────────
     total = net_score + vp_score + ia_score + sh_score
+
+    # Zero-score guard: if any driver fired but total rounded to 0, set floor to 1
+    has_any_driver = any(comp['drivers'] for comp in components.values())
+    if has_any_driver and total == 0:
+        total = 1
+
     level = 'critical' if critical_overrides else _risk_level(total)
 
     for comp_name, comp in components.items():
@@ -250,6 +262,72 @@ def score_key_vault(data):
             all_reasons.append(f"{d['name']} (+{d['points']})")
 
     return total, level, components, critical_overrides, all_reasons
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SAS Risk Assessment (extracted from handlers.py inline code)
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_sas_risk(data):
+    """
+    Compute SAS token / shared key risk assessment for a storage account.
+    Returns dict with level, factors, recommendations, audit_status, audit_label.
+    """
+    factors = []
+    recommendations = []
+
+    if data.get('shared_key_access') is True:
+        factors.append('Shared key access is enabled')
+        recommendations.append('Disable shared key access and use Azure AD authentication')
+    if not data.get('sas_policy_enabled'):
+        factors.append('No SAS expiration policy configured')
+        recommendations.append('Configure a SAS expiration policy to limit token lifetimes')
+    if data.get('public_blob_access') is True:
+        factors.append('Public blob access is enabled')
+        recommendations.append('Disable public blob access unless required')
+    if data.get('key_rotation_stale') is True:
+        factors.append('Storage keys have not been rotated in >90 days')
+        recommendations.append('Rotate storage account keys every 90 days')
+    if data.get('shared_key_access') is True and not data.get('diagnostic_logging_enabled'):
+        factors.append('No diagnostic logging — shared key/SAS usage is unauditable')
+        recommendations.append('Enable diagnostic settings (StorageRead/Write/Delete) to Log Analytics or Event Hub')
+    if data.get('diagnostic_logging_enabled') and data.get('shared_key_access') is True:
+        factors.append('Shared key access enabled with logging — SAS tokens can be generated but usage is tracked')
+
+    level = 'low'
+    if len(factors) >= 4:
+        level = 'critical'
+    elif len(factors) >= 3:
+        level = 'high'
+    elif len(factors) >= 2:
+        level = 'medium'
+    elif len(factors) >= 1:
+        level = 'medium'
+
+    # Compute auditability status
+    has_shared_key = data.get('shared_key_access') is True
+    has_diag = data.get('diagnostic_logging_enabled') is True
+    has_sas_policy = data.get('sas_policy_enabled') is True
+    if not has_shared_key:
+        audit_status = 'compliant'
+        audit_label = 'Azure AD Only — Fully Auditable'
+    elif has_shared_key and has_diag and has_sas_policy:
+        audit_status = 'auditable'
+        audit_label = 'Shared Key + Logging + SAS Policy — Auditable'
+    elif has_shared_key and has_diag:
+        audit_status = 'partial'
+        audit_label = 'Shared Key + Logging — Partially Auditable (no SAS policy)'
+    else:
+        audit_status = 'unauditable'
+        audit_label = 'Shared Key without Logging — Unauditable'
+
+    return {
+        'level': level,
+        'factors': factors,
+        'recommendations': recommendations,
+        'audit_status': audit_status,
+        'audit_label': audit_label,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -400,3 +478,51 @@ def compute_data_security_summary(storage_accounts, key_vaults):
         },
         'top_risks': top_risks,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Findings Extractor
+# ═══════════════════════════════════════════════════════════════════
+
+def _finding_severity(points):
+    """Map driver points to a severity string."""
+    if points >= 12:
+        return 'critical'
+    if points >= 8:
+        return 'high'
+    if points >= 5:
+        return 'medium'
+    return 'low'
+
+
+def extract_findings(resource_type, risk_components, critical_overrides=None):
+    """
+    Convert risk_components dict into a flat list of findings.
+    Each finding has a stable finding_key for dedup across runs.
+
+    Returns list of dicts: finding_key, component, finding_title, points, severity,
+                           is_critical_override, metadata.
+    """
+    findings = []
+    overrides = set(critical_overrides or [])
+
+    for comp_name, comp in (risk_components or {}).items():
+        for driver in comp.get('drivers', []):
+            name = driver.get('name', '')
+            points = driver.get('points', 0)
+            # Stable key: resource_type + component + driver name (lowered, spaces→underscores)
+            key_base = f"{resource_type}.{comp_name}.{name.lower().replace(' ', '_').replace('—', '-')}"
+            # Truncate to 200 chars for DB
+            finding_key = key_base[:200]
+
+            findings.append({
+                'component': comp_name,
+                'finding_key': finding_key,
+                'finding_title': name,
+                'points': points,
+                'severity': _finding_severity(points),
+                'is_critical_override': name in overrides or any(name in o for o in overrides),
+                'metadata': {},
+            })
+
+    return findings

@@ -629,12 +629,14 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
   const boxW = (rightWidth - 10) / 3;
   const boxH = 32;
 
+  const ghostCount = (data.stats as Record<string, unknown>).ghost_count as number || 0;
+
   const metrics: { label: string; value: string; color: RGB }[] = [
     { label: 'Total Identities', value: `${data.stats.total_identities}`, color: DARK },
     { label: 'Critical / High Risk', value: `${crit + high}`, color: crit + high > 0 ? RED : GREEN },
     { label: 'Credential Health', value: `${credHealthPct}%`, color: credHealthPct >= 80 ? GREEN : credHealthPct >= 60 ? [202, 138, 4] : RED },
     { label: 'CA Coverage', value: data.conditional_access ? `${Math.round((data.conditional_access.covered / (data.conditional_access.total || 1)) * 100)}%` : 'N/A', color: BLUE },
-    { label: 'Active Anomalies', value: 'N/A', color: GRAY },
+    { label: 'Ghost Access', value: `${ghostCount}`, color: ghostCount > 0 ? RED : GREEN },
     { label: 'Days Since Scan', value: daysSinceScan >= 0 ? `${daysSinceScan}` : 'N/A', color: daysSinceScan <= 1 ? GREEN : daysSinceScan <= 7 ? [202, 138, 4] : RED },
   ];
 
@@ -678,7 +680,8 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
     `Your organization manages ${data.stats.total_identities} identities across cloud providers.`,
     crit > 0 ? `${crit} critical risk identities require immediate attention.` : 'No critical risk identities detected.',
     `Credential health is at ${credHealthPct}%. ${data.credential_health.expired > 0 ? data.credential_health.expired + ' credentials have expired.' : 'All credentials are current.'}`,
-  ].join(' ');
+    ghostCount > 0 ? `WARNING: ${ghostCount} disabled/deleted identities still retain active role assignments (ghost access).` : '',
+  ].filter(Boolean).join(' ');
   const splitSummary = doc.splitTextToSize(summaryText, pageWidth - margin * 2 - 12);
   doc.text(splitSummary, margin + 6, summaryY + 15);
 

@@ -1167,7 +1167,7 @@ class AzureDiscoveryEngine:
 
             # Try with signInActivity first (requires Premium license)
             # Fall back to basic fields if not available
-            select_fields = ['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType']
+            select_fields = ['id', 'displayName', 'userPrincipalName', 'accountEnabled', 'createdDateTime', 'userType', 'employeeId', 'department', 'jobTitle']
             try:
                 query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
                     select=select_fields + ['signInActivity']
@@ -1200,6 +1200,23 @@ class AzureDiscoveryEngine:
                 if users_response and users_response.value:
                     all_users.extend(users_response.value)
 
+            # Fetch manager info for users with roles
+            manager_map = {}
+            users_with_roles = [u for u in all_users if u.id in principal_ids_with_roles]
+            for user in users_with_roles:
+                try:
+                    mgr = await self.graph_client.users.by_user_id(user.id).manager.get()
+                    if mgr:
+                        manager_map[user.id] = {
+                            'manager_id': getattr(mgr, 'id', None),
+                            'manager_upn': getattr(mgr, 'user_principal_name', None),
+                        }
+                except Exception:
+                    pass  # Manager not set or no permission
+
+            # Load ICE config for account classification
+            ice_config = self._load_ice_config()
+
             identities = []
             for user in all_users:
                 # Only include users who have roles (Azure RBAC or Entra ID)
@@ -1227,6 +1244,7 @@ class AzureDiscoveryEngine:
                     elif hasattr(sia, 'last_non_interactive_sign_in_date_time') and sia.last_non_interactive_sign_in_date_time:
                         last_sign_in = sia.last_non_interactive_sign_in_date_time.isoformat()
 
+                mgr_info = manager_map.get(user.id, {})
                 identities.append({
                     'identity_id': user.id,
                     'object_id': user.id,
@@ -1244,6 +1262,14 @@ class AzureDiscoveryEngine:
                     'source': 'entra',
                     'permission_plane': 'entra_id',
                     'is_federated': is_guest,  # Guest users are federated
+                    # ICE fields
+                    'upn': user.user_principal_name,
+                    'employee_id_entra': getattr(user, 'employee_id', None),
+                    'department': getattr(user, 'department', None),
+                    'job_title': getattr(user, 'job_title', None),
+                    'manager_id': mgr_info.get('manager_id'),
+                    'manager_upn': mgr_info.get('manager_upn'),
+                    'account_category': self._classify_account_category(user, ice_config),
                 })
 
             return identities
@@ -1251,6 +1277,59 @@ class AzureDiscoveryEngine:
             print(f"  ❌ Error discovering users: {e}")
             return []
     
+    _ice_config_cache = None
+
+    def _load_ice_config(self) -> dict:
+        """Load ICE configuration from settings table, with caching."""
+        if self._ice_config_cache is not None:
+            return self._ice_config_cache
+        defaults = {
+            'ice_privileged_prefixes': 'ep.,adm-,adm.,a-,admin-,admin.,priv-,priv.,sa_,pa-,pa.',
+            'ice_privileged_suffixes': '-admin,.admin,-priv,.priv,-elevated,.elevated',
+        }
+        try:
+            from app.database import Database
+            db = Database()
+            try:
+                from psycopg2.extras import RealDictCursor
+                cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute("SELECT key, value FROM settings WHERE key IN ('ice_privileged_prefixes', 'ice_privileged_suffixes')")
+                rows = cursor.fetchall()
+                cursor.close()
+                for row in rows:
+                    defaults[row['key']] = row['value']
+            finally:
+                db.close()
+        except Exception:
+            pass
+        self._ice_config_cache = defaults
+        return defaults
+
+    def _classify_account_category(self, user, ice_config: dict) -> str:
+        """Classify a user account as regular, privileged, or service_account."""
+        upn = getattr(user, 'user_principal_name', '') or ''
+        local_part = upn.split('@')[0].lower() if '@' in upn else upn.lower()
+        if not local_part:
+            return 'unknown'
+
+        prefixes = [p.strip() for p in ice_config.get('ice_privileged_prefixes', '').split(',') if p.strip()]
+        suffixes = [s.strip() for s in ice_config.get('ice_privileged_suffixes', '').split(',') if s.strip()]
+
+        for prefix in prefixes:
+            if local_part.startswith(prefix):
+                return 'privileged'
+        for suffix in suffixes:
+            if local_part.endswith(suffix):
+                return 'privileged'
+
+        # Service accounts detected by naming pattern
+        svc_patterns = ['svc-', 'svc.', 'service-', 'service.', 'bot-', 'noreply']
+        for sp in svc_patterns:
+            if local_part.startswith(sp):
+                return 'service_account'
+
+        return 'regular'
+
     def _discover_role_assignments(self) -> List[Dict[str, Any]]:
         """Discover RBAC role assignments across ALL accessible subscriptions using Azure SDK."""
         from datetime import datetime, timezone
@@ -1862,7 +1941,7 @@ class AzureDiscoveryEngine:
     def _enhance_resources_with_identity_exposure(self, run_id, storage_accounts, key_vaults):
         """Count privileged identities per resource, enhance scores, persist risk history."""
         from psycopg2.extras import RealDictCursor as RDC
-        from app.engines.data_security import enhance_risk_with_identity_exposure, compute_blast_radius
+        from app.engines.data_security import enhance_risk_with_identity_exposure, compute_blast_radius, extract_findings
 
         # Build a map of resource_id → privileged identity count from role_assignments
         cursor = self.db.conn.cursor(cursor_factory=RDC)
@@ -1924,8 +2003,7 @@ class AzureDiscoveryEngine:
             res['privileged_identity_count'] = priv_count
             res['network_exposure_score'] = net_score
 
-            # Persist risk history
-            self.db.save_resource_risk_history(run_id, rid, res.get('resource_type', ''), {
+            enhanced_data = {
                 'risk_score': adj_score,
                 'risk_level': adj_level,
                 'risk_components': updated_components,
@@ -1934,72 +2012,24 @@ class AzureDiscoveryEngine:
                 'privileged_identity_count': priv_count,
                 'dependency_count': 0,
                 'network_exposure_score': net_score,
-            })
+            }
+
+            # Persist risk history
+            self.db.save_resource_risk_history(run_id, rid, res.get('resource_type', ''), enhanced_data)
+
+            # Write enhanced scores back to main table so list/detail views are consistent
+            self.db.update_resource_risk_scores(run_id, rid, res.get('resource_type', ''), enhanced_data)
+
+            # Extract and persist queryable findings
+            findings = extract_findings(
+                res.get('resource_type', ''),
+                updated_components,
+                res.get('critical_overrides', []),
+            )
+            if findings:
+                self.db.save_resource_findings(run_id, rid, res.get('resource_type', ''), findings)
 
         print(f"  ✓ Identity exposure enhanced + risk history saved for {len(all_resources)} resources")
-
-    def _compute_storage_risk(self, public_blob, https_only, tls, shared_key,
-                              default_action, pe_count, cmk, key_stale,
-                              sas_policy_enabled=False, diag_enabled=False):
-        """Compute risk score for a storage account."""
-        score = 0
-        reasons = []
-        if public_blob:
-            score += 40; reasons.append("Public blob access enabled (+40)")
-        if not https_only:
-            score += 30; reasons.append("HTTP traffic allowed (+30)")
-        if 'Allow' in str(default_action):
-            score += 25; reasons.append("Network allows all traffic (+25)")
-        if tls not in ('TLS1_2', 'TLS1_3'):
-            score += 20; reasons.append(f"Old TLS version: {tls} (+20)")
-        if not cmk:
-            score += 20; reasons.append("No customer-managed encryption keys (+20)")
-        if key_stale:
-            score += 20; reasons.append("Storage keys not rotated in 90+ days (+20)")
-        if shared_key:
-            score += 15; reasons.append("Shared key access enabled (+15)")
-        if pe_count == 0:
-            score += 15; reasons.append("No private endpoints (+15)")
-        if shared_key and not sas_policy_enabled:
-            score += 10; reasons.append("No SAS expiration policy with shared key enabled (+10)")
-        if shared_key and not diag_enabled:
-            score += 10; reasons.append("Shared key access without diagnostic logging — unauditable (+10)")
-        return (score, reasons)
-
-    def _compute_keyvault_risk(self, soft_delete, purge_prot, public_access,
-                               default_action, pe_count, secrets, keys, certs):
-        """Compute risk score for a key vault."""
-        score = 0
-        reasons = []
-        if secrets.get('expired', 0) > 0:
-            score += 35; reasons.append(f"{secrets['expired']} expired secrets (+35)")
-        if keys.get('expired', 0) > 0:
-            score += 35; reasons.append(f"{keys['expired']} expired keys (+35)")
-        if certs.get('expired', 0) > 0:
-            score += 35; reasons.append(f"{certs['expired']} expired certificates (+35)")
-        if not soft_delete:
-            score += 30; reasons.append("Soft delete disabled (+30)")
-        if str(public_access) != 'Disabled' and 'Allow' in str(default_action):
-            score += 25; reasons.append("Network allows all traffic (+25)")
-        if not purge_prot:
-            score += 20; reasons.append("Purge protection disabled (+20)")
-        if pe_count == 0:
-            score += 15; reasons.append("No private endpoints (+15)")
-        if secrets.get('expiring_soon', 0) > 0:
-            score += 10; reasons.append(f"{secrets['expiring_soon']} secrets expiring within 30 days (+10)")
-        if keys.get('expiring_soon', 0) > 0:
-            score += 10; reasons.append(f"{keys['expiring_soon']} keys expiring within 30 days (+10)")
-        if certs.get('expiring_soon', 0) > 0:
-            score += 10; reasons.append(f"{certs['expiring_soon']} certificates expiring within 30 days (+10)")
-        return (score, reasons)
-
-    def _resource_risk_level(self, score):
-        """Map risk score to risk level for resources."""
-        if score >= 80: return 'critical'
-        if score >= 50: return 'high'
-        if score >= 25: return 'medium'
-        if score > 0: return 'low'
-        return 'info'
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
