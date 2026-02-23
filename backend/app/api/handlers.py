@@ -9652,6 +9652,7 @@ def _ensure_resource_tables(db):
     if not _resource_tables_ensured:
         db._ensure_azure_storage_accounts_table()
         db._ensure_azure_key_vaults_table()
+        db._ensure_resource_risk_history_table()
         _resource_tables_ensured = True
 
 def get_resources():
@@ -9786,6 +9787,24 @@ def get_resources():
                     except Exception:
                         r[jf] = {} if jf in ('tags', 'key_config', 'risk_components') else []
             resources.append(r)
+
+        # Batch risk trend lookup (last 2 snapshots per resource for delta)
+        try:
+            resource_ids = [r['resource_id'] for r in resources if r.get('resource_id')]
+            if resource_ids:
+                trends = db.get_resource_risk_trend_batch(resource_ids, limit_per_resource=2)
+                for r in resources:
+                    rid = r.get('resource_id', '')
+                    t = trends.get(rid, [])
+                    if len(t) >= 2:
+                        delta = t[0]['risk_score'] - t[1]['risk_score']
+                        r['risk_trend_delta'] = delta
+                        r['risk_trend_direction'] = 'up' if delta > 0 else 'down' if delta < 0 else 'stable'
+                    else:
+                        r['risk_trend_delta'] = 0
+                        r['risk_trend_direction'] = 'stable'
+        except Exception:
+            pass
 
         return jsonify({
             'resources': resources,
@@ -10056,7 +10075,56 @@ def get_resource_detail(resource_id):
                 'audit_label': audit_label,
             }
 
+        # Risk trend data (last 10 runs)
+        try:
+            trend = db.get_resource_risk_trend(resource_id, limit=10)
+            resource['risk_trend'] = trend
+            if len(trend) >= 2:
+                delta = trend[0]['risk_score'] - trend[1]['risk_score']
+                resource['risk_trend_delta'] = delta
+                resource['risk_trend_direction'] = 'up' if delta > 0 else 'down' if delta < 0 else 'stable'
+            else:
+                resource['risk_trend_delta'] = 0
+                resource['risk_trend_direction'] = 'stable'
+        except Exception:
+            resource['risk_trend'] = []
+            resource['risk_trend_delta'] = 0
+            resource['risk_trend_direction'] = 'stable'
+
         return jsonify(resource)
+    finally:
+        db.close()
+
+
+def get_resource_anomalies(resource_id):
+    """GET /api/resources/<path:resource_id>/anomalies — anomalies for a specific resource."""
+    if not resource_id.startswith('/'):
+        resource_id = '/' + resource_id
+    db = _db()
+    try:
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM anomalies
+            WHERE details->>'resource_id' = %s
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, (resource_id, limit, offset))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("""
+            SELECT COUNT(*) as total FROM anomalies
+            WHERE details->>'resource_id' = %s
+        """, (resource_id,))
+        total = cursor.fetchone()['total']
+        cursor.close()
+        for r in rows:
+            for ts in ('created_at', 'resolved_at'):
+                if r.get(ts):
+                    r[ts] = r[ts].isoformat()
+        return jsonify({'anomalies': rows, 'count': len(rows), 'total': total})
+    except Exception:
+        return jsonify({'anomalies': [], 'count': 0, 'total': 0})
     finally:
         db.close()
 

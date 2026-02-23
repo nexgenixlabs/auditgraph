@@ -67,6 +67,22 @@ interface ResourceData {
   private_endpoint_count?: number;
   bypass_settings?: string;
   network_rules?: Record<string, unknown>;
+  // Risk trend (Phase 89)
+  risk_trend?: Array<{
+    risk_score: number;
+    risk_level: string;
+    created_at: string;
+    run_date?: string;
+    risk_components?: Record<string, { score: number; max: number; pct: number; drivers: Array<{ name: string; points: number }> }>;
+    privileged_identity_count?: number;
+    blast_radius_score?: number;
+  }>;
+  risk_trend_delta?: number;
+  risk_trend_direction?: 'up' | 'down' | 'stable';
+  // Risk components (from scoring engine)
+  risk_components?: Record<string, { score: number; max: number; pct: number; drivers: Array<{ name: string; points: number }> }>;
+  critical_overrides?: string[];
+  blast_radius_score?: number;
 }
 
 interface AccessIdentity {
@@ -85,7 +101,29 @@ interface AccessIdentity {
   access_source_label?: string;
 }
 
-type Tab = 'overview' | 'security' | 'network' | 'access' | 'compliance';
+interface ResourceAnomaly {
+  id: number;
+  anomaly_type: string;
+  severity: string;
+  title: string;
+  description: string;
+  details: {
+    resource_id?: string;
+    resource_name?: string;
+    resource_type?: string;
+    trigger?: string;
+    baseline?: string | number;
+    deviation?: string | number;
+    confidence?: number;
+    impact?: string;
+    recommended_action?: string;
+    [key: string]: unknown;
+  };
+  resolved: boolean;
+  created_at: string;
+}
+
+type Tab = 'overview' | 'security' | 'network' | 'access' | 'compliance' | 'intelligence';
 
 // ─── Compliance Mapping ───────────────────────────────────────────
 
@@ -246,6 +284,8 @@ export default function ResourceDetail() {
   const [blastRadius, setBlastRadius] = useState(0);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessLoaded, setAccessLoaded] = useState(false);
+  const [anomalies, setAnomalies] = useState<ResourceAnomaly[]>([]);
+  const [anomaliesLoaded, setAnomaliesLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
 
@@ -275,6 +315,18 @@ export default function ResourceDetail() {
       .catch(() => setAccessLoading(false));
   }, [activeTab, rid, accessLoaded]);
 
+  // Lazy-load intelligence tab anomalies
+  useEffect(() => {
+    if (activeTab !== 'intelligence' || !rid || anomaliesLoaded) return;
+    fetch(withConnection(`/api/resources/${encodeURIComponent(rid)}/anomalies?limit=50`))
+      .then(r => r.json())
+      .then(data => {
+        setAnomalies(data.anomalies || []);
+        setAnomaliesLoaded(true);
+      })
+      .catch(() => setAnomaliesLoaded(true));
+  }, [activeTab, rid, anomaliesLoaded]);
+
   if (loading) {
     return <div className="flex items-center justify-center h-64 text-gray-400">Loading resource...</div>;
   }
@@ -295,6 +347,7 @@ export default function ResourceDetail() {
     { key: 'network', label: 'Network' },
     { key: 'access', label: 'Access Control' },
     { key: 'compliance', label: 'Compliance' },
+    { key: 'intelligence', label: 'Risk Intelligence' },
   ];
 
   return (
@@ -351,6 +404,7 @@ export default function ResourceDetail() {
         {activeTab === 'network' && <NetworkTab resource={resource} />}
         {activeTab === 'access' && <AccessTab rbacAccess={rbacAccess} policyAccess={policyAccess} blastRadius={blastRadius} loading={accessLoading} isKeyVault={!isStorage} />}
         {activeTab === 'compliance' && <ComplianceTab resource={resource} />}
+        {activeTab === 'intelligence' && <IntelligenceTab resource={resource} anomalies={anomalies} />}
       </div>
     </div>
   );
@@ -1085,6 +1139,226 @@ function ComplianceTab({ resource }: { resource: ResourceData }) {
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── Risk Intelligence Tab (Phase 89) ────────────────────────────
+
+const SEVERITY_BADGE: Record<string, string> = {
+  critical: 'bg-red-100 text-red-800 border-red-200',
+  high: 'bg-orange-100 text-orange-800 border-orange-200',
+  medium: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+  low: 'bg-blue-100 text-blue-800 border-blue-200',
+};
+
+const ANOMALY_LABELS: Record<string, string> = {
+  resource_score_spike: 'Risk Spike',
+  config_drift_critical: 'Config Drift',
+  shadow_infrastructure: 'Shadow Infra',
+  expiry_cascade: 'Expiry Cascade',
+  privilege_creep: 'Privilege Creep',
+  network_exposure_change: 'Network Change',
+};
+
+function IntelligenceTab({ resource, anomalies }: { resource: ResourceData; anomalies: ResourceAnomaly[] }) {
+  const trend = resource.risk_trend || [];
+  const delta = resource.risk_trend_delta || 0;
+  const direction = resource.risk_trend_direction || 'stable';
+  const components = resource.risk_components || {};
+  const unresolvedAnomalies = anomalies.filter(a => !a.resolved);
+
+  // Bar chart max for scaling
+  const maxScore = Math.max(...trend.map(t => t.risk_score), 1);
+
+  return (
+    <div className="space-y-6 py-2">
+      {/* Trend Summary Header */}
+      <div className="flex items-center gap-6">
+        <div className="bg-white border border-gray-200 rounded-lg px-5 py-4 flex items-center gap-4 flex-1">
+          <ScoreRing score={resource.risk_score} size={56} />
+          <div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">Current Risk Score</div>
+            <div className="text-2xl font-bold text-gray-800">{resource.risk_score}</div>
+          </div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-lg px-5 py-4 flex items-center gap-3 flex-1">
+          <div className={`text-2xl ${direction === 'up' ? 'text-red-500' : direction === 'down' ? 'text-green-500' : 'text-gray-400'}`}>
+            {direction === 'up' ? '\u2191' : direction === 'down' ? '\u2193' : '\u2194'}
+          </div>
+          <div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">Trend</div>
+            <div className="text-lg font-semibold text-gray-800">
+              {delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : 'Stable'}
+              <span className="text-xs text-gray-500 ml-1">pts</span>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-lg px-5 py-4 flex items-center gap-3 flex-1">
+          <div className="text-2xl text-indigo-500">&#x26A0;</div>
+          <div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">Active Anomalies</div>
+            <div className="text-lg font-semibold text-gray-800">{unresolvedAnomalies.length}</div>
+          </div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-lg px-5 py-4 flex items-center gap-3 flex-1">
+          <div className="text-2xl text-purple-500">&#x1F4CA;</div>
+          <div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">History Depth</div>
+            <div className="text-lg font-semibold text-gray-800">{trend.length} runs</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Risk Score Trajectory */}
+      <div className="bg-white border border-gray-200 rounded-lg p-5">
+        <h3 className="text-sm font-semibold text-gray-700 mb-4">Risk Score Trajectory</h3>
+        {trend.length < 2 ? (
+          <div className="text-center py-8 text-gray-400 text-sm">
+            Insufficient history — at least 2 discovery runs required for trend analysis
+          </div>
+        ) : (
+          <div className="flex items-end gap-1.5" style={{ height: 160 }}>
+            {[...trend].reverse().map((t, i) => {
+              const h = Math.max((t.risk_score / maxScore) * 140, 4);
+              const color = t.risk_level === 'critical' ? 'bg-red-500' : t.risk_level === 'high' ? 'bg-orange-400' : t.risk_level === 'medium' ? 'bg-yellow-400' : 'bg-green-400';
+              const date = t.run_date ? new Date(t.run_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : `Run ${i + 1}`;
+              return (
+                <div key={i} className="flex flex-col items-center flex-1 gap-1">
+                  <div className="text-[10px] text-gray-500 font-medium">{t.risk_score}</div>
+                  <div className={`w-full rounded-t ${color}`} style={{ height: h }} title={`${date}: ${t.risk_score} (${t.risk_level})`} />
+                  <div className="text-[9px] text-gray-400 truncate w-full text-center">{date}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Component Breakdown */}
+      {Object.keys(components).length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 className="text-sm font-semibold text-gray-700 mb-4">Risk Component Breakdown</h3>
+          <div className="space-y-3">
+            {Object.entries(components).map(([key, comp]) => {
+              const c = comp as { score: number; max: number; pct: number; drivers: Array<{ name: string; points: number }> };
+              const pct = c.pct || 0;
+              const barColor = pct >= 80 ? 'bg-red-500' : pct >= 50 ? 'bg-orange-400' : pct >= 25 ? 'bg-yellow-400' : 'bg-green-400';
+              return (
+                <div key={key}>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="font-medium text-gray-700 capitalize">{key.replace(/_/g, ' ')}</span>
+                    <span className="text-gray-500">{c.score}/{c.max} ({pct}%)</span>
+                  </div>
+                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div className={`h-full ${barColor} rounded-full transition-all`} style={{ width: `${pct}%` }} />
+                  </div>
+                  {c.drivers && c.drivers.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {c.drivers.map((d, di) => (
+                        <span key={di} className="text-[10px] px-1.5 py-0.5 bg-gray-50 text-gray-600 rounded border border-gray-100">
+                          {d.name} <span className="text-red-500 font-medium">+{d.points}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Critical Overrides */}
+      {!!resource.critical_overrides && resource.critical_overrides.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-red-800 mb-2">Critical Overrides Active</h3>
+          <ul className="space-y-1">
+            {resource.critical_overrides.map((o, i) => (
+              <li key={i} className="text-xs text-red-700 flex items-center gap-2">
+                <span className="w-1.5 h-1.5 bg-red-500 rounded-full" />
+                {o}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* AI-Detected Anomalies */}
+      <div className="bg-white border border-gray-200 rounded-lg p-5">
+        <h3 className="text-sm font-semibold text-gray-700 mb-4">
+          AI-Detected Anomalies
+          {unresolvedAnomalies.length > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-[10px] font-bold">
+              {unresolvedAnomalies.length}
+            </span>
+          )}
+        </h3>
+        {anomalies.length === 0 ? (
+          <div className="text-center py-8 text-gray-400 text-sm">
+            No anomalies detected for this resource
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {anomalies.map(a => (
+              <div key={a.id} className={`border rounded-lg p-4 ${a.resolved ? 'border-gray-200 bg-gray-50 opacity-60' : 'border-gray-200'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${SEVERITY_BADGE[a.severity] || SEVERITY_BADGE.medium}`}>
+                    {a.severity.toUpperCase()}
+                  </span>
+                  <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 rounded text-[10px] font-medium">
+                    {ANOMALY_LABELS[a.anomaly_type] || a.anomaly_type}
+                  </span>
+                  {a.resolved && <span className="px-1.5 py-0.5 bg-green-50 text-green-700 rounded text-[10px] font-medium">Resolved</span>}
+                  <span className="ml-auto text-[10px] text-gray-400">{new Date(a.created_at).toLocaleDateString()}</span>
+                </div>
+                <div className="text-sm font-medium text-gray-800 mb-1">{a.title}</div>
+                <div className="text-xs text-gray-600 mb-3">{a.description}</div>
+                {a.details && (
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    {a.details.trigger && (
+                      <div className="bg-gray-50 rounded px-2.5 py-1.5">
+                        <span className="text-gray-500 font-medium">Trigger:</span>{' '}
+                        <span className="text-gray-700">{String(a.details.trigger)}</span>
+                      </div>
+                    )}
+                    {a.details.baseline !== undefined && (
+                      <div className="bg-gray-50 rounded px-2.5 py-1.5">
+                        <span className="text-gray-500 font-medium">Baseline:</span>{' '}
+                        <span className="text-gray-700">{String(a.details.baseline)}</span>
+                      </div>
+                    )}
+                    {a.details.deviation !== undefined && (
+                      <div className="bg-gray-50 rounded px-2.5 py-1.5">
+                        <span className="text-gray-500 font-medium">Deviation:</span>{' '}
+                        <span className="text-gray-700">{String(a.details.deviation)}</span>
+                      </div>
+                    )}
+                    {a.details.confidence !== undefined && (
+                      <div className="bg-gray-50 rounded px-2.5 py-1.5">
+                        <span className="text-gray-500 font-medium">Confidence:</span>{' '}
+                        <span className="text-gray-700">{a.details.confidence}%</span>
+                      </div>
+                    )}
+                    {a.details.impact && (
+                      <div className="bg-orange-50 rounded px-2.5 py-1.5 col-span-2">
+                        <span className="text-orange-600 font-medium">Impact:</span>{' '}
+                        <span className="text-gray-700">{String(a.details.impact)}</span>
+                      </div>
+                    )}
+                    {a.details.recommended_action && (
+                      <div className="bg-blue-50 rounded px-2.5 py-1.5 col-span-2">
+                        <span className="text-blue-600 font-medium">Action:</span>{' '}
+                        <span className="text-gray-700">{String(a.details.recommended_action)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

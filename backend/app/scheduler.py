@@ -419,6 +419,9 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
         # Phase 40: Run anomaly detection
         _run_anomaly_detection(current_run_id, previous_run_id, db)
 
+        # Phase 89: Run resource anomaly detection
+        _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
+
         # Phase 51: Save compliance snapshot
         _save_compliance_snapshot(current_run_id, db)
 
@@ -669,6 +672,40 @@ def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Databa
 
     except Exception as e:
         logger.error(f"Anomaly detection failed: {e}")
+        logger.exception(e)
+
+
+def _run_resource_anomaly_detection(current_run_id: int, previous_run_id: int, db: Database):
+    """Run resource anomaly detection after identity anomaly detection."""
+    try:
+        from app.engines.resource_anomaly_detector import ResourceAnomalyDetector
+
+        settings = {}
+        for key in ('resource_anomaly_score_spike_threshold', 'resource_anomaly_expiry_window_days',
+                     'resource_anomaly_expiry_threshold', 'resource_anomaly_privilege_creep_threshold'):
+            val = db.get_system_setting(key, None)
+            if val is not None:
+                settings[key] = val
+
+        detector = ResourceAnomalyDetector(db)
+        anomalies = detector.analyze(current_run_id, previous_run_id, settings)
+
+        if anomalies:
+            count = db.save_anomalies(current_run_id, anomalies)
+            logger.info(f"Resource anomaly detection: {count} anomalies saved for run #{current_run_id}")
+            _generate_anomaly_notifications(current_run_id, anomalies, db)
+            critical_anomalies = [a for a in anomalies if a.get('severity') in ('critical', 'high')]
+            if critical_anomalies:
+                _dispatch_notification('anomaly_detected', {
+                    'title': f'{len(critical_anomalies)} Resource Anomalies Detected',
+                    'description': f'Run #{current_run_id}: {", ".join(a["title"] for a in critical_anomalies[:3])}',
+                    'severity': critical_anomalies[0].get('severity', 'high'),
+                }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+        else:
+            logger.info(f"Resource anomaly detection: no anomalies found for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Resource anomaly detection failed: {e}")
         logger.exception(e)
 
 

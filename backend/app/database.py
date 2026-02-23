@@ -2019,6 +2019,8 @@ class Database:
         'slack_webhook_url', 'teams_webhook_url', 'slack_events', 'teams_events',
         'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
         'p2_telemetry_enabled',
+        'resource_anomaly_score_spike_threshold', 'resource_anomaly_expiry_window_days',
+        'resource_anomaly_expiry_threshold', 'resource_anomaly_privilege_creep_threshold',
     ])
 
     def get_system_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
@@ -4281,6 +4283,126 @@ class Database:
         self.conn.commit()
         cursor.close()
         return db_id
+
+    # ──────────────────────────────────────────────────────────
+    # Resource Risk History (Phase 89)
+    # ──────────────────────────────────────────────────────────
+
+    def _ensure_resource_risk_history_table(self):
+        """Create resource_risk_history table for trend tracking."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS resource_risk_history (
+                id SERIAL PRIMARY KEY,
+                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                resource_id TEXT NOT NULL,
+                resource_type VARCHAR(30) NOT NULL,
+                risk_score INTEGER NOT NULL DEFAULT 0,
+                risk_level VARCHAR(20) NOT NULL DEFAULT 'info',
+                risk_components JSONB DEFAULT '{}',
+                critical_overrides JSONB DEFAULT '[]',
+                blast_radius_score INTEGER DEFAULT 0,
+                privileged_identity_count INTEGER DEFAULT 0,
+                dependency_count INTEGER DEFAULT 0,
+                network_exposure_score INTEGER DEFAULT 0,
+                tenant_id INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(discovery_run_id, resource_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rrh_resource ON resource_risk_history(resource_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rrh_run ON resource_risk_history(discovery_run_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rrh_created ON resource_risk_history(created_at DESC)")
+        self.conn.commit()
+        cursor.close()
+
+    def save_resource_risk_history(self, run_id: int, resource_id: str, resource_type: str, data: dict) -> int:
+        """Upsert a resource risk snapshot for a discovery run."""
+        self._ensure_resource_risk_history_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO resource_risk_history
+                (discovery_run_id, resource_id, resource_type, risk_score, risk_level,
+                 risk_components, critical_overrides, blast_radius_score,
+                 privileged_identity_count, dependency_count, network_exposure_score, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (discovery_run_id, resource_id)
+            DO UPDATE SET risk_score = EXCLUDED.risk_score,
+                         risk_level = EXCLUDED.risk_level,
+                         risk_components = EXCLUDED.risk_components,
+                         critical_overrides = EXCLUDED.critical_overrides,
+                         blast_radius_score = EXCLUDED.blast_radius_score,
+                         privileged_identity_count = EXCLUDED.privileged_identity_count,
+                         dependency_count = EXCLUDED.dependency_count,
+                         network_exposure_score = EXCLUDED.network_exposure_score
+            RETURNING id
+        """, (
+            run_id, resource_id, resource_type,
+            data.get('risk_score', 0), data.get('risk_level', 'info'),
+            json.dumps(data.get('risk_components', {})),
+            json.dumps(data.get('critical_overrides', [])),
+            data.get('blast_radius_score', 0),
+            data.get('privileged_identity_count', 0),
+            data.get('dependency_count', 0),
+            data.get('network_exposure_score', 0),
+            self._tenant_id,
+        ))
+        db_id = cursor.fetchone()[0]
+        self.conn.commit()
+        cursor.close()
+        return db_id
+
+    def get_resource_risk_trend(self, resource_id: str, limit: int = 10) -> list:
+        """Get risk history for a resource, most recent first."""
+        self._ensure_resource_risk_history_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT rrh.id, rrh.discovery_run_id, rrh.resource_id, rrh.resource_type,
+                   rrh.risk_score, rrh.risk_level, rrh.risk_components, rrh.critical_overrides,
+                   rrh.blast_radius_score, rrh.privileged_identity_count,
+                   rrh.dependency_count, rrh.network_exposure_score,
+                   rrh.created_at, dr.started_at AS run_date
+            FROM resource_risk_history rrh
+            LEFT JOIN discovery_runs dr ON dr.id = rrh.discovery_run_id
+            WHERE rrh.resource_id = %s
+            ORDER BY rrh.created_at DESC
+            LIMIT %s
+        """, (resource_id, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            for ts in ('created_at', 'run_date'):
+                if r.get(ts):
+                    r[ts] = r[ts].isoformat()
+        return rows
+
+    def get_resource_risk_trend_batch(self, resource_ids: list, limit_per_resource: int = 2) -> dict:
+        """Get risk trend for multiple resources (for list view). Returns dict keyed by resource_id."""
+        self._ensure_resource_risk_history_table()
+        if not resource_ids:
+            return {}
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT resource_id, risk_score, risk_level, created_at
+            FROM (
+                SELECT resource_id, risk_score, risk_level, created_at,
+                       ROW_NUMBER() OVER (PARTITION BY resource_id ORDER BY created_at DESC) AS rn
+                FROM resource_risk_history
+                WHERE resource_id = ANY(%s)
+            ) ranked
+            WHERE rn <= %s
+            ORDER BY resource_id, created_at DESC
+        """, (resource_ids, limit_per_resource))
+        rows = cursor.fetchall()
+        cursor.close()
+        result = {}
+        for r in rows:
+            rid = r['resource_id']
+            result.setdefault(rid, []).append({
+                'risk_score': r['risk_score'],
+                'risk_level': r['risk_level'],
+            })
+        return result
 
     # ──────────────────────────────────────────────────────────
     # App Registrations (Phase 74)

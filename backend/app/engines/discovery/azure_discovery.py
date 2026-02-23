@@ -319,6 +319,12 @@ class AzureDiscoveryEngine:
             self.db.save_key_vault(run_id, kv)
         print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
 
+        # Step 9b-2: Identity exposure enhancement + risk history persistence
+        try:
+            self._enhance_resources_with_identity_exposure(run_id, storage_accounts, key_vaults)
+        except Exception as e:
+            print(f"  ⚠️ Identity exposure enhancement error: {e}")
+
         # Step 9c: Discover App Registrations
         print("\n📋 Discovering App Registrations...")
         try:
@@ -1851,6 +1857,85 @@ class AzureDiscoveryEngine:
                 print(f"    ⚠️  Key Vault discovery failed for {sub_name}: {e}")
                 continue
         return key_vaults
+
+    def _enhance_resources_with_identity_exposure(self, run_id, storage_accounts, key_vaults):
+        """Count privileged identities per resource, enhance scores, persist risk history."""
+        from psycopg2.extras import RealDictCursor as RDC
+        from app.engines.data_security import enhance_risk_with_identity_exposure, compute_blast_radius
+
+        # Build a map of resource_id → privileged identity count from role_assignments
+        cursor = self.db.conn.cursor(cursor_factory=RDC)
+        cursor.execute("""
+            SELECT ra.scope, COUNT(DISTINCT i.id) AS priv_count
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND ra.role_name IN ('Owner', 'Contributor', 'User Access Administrator',
+                                   'Key Vault Administrator', 'Key Vault Secrets Officer',
+                                   'Storage Account Contributor', 'Storage Blob Data Owner')
+            GROUP BY ra.scope
+        """, (run_id,))
+        scope_counts = {r['scope']: r['priv_count'] for r in cursor.fetchall()}
+        cursor.close()
+
+        def _count_privileged(resource_id):
+            """Count privileged identities at resource, RG, or subscription scope."""
+            count = scope_counts.get(resource_id, 0)
+            # Also count inherited from parent scopes
+            parts = resource_id.split('/')
+            # subscription scope: /subscriptions/{id}
+            if len(parts) >= 3:
+                sub_scope = '/'.join(parts[:3])
+                count += scope_counts.get(sub_scope, 0)
+            # RG scope: /subscriptions/{id}/resourceGroups/{name}
+            if '/resourceGroups/' in resource_id:
+                rg_scope = resource_id.split('/providers/')[0]
+                count += scope_counts.get(rg_scope, 0)
+            return count
+
+        all_resources = []
+        for sa in storage_accounts:
+            sa['resource_type'] = 'storage_account'
+            all_resources.append(sa)
+        for kv in key_vaults:
+            kv['resource_type'] = 'key_vault'
+            all_resources.append(kv)
+
+        for res in all_resources:
+            rid = res.get('resource_id', '')
+            priv_count = _count_privileged(rid)
+            net_score = res.get('risk_components', {}).get('network_exposure', {}).get('score', 0)
+
+            # Apply identity exposure enhancement
+            base_score = res.get('risk_score', 0)
+            components = dict(res.get('risk_components', {}))
+            adj_score, adj_level, updated_components = enhance_risk_with_identity_exposure(
+                base_score, components, res, priv_count, net_score
+            )
+
+            # Compute blast radius
+            blast = compute_blast_radius(priv_count, 0, net_score)
+
+            res['risk_score'] = adj_score
+            res['risk_level'] = adj_level
+            res['risk_components'] = updated_components
+            res['blast_radius_score'] = blast
+            res['privileged_identity_count'] = priv_count
+            res['network_exposure_score'] = net_score
+
+            # Persist risk history
+            self.db.save_resource_risk_history(run_id, rid, res.get('resource_type', ''), {
+                'risk_score': adj_score,
+                'risk_level': adj_level,
+                'risk_components': updated_components,
+                'critical_overrides': res.get('critical_overrides', []),
+                'blast_radius_score': blast,
+                'privileged_identity_count': priv_count,
+                'dependency_count': 0,
+                'network_exposure_score': net_score,
+            })
+
+        print(f"  ✓ Identity exposure enhanced + risk history saved for {len(all_resources)} resources")
 
     def _compute_storage_risk(self, public_blob, https_only, tls, shared_key,
                               default_action, pe_count, cmk, key_stale,

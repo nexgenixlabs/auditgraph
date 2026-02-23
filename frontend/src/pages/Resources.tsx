@@ -21,6 +21,8 @@ interface ResourceRow {
   key_config: Record<string, unknown>;
   tags: Record<string, string>;
   created_at: string;
+  risk_trend_delta?: number;
+  risk_trend_direction?: 'up' | 'down' | 'stable';
 }
 
 interface ResourceStats {
@@ -409,15 +411,16 @@ export default function Resources() {
                 <SortHeader label="Subscription" field="subscription_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Score" field="risk_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <th className="px-3 py-2.5 text-xs">Trend</th>
                 <th className="px-3 py-2.5 text-xs">Key Issues</th>
                 <th className="px-3 py-2.5 text-xs w-6"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={9} className="px-3 py-8 text-center text-gray-400">Loading resources...</td></tr>
+                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">Loading resources...</td></tr>
               ) : sorted.length === 0 ? (
-                <tr><td colSpan={9} className="px-3 py-8 text-center text-gray-400">No resources found. Run a discovery to populate.</td></tr>
+                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">No resources found. Run a discovery to populate.</td></tr>
               ) : sorted.map(r => (
                 <tr
                   key={`${r.resource_type}-${r.id}`}
@@ -431,6 +434,15 @@ export default function Resources() {
                   <td className="px-3 py-2 text-gray-600 max-w-[160px] truncate" title={r.subscription_name}>{r.subscription_name || '—'}</td>
                   <td className="px-3 py-2"><RiskBadge level={r.risk_level} /></td>
                   <td className="px-3 py-2 font-mono text-gray-700">{r.risk_score}</td>
+                  <td className="px-3 py-2">
+                    {r.risk_trend_direction === 'up' ? (
+                      <span className="text-red-500 font-medium text-[11px]">{'\u2191'} +{r.risk_trend_delta}</span>
+                    ) : r.risk_trend_direction === 'down' ? (
+                      <span className="text-green-500 font-medium text-[11px]">{'\u2193'} {r.risk_trend_delta}</span>
+                    ) : (
+                      <span className="text-gray-400 text-[11px]">{'\u2014'}</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2"><KeyIssuesBadges row={r} /></td>
                   <td className="px-3 py-2 text-gray-400">→</td>
                 </tr>

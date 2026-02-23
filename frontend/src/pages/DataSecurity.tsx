@@ -66,6 +66,8 @@ interface ResourceRow {
   blast_radius_score: number;
   critical_overrides: string[];
   tags: Record<string, string>;
+  risk_trend_delta?: number;
+  risk_trend_direction?: 'up' | 'down' | 'stable';
 }
 
 interface SummaryData {
@@ -409,15 +411,18 @@ export default function DataSecurity() {
                     </th>
                   ))}
                   <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600, color: G.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Trend
+                  </th>
+                  <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600, color: G.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                     Components
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={7} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>Loading...</td></tr>
+                  <tr><td colSpan={8} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>Loading...</td></tr>
                 ) : sorted.length === 0 ? (
-                  <tr><td colSpan={7} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>No resources found</td></tr>
+                  <tr><td colSpan={8} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>No resources found</td></tr>
                 ) : sorted.map(r => {
                   const isSelected = selectedResource?.resource_id === r.resource_id;
                   const keys = compKeys(r.resource_type);
@@ -449,6 +454,15 @@ export default function DataSecurity() {
                       <td style={{ padding: '10px 12px', color: G.textSecondary, fontSize: 11 }}>{r.location || '\u2014'}</td>
                       <td style={{ padding: '10px 12px', color: G.textSecondary, fontSize: 11, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {r.subscription_name || '\u2014'}
+                      </td>
+                      <td style={{ padding: '10px 12px', width: 60 }}>
+                        {r.risk_trend_direction === 'up' ? (
+                          <span style={{ color: G.severity.critical, fontWeight: 600, fontSize: 11 }}>{'\u2191'} +{r.risk_trend_delta}</span>
+                        ) : r.risk_trend_direction === 'down' ? (
+                          <span style={{ color: G.severity.low, fontWeight: 600, fontSize: 11 }}>{'\u2193'} {r.risk_trend_delta}</span>
+                        ) : (
+                          <span style={{ color: G.textMuted, fontSize: 11 }}>{'\u2014'}</span>
+                        )}
                       </td>
                       <td style={{ padding: '10px 12px', width: 160 }}>
                         {r.risk_components && Object.keys(r.risk_components).length > 0 ? (

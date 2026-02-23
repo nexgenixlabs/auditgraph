@@ -140,6 +140,7 @@ from app.api.handlers import (
     get_resource_stats,
     get_resource_detail,
     get_resource_access,
+    get_resource_anomalies,
     get_resource_expiry_summary,
     get_resource_compliance_summary,
     get_data_security_summary,
@@ -1347,6 +1348,11 @@ def create_app():
     @require_role('compliance', 'reader', 'admin')
     def resources_access(resource_id):
         return get_resource_access(resource_id)
+
+    @app.get("/api/resources/<path:resource_id>/anomalies")
+    @require_role('compliance', 'reader', 'admin')
+    def resources_anomalies(resource_id):
+        return get_resource_anomalies(resource_id)
 
     @app.get("/api/data-security/summary")
     @require_role('compliance', 'reader', 'admin')

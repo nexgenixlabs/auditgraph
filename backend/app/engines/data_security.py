@@ -264,6 +264,74 @@ def compute_blast_radius(privileged_identity_count, dependency_count, network_ex
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Identity Exposure Enhancement (Phase 89)
+# ═══════════════════════════════════════════════════════════════════
+
+def enhance_risk_with_identity_exposure(base_score, risk_components, resource_data,
+                                         privileged_identity_count, network_exposure_score):
+    """
+    Enhance a resource's risk score based on identity exposure.
+
+    Modifiers for Storage Accounts:
+      - Network-exposed + >5 privileged identities = +15 pts
+      - Public blob + any privileged identity = +10 pts
+
+    Modifiers for Key Vaults:
+      - High access policy count (>5) + network-exposed = +15 pts
+      - Secrets exist + >5 privileged identities = +10 pts
+
+    Adds 'identity_exposure' component to risk_components.
+    Returns (adjusted_score, adjusted_level, updated_risk_components).
+    """
+    drivers = []
+    bonus = 0
+    resource_type = resource_data.get('resource_type', '')
+
+    is_network_exposed = network_exposure_score > 10
+    public_blob = resource_data.get('public_blob_access', False)
+
+    if resource_type == 'storage_account' or public_blob is not None:
+        # Storage account modifiers
+        if is_network_exposed and privileged_identity_count > 5:
+            bonus += 15
+            drivers.append({
+                'name': f'Network-exposed with {privileged_identity_count} privileged identities',
+                'points': 15,
+            })
+        if public_blob and privileged_identity_count > 0:
+            bonus += 10
+            drivers.append({
+                'name': f'Public blob access with {privileged_identity_count} privileged identities',
+                'points': 10,
+            })
+    else:
+        # Key vault modifiers
+        ap_count = resource_data.get('access_policy_count', 0)
+        secrets_total = resource_data.get('secrets_total', 0)
+        if ap_count > 5 and is_network_exposed:
+            bonus += 15
+            drivers.append({
+                'name': f'{ap_count} access policies on network-exposed vault',
+                'points': 15,
+            })
+        if secrets_total > 0 and privileged_identity_count > 5:
+            bonus += 10
+            drivers.append({
+                'name': f'{secrets_total} secrets with {privileged_identity_count} privileged identities',
+                'points': 10,
+            })
+
+    adjusted_score = min(base_score + bonus, 100)
+    risk_components['identity_exposure'] = {
+        'score': bonus, 'max': 25,
+        'drivers': drivers, 'pct': round(bonus / 25 * 100),
+    }
+    adjusted_level = 'critical' if risk_components.get('identity_exposure', {}).get('score', 0) >= 15 and adjusted_score >= 70 else _risk_level(adjusted_score)
+
+    return adjusted_score, adjusted_level, risk_components
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Summary Aggregator
 # ═══════════════════════════════════════════════════════════════════
 
