@@ -292,6 +292,9 @@ def create_app():
         _db_init._ensure_spn_exposure()
         _db_init._ensure_app_reg_exposure()
         _db_init._ensure_workload_telemetry_tables()
+        # ICE tables (human_identities, identity_links, orphaned_privileged_findings)
+        from app.database import _ensure_orphaned_findings_table
+        _ensure_orphaned_findings_table(_db_init.conn)
         _db_init.close()
     except Exception as e:
         print(f"  ⚠️ Could not ensure tables/backfill: {e}")

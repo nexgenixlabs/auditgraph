@@ -10407,26 +10407,13 @@ def _ensure_orphaned_findings_table(conn):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_severity ON orphaned_privileged_findings(severity)")
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_orphaned_findings_open_unique
-            ON orphaned_privileged_findings(tenant_id, privileged_account_object_id)
+            ON orphaned_privileged_findings(tenant_id, privileged_object_id)
             WHERE status = 'open'
         """)
         conn.commit()
     except Exception as e:
         conn.rollback()
-        # The partial unique index references privileged_account_object_id but column is privileged_object_id
-        # Retry with correct column name
-        try:
-            cursor2 = conn.cursor()
-            cursor2.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_orphaned_findings_open_unique
-                ON orphaned_privileged_findings(tenant_id, privileged_object_id)
-                WHERE status = 'open'
-            """)
-            conn.commit()
-            cursor2.close()
-        except Exception:
-            conn.rollback()
-        print(f"  ⚠️ orphaned_privileged_findings table creation note: {e}")
+        print(f"  ⚠️ orphaned_privileged_findings table creation error: {e}")
     finally:
         cursor.close()
     _orphaned_findings_ensured = True
