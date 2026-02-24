@@ -1275,8 +1275,8 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
           <CISOCard>
             <SectionTitle right="Deep Dive →">Blast Radius Preview</SectionTitle>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
-              <StatBox label="High" value={<DN navigateTo="/identities?risk=high,critical">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
-              <StatBox label="Low" value={<DN navigateTo="/identities?risk=low,medium">{d.blastRadius.lowRisk}</DN>} color={COLORS.success} />
+              <StatBox label="High" value={<span title="Identities with high blast radius exposure score" style={{ cursor: 'default' }}>{d.blastRadius.highRisk}</span>} color={COLORS.danger} />
+              <StatBox label="Low" value={<span title="Identities with low blast radius exposure score" style={{ cursor: 'default' }}>{d.blastRadius.lowRisk}</span>} color={COLORS.success} />
               <StatBox label="Orphan" value={<DN navigateTo="/identities?pillar=ownership-governance">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
             </div>
             <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: COLORS.border }}>
@@ -1466,8 +1466,8 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
           <div style={{ flex: 1, background: COLORS.success }} />
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
-          <StatBox label="Risk" value={<DN navigateTo="/identities?risk=high,critical">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
-          <StatBox label="Low" value={<DN navigateTo="/identities?risk=low,medium">{d.blastRadius.lowRisk}</DN>} color={COLORS.success} />
+          <StatBox label="Risk" value={<span title="Identities with high blast radius exposure score" style={{ cursor: 'default' }}>{d.blastRadius.highRisk}</span>} color={COLORS.danger} />
+          <StatBox label="Low" value={<span title="Identities with low blast radius exposure score" style={{ cursor: 'default' }}>{d.blastRadius.lowRisk}</span>} color={COLORS.success} />
           <StatBox label="Orphaned" value={<DN navigateTo="/identities?pillar=ownership-governance">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
         </div>
         <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, marginBottom: 10, fontFamily: FONT.ui }}>Category Scores</div>
@@ -1669,25 +1669,56 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
 
   // Rule 35: Export CSV handler
   const handleExportAll = useCallback(() => {
-    const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
-    const rows = d.compliance.frameworks.map(fw =>
-      `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`
-    ).join('\n');
-    const blob = new Blob([header + rows], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'compliance_frameworks.csv'; a.click();
-    URL.revokeObjectURL(url);
+    // Export control-level detail for ALL frameworks
+    const hasControls = d.compliance.frameworks.some(fw => fw.controls && fw.controls.length > 0);
+    if (hasControls) {
+      const header = 'Framework,Control ID,Control Name,Status,Severity,Evidence\n';
+      const rows = d.compliance.frameworks.flatMap(fw =>
+        (fw.controls || []).map(c =>
+          `"${fw.name}","${c.id}","${c.name.replace(/"/g, '""')}","${c.status}","${c.severity}","${(c.evidence || '').replace(/"/g, '""')}"`
+        )
+      ).join('\n');
+      const blob = new Blob([header + rows], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'compliance_all_controls.csv'; a.click();
+      URL.revokeObjectURL(url);
+    } else {
+      // Fallback: framework-level summary
+      const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
+      const rows = d.compliance.frameworks.map(fw =>
+        `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`
+      ).join('\n');
+      const blob = new Blob([header + rows], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'compliance_frameworks.csv'; a.click();
+      URL.revokeObjectURL(url);
+    }
   }, [d.compliance.frameworks]);
 
   const handleExportSingle = useCallback((fw: ComplianceFramework) => {
-    const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
-    const row = `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`;
-    const blob = new Blob([header + row], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${fw.id}_compliance.csv`; a.click();
-    URL.revokeObjectURL(url);
+    // Export control-level detail (not just framework summary)
+    if (fw.controls && fw.controls.length > 0) {
+      const header = 'Framework,Control ID,Control Name,Status,Severity,Evidence\n';
+      const rows = fw.controls.map(c =>
+        `"${fw.name}","${c.id}","${c.name.replace(/"/g, '""')}","${c.status}","${c.severity}","${(c.evidence || '').replace(/"/g, '""')}"`
+      ).join('\n');
+      const blob = new Blob([header + rows], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${fw.id}_compliance_controls.csv`; a.click();
+      URL.revokeObjectURL(url);
+    } else {
+      // Fallback: framework-level summary if no controls data
+      const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
+      const row = `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`;
+      const blob = new Blob([header + row], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${fw.id}_compliance.csv`; a.click();
+      URL.revokeObjectURL(url);
+    }
   }, []);
 
   return (
@@ -1740,8 +1771,8 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
                     background: 'transparent', color: COLORS.textMuted, border: `1px solid ${COLORS.border}`,
                     cursor: 'pointer', fontFamily: FONT.ui,
                   }}>Export</button>
-                  {/* Rule 35 fix: Details navigates to compliance page */}
-                  <button onClick={() => navigate('/compliance')} style={{
+                  {/* Rule 35 fix: Details navigates to compliance page with framework auto-expand */}
+                  <button onClick={() => navigate(`/compliance?framework=${encodeURIComponent(fw.name)}`)} style={{
                     flex: 1, padding: '4px 8px', borderRadius: 4, fontSize: 9, fontWeight: 600,
                     background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
                     cursor: 'pointer', fontFamily: FONT.ui,
