@@ -15,6 +15,9 @@
  *         changes[], affectedIdentityIds. Drill-downs navigate to
  *         /identities with filter params. Preview Changes fetches from
  *         remediation detail API. DrillDownPanel DEPRECATED.
+ * v3.0.9: Enterprise Review Refinements — score label, confidence banner,
+ *         pillar count labels, rollback badges, governance trends,
+ *         Identity Controls Only tooltip, predictive scores, layout fix.
  */
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -561,6 +564,10 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
         </div>
         <CISOBadge label={item.risk} color={item.risk === 'HIGH' ? COLORS.danger : COLORS.success} />
         <CISOBadge label={item.automation} color={item.automation === 'Auto' ? COLORS.accent : COLORS.textMuted} />
+        <CISOBadge
+          label={item.rollbackRisk === 'safe' ? 'Safe' : item.rollbackRisk === 'controlled' ? 'Controlled' : 'Risky'}
+          color={item.rollbackRisk === 'safe' ? COLORS.success : item.rollbackRisk === 'controlled' ? COLORS.warning : COLORS.danger}
+        />
         <span style={{ fontSize: 12, color: COLORS.textMuted, marginLeft: 4, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▾</span>
       </div>
       {expanded && (
@@ -1183,6 +1190,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
             <ScoreRing score={d.riskScore.current} size={96} strokeWidth={6} />
             <div>
               <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>{d.tenant.organizationName}</div>
+              <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.mono, letterSpacing: '0.04em', marginTop: 2 }}>Identity Attack Surface Score (0=Secure, 100=Max Risk)</div>
               <CISOBadge label={d.riskScore.tier} color={getTierColor(d.riskScore.tier)} />
               <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6, fontFamily: FONT.ui }}>
                 <DN navigateTo="/identities">{d.tenant.identityCount}</DN> ids · {d.tenant.subscriptions} subs
@@ -1206,7 +1214,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
             ]} />
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 10, fontFamily: FONT.ui }}>
               <span style={{ color: COLORS.textMuted }}>{Math.round(d.riskScore.industry - d.riskScore.current)} pts below industry</span>
-              <span style={{ color: COLORS.textMuted }}>Potential +{d.riskScore.potentialGain}</span>
+              <span style={{ color: COLORS.textMuted }}>Potential +{d.riskScore.potentialGain} <span style={{ fontSize: 9, opacity: 0.7 }}>if top 3 remediations completed</span></span>
             </div>
           </div>
           {/* Right: Projection */}
@@ -1246,7 +1254,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
       </CISOCard>
 
       {/* Zone 2 — Risk + Remediation */}
-      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 18 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 18, alignItems: 'start' }}>
         {/* Left: Three stacked cards */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
           {/* Card A: Top Risk Drivers */}
@@ -1259,7 +1267,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{p.name}</div>
                     <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-                      <DN navigateTo={pillarNav(p.name)}>{p.identityCount} identities</DN>
+                      <DN navigateTo={pillarNav(p.name)}>{p.identityCount}</DN> contributing
                     </div>
                   </div>
                   <div style={{ width: 50, flexShrink: 0 }}>
@@ -1331,14 +1339,14 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
             background: COLORS.successSoft, border: `1px solid ${COLORS.success}2e`,
             borderRadius: 8, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
-            <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>Total potential from top 3</span>
+            <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>Total potential if top 3 remediations completed</span>
             <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.success, fontFamily: FONT.mono }}>+{totalGain} pts</span>
           </div>
         </div>
       </div>
 
       {/* Zone 3 — Compliance + Governance */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, alignItems: 'start' }}>
         {/* Compliance Snapshot */}
         <CISOCard>
           <SectionTitle right={`View all ${d.compliance.frameworks.length} →`}>Compliance Posture — Worst Performing</SectionTitle>
@@ -1361,15 +1369,21 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
               <CISOBadge label={d.governance.effectivenessTier} color={getTierColor(d.governance.effectivenessTier)} />
             </div>
             <div style={{ flex: 1 }}>
-              {d.governance.metrics.map((m, i) => (
+              {d.governance.metrics.map((m, i) => {
+                const nv = parseFloat(String(m.value).replace(/[^0-9.]/g, ''));
+                const nt = parseFloat(String(m.target).replace(/[^0-9.]/g, ''));
+                const ta = m.status === 'not-configured' ? '' : nv >= nt ? '↑' : nv >= nt * 0.7 ? '→' : '↓';
+                const tc = ta === '↑' ? COLORS.success : ta === '→' ? COLORS.warning : COLORS.danger;
+                return (
                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: i < d.governance.metrics.length - 1 ? `1px solid ${COLORS.border}` : 'none' }}>
                   <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{m.icon} {m.label}</span>
                   <span style={{
                     fontSize: 11, fontFamily: FONT.mono, fontWeight: 600,
                     color: m.status === 'not-configured' ? COLORS.textDim : m.status === 'critical' ? COLORS.danger : COLORS.success,
-                  }}>{m.value} / {m.target}</span>
+                  }}>{m.value} / {m.target} {ta && <span style={{ color: tc }}>{ta}</span>}</span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
           {/* Setup completion */}
@@ -1405,7 +1419,7 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
               <ProgressBar value={p.score} color={getPillarColor(p.score)} height={8} />
               <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: getPillarColor(p.score), textAlign: 'center' as const }}>{p.score}</span>
               <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.mono, textAlign: 'right' as const }}>
-                <DN navigateTo={pillarNav(p.name)}>{p.identityCount} identities</DN>
+                <DN navigateTo={pillarNav(p.name)}>{p.identityCount}</DN> contributing
               </span>
             </div>
             {expandedPillar === i && p.subMetrics.length > 0 && (
@@ -1573,13 +1587,22 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {/* Governance Metric Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
-        {d.governance.metrics.map((m, i) => (
+        {d.governance.metrics.map((m, i) => {
+          // v3.0.9: Trend arrow — compare value to target numerically
+          const numVal = parseFloat(String(m.value).replace(/[^0-9.]/g, ''));
+          const numTarget = parseFloat(String(m.target).replace(/[^0-9.]/g, ''));
+          const trendArrow = m.status === 'not-configured' ? '' : numVal >= numTarget ? '↑' : numVal >= numTarget * 0.7 ? '→' : '↓';
+          const trendColor = trendArrow === '↑' ? COLORS.success : trendArrow === '→' ? COLORS.warning : COLORS.danger;
+          return (
           <CISOCard key={i}>
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui }}>{m.icon} {m.label}</div>
-            <div style={{
-              fontSize: 28, fontWeight: 700, fontFamily: FONT.mono, marginTop: 6,
-              color: m.status === 'not-configured' ? COLORS.textDim : m.status === 'critical' ? COLORS.danger : COLORS.success,
-            }}>{m.value}</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+              <div style={{
+                fontSize: 28, fontWeight: 700, fontFamily: FONT.mono, marginTop: 6,
+                color: m.status === 'not-configured' ? COLORS.textDim : m.status === 'critical' ? COLORS.danger : COLORS.success,
+              }}>{m.value}</div>
+              {trendArrow && <span style={{ fontSize: 16, color: trendColor, fontWeight: 700 }}>{trendArrow}</span>}
+            </div>
             <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 4 }}>Target: {m.target}</div>
             {m.status === 'not-configured' && (
               <button onClick={() => navigate('/settings/governance')} style={{
@@ -1589,7 +1612,8 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
               }}>Configure →</button>
             )}
           </CISOCard>
-        ))}
+          );
+        })}
       </div>
 
       {/* Two-column: Control Failures + Governance Ring */}
@@ -1725,7 +1749,9 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {/* Top bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <CISOBadge label="Identity Controls Only" color={COLORS.accent} />
+        <span title="This assessment covers identity-related controls only (authentication, authorization, lifecycle). Network, infrastructure, and application controls are not in scope.">
+          <CISOBadge label="Identity Controls Only" color={COLORS.accent} />
+        </span>
         <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>{d.compliance.frameworks.length} frameworks · All initial assessment</span>
         <button onClick={handleExportAll} style={{
           marginLeft: 'auto', padding: '5px 12px', borderRadius: 5, fontSize: 10, fontWeight: 600,
@@ -1820,6 +1846,12 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
 // ── Tab 6: Risk Movement ──
 
 function RiskMovementTab({ d }: { d: TenantData }) {
+  // v3.0.9: Predictive scores — extrapolate from trajectory + remediation potential
+  const trajectory = d.riskMovement.trajectory;
+  const recentDelta = trajectory.length >= 3 ? (trajectory[trajectory.length - 1] - trajectory[trajectory.length - 3]) / 3 : 0;
+  const predicted30d = Math.max(0, Math.min(100, d.riskScore.current + recentDelta * 3));
+  const predicted90d = Math.max(0, Math.min(100, d.riskScore.current + recentDelta * 9));
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {/* Score Trajectory */}
@@ -1831,6 +1863,25 @@ function RiskMovementTab({ d }: { d: TenantData }) {
           </div>
           <div style={{ flex: 1 }}>
             <Sparkline data={d.riskMovement.trajectory} width={400} height={80} color={getTierColor(d.riskScore.tier)} />
+          </div>
+          {/* v3.0.9: Predictive score cards */}
+          <div style={{ display: 'flex', gap: 10, flexShrink: 0 }}>
+            <div style={{
+              background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+              borderRadius: 8, padding: '10px 14px', textAlign: 'center' as const,
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: COLORS.textMuted, fontFamily: FONT.ui }}>30-Day</div>
+              <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONT.mono, color: getScoreColor(predicted30d), marginTop: 2 }}>{predicted30d.toFixed(1)}</div>
+              <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>projected</div>
+            </div>
+            <div style={{
+              background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+              borderRadius: 8, padding: '10px 14px', textAlign: 'center' as const,
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: COLORS.textMuted, fontFamily: FONT.ui }}>90-Day</div>
+              <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONT.mono, color: getScoreColor(predicted90d), marginTop: 2 }}>{predicted90d.toFixed(1)}</div>
+              <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>projected</div>
+            </div>
           </div>
         </div>
       </CISOCard>
@@ -1995,6 +2046,27 @@ export default function CISODashboard() {
           <span>Updated {new Date(data.tenant.lastScan).toLocaleTimeString()}</span>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success, animation: 'pulse 2s infinite' }} />
         </div>
+      </div>
+
+      {/* v3.0.9: Confidence / Data Completeness Banner */}
+      <div style={{
+        margin: '12px 24px 0', padding: '8px 14px', borderRadius: 8,
+        background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+        display: 'flex', alignItems: 'center', gap: 16, fontSize: 10, fontFamily: FONT.ui,
+      }}>
+        <span style={{ color: COLORS.textMuted }}>Data Completeness</span>
+        <div style={{ width: 80, height: 4, borderRadius: 2, background: COLORS.border, overflow: 'hidden' }}>
+          <div style={{ width: `${data.tenant.scanCompleteness}%`, height: '100%', background: data.tenant.scanCompleteness >= 80 ? COLORS.success : COLORS.warning, borderRadius: 2 }} />
+        </div>
+        <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: data.tenant.scanCompleteness >= 80 ? COLORS.success : COLORS.warning }}>{data.tenant.scanCompleteness}%</span>
+        <span style={{ color: COLORS.textDim }}>|</span>
+        <span style={{ color: COLORS.textMuted }}>Confidence</span>
+        <CISOBadge label={data.tenant.scanConfidence || 'Unknown'} color={
+          data.tenant.scanConfidence === 'high' ? COLORS.success :
+          data.tenant.scanConfidence === 'medium' ? COLORS.warning : COLORS.textMuted
+        } />
+        <span style={{ color: COLORS.textDim }}>|</span>
+        <span style={{ color: COLORS.textMuted }}>Sources: {data.tenant.sources?.join(', ') || 'Graph API'}</span>
       </div>
 
       {/* Tab Content */}
