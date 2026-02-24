@@ -55,7 +55,7 @@ import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
-import Overview from './pages/Overview';
+import CISODashboard from './pages/CISODashboard';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
@@ -241,7 +241,7 @@ function AppContent() {
                   <Route path="/" element={
                     tenantStage !== 'active'
                       ? <ErrorBoundary><LockedDashboard /></ErrorBoundary>
-                      : <ErrorBoundary><Overview /></ErrorBoundary>
+                      : <ErrorBoundary><CISODashboard /></ErrorBoundary>
                   } />
                   <Route path="/dashboard" element={
                     tenantStage !== 'active'
