@@ -324,7 +324,7 @@ export default function IdentityCorrelation() {
   // ─── Actions ─────────────────────────────────────────────────
 
   const handleUnlink = useCallback(async (linkId: number) => {
-    if (!confirm('Remove this account link?')) return;
+    if (!window.confirm('Remove this account link?')) return;
     const res = await fetch(withConnection(`/api/correlation/link/${linkId}`), { method: 'DELETE' });
     if (res.ok) {
       // Refresh detail
