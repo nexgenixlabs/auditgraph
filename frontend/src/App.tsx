@@ -49,6 +49,7 @@ import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
 import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
+import IdentityCorrelation from './pages/IdentityCorrelation';
 import WorkloadIdentities from './pages/WorkloadIdentities';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
@@ -257,6 +258,7 @@ function AppContent() {
                   <Route path="/access-reviews" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AccessReviews /></ErrorBoundary>} />
                   <Route path="/role-mining" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RoleMining /></ErrorBoundary>} />
                   <Route path="/groups" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
+                  <Route path="/identity-correlation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityCorrelation /></ErrorBoundary>} />
                   <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
                   <Route path="/workload-identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentities /></ErrorBoundary>} />
                   <Route path="/workload-identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentityDetail /></ErrorBoundary>} />

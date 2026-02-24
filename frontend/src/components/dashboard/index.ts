@@ -16,3 +16,4 @@ export { default as SOARActivity } from './SOARActivity';
 export { default as ServiceAccountGovernance } from './ServiceAccountGovernance';
 export { default as PlatformHealth } from './PlatformHealth';
 export { default as CustomizePanel } from './CustomizePanel';
+export { default as IdentityCorrelationWidget } from './IdentityCorrelationWidget';

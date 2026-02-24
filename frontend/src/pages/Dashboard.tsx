@@ -12,7 +12,7 @@ import {
   ComplianceScorecard, ConditionalAccessCard, CloudContextBanner,
   RecentChanges, RemediationProgress, RiskTrendChart, RoleUsageChart,
   AnomalyAlerts, RiskVelocityChart, SOARActivity, ServiceAccountGovernance,
-  PlatformHealth, CustomizePanel,
+  PlatformHealth, CustomizePanel, IdentityCorrelationWidget,
 } from '../components/dashboard';
 import ExpiryTracker from '../components/dashboard/ExpiryTracker';
 import ResourceOverview from '../components/dashboard/ResourceOverview';
@@ -605,6 +605,9 @@ export default function Dashboard() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <SOARActivity />
                 <PlatformHealth />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <IdentityCorrelationWidget />
               </div>
               <ResourceOverview />
             </div>
