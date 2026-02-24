@@ -275,6 +275,11 @@ function AppContent() {
                       <ErrorBoundary><Settings /></ErrorBoundary>
                     </ProtectedRoute>
                   } />
+                  <Route path="/settings/:tab" element={
+                    <ProtectedRoute requiredRole="admin">
+                      <ErrorBoundary><Settings /></ErrorBoundary>
+                    </ProtectedRoute>
+                  } />
                   <Route path="/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ActivityLog /></ErrorBoundary>} />
                   <Route path="/notifications" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
                   <Route path="/analytics" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><CrossTenantAnalytics /></ErrorBoundary>} />

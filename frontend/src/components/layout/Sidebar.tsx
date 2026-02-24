@@ -254,7 +254,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked, canMan
         label: 'Administration',
         adminOnly: true,
         items: [
-          { to: '/settings', label: 'Settings', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg> },
+          { to: '/settings/general', label: 'Settings', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg> },
         ],
       },
     ];
@@ -276,8 +276,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked, canMan
   };
 
   const renderNavItem = (item: NavItem, depth: number = 0, brandColor?: string) => {
-    const active = isActive(item.to, item.matchExact);
-    const isSettings = item.to === '/settings';
+    const isSettings = item.to.startsWith('/settings');
+    const active = isSettings ? location.pathname.startsWith('/settings') : isActive(item.to, item.matchExact);
     const isLocked = locked && !isSettings;
     const paddingLeft = depth === 0 ? 'px-3' : depth === 1 ? 'pl-8 pr-3' : depth === 2 ? 'pl-12 pr-3' : 'pl-16 pr-3';
     const activeStyle = brandColor && active

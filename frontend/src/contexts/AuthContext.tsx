@@ -134,13 +134,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (!headers.has('Authorization')) {
             headers.set('Authorization', `Bearer ${token}`);
           }
-          // Phase 46: Attach tenant override header for superadmins (admin portal only)
+          // Phase 46: Attach tenant override header for superadmins (any portal)
           const activeTid = localStorage.getItem('active_tenant_id');
           if (activeTid && !headers.has('X-Tenant-Id')) {
-            const currentPortal = detectPortal();
-            if (currentPortal === 'admin') {
-              headers.set('X-Tenant-Id', activeTid);
-            }
+            headers.set('X-Tenant-Id', activeTid);
           }
           init = { ...init, headers };
         }

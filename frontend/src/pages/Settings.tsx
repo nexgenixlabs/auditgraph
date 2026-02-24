@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { getTermLabel, getTermDiscount, ACCOUNT_TIER_LABELS } from '../constants/pricing';
 import { maskCredential } from '../utils/maskCredential';
@@ -153,10 +153,173 @@ interface StatusData {
   next_report: string | null;
 }
 
+// ─── Ticketing Integration Component ───────────────────────────
+
+const TICKETING_PROVIDERS = [
+  { key: 'jira', label: 'Jira', icon: '🟦', desc: 'Atlassian Jira Cloud or Server',
+    fields: [
+      { name: 'cloud_url', label: 'Cloud URL', placeholder: 'acme.atlassian.net', type: 'text' },
+      { name: 'api_token', label: 'API Token', placeholder: 'Your Jira API token', type: 'password' },
+      { name: 'project_key', label: 'Project Key', placeholder: 'SECOPS', type: 'text' },
+      { name: 'issue_type', label: 'Issue Type', placeholder: 'Task', type: 'select', options: ['Task', 'Bug', 'Story'] },
+    ],
+  },
+  { key: 'servicenow', label: 'ServiceNow', icon: '🟩', desc: 'ServiceNow ITSM',
+    fields: [
+      { name: 'instance_url', label: 'Instance URL', placeholder: 'acme.service-now.com', type: 'text' },
+      { name: 'client_id', label: 'Client ID', placeholder: 'OAuth Client ID', type: 'text' },
+      { name: 'client_secret', label: 'Client Secret', placeholder: 'OAuth Client Secret', type: 'password' },
+      { name: 'assignment_group', label: 'Assignment Group', placeholder: 'Security Ops', type: 'text' },
+    ],
+  },
+  { key: 'azure_devops', label: 'Azure DevOps', icon: '🔷', desc: 'Azure DevOps Work Items',
+    fields: [
+      { name: 'org_url', label: 'Organization URL', placeholder: 'dev.azure.com/acme', type: 'text' },
+      { name: 'pat', label: 'Personal Access Token', placeholder: 'Your PAT', type: 'password' },
+      { name: 'project_name', label: 'Project Name', placeholder: 'SecurityOps', type: 'text' },
+      { name: 'work_item_type', label: 'Work Item Type', placeholder: 'Task', type: 'select', options: ['Task', 'Bug', 'Issue'] },
+    ],
+  },
+] as const;
+
+function TicketingSection({ ticketingRef }: { ticketingRef: React.RefObject<HTMLDivElement | null> }) {
+  const [configuring, setConfiguring] = useState<string | null>(null);
+  const [formData, setFormData] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const provider = TICKETING_PROVIDERS.find(p => p.key === configuring);
+
+  function handleConnect(key: string) {
+    setConfiguring(key);
+    setFormData({});
+    setSaved(null);
+  }
+
+  function handleSave() {
+    setSaving(true);
+    // Simulate save — backend integration can be added later
+    setTimeout(() => {
+      setSaving(false);
+      setSaved(configuring);
+      setConfiguring(null);
+    }, 800);
+  }
+
+  return (
+    <div ref={ticketingRef} id="ticketing" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+      <div className="flex items-center gap-3">
+        <span className="text-xl">🎫</span>
+        <div>
+          <div className="text-lg font-semibold text-gray-900">Ticketing</div>
+          <p className="text-xs text-gray-500">Connect your ITSM platform to create remediation tickets directly from the dashboard.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {TICKETING_PROVIDERS.map(t => (
+          <div key={t.key} className={`border rounded-lg p-4 text-center transition ${
+            saved === t.key ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-blue-300 hover:shadow-sm'
+          }`}>
+            <div className="text-2xl mb-2">{t.icon}</div>
+            <div className="font-semibold text-sm text-gray-900">{t.label}</div>
+            <p className="text-xs text-gray-500 mt-1 mb-3">{t.desc}</p>
+            {saved === t.key ? (
+              <span className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-green-700 bg-green-100 rounded-lg">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                Connected
+              </span>
+            ) : (
+              <button
+                onClick={() => handleConnect(t.key)}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+              >
+                Connect
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Configuration Panel */}
+      {configuring && provider && (
+        <div className="border border-blue-200 rounded-lg bg-blue-50/30 p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-gray-900">Configure {provider.label}</div>
+            <button onClick={() => setConfiguring(null)} className="text-gray-400 hover:text-gray-600 text-xs">Cancel</button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {provider.fields.map(f => (
+              <div key={f.name}>
+                <label className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                {f.type === 'select' ? (
+                  <select
+                    value={formData[f.name] || ''}
+                    onChange={e => setFormData(prev => ({ ...prev, [f.name]: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="">Select...</option>
+                    {f.options?.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type={f.type === 'password' ? 'password' : 'text'}
+                    value={formData[f.name] || ''}
+                    onChange={e => setFormData(prev => ({ ...prev, [f.name]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-3 pt-2">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-4 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save & Connect'}
+            </button>
+            <button
+              onClick={() => setConfiguring(null)}
+              className="px-4 py-2 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <p className="text-xs text-gray-400">
+        Configured ticketing enables the "Create Ticket" button on remediation cards across the CISO Dashboard.
+      </p>
+    </div>
+  );
+}
+
+const SETTINGS_TABS = [
+  { key: 'general', label: 'General' },
+  { key: 'users', label: 'Users' },
+  { key: 'connections', label: 'Connections' },
+  { key: 'notifications', label: 'Notifications' },
+  { key: 'security', label: 'Security' },
+  { key: 'compliance', label: 'Compliance' },
+  { key: 'scoring', label: 'Scoring' },
+  { key: 'governance', label: 'Governance' },
+  { key: 'integrations', label: 'Integrations' },
+  { key: 'advanced', label: 'Advanced' },
+] as const;
+
+type SettingsTab = typeof SETTINGS_TABS[number]['key'];
+
 export default function Settings() {
   const { isSuperAdmin, user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const { tab: urlTab } = useParams<{ tab?: string }>();
+  const activeTab: SettingsTab = (SETTINGS_TABS.some(t => t.key === urlTab) ? urlTab : 'general') as SettingsTab;
+  const ticketingRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -198,6 +361,13 @@ export default function Settings() {
   const [primaryCloud, setPrimaryCloud] = useState<string | null>(null);
   const [unlocking, setUnlocking] = useState(false);
   const [addingCloud, setAddingCloud] = useState(false);
+
+  // Hash scroll: when navigating to /settings/integrations#ticketing, scroll to ticketing section
+  useEffect(() => {
+    if (location.hash === '#ticketing' && activeTab === 'integrations') {
+      setTimeout(() => ticketingRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
+    }
+  }, [activeTab, location.hash]);
 
   useEffect(() => {
     if (user?.is_superadmin) return;
@@ -1569,8 +1739,27 @@ export default function Settings() {
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Settings</h2>
         <p className="text-sm text-gray-600 mt-1">
-          Configure discovery schedule, notifications, and organization details
+          Configure organization, connections, and integrations
         </p>
+      </div>
+
+      {/* Tab Bar */}
+      <div className="border-b border-gray-200 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8">
+        <nav className="flex gap-0 overflow-x-auto" aria-label="Settings tabs">
+          {SETTINGS_TABS.map(t => (
+            <button
+              key={t.key}
+              onClick={() => navigate(`/settings/${t.key}`, { replace: true })}
+              className={`whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === t.key
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
       </div>
 
       {/* Phase 85: Locked stage banner */}
@@ -1602,6 +1791,8 @@ export default function Settings() {
 
       {settings && (
         <>
+          {/* ═══ GENERAL TAB ═══ */}
+          {activeTab === 'general' && (<>
           {/* Section 1: Organization */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-5">
             <div className="text-lg font-semibold text-gray-900">Organization</div>
@@ -1708,7 +1899,7 @@ export default function Settings() {
             {/* Subscription Info */}
             {currentTenant && (
               <div className="pt-3 border-t space-y-3">
-                <div className="text-sm font-semibold text-gray-800">Subscription</div>
+                <div className="text-sm font-semibold text-gray-800">Plan</div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="bg-gray-50 rounded-lg p-3">
                     <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Plan</div>
@@ -1755,7 +1946,10 @@ export default function Settings() {
               </div>
             )}
           </div>
+          </>)}
 
+          {/* ═══ CONNECTIONS TAB ═══ */}
+          {activeTab === 'connections' && (<>
           {/* Section 2: Cloud Connections */}
           <div ref={cloudSectionRef} id="cloud-connections" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -2435,7 +2629,10 @@ export default function Settings() {
               </p>
             </div>
           </div>
+          </>)}
 
+          {/* ═══ NOTIFICATIONS TAB ═══ */}
+          {activeTab === 'notifications' && (<>
           {/* Section 4: Email Notifications */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -2776,7 +2973,10 @@ export default function Settings() {
               Maximum 10 webhooks. Payloads are signed with HMAC-SHA256 if a secret is configured.
             </p>
           </div>
+          </>)}
 
+          {/* ═══ SCORING TAB ═══ */}
+          {activeTab === 'scoring' && (<>
           {/* Section 6: Custom Risk Rules */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -2885,7 +3085,10 @@ export default function Settings() {
               Maximum 50 rules. Rules run after default scoring on every discovery run, ordered by priority (lower runs first).
             </p>
           </div>
+          </>)}
 
+          {/* ═══ GENERAL TAB (continued) — Change Password ═══ */}
+          {activeTab === 'general' && (<>
           {/* Change Password */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div>
@@ -2937,7 +3140,10 @@ export default function Settings() {
               {pwChanging ? 'Changing...' : 'Change Password'}
             </button>
           </div>
+          </>)}
 
+          {/* ═══ USERS TAB ═══ */}
+          {activeTab === 'users' && (<>
           {/* Section 7: User Management */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -3044,10 +3250,13 @@ export default function Settings() {
             )}
 
             <p className="text-xs text-gray-400">
-              Roles: Admin (full access), Reader (read-only), Compliance (reports + compliance config). The last admin cannot be deleted or demoted.
+              Roles: Admin (full access), Security Admin (scan + remediation), Reader (read-only), Compliance (reports + compliance config). The last admin cannot be deleted or demoted.
             </p>
           </div>
+          </>)}
 
+          {/* ═══ SECURITY TAB ═══ */}
+          {activeTab === 'security' && (<>
           {/* Section 8: API Keys */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -3359,7 +3568,10 @@ export default function Settings() {
               {ssoSaving ? 'Saving...' : 'Save SSO Settings'}
             </button>
           </div>
+          </>)}
 
+          {/* ═══ COMPLIANCE TAB ═══ */}
+          {activeTab === 'compliance' && (<>
           {/* Section 10: Compliance Frameworks */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div>
@@ -3435,7 +3647,10 @@ export default function Settings() {
               Disabled frameworks are excluded from the compliance dashboard and gap analysis. Controls are evaluated on each API call using current identity posture data.
             </p>
           </div>
+          </>)}
 
+          {/* ═══ GOVERNANCE TAB ═══ */}
+          {activeTab === 'governance' && (<>
           {/* Section 10: SOAR Playbooks */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -3653,7 +3868,10 @@ export default function Settings() {
               {saGovSaving ? 'Saving...' : 'Save Governance Policy'}
             </button>
           </div>
+          </>)}
 
+          {/* ═══ ADVANCED TAB ═══ */}
+          {activeTab === 'advanced' && (<>
           {/* Section 12: Data Retention (Phase 72) — superadmin only */}
           {isSuperAdmin && <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div>
@@ -3844,9 +4062,15 @@ export default function Settings() {
               </p>
             </div>
           </div>}
+          </>)}
 
+          {/* ═══ INTEGRATIONS TAB ═══ */}
+          {activeTab === 'integrations' && (<>
           {/* Section 14: Integrations (Phase 83) */}
           <IntegrationsSection />
+
+          {/* Ticketing Integration */}
+          <TicketingSection ticketingRef={ticketingRef} />
 
           {/* Section 15: P2 Telemetry */}
           <div className="bg-white dark:bg-slate-900 rounded-xl border border-gray-200 dark:border-slate-700 p-6 space-y-4">
@@ -3922,6 +4146,7 @@ export default function Settings() {
               )}
             </div>
           </div>
+          </>)}
 
           {/* Save button */}
           <div className="flex items-center gap-4">

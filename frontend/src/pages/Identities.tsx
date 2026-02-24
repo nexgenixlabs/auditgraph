@@ -282,6 +282,10 @@ export default function IdentitiesPage() {
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
   const [allSubscriptions, setAllSubscriptions] = useState<{subscription_id: string; subscription_name: string}[]>([]);
   const [groupFilter, setGroupFilter] = useState<number | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [hasRolesFilter, setHasRolesFilter] = useState(false);
+  const [workloadFilter, setWorkloadFilter] = useState(false);
+  const [contextBanner, setContextBanner] = useState<string | null>(null);
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('risk_level');
@@ -330,28 +334,85 @@ export default function IdentitiesPage() {
     return `Subscription ${suffix}`;
   }
 
-  // URL param sync
+  // URL param sync — supports both legacy param names and CISO Dashboard param names
   useEffect(() => {
     const params = new URLSearchParams(location.search);
+
+    // Category: identity_category, category (also map CISO values: Human→human_user, ServicePrincipal→service_principal)
     const catParam = params.get('identity_category') || params.get('category');
-    const riskParam = params.get('risk_level');
-    const ownerParam = params.get('owner_status');
+    const CISO_CAT_MAP: Record<string, string> = {
+      'Human': 'human_user', 'ServicePrincipal': 'service_principal',
+      'ManagedIdentity': 'managed_identity_system', 'Guest': 'guest',
+    };
+    const mappedCat = catParam ? (CISO_CAT_MAP[catParam] || catParam) : null;
+    setCategoryFilter(mappedCat && CATEGORY_FILTER_OPTIONS.find(o => o.value === mappedCat) ? mappedCat as IdentityCategory : 'all');
+
+    // Risk: risk_level, risk (supports comma-separated: risk=critical,high → use first match)
+    const riskParam = params.get('risk_level') || params.get('risk');
+    if (riskParam) {
+      const first = riskParam.split(',')[0].toLowerCase();
+      setRiskFilter(RISK_FILTER_OPTIONS.find(o => o.value === first) ? first as RiskLevel : 'all');
+    } else {
+      setRiskFilter('all');
+    }
+
+    // Owner: owner_status=unowned, owner=none
+    const ownerParam = params.get('owner_status') || params.get('owner');
+    setOwnerFilter(ownerParam === 'unowned' || ownerParam === 'none' ? 'unowned' : 'all');
+
+    // Activity/Dormant: activity_status=dormant, dormant=true
     const activityParam = params.get('activity_status');
+    const dormantParam = params.get('dormant');
+    setActivityFilter(activityParam === 'dormant' || dormantParam === 'true' ? 'dormant' : 'all');
+
+    // Privilege tier
     const tierParam = params.get('privilege_tier');
-    const credParam = params.get('credential_status') || params.get('credential_expiry');
-    const caParam = params.get('ca_coverage');
-    setCategoryFilter(catParam && CATEGORY_FILTER_OPTIONS.find(o => o.value === catParam) ? catParam as IdentityCategory : 'all');
-    setRiskFilter(riskParam && RISK_FILTER_OPTIONS.find(o => o.value === riskParam) ? riskParam as RiskLevel : 'all');
-    setOwnerFilter(ownerParam === 'unowned' ? 'unowned' : 'all');
-    setActivityFilter(activityParam === 'dormant' ? 'dormant' : 'all');
-    if (tierParam != null) {
+    const privilegedParam = params.get('privileged');
+    if (privilegedParam === 'true') {
+      setTierFilter([0, 1]); // T0 + T1 = Privileged + Elevated
+    } else if (tierParam != null) {
       const tiers = tierParam.split(',').map(Number).filter(t => [0, 1, 2, 3].includes(t));
       setTierFilter(tiers.length > 0 ? tiers : 'all');
     } else {
       setTierFilter('all');
     }
+
+    // Credential
+    const credParam = params.get('credential_status') || params.get('credential_expiry');
     setCredentialFilter(credParam && ['expired', 'expiring_soon', 'valid', 'none'].includes(credParam) ? credParam as any : 'all');
+
+    // CA coverage
+    const caParam = params.get('ca_coverage');
     setCaFilter(caParam === 'covered' ? 'covered' : caParam === 'not_covered' ? 'not_covered' : 'all');
+
+    // Status (e.g., ?status=Disabled)
+    const statusParam = params.get('status');
+    setStatusFilter(statusParam ? statusParam.toLowerCase() : 'all');
+
+    // hasRoles (e.g., ?hasRoles=true)
+    setHasRolesFilter(params.get('hasRoles') === 'true');
+
+    // Workload identities (e.g., ?workload=true → SP + managed identity types)
+    setWorkloadFilter(params.get('workload') === 'true');
+
+    // Search
+    const searchParam = params.get('search');
+    if (searchParam) setSearch(searchParam);
+
+    // Context banner for pillar/remediation/workload (API may not support these directly)
+    const pillarParam = params.get('pillar');
+    const remParam = params.get('remediation');
+    const workloadParam = params.get('workload');
+    if (workloadParam === 'true') {
+      setContextBanner('Showing workload identities (Service Principals + Managed Identities)');
+    } else if (pillarParam) {
+      const label = pillarParam.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      setContextBanner(`Showing identities related to ${label}`);
+    } else if (remParam) {
+      setContextBanner(`Showing identities affected by remediation ${remParam}`);
+    } else {
+      setContextBanner(null);
+    }
   }, [location.search]);
 
   // Fetch
@@ -771,6 +832,7 @@ export default function IdentitiesPage() {
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
     if (riskFilter !== 'all') result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
     if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
+    if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
     if (subscriptionFilter !== 'all') result = result.filter(i => i.subscription_id === subscriptionFilter);
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (activityFilter === 'dormant') result = result.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'idle' || d === 'never'; });
@@ -795,6 +857,12 @@ export default function IdentitiesPage() {
     }
     if (groupFilter !== 'all' && groupMemberIds) {
       result = result.filter(i => groupMemberIds.has(i.identity_id));
+    }
+    if (statusFilter !== 'all') {
+      result = result.filter(i => safeLower(i.status) === statusFilter || (statusFilter === 'disabled' && i.enabled === false));
+    }
+    if (hasRolesFilter) {
+      result = result.filter(i => (i.rbac_role_count ?? 0) + (i.entra_role_count ?? 0) > 0);
     }
 
     result.sort((a, b) => {
@@ -846,7 +914,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, riskFilter, categoryFilter, subscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, riskFilter, categoryFilter, workloadFilter, subscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, statusFilter, hasRolesFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -1240,6 +1308,19 @@ export default function IdentitiesPage() {
         </div>
       )}
 
+      {/* Context banner for CISO Dashboard drill-down */}
+      {contextBanner && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5 mb-3 flex items-center justify-between">
+          <span className="text-sm text-blue-800 font-medium">{contextBanner}</span>
+          <button
+            onClick={() => { setContextBanner(null); navigate('/identities', { replace: true }); }}
+            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="bg-white border rounded-xl p-3 mb-3 shadow-sm">
         {/* Mode toggle */}
@@ -1280,7 +1361,7 @@ export default function IdentitiesPage() {
             <option value="all">All Groups</option>
             {allGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.member_count})</option>)}
           </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setSubscriptionFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setGroupFilter('all'); setActiveViewId(null); navigate('/identities', { replace: true }); }}
+          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setWorkloadFilter(false); setSubscriptionFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setGroupFilter('all'); setStatusFilter('all'); setHasRolesFilter(false); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true }); }}
             className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
             Clear
           </button>

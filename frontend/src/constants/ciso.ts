@@ -1,14 +1,16 @@
 /**
- * AuditGraph v3.0.4 CISO Dashboard — Design System
+ * AuditGraph v3.0.5 CISO Dashboard — Design System
  *
  * Color tokens, scoring helpers, and TypeScript interfaces.
  * All dashboard components MUST use these tokens — no raw hex values.
  *
  * v3.0.2: DrillableNumber enforcement, Preview Changes panel, Create Ticket integration,
  *          bug fixes (Rules 30-32), dead button elimination (Rules 33-35).
- * v3.0.3: identityStore (real scan data), data source attribution (Rules 37-40).
- * v3.0.4: Eliminated separate remediationDiffs — role diffs embedded in
- *          remediation.changes[]. "Connect Azure" bug fixed (Rule 33/39 updated).
+ * v3.0.5: MAJOR ARCHITECTURE FIX — removed all invented schema fields
+ *          (identityStore, identityIds, changes[], affectedIdentityIds).
+ *          Dashboard tenantData contains ONLY summary data. Drill-downs
+ *          navigate to /identities with filter params. Preview Changes
+ *          fetches from remediation detail API on demand.
  */
 
 // ─── Color Tokens ────────────────────────────────────────────────
@@ -150,7 +152,6 @@ export interface Pillar {
   weight: number;
   detail: string;
   identityCount: number;
-  identityIds: string[];
   subMetrics: { name: string; value: number; max: number }[];
 }
 
@@ -166,7 +167,6 @@ export interface GhostAccounts {
   total: number;
   privileged: number;
   nonPrivileged: number;
-  identityIds: string[];
   roles: { role: string; scope: string; count: number }[];
   complianceImpact: string[];
   lastDetected: string;
@@ -199,8 +199,6 @@ export interface Remediation {
   confidence: number;
   productionImpact: boolean;
   riskPerDay: number;
-  affectedIdentityIds: string[];
-  changes: RemediationChange[];
 }
 
 export interface GovernanceMetric {
@@ -232,7 +230,7 @@ export interface ComplianceControl {
   severity: string;
   evidence: string;
   recommendation: string;
-  identityIds: string[];
+  identityCount: number;
 }
 
 export interface ComplianceFramework {
@@ -274,33 +272,6 @@ export interface TicketingIntegration {
   } | null;
 }
 
-export interface IdentityRecord {
-  id: string;
-  displayName: string;
-  upn: string;
-  type: string;
-  status: string;
-  lastSignIn: string | null;
-  riskScore: number;
-  riskLevel: string;
-  roles: string[];
-  owner: string | null;
-  groups: string[];
-  createdDate: string | null;
-}
-
-/** Per-identity role change diff, embedded in remediation.changes[] (v3.0.4). */
-export interface RemediationChange {
-  identityId: string;
-  currentRole: string;
-  currentScope: string;
-  proposedRole: string;
-  proposedScope: string;
-  riskLevel: string;
-  impact: string;
-  reversible: boolean;
-}
-
 export interface RiskMovement {
   trajectory: number[];
   changes: RiskMovementChange[];
@@ -329,5 +300,4 @@ export interface TenantData {
   compliance: ComplianceData;
   riskMovement: RiskMovement;
   ticketingIntegration: TicketingIntegration;
-  identityStore: Record<string, IdentityRecord>;
 }

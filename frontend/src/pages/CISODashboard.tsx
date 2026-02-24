@@ -1,5 +1,5 @@
 /**
- * AuditGraph v3.0.4 — Executive Summary
+ * AuditGraph v3.0.5 — Executive Summary
  *
  * Dark-themed executive risk intelligence view with 6 tabs:
  *   1. Executive Summary   2. Identity Risk   3. Action Plan
@@ -11,18 +11,19 @@
  * v3.0.2: DrillableNumber enforcement (Rule 36), Preview Changes panel,
  *         Create Ticket integration, bug fixes (Rules 30-32),
  *         dead button elimination (Rules 33-35).
- * v3.0.3: identityStore (real scan data), data source attribution (Rules 37-40).
- * v3.0.4: Eliminated separate remediationDiffs — role diffs embedded in
- *         remediation.changes[]. "Connect Azure" bug fixed (Rule 33/39).
+ * v3.0.5: MAJOR ARCHITECTURE FIX — removed identityStore, identityIds,
+ *         changes[], affectedIdentityIds. Drill-downs navigate to
+ *         /identities with filter params. Preview Changes fetches from
+ *         remediation detail API. DrillDownPanel DEPRECATED.
  */
-import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 import {
   COLORS, getTierColor, getScoreColor, getPillarColor,
   getTier, getGrade, getSemanticColor,
   type TenantData, type Remediation, type ComplianceFramework,
-  type IdentityRecord, type RemediationChange,
 } from '../constants/ciso';
 
 // ─── Font Injection ──────────────────────────────────────────────
@@ -218,19 +219,20 @@ function Gauge({ value, marks, max = 100 }: {
   );
 }
 
-// ─── DrillableNumber (v3.0.2, enhanced v3.0.3) ──────────────────
+// ─── DrillableNumber (v3.0.5: navigation model) ─────────────────
 
-interface DrillState { label: string; filter: string; identityIds?: string[] }
-const DrillCtx = createContext<(d: DrillState) => void>(() => {});
-
-/** Wraps a countable number with dashed underline + pointer. Click opens DrillDownPanel.
- *  v3.0.3: accepts identityIds to resolve from identityStore instead of API fetch. */
-function DN({ children, label, filter, identityIds }: { children: React.ReactNode; label: string; filter?: string; identityIds?: string[] }) {
-  const drill = useContext(DrillCtx);
-  if (!filter) return <>{children}</>;
+/** Wraps a countable number with dashed underline + pointer.
+ *  v3.0.5: navigates to /identities with filter params (Section 3.1).
+ *  Non-identity numbers use tooltip prop instead of navigateTo. */
+function DN({ children, navigateTo, tooltip }: { children: React.ReactNode; navigateTo?: string; tooltip?: string }) {
+  const navigate = useNavigate();
+  if (!navigateTo) {
+    return <span title={tooltip}>{children}</span>;
+  }
   return (
     <span
-      onClick={(e) => { e.stopPropagation(); drill({ label, filter, identityIds }); }}
+      onClick={(e) => { e.stopPropagation(); navigate(navigateTo); }}
+      title={tooltip || `Click to view details`}
       style={{
         textDecoration: 'underline', textDecorationStyle: 'dashed' as const,
         textUnderlineOffset: '3px', cursor: 'pointer',
@@ -241,168 +243,32 @@ function DN({ children, label, filter, identityIds }: { children: React.ReactNod
   );
 }
 
-// ─── Data Source Attribution (v3.0.3 Rule 40) ───────────────────
-
-function DataSourceFooter({ lastScan }: { lastScan: string }) {
-  return (
-    <div style={{
-      padding: '8px 20px', borderTop: `1px solid ${COLORS.border}`,
-      fontSize: 10, color: COLORS.textDim, fontFamily: FONT.ui,
-      display: 'flex', alignItems: 'center', gap: 6,
-    }}>
-      <span style={{ width: 4, height: 4, borderRadius: '50%', background: COLORS.success, flexShrink: 0 }} />
-      Source: Azure RBAC scan · Entra ID · Last updated: {new Date(lastScan).toLocaleString()}
-    </div>
-  );
-}
-
-// ─── DrillDownPanel (560px slide-in, v3.0.3: identityStore) ─────
-
-function DrillDownPanel({ drill, data, onClose }: { drill: DrillState; data: TenantData; onClose: () => void }) {
-  const navigate = useNavigate();
-  const { withConnection } = useConnection();
-  const [apiItems, setApiItems] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  // v3.0.3 Rule 37: Resolve from identityStore when identityIds are provided
-  const storeItems: IdentityRecord[] = useMemo(() => {
-    if (!drill.identityIds?.length) return [];
-    return drill.identityIds
-      .map(id => data.identityStore[id])
-      .filter((r): r is IdentityRecord => !!r);
-  }, [drill.identityIds, data.identityStore]);
-
-  const useStore = storeItems.length > 0;
-
-  // Fallback to API when no identityIds or identityStore is empty
-  useEffect(() => {
-    if (useStore) { setLoading(false); return; }
-    setLoading(true);
-    fetch(withConnection(`/api/identities?${drill.filter}&limit=50`))
-      .then(r => r.ok ? r.json() : { items: [] })
-      .then(d => { setApiItems(d.items || []); setLoading(false); })
-      .catch(() => { setApiItems([]); setLoading(false); });
-  }, [drill.filter, useStore]);
-
-  // Normalize items to a common shape for rendering
-  const items = useMemo(() => {
-    if (useStore) {
-      return storeItems.map(r => ({
-        id: r.id,
-        displayName: r.displayName,
-        upn: r.upn,
-        type: r.type,
-        riskLevel: r.riskLevel,
-      }));
-    }
-    return apiItems.map((item: any) => ({
-      id: item.id,
-      displayName: item.display_name || item.upn || 'Unknown',
-      upn: item.upn || '',
-      type: (item.identity_category || 'unknown').replace(/_/g, ' '),
-      riskLevel: item.risk_level || 'unknown',
-    }));
-  }, [useStore, storeItems, apiItems]);
-
-  const riskColor = (level: string) =>
-    level === 'critical' ? COLORS.danger :
-    level === 'high' ? COLORS.elevated :
-    level === 'medium' ? COLORS.warning : COLORS.success;
-
-  return (
-    <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 60 }} />
-      <div style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: 560,
-        background: COLORS.surface, borderLeft: `1px solid ${COLORS.border}`,
-        zIndex: 61, display: 'flex', flexDirection: 'column',
-        boxShadow: '-8px 0 32px rgba(0,0,0,0.3)',
-      }}>
-        {/* Header */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${COLORS.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{drill.label}</div>
-            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-              {loading ? 'Loading...' : `${items.length} identities`}
-              {useStore && <span style={{ marginLeft: 6, color: COLORS.success, fontSize: 10 }}>(from scan)</span>}
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', fontSize: 20, fontFamily: FONT.ui, padding: '4px 8px' }}>×</button>
-        </div>
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-          {loading ? (
-            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontSize: 12, fontFamily: FONT.ui }}>
-              <div style={{ width: 24, height: 24, borderRadius: '50%', border: `2px solid ${COLORS.border}`, borderTopColor: COLORS.accent, animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
-              Loading identities...
-            </div>
-          ) : items.length === 0 ? (
-            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-              <div style={{ fontSize: 24, marginBottom: 8 }}>🔍</div>
-              <div style={{ fontSize: 12 }}>No identities found</div>
-              <div style={{ fontSize: 10, marginTop: 4 }}>Run a discovery scan to populate identity data</div>
-            </div>
-          ) : items.map((item, i) => (
-            <div key={item.id || i} onClick={() => { navigate(`/identities/${item.id}`); onClose(); }} style={{
-              padding: '10px 20px', borderBottom: `1px solid ${COLORS.border}`, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 10,
-              transition: 'background 0.1s',
-            }}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = COLORS.surfaceHover; }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{item.displayName}</div>
-                <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{item.type}</div>
-              </div>
-              <CISOBadge label={item.riskLevel} color={riskColor(item.riskLevel)} />
-            </div>
-          ))}
-        </div>
-        {/* Footer: View All + Data Source Attribution (Rule 40) */}
-        <div style={{ padding: '12px 20px', borderTop: `1px solid ${COLORS.border}` }}>
-          <button onClick={() => { navigate(`/identities?${drill.filter}`); onClose(); }} style={{
-            width: '100%', padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-            background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
-            cursor: 'pointer', fontFamily: FONT.ui,
-          }}>View All in Identities →</button>
-        </div>
-        <DataSourceFooter lastScan={data.tenant.lastScan} />
-      </div>
-    </>
-  );
-}
-
-// ─── PreviewChangesPanel (640px, v3.0.4: rem.changes[]) ─────────
+// ─── PreviewChangesPanel (640px, v3.0.5: API fetch model) ────────
 
 function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: TenantData; onClose: () => void }) {
+  const navigate = useNavigate();
   const { withConnection } = useConnection();
+  const [loading, setLoading] = useState(true);
+  const [detail, setDetail] = useState<any>(null);
+  const [error, setError] = useState(false);
 
-  // v3.0.4 Rule 39: Read directly from remediation.changes[] (embedded by scan engine)
-  const changes: RemediationChange[] = rem.changes || [];
-  const hasChanges = changes.length > 0;
-
-  // Resolve display names from identityStore
-  const resolvedChanges = useMemo(() => {
-    return changes.map(ch => {
-      const identity = data.identityStore[ch.identityId];
-      return {
-        ...ch,
-        displayName: identity?.displayName || identity?.upn || ch.identityId,
-        upn: identity?.upn || '',
-      };
-    });
-  }, [changes, data.identityStore]);
-
-  const handleScan = useCallback(() => {
-    fetch(withConnection('/api/runs/trigger'), { method: 'POST' }).catch(() => {});
-    onClose();
-  }, [withConnection, onClose]);
+  // v3.0.5 Rule 39: Fetch from remediation detail API on click
+  useEffect(() => {
+    setLoading(true);
+    setError(false);
+    fetch(withConnection(`/api/identities/${rem.id}/remediations`))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { setDetail(d); setLoading(false); })
+      .catch(() => { setError(true); setLoading(false); });
+  }, [rem.id, withConnection]);
 
   const riskColor = (level: string) =>
     level === 'critical' ? COLORS.danger :
     level === 'high' ? COLORS.elevated :
     level === 'medium' ? COLORS.warning : COLORS.success;
+
+  // Determine whether we have detailed identity-level data
+  const hasDetail = detail?.playbooks?.length > 0 || detail?.affected_identities?.length > 0;
 
   return (
     <>
@@ -422,7 +288,7 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
             </div>
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', fontSize: 20, fontFamily: FONT.ui }}>×</button>
           </div>
-          {/* Score impact bar */}
+          {/* Score impact bar — always shown from tenantData */}
           <div style={{
             marginTop: 12, padding: '10px 14px', borderRadius: 8,
             background: COLORS.successSoft, border: `1px solid ${COLORS.success}2e`,
@@ -437,76 +303,99 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
-          {!hasChanges ? (
-            /* v3.0.4 Rule 33: Empty state — "Run Discovery Scan", never "Connect Azure" */
-            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-              <div style={{ fontSize: 28, marginBottom: 12 }}>📋</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, marginBottom: 6 }}>Role change details pending</div>
-              <div style={{ fontSize: 11, lineHeight: 1.6, marginBottom: 16 }}>
-                Role change details will be available after the next discovery scan completes.
+          {loading ? (
+            /* Skeleton while API responds */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {[1, 2, 3].map(i => (
+                <div key={i} style={{
+                  background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+                  borderRadius: 8, padding: '16px 14px', height: 60,
+                }}>
+                  <div style={{ width: `${60 + i * 10}%`, height: 10, borderRadius: 4, background: COLORS.border, marginBottom: 8 }} />
+                  <div style={{ width: `${40 + i * 5}%`, height: 8, borderRadius: 4, background: COLORS.border }} />
+                </div>
+              ))}
+              <div style={{ textAlign: 'center' as const, fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 8 }}>
+                Loading affected identities...
               </div>
-              <button onClick={handleScan} style={{
-                padding: '8px 20px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-                background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-              }}>Run Discovery Scan</button>
             </div>
-          ) : (
+          ) : hasDetail ? (
+            /* Loaded — API returned data */
             <>
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 12 }}>
-                Affected Identities ({resolvedChanges.length})
+                Remediation Details
               </div>
-              {resolvedChanges.map((ch, i) => (
+              {(detail.playbooks || []).map((pb: any, i: number) => (
                 <div key={i} style={{
                   background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
                   borderRadius: 8, padding: '12px 14px', marginBottom: 8,
                 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ch.displayName}</div>
-                      {ch.upn && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{ch.upn}</div>}
-                    </div>
-                    <CISOBadge label={ch.riskLevel} color={riskColor(ch.riskLevel)} />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, marginTop: 8, alignItems: 'center' }}>
-                    <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.dangerSoft, textAlign: 'center' as const }}>
-                      <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>CURRENT</div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.danger, fontFamily: FONT.mono }}>{ch.currentRole}</div>
-                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ch.currentScope}</div>
-                    </div>
-                    <span style={{ fontSize: 14, color: COLORS.textMuted }}>→</span>
-                    <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.successSoft, textAlign: 'center' as const }}>
-                      <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>PROPOSED</div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.success, fontFamily: FONT.mono }}>{ch.proposedRole}</div>
-                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ch.proposedScope}</div>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
-                    <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{ch.impact}</span>
-                    {ch.reversible && <span style={{ fontSize: 9, color: COLORS.success, fontFamily: FONT.ui }}>Reversible</span>}
-                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{pb.title || pb.name}</div>
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 4 }}>{pb.description || pb.subtitle}</div>
+                  {pb.risk_level && <CISOBadge label={pb.risk_level} color={riskColor(pb.risk_level)} />}
                 </div>
               ))}
             </>
+          ) : (
+            /* Fallback — show existing remediation data + View Affected Identities link (Rule 39) */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui }}>
+                Remediation Summary
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Affected</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.affected}</div>
+                </div>
+                <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Est. Effort</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.effort}</div>
+                </div>
+                <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Rollback</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: rem.rollbackRisk === 'safe' ? COLORS.success : COLORS.danger, fontFamily: FONT.mono, marginTop: 4 }}>{rem.rollback}</div>
+                </div>
+                <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Confidence</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.confidence}%</div>
+                </div>
+              </div>
+              <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
+                <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Compliance</div>
+                <div style={{ fontSize: 12, color: COLORS.text, fontFamily: FONT.ui, marginTop: 4 }}>{rem.compliance}</div>
+              </div>
+              {/* Navigate to All Identities with remediation filter */}
+              <button onClick={() => { navigate(`/identities?remediation=${rem.id}`); onClose(); }} style={{
+                width: '100%', padding: '10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
+                cursor: 'pointer', fontFamily: FONT.ui, marginTop: 4,
+              }}>View Affected Identities →</button>
+            </div>
           )}
         </div>
 
         {/* Footer */}
         <div style={{ padding: '14px 20px', borderTop: `1px solid ${COLORS.border}`, display: 'flex', gap: 8 }}>
-          {hasChanges && (
-            <button style={{
-              flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-              background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
-              color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-            }}>Apply Changes</button>
-          )}
+          <button style={{
+            flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
+            color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+          }}>Apply Changes</button>
           <button onClick={onClose} style={{
-            flex: hasChanges ? undefined : 1, padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
             background: 'transparent', color: COLORS.textMuted,
             border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
           }}>Cancel</button>
         </div>
         {/* Rule 40: Data source attribution */}
-        <DataSourceFooter lastScan={data.tenant.lastScan} />
+        <div style={{
+          padding: '8px 20px', borderTop: `1px solid ${COLORS.border}`,
+          fontSize: 10, color: COLORS.textDim, fontFamily: FONT.ui,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <span style={{ width: 4, height: 4, borderRadius: '50%', background: COLORS.success, flexShrink: 0 }} />
+          Source: Azure RBAC scan · Entra ID · Last updated: {new Date(data.tenant.lastScan).toLocaleString()}
+        </div>
       </div>
     </>
   );
@@ -537,10 +426,10 @@ function CreateTicketModal({ rem, data, onClose }: { rem: Remediation; data: Ten
             Connect Jira, ServiceNow, or Azure DevOps in Settings to create tickets directly from remediation actions.
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={() => { navigate('/settings'); onClose(); }} style={{
+            <button onClick={() => { navigate('/settings/integrations#ticketing'); onClose(); }} style={{
               flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-            }}>Go to Settings</button>
+            }}>Configure in Settings</button>
             <button onClick={onClose} style={{
               padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: 'transparent', color: COLORS.textMuted,
@@ -760,7 +649,6 @@ function buildSampleData(): TenantData {
       total: 3,
       privileged: 1,
       nonPrivileged: 2,
-      identityIds: [],
       roles: [
         { role: 'Contributor', scope: '/subscriptions/prod-sub-001', count: 1 },
         { role: 'Reader', scope: '/subscriptions/dev-sub-002', count: 2 },
@@ -781,12 +669,12 @@ function buildSampleData(): TenantData {
       { type: 'Guest Users', count: 3, percentage: 5.3, color: 'textDim' },
     ],
     pillars: [
-      { name: 'Effective Privilege', score: 38, weight: 30, detail: '4 IDs over-privileged', identityCount: 4, identityIds: [], subMetrics: [{ name: 'Tenant/Sub Owner', value: 2, max: 10 }, { name: 'High-priv roles', value: 6, max: 20 }] },
-      { name: 'Credential Risk', score: 22, weight: 20, detail: '3 expired credentials', identityCount: 3, identityIds: [], subMetrics: [{ name: 'Expired certs', value: 2, max: 10 }, { name: 'No MFA', value: 1, max: 8 }] },
-      { name: 'Trust & Federation', score: 15, weight: 20, detail: '2 external trusts', identityCount: 2, identityIds: [], subMetrics: [{ name: 'External apps', value: 2, max: 5 }] },
-      { name: 'Usage Dormancy', score: 100, weight: 10, detail: '53 dormant identities', identityCount: 53, identityIds: [], subMetrics: [{ name: 'Dormant privl', value: 4, max: 4 }, { name: 'Dormant all', value: 53, max: 57 }] },
-      { name: 'Ownership Governance', score: 96, weight: 10, detail: '44 unowned SPNs', identityCount: 44, identityIds: [], subMetrics: [{ name: 'Unowned', value: 44, max: 46 }] },
-      { name: 'External Exposure', score: 28, weight: 10, detail: '4 externally exposed', identityCount: 4, identityIds: [], subMetrics: [{ name: 'Multi-tenant apps', value: 3, max: 10 }, { name: 'Guest access', value: 1, max: 3 }] },
+      { name: 'Effective Privilege', score: 38, weight: 30, detail: '4 IDs over-privileged', identityCount: 4, subMetrics: [{ name: 'Tenant/Sub Owner', value: 2, max: 10 }, { name: 'High-priv roles', value: 6, max: 20 }] },
+      { name: 'Credential Risk', score: 22, weight: 20, detail: '3 expired credentials', identityCount: 3, subMetrics: [{ name: 'Expired certs', value: 2, max: 10 }, { name: 'No MFA', value: 1, max: 8 }] },
+      { name: 'Trust & Federation', score: 15, weight: 20, detail: '2 external trusts', identityCount: 2, subMetrics: [{ name: 'External apps', value: 2, max: 5 }] },
+      { name: 'Usage Dormancy', score: 100, weight: 10, detail: '53 dormant identities', identityCount: 53, subMetrics: [{ name: 'Dormant privl', value: 4, max: 4 }, { name: 'Dormant all', value: 53, max: 57 }] },
+      { name: 'Ownership Governance', score: 96, weight: 10, detail: '44 unowned SPNs', identityCount: 44, subMetrics: [{ name: 'Unowned', value: 44, max: 46 }] },
+      { name: 'External Exposure', score: 28, weight: 10, detail: '4 externally exposed', identityCount: 4, subMetrics: [{ name: 'Multi-tenant apps', value: 3, max: 10 }, { name: 'Guest access', value: 1, max: 3 }] },
     ],
     blastRadius: {
       highRisk: 12.8, lowRisk: 0, orphaned: 44, productionWorkloads: 46,
@@ -806,10 +694,10 @@ function buildSampleData(): TenantData {
       rbacModifiers: { value: 3, subtitle: 'Custom role defs' },
     },
     remediations: [
-      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3, affectedIdentityIds: [], changes: [] },
-      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1, affectedIdentityIds: [], changes: [] },
-      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5, affectedIdentityIds: [], changes: [] },
-      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05, affectedIdentityIds: [], changes: [] },
+      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3 },
+      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1 },
+      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5 },
+      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05 },
     ],
     governance: {
       effectivenessScore: 1, effectivenessTier: 'CRITICAL', maturityLevel: 'Ad-Hoc',
@@ -860,7 +748,6 @@ function buildSampleData(): TenantData {
       scanMeta: { frequency: 'High', lastRun: new Date().toISOString(), sources: 'Azure RBAC, Entra ID, Graph API', duration: '1m 5s', completeness: '100%' },
     },
     ticketingIntegration: { configured: false, provider: null, projectKey: null, defaultAssignee: null, jira: null },
-    identityStore: {},
   };
 }
 
@@ -868,6 +755,7 @@ function buildSampleData(): TenantData {
 
 function useCISOData(): { data: TenantData; loading: boolean } {
   const { withConnection, selectedConnectionId } = useConnection();
+  const { activeTenantId } = useAuth();
   const [data, setData] = useState<TenantData>(buildSampleData);
   const [loading, setLoading] = useState(true);
 
@@ -876,18 +764,16 @@ function useCISOData(): { data: TenantData; loading: boolean } {
     async function load() {
       setLoading(true);
       try {
-        const [statsRes, postureRes, summaryRes, compRes, identitiesRes] = await Promise.all([
+        const [statsRes, postureRes, summaryRes, compRes] = await Promise.all([
           fetch(withConnection('/api/stats')).catch(() => null),
           fetch(withConnection('/api/dashboard/posture')).catch(() => null),
           fetch(withConnection('/api/identity-summary')).catch(() => null),
           fetch(withConnection('/api/dashboard/compliance')).catch(() => null),
-          fetch(withConnection('/api/identities?limit=500')).catch(() => null),
         ]);
         const stats = statsRes?.ok ? await statsRes.json() : null;
         const posture = postureRes?.ok ? await postureRes.json() : null;
         const summary = summaryRes?.ok ? await summaryRes.json() : null;
         const comp = compRes?.ok ? await compRes.json() : null;
-        const identities = identitiesRes?.ok ? await identitiesRes.json() : null;
 
         if (cancelled) return;
         const base = buildSampleData();
@@ -921,28 +807,6 @@ function useCISOData(): { data: TenantData; loading: boolean } {
           }
         }
 
-        // v3.0.3: Build identityStore from real scan data (Rule 37)
-        if (identities?.items?.length) {
-          const store: Record<string, IdentityRecord> = {};
-          for (const item of identities.items) {
-            const id = String(item.id);
-            store[id] = {
-              id,
-              displayName: item.display_name || item.upn || 'Unknown',
-              upn: item.upn || '',
-              type: (item.identity_category || 'unknown').replace(/_/g, ' '),
-              status: item.activity_status || item.status || 'unknown',
-              lastSignIn: item.last_sign_in || null,
-              riskScore: item.risk_score || 0,
-              riskLevel: item.risk_level || 'unknown',
-              roles: [],
-              owner: null,
-              groups: [],
-              createdDate: item.created_date || null,
-            };
-          }
-          base.identityStore = store;
-        }
         setData(base);
       } catch {
         // Keep sample data
@@ -952,12 +816,26 @@ function useCISOData(): { data: TenantData; loading: boolean } {
     }
     load();
     return () => { cancelled = true; };
-  }, [selectedConnectionId]);
+  }, [selectedConnectionId, activeTenantId]);
 
   return { data, loading };
 }
 
 // ─── Tab Components ──────────────────────────────────────────────
+
+// ─── Navigation Helpers (v3.0.5 Section 3.1) ─────────────────────
+
+function pillarNav(name: string): string {
+  // Map pillars with direct filter equivalents to real filter params
+  const n = name.toLowerCase();
+  if (n.includes('usage') || n.includes('dormancy')) return '/identities?dormant=true';
+  if (n.includes('ownership') || n.includes('governance')) return '/identities?owner=none';
+  if (n.includes('privilege')) return '/identities?privileged=true';
+  if (n.includes('credential')) return '/identities?credential_status=expired';
+  // For others, use the pillar banner
+  const slug = n.replace(/\s+&\s+/g, '-').replace(/\s+/g, '-');
+  return `/identities?pillar=${slug}`;
+}
 
 // ── Tab 1: Executive Summary ──
 
@@ -979,7 +857,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
               <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>{d.tenant.organizationName}</div>
               <CISOBadge label={d.riskScore.tier} color={getTierColor(d.riskScore.tier)} />
               <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6, fontFamily: FONT.ui }}>
-                <DN label="All Identities" filter="limit=50">{d.tenant.identityCount}</DN> ids · {d.tenant.subscriptions} subs
+                <DN navigateTo="/identities">{d.tenant.identityCount}</DN> ids · {d.tenant.subscriptions} subs
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                 <span style={{ fontSize: 12, fontWeight: 700, fontFamily: FONT.mono, color: d.riskScore.delta >= 0 ? COLORS.success : COLORS.danger }}>
@@ -1023,13 +901,13 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
               }}>
                 <span>{dc.icon}</span>
                 <span style={{ color: COLORS.textMuted }}>{dc.label}</span>
-                <DN label={dc.label} filter={
-                  dc.label === 'Dormant' ? 'activity_status=stale&limit=50' :
-                  dc.label === 'Over-priv' ? 'risk_level=critical&limit=50' :
-                  dc.label === 'Ghost Roles' ? 'search=disabled&limit=50' :
-                  dc.label === 'Unowned SPs' ? 'identity_category=service_principal&limit=50' :
-                  dc.label === 'Ext exposure' ? 'identity_category=guest&limit=50' :
-                  'limit=50'
+                <DN navigateTo={
+                  dc.label === 'Dormant' ? '/identities?dormant=true' :
+                  dc.label === 'Over-priv' ? '/identities?privileged=true' :
+                  dc.label === 'Ghost Roles' ? '/identities?status=disabled&hasRoles=true' :
+                  dc.label === 'Unowned SPs' ? '/identities?category=service_principal&owner=none' :
+                  dc.label === 'Ext exposure' ? '/identities?pillar=external-exposure' :
+                  '/identities'
                 }>
                   <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: c }}>{dc.value}</span>
                 </DN>
@@ -1053,13 +931,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{p.name}</div>
                     <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-                      <DN label={p.name} filter={
-                        p.name === 'Effective Privilege' ? 'risk_level=critical&limit=50' :
-                        p.name === 'Usage Dormancy' ? 'activity_status=stale&limit=50' :
-                        p.name === 'External Exposure' ? 'identity_category=guest&limit=50' :
-                        p.name === 'Ownership Governance' ? 'identity_category=service_principal&limit=50' :
-                        'limit=50'
-                      }>{p.identityCount} identities</DN>
+                      <DN navigateTo={pillarNav(p.name)}>{p.identityCount} identities</DN>
                     </div>
                   </div>
                   <div style={{ width: 50, flexShrink: 0 }}>
@@ -1075,16 +947,16 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
           <CISOCard>
             <SectionTitle right="Deep Dive →">Blast Radius Preview</SectionTitle>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
-              <StatBox label="High" value={<DN label="High Blast Radius" filter="risk_level=critical&limit=50">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
-              <StatBox label="Low" value={d.blastRadius.lowRisk.toString()} color={COLORS.success} />
-              <StatBox label="Orphan" value={<DN label="Orphaned SPNs" filter="identity_category=service_principal&limit=50">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
+              <StatBox label="High" value={<DN navigateTo="/identities?risk=high,critical">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
+              <StatBox label="Low" value={<DN navigateTo="/identities?risk=low,medium">{d.blastRadius.lowRisk}</DN>} color={COLORS.success} />
+              <StatBox label="Orphan" value={<DN navigateTo="/identities?owner=none">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
             </div>
             <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: COLORS.border }}>
               <div style={{ width: `${Math.max(3, (d.blastRadius.highRisk / (d.blastRadius.highRisk + d.blastRadius.lowRisk + 1)) * 100)}%`, background: COLORS.danger }} />
               <div style={{ flex: 1, background: COLORS.success }} />
             </div>
             <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 8, fontFamily: FONT.ui }}>
-              <DN label="Production Workloads" filter="limit=50">{d.blastRadius.productionWorkloads}</DN> production workloads affected
+              <DN navigateTo="/identities?category=service_principal">{d.blastRadius.productionWorkloads}</DN> production workloads affected
             </div>
           </CISOCard>
 
@@ -1100,10 +972,10 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
                 <div style={{ width: 6, height: 6, borderRadius: '50%', background: getSemanticColor(ib.color), flexShrink: 0 }} />
                 <span style={{ flex: 1, fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{ib.type}</span>
-                <DN label={ib.type} filter={
-                  ib.type === 'Human Users' ? 'identity_category=human_user&limit=50' :
-                  ib.type === 'Guest Users' ? 'identity_category=guest&limit=50' :
-                  'identity_category=service_principal&limit=50'
+                <DN navigateTo={
+                  ib.type === 'Human Users' ? '/identities?identity_category=human_user' :
+                  ib.type === 'Guest Users' ? '/identities?identity_category=guest' :
+                  '/identities?workload=true'
                 }>
                   <span style={{ fontSize: 11, fontFamily: FONT.mono, fontWeight: 600, color: COLORS.text }}>{ib.count}</span>
                 </DN>
@@ -1205,24 +1077,30 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
               <ProgressBar value={p.score} color={getPillarColor(p.score)} height={8} />
               <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: getPillarColor(p.score), textAlign: 'center' as const }}>{p.score}</span>
               <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.mono, textAlign: 'right' as const }}>
-                <DN label={`${p.name} Identities`} filter={
-                  p.name === 'Effective Privilege' ? 'risk_level=critical&limit=50' :
-                  p.name === 'Usage Dormancy' ? 'activity_status=stale&limit=50' :
-                  p.name === 'External Exposure' ? 'identity_category=guest&limit=50' :
-                  p.name === 'Ownership Governance' ? 'identity_category=service_principal&limit=50' :
-                  'limit=50'
-                }>{p.identityCount} identities</DN>
+                <DN navigateTo={pillarNav(p.name)}>{p.identityCount} identities</DN>
               </span>
             </div>
             {expandedPillar === i && p.subMetrics.length > 0 && (
               <div style={{ background: COLORS.surfaceAlt, padding: '10px 16px', borderBottom: `1px solid ${COLORS.border}` }}>
-                {p.subMetrics.map((sm, j) => (
+                {p.subMetrics.map((sm, j) => {
+                  const smNav = sm.name.toLowerCase().includes('dormant') ? '/identities?dormant=true' :
+                    sm.name.toLowerCase().includes('unowned') || sm.name.toLowerCase().includes('ownership') ? '/identities?owner=none' :
+                    sm.name.toLowerCase().includes('owner') || sm.name.toLowerCase().includes('tenant') ? '/identities?privileged=true' :
+                    sm.name.toLowerCase().includes('priv') || sm.name.toLowerCase().includes('high-priv') ? '/identities?privileged=true' :
+                    sm.name.toLowerCase().includes('expired') || sm.name.toLowerCase().includes('cert') ? '/identities?credential_status=expired' :
+                    sm.name.toLowerCase().includes('mfa') ? '/identities?pillar=mfa-enforcement' :
+                    sm.name.toLowerCase().includes('external') || sm.name.toLowerCase().includes('multi-tenant') ? '/identities?category=service_principal' :
+                    sm.name.toLowerCase().includes('guest') ? '/identities?category=guest' :
+                    pillarNav(p.name);
+                  return (
                   <div key={j} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 0' }}>
                     <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, width: 120 }}>{sm.name}</span>
                     <div style={{ flex: 1 }}><ProgressBar value={(sm.value / sm.max) * 100} color={COLORS.accent} height={4} /></div>
-                    <span style={{ fontSize: 10, fontFamily: FONT.mono, color: COLORS.text }}>{sm.value}/{sm.max}</span>
+                    <DN navigateTo={smNav}><span style={{ fontSize: 10, fontFamily: FONT.mono, color: COLORS.text }}>{sm.value}</span></DN>
+                    <span style={{ fontSize: 10, fontFamily: FONT.mono, color: COLORS.textDim }}>/{sm.max}</span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1234,18 +1112,19 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
         {Object.entries(d.kpis).map(([key, kpi]) => {
           const isGhost = key === 'ghostAccounts';
           const valueColor = isGhost && kpi.value > 0 ? COLORS.danger : COLORS.text;
-          const filter = key === 'privilegedRoles' ? 'risk_level=critical&limit=50' :
-            key === 'dormantPrivileged' ? 'activity_status=stale&limit=50' :
-            key === 'ghostAccounts' ? 'search=disabled&limit=50' :
-            key === 'subscriptionAccess' ? 'limit=50' :
-            'limit=50';
+          const navTo = key === 'privilegedRoles' ? '/identities?privileged=true' :
+            key === 'dormantPrivileged' ? '/identities?privileged=true&dormant=true' :
+            key === 'ghostAccounts' ? '/identities?status=disabled&hasRoles=true' :
+            key === 'subscriptionAccess' ? '/identities?pillar=subscription-access' :
+            key === 'rbacModifiers' ? '/identities?pillar=rbac-modifiers' :
+            '/identities';
           return (
             <CISOCard key={key} style={isGhost && kpi.value > 0 ? { borderColor: `${COLORS.danger}40` } : undefined}>
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui }}>
                 {key.replace(/([A-Z])/g, ' $1').trim()}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-                <DN label={key.replace(/([A-Z])/g, ' $1').trim()} filter={filter}>
+                <DN navigateTo={navTo}>
                   <span style={{ fontSize: 32, fontWeight: 700, fontFamily: FONT.mono, color: valueColor }}>{kpi.value}</span>
                 </DN>
                 {isGhost && kpi.value > 0 && (
@@ -1266,9 +1145,9 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
           <div style={{ flex: 1, background: COLORS.success }} />
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
-          <StatBox label="Risk" value={<DN label="High Blast Radius" filter="risk_level=critical&limit=50">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
-          <StatBox label="Low" value={d.blastRadius.lowRisk.toString()} color={COLORS.success} />
-          <StatBox label="Orphaned" value={<DN label="Orphaned SPNs" filter="identity_category=service_principal&limit=50">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
+          <StatBox label="Risk" value={<DN navigateTo="/identities?risk=high,critical">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
+          <StatBox label="Low" value={<DN navigateTo="/identities?risk=low,medium">{d.blastRadius.lowRisk}</DN>} color={COLORS.success} />
+          <StatBox label="Orphaned" value={<DN navigateTo="/identities?owner=none">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
         </div>
         <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, marginBottom: 10, fontFamily: FONT.ui }}>Category Scores</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
@@ -1382,7 +1261,7 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
             }}>{m.value}</div>
             <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 4 }}>Target: {m.target}</div>
             {m.status === 'not-configured' && (
-              <button onClick={() => navigate('/settings')} style={{
+              <button onClick={() => navigate('/settings/governance')} style={{
                 marginTop: 8, padding: '4px 10px', borderRadius: 4, fontSize: 10,
                 background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
                 cursor: 'pointer', fontFamily: FONT.ui,
@@ -1403,14 +1282,21 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
                 color: group.type.includes('PREVENTIVE') ? COLORS.danger : COLORS.warning,
                 marginBottom: 8, fontFamily: FONT.ui,
               }}>▸ {group.type}</div>
-              {group.items.map((item, ii) => (
+              {group.items.map((item, ii) => {
+                const cfNav = item.label.toLowerCase().includes('pim') || item.label.toLowerCase().includes('privilege outside') ? '/identities?privileged=true' :
+                  item.label.toLowerCase().includes('disabled') || item.label.toLowerCase().includes('ghost') ? '/identities?status=disabled&hasRoles=true' :
+                  item.label.toLowerCase().includes('ownership') || item.label.toLowerCase().includes('unowned') ? '/identities?owner=none' :
+                  item.label.toLowerCase().includes('dormant') ? '/identities?privileged=true&dormant=true' :
+                  item.label.toLowerCase().includes('credential') || item.label.toLowerCase().includes('expired') ? '/identities?credential_status=expired' :
+                  '/identities';
+                return (
                 <div key={ii} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: `1px solid ${COLORS.border}` }}>
                   <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>● {item.label}</span>
-                  <DN label={item.label} filter="limit=50">
+                  <DN navigateTo={cfNav}>
                     <span style={{ fontSize: 11, fontWeight: 600, fontFamily: FONT.mono, color: item.color }}>{item.count}</span>
                   </DN>
-                </div>
-              ))}
+                </div>);
+              })}
             </div>
           ))}
         </CISOCard>
@@ -1521,7 +1407,7 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{fw.name}</div>
                     <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-                      <DN label={`${fw.name} Controls`} filter="limit=50">{fw.totalControls}</DN> controls · <DN label={`${fw.name} Failures`} filter="limit=50">{fw.failedControls}</DN> failures
+                      {fw.totalControls} controls · <DN navigateTo={`/identities?pillar=compliance-${fw.id}`}>{fw.failedControls}</DN> failures
                     </div>
                   </div>
                 </div>
@@ -1606,12 +1492,14 @@ function RiskMovementTab({ d }: { d: TenantData }) {
               <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{ch.label}</span>
               <span style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.textMuted, textAlign: 'right' as const }}>{ch.before}</span>
               <span style={{ fontSize: 11, color: COLORS.textMuted, textAlign: 'center' as const }}>→</span>
-              <DN label={ch.label} filter={
-                ch.label === 'Critical Identities' ? 'risk_level=critical&limit=50' :
-                ch.label === 'High-Risk Identities' ? 'risk_level=high&limit=50' :
-                ch.label === 'Ghost Accounts' ? 'search=disabled&limit=50' :
-                ch.label === 'Total Identities' ? 'limit=50' :
-                undefined
+              <DN navigateTo={
+                ch.label === 'Critical Identities' ? '/identities?risk_level=critical' :
+                ch.label === 'High-Risk Identities' ? '/identities?risk_level=high' :
+                ch.label === 'Ghost Accounts' ? '/identities?status=disabled&hasRoles=true' :
+                ch.label === 'New Identities' ? '/identities' :
+                ch.label === 'Removed' ? '/identities?status=disabled' :
+                ch.label === 'Total Identities' ? '/identities' :
+                '/identities'
               }>
                 <span style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.text }}>{ch.after}</span>
               </DN>
@@ -1688,8 +1576,7 @@ export default function CISODashboard() {
   const [activeTab, setActiveTab] = useState<CISOTab>('exec');
   const { data, loading } = useCISOData();
 
-  // v3.0.2: DrillDown, Preview, Ticket state
-  const [drillState, setDrillState] = useState<DrillState | null>(null);
+  // v3.0.5: Preview Changes + Create Ticket state (DrillDownPanel removed)
   const [previewRem, setPreviewRem] = useState<Remediation | null>(null);
   const [ticketRem, setTicketRem] = useState<Remediation | null>(null);
 
@@ -1726,49 +1613,46 @@ export default function CISODashboard() {
   }
 
   return (
-    <DrillCtx.Provider value={setDrillState}>
-      <div style={{ minHeight: 'calc(100vh - 56px)', background: COLORS.bg, fontFamily: FONT.ui, borderRadius: '12px 0 0 0' }}>
-        {/* Font import */}
-        <link rel="stylesheet" href={FONT_LINK} />
-        <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
+    <div style={{ minHeight: 'calc(100vh - 56px)', background: COLORS.bg, fontFamily: FONT.ui, borderRadius: '12px 0 0 0' }}>
+      {/* Font import */}
+      <link rel="stylesheet" href={FONT_LINK} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
 
-        {/* Tab Bar */}
-        <div style={{
-          borderBottom: `1px solid ${COLORS.border}`, display: 'flex', padding: '0 24px',
-          background: COLORS.surface, borderRadius: '12px 0 0 0',
-        }}>
-          {TAB_CONFIG.map(t => (
-            <div key={t.id} onClick={() => setActiveTab(t.id)} style={{
-              padding: '12px 18px', cursor: 'pointer', fontSize: 12, fontFamily: FONT.ui,
-              color: activeTab === t.id ? COLORS.accent : COLORS.textMuted,
-              fontWeight: activeTab === t.id ? 600 : 400,
-              borderBottom: `2px solid ${activeTab === t.id ? COLORS.accent : 'transparent'}`,
-              transition: 'all 0.15s ease',
-            }}>
-              {t.label}
-            </div>
-          ))}
-
-          {/* Scan status indicator */}
-          <div style={{
-            marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
-            fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui,
+      {/* Tab Bar */}
+      <div style={{
+        borderBottom: `1px solid ${COLORS.border}`, display: 'flex', padding: '0 24px',
+        background: COLORS.surface, borderRadius: '12px 0 0 0',
+      }}>
+        {TAB_CONFIG.map(t => (
+          <div key={t.id} onClick={() => setActiveTab(t.id)} style={{
+            padding: '12px 18px', cursor: 'pointer', fontSize: 12, fontFamily: FONT.ui,
+            color: activeTab === t.id ? COLORS.accent : COLORS.textMuted,
+            fontWeight: activeTab === t.id ? 600 : 400,
+            borderBottom: `2px solid ${activeTab === t.id ? COLORS.accent : 'transparent'}`,
+            transition: 'all 0.15s ease',
           }}>
-            <span>Updated {new Date(data.tenant.lastScan).toLocaleTimeString()}</span>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success, animation: 'pulse 2s infinite' }} />
+            {t.label}
           </div>
-        </div>
+        ))}
 
-        {/* Tab Content */}
-        <div style={{ padding: 24 }}>
-          {renderTab()}
+        {/* Scan status indicator */}
+        <div style={{
+          marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
+          fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui,
+        }}>
+          <span>Updated {new Date(data.tenant.lastScan).toLocaleTimeString()}</span>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success, animation: 'pulse 2s infinite' }} />
         </div>
-
-        {/* v3.0.3 Panels */}
-        {drillState && <DrillDownPanel drill={drillState} data={data} onClose={() => setDrillState(null)} />}
-        {previewRem && <PreviewChangesPanel rem={previewRem} data={data} onClose={() => setPreviewRem(null)} />}
-        {ticketRem && <CreateTicketModal rem={ticketRem} data={data} onClose={() => setTicketRem(null)} />}
       </div>
-    </DrillCtx.Provider>
+
+      {/* Tab Content */}
+      <div style={{ padding: 24 }}>
+        {renderTab()}
+      </div>
+
+      {/* v3.0.5 Panels */}
+      {previewRem && <PreviewChangesPanel rem={previewRem} data={data} onClose={() => setPreviewRem(null)} />}
+      {ticketRem && <CreateTicketModal rem={ticketRem} data={data} onClose={() => setTicketRem(null)} />}
+    </div>
   );
 }
