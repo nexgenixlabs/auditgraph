@@ -37,6 +37,50 @@ HIDE_MICROSOFT_SQL = "\n    AND NOT COALESCE(i.is_microsoft_system, false)\n"
 HIDE_DELETED_SQL = "\n    AND i.deleted_at IS NULL\n"
 
 
+def _get_pillar_filter_sql(pillar: str) -> str:
+    """Return SQL AND clause matching the attack-surface-score engine's
+    pillar counting logic.  This ensures ?contributing_pillar=X returns
+    the EXACT identities the engine counted for each pillar."""
+    PILLAR_SQL = {
+        # Matches the engine's t0t1_count FILTER exactly (lines 2955-2965):
+        # T1 Entra roles + Owner/Contributor/UAA RBAC at any scope
+        "effective_privilege": """
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                    AND LOWER(era.role_name) IN (
+                        'user administrator','exchange administrator',
+                        'sharepoint administrator','teams administrator',
+                        'security administrator','conditional access administrator',
+                        'authentication administrator','helpdesk administrator'
+                    ))
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                    AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator'))
+            )""",
+        "credential_risk": """
+            AND credential_expiration IS NOT NULL
+            AND credential_expiration < NOW() + INTERVAL '30 days'""",
+        "trust_federation": """
+            AND COALESCE(i.identity_category, '') = 'guest'
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+            )""",
+        "usage_dormancy": """
+            AND i.activity_status IN ('stale', 'never_used')""",
+        "ownership_governance": """
+            AND COALESCE(i.identity_category, '') IN ('service_principal', 'managed_identity_user')
+            AND (i.owner_count = 0 OR i.owner_count IS NULL)""",
+        "external_exposure": """
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                    AND (era.directory_scope IS NULL OR era.directory_scope = '/'))
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                    AND ra.scope_type = 'tenant')
+            )""",
+    }
+    return PILLAR_SQL.get(pillar, "")
+
+
 def _db() -> Database:
     """Create a Database connection with RLS tenant context from JWT.
 
@@ -352,6 +396,7 @@ def get_identities():
     offset = request.args.get("offset", default=0, type=int)
     hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
     show_deleted = request.args.get('show_deleted', 'false').lower() == 'true'
+    contributing_pillar = request.args.get("contributing_pillar")
 
     cursor = db.conn.cursor()
 
@@ -369,6 +414,13 @@ def get_identities():
 
         if hide_microsoft:
             query += HIDE_MICROSOFT_SQL
+
+        # contributing_pillar: filter to identities the attack-surface-score
+        # engine counted for a specific pillar (exact count match)
+        if contributing_pillar:
+            pillar_sql = _get_pillar_filter_sql(contributing_pillar)
+            if pillar_sql:
+                query += pillar_sql
 
         if risk_filter:
             query += " AND i.risk_level = %s"

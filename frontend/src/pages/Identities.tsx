@@ -273,9 +273,10 @@ export default function IdentitiesPage() {
   const [showMicrosoft, setShowMicrosoft] = useState(false);
   const [search, setSearch] = useState('');
   const [riskFilter, setRiskFilter] = useState<RiskLevel | 'all'>('all');
+  const [multiRiskFilter, setMultiRiskFilter] = useState<string[]>([]);
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
   const [ownerFilter, setOwnerFilter] = useState<'all' | 'unowned'>('all');
-  const [activityFilter, setActivityFilter] = useState<'all' | 'dormant'>('all');
+  const [activityFilter, setActivityFilter] = useState<'all' | 'dormant' | 'dormant_strict'>('all');
   const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
   const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
   const [caFilter, setCaFilter] = useState<'all' | 'covered' | 'not_covered'>('all');
@@ -286,6 +287,7 @@ export default function IdentitiesPage() {
   const [hasRolesFilter, setHasRolesFilter] = useState(false);
   const [workloadFilter, setWorkloadFilter] = useState(false);
   const [contextBanner, setContextBanner] = useState<string | null>(null);
+  const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('risk_level');
@@ -338,6 +340,9 @@ export default function IdentitiesPage() {
   useEffect(() => {
     const params = new URLSearchParams(location.search);
 
+    // Reset pillar filter (only set if ?pillar=X is present)
+    if (!params.get('pillar')) setContributingPillar(null);
+
     // Category: identity_category, category (also map CISO values: Human→human_user, ServicePrincipal→service_principal)
     const catParam = params.get('identity_category') || params.get('category');
     const CISO_CAT_MAP: Record<string, string> = {
@@ -347,23 +352,39 @@ export default function IdentitiesPage() {
     const mappedCat = catParam ? (CISO_CAT_MAP[catParam] || catParam) : null;
     setCategoryFilter(mappedCat && CATEGORY_FILTER_OPTIONS.find(o => o.value === mappedCat) ? mappedCat as IdentityCategory : 'all');
 
-    // Risk: risk_level, risk (supports comma-separated: risk=critical,high → use first match)
+    // Risk: risk_level, risk (supports comma-separated: risk=critical,high)
     const riskParam = params.get('risk_level') || params.get('risk');
     if (riskParam) {
-      const first = riskParam.split(',')[0].toLowerCase();
-      setRiskFilter(RISK_FILTER_OPTIONS.find(o => o.value === first) ? first as RiskLevel : 'all');
+      const riskValues = riskParam.split(',').map(r => r.toLowerCase().trim()).filter(r => RISK_FILTER_OPTIONS.some(o => o.value === r));
+      if (riskValues.length === 1) {
+        setRiskFilter(riskValues[0] as RiskLevel);
+        setMultiRiskFilter([]);
+      } else if (riskValues.length > 1) {
+        setRiskFilter('all');
+        setMultiRiskFilter(riskValues);
+      } else {
+        setRiskFilter('all');
+        setMultiRiskFilter([]);
+      }
     } else {
       setRiskFilter('all');
+      setMultiRiskFilter([]);
     }
 
     // Owner: owner_status=unowned, owner=none
     const ownerParam = params.get('owner_status') || params.get('owner');
     setOwnerFilter(ownerParam === 'unowned' || ownerParam === 'none' ? 'unowned' : 'all');
 
-    // Activity/Dormant: activity_status=dormant, dormant=true
+    // Activity/Dormant: activity_status=dormant|dormant_strict, dormant=true
     const activityParam = params.get('activity_status');
     const dormantParam = params.get('dormant');
-    setActivityFilter(activityParam === 'dormant' || dormantParam === 'true' ? 'dormant' : 'all');
+    if (activityParam === 'dormant_strict') {
+      setActivityFilter('dormant_strict');
+    } else if (activityParam === 'dormant' || dormantParam === 'true') {
+      setActivityFilter('dormant');
+    } else {
+      setActivityFilter('all');
+    }
 
     // Privilege tier
     const tierParam = params.get('privilege_tier');
@@ -399,15 +420,42 @@ export default function IdentitiesPage() {
     const searchParam = params.get('search');
     if (searchParam) setSearch(searchParam);
 
-    // Context banner for pillar/remediation/workload (API may not support these directly)
+    // Context banner for combined filter params from CISO dashboard drill-downs
     const pillarParam = params.get('pillar');
     const remParam = params.get('remediation');
     const workloadParam = params.get('workload');
-    if (workloadParam === 'true') {
+    const activityParamForBanner = params.get('activity_status');
+    const hasRolesParam = params.get('hasRoles');
+    const statusParamForBanner = params.get('status');
+    const catParamForBanner = params.get('category') || params.get('identity_category');
+    if (activityParamForBanner === 'dormant_strict' && params.get('privileged') === 'true') {
+      setContextBanner('Dormant accounts with active privileged roles (stale or never used)');
+    } else if (activityParamForBanner === 'dormant_strict') {
+      setContextBanner('Dormant identities (stale or never used — excludes idle)');
+    } else if (statusParamForBanner?.toLowerCase() === 'disabled' && hasRolesParam === 'true') {
+      setContextBanner('Ghost accounts — disabled in Entra ID but retain active RBAC roles');
+    } else if (catParamForBanner === 'guest' && hasRolesParam === 'true') {
+      setContextBanner('Guest users with active role assignments');
+    } else if (workloadParam === 'true' && ownerParam === 'none') {
+      setContextBanner('Unowned workload identities (Service Principals + Managed Identities)');
+    } else if (workloadParam === 'true') {
       setContextBanner('Showing workload identities (Service Principals + Managed Identities)');
+    } else if (riskParam && riskParam.includes(',')) {
+      setContextBanner(`Showing ${riskParam.split(',').join(' + ')} risk identities`);
     } else if (pillarParam) {
+      // Map URL slug to API pillar name and trigger server-side filtering
+      const PILLAR_API_MAP: Record<string, string> = {
+        'effective-privilege': 'effective_privilege',
+        'credential-risk': 'credential_risk',
+        'trust-federation': 'trust_federation',
+        'usage-dormancy': 'usage_dormancy',
+        'ownership-governance': 'ownership_governance',
+        'external-exposure': 'external_exposure',
+      };
+      const apiPillar = PILLAR_API_MAP[pillarParam] || pillarParam.replace(/-/g, '_');
+      setContributingPillar(apiPillar);
       const label = pillarParam.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      setContextBanner(`Showing identities related to ${label}`);
+      setContextBanner(`Showing identities flagged by ${label} pillar`);
     } else if (remParam) {
       setContextBanner(`Showing identities affected by remediation ${remParam}`);
     } else {
@@ -422,6 +470,7 @@ export default function IdentitiesPage() {
       try {
         const params = new URLSearchParams();
         params.set('hide_microsoft', String(!showMicrosoft));
+        if (contributingPillar) params.set('contributing_pillar', contributingPillar);
         if (connectionParam) params.append(...connectionParam.split('=') as [string, string]);
         const resp = await fetch(`/api/identities?${params}`);
         if (!resp.ok) throw new Error('Failed to fetch identities');
@@ -475,7 +524,7 @@ export default function IdentitiesPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, [showMicrosoft, selectedConnectionId]);
+  }, [showMicrosoft, selectedConnectionId, contributingPillar]);
 
   // ─── Batch risk histories for sparkline column ─────────────────
   useEffect(() => {
@@ -830,12 +879,24 @@ export default function IdentitiesPage() {
     let result = [...identities];
     const s = safeLower(search);
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
-    if (riskFilter !== 'all') result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
+    if (multiRiskFilter.length > 0) {
+      result = result.filter(i => multiRiskFilter.includes(safeLower(i.risk_level)));
+    } else if (riskFilter !== 'all') {
+      result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
+    }
     if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
     if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
     if (subscriptionFilter !== 'all') result = result.filter(i => i.subscription_id === subscriptionFilter);
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
-    if (activityFilter === 'dormant') result = result.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'idle' || d === 'never'; });
+    if (activityFilter === 'dormant_strict') {
+      // Strict dormant: matches backend attack-surface-score logic (stale + never_used only)
+      result = result.filter(i => {
+        const act = safeLower(i.activity_status);
+        return act === 'stale' || act === 'never_used';
+      });
+    } else if (activityFilter === 'dormant') {
+      result = result.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'idle' || d === 'never'; });
+    }
     if (tierFilter !== 'all') result = result.filter(i => tierFilter.includes(getPrivilegeTier(i)));
     if (credentialFilter !== 'all') {
       const now = Date.now();
@@ -914,7 +975,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, riskFilter, categoryFilter, workloadFilter, subscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, statusFilter, hasRolesFilter, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, riskFilter, multiRiskFilter, categoryFilter, workloadFilter, subscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, statusFilter, hasRolesFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');

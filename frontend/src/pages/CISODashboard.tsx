@@ -364,8 +364,8 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
                 <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Compliance</div>
                 <div style={{ fontSize: 12, color: COLORS.text, fontFamily: FONT.ui, marginTop: 4 }}>{rem.compliance}</div>
               </div>
-              {/* Navigate to All Identities with remediation filter */}
-              <button onClick={() => { navigate(`/identities?remediation=${rem.id}`); onClose(); }} style={{
+              {/* Navigate to filtered identities matching this remediation */}
+              <button onClick={() => { navigate(remediationNav(rem.id)); onClose(); }} style={{
                 width: '100%', padding: '10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
                 background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
                 cursor: 'pointer', fontFamily: FONT.ui, marginTop: 4,
@@ -531,6 +531,7 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
   onTicket?: (r: Remediation) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const navigate = useNavigate();
   const c = getSemanticColor(item.color) || COLORS.accent;
   return (
     <div
@@ -587,11 +588,16 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-            <button onClick={(e) => { e.stopPropagation(); onPreview?.(item); }} style={{
+            <button onClick={(e) => { e.stopPropagation(); navigate(remediationNav(item.id)); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
               color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-            }}>Preview Changes →</button>
+            }}>View Affected Identities →</button>
+            <button onClick={(e) => { e.stopPropagation(); onPreview?.(item); }} style={{
+              padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: 'transparent', color: COLORS.text,
+              border: `1px solid ${COLORS.borderAccent}`, cursor: 'pointer', fontFamily: FONT.ui,
+            }}>Preview Changes</button>
             <button onClick={(e) => { e.stopPropagation(); onTicket?.(item); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: 'transparent', color: COLORS.textMuted,
@@ -604,159 +610,83 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
   );
 }
 
-// ─── Sample Tenant Data ──────────────────────────────────────────
+// ─── Empty Data (no hardcoded values) ────────────────────────────
 
-function buildSampleData(): TenantData {
+function buildEmptyData(): TenantData {
   return {
     tenant: {
-      id: 'sample-tenant',
-      name: 'NexgenixLabs',
-      organizationName: 'NexgenixLabs',
-      organizationLogo: null,
-      cloud: 'Azure',
-      subscriptions: 5,
-      identityCount: 57,
-      lastScan: new Date().toISOString(),
-      scanDuration: 65,
-      scanCompleteness: 100,
-      scanConfidence: 'High',
-      sources: ['Azure RBAC', 'Entra ID', 'Graph API'],
-      isolationGuarantee: 'Isolated dataset • No cross-tenant visibility',
+      id: '', name: '', organizationName: '', organizationLogo: null,
+      cloud: 'Azure', subscriptions: 0, identityCount: 0,
+      lastScan: '', scanDuration: 0, scanCompleteness: 0, scanConfidence: 'Low',
+      sources: [], isolationGuarantee: 'Isolated dataset \u2022 No cross-tenant visibility',
     },
     riskScore: {
-      current: 50.2, previous: 48.2, delta: 2.0,
-      tier: 'ELEVATED', grade: 'D',
-      industry: 69, target: 90, potentialGain: 150,
-      trend: [42, 44, 45, 43, 46, 48, 47, 49, 48, 50, 50.2],
+      current: 0, previous: 0, delta: 0,
+      tier: 'CRITICAL', grade: 'F',
+      industry: 0, target: 90, potentialGain: 0,
+      trend: [],
     },
     projection: {
-      noAction: { score: 47.2, tier: 'ELEVATED', consequences: [
-        '2 privileged HRIs remain without review',
-        '4 dormant privileged accounts retain active roles',
-        '3 disabled accounts retain active RBAC roles (ghost accounts)',
-        '3 RBAC modifiers continue unscreened',
-        'Ownership gap at 96% — 44 SPNs unowned',
-        '53 dormant accounts with active roles unresolved',
-      ], breachImpact: 'Moderate-High' },
-      remediated: { score: 95.0, tier: 'RESILIENT', actions: [
-        'Over-privileged identities scoped down',
-        'Dormant privileged accounts disabled',
-        'Ghost account roles revoked',
-        'All SPNs assigned owners',
-      ], breachImpact: 'Low' },
+      noAction: { score: 0, tier: 'CRITICAL', consequences: [], breachImpact: 'Unknown' },
+      remediated: { score: 0, tier: 'CRITICAL', actions: [], breachImpact: 'Unknown' },
     },
     ghostAccounts: {
-      total: 3,
-      privileged: 1,
-      nonPrivileged: 2,
-      roles: [
-        { role: 'Contributor', scope: '/subscriptions/prod-sub-001', count: 1 },
-        { role: 'Reader', scope: '/subscriptions/dev-sub-002', count: 2 },
-      ],
-      complianceImpact: ['SOC2 CC6.1', 'HIPAA', 'NIST AC-2', 'SOX'],
-      lastDetected: new Date().toISOString(),
+      total: 0, privileged: 0, nonPrivileged: 0,
+      roles: [], complianceImpact: [], lastDetected: '',
     },
-    deltaChanges: [
-      { icon: '👤', label: 'Dormant', value: '+3', color: 'danger' },
-      { icon: '🔑', label: 'Over-priv', value: '6', color: 'warning' },
-      { icon: '👻', label: 'Ghost Roles', value: '3', color: 'danger' },
-      { icon: '🤖', label: 'Unowned SPs', value: '44', color: 'elevated' },
-      { icon: '🌐', label: 'Ext exposure', value: '4', color: 'accent' },
-    ],
-    identityBreakdown: [
-      { type: 'Human Users', count: 8, percentage: 14, color: 'accent' },
-      { type: 'Workload Identities', count: 46, percentage: 80.7, color: 'warning' },
-      { type: 'Guest Users', count: 3, percentage: 5.3, color: 'textDim' },
-    ],
+    deltaChanges: [],
+    identityBreakdown: [],
     pillars: [
-      { name: 'Effective Privilege', score: 38, weight: 30, detail: '4 IDs over-privileged', identityCount: 4, subMetrics: [{ name: 'Tenant/Sub Owner', value: 2, max: 10 }, { name: 'High-priv roles', value: 6, max: 20 }] },
-      { name: 'Credential Risk', score: 22, weight: 20, detail: '3 expired credentials', identityCount: 3, subMetrics: [{ name: 'Expired certs', value: 2, max: 10 }, { name: 'No MFA', value: 1, max: 8 }] },
-      { name: 'Trust & Federation', score: 15, weight: 20, detail: '2 external trusts', identityCount: 2, subMetrics: [{ name: 'External apps', value: 2, max: 5 }] },
-      { name: 'Usage Dormancy', score: 100, weight: 10, detail: '53 dormant identities', identityCount: 53, subMetrics: [{ name: 'Dormant privl', value: 4, max: 4 }, { name: 'Dormant all', value: 53, max: 57 }] },
-      { name: 'Ownership Governance', score: 96, weight: 10, detail: '44 unowned SPNs', identityCount: 44, subMetrics: [{ name: 'Unowned', value: 44, max: 46 }] },
-      { name: 'External Exposure', score: 28, weight: 10, detail: '4 externally exposed', identityCount: 4, subMetrics: [{ name: 'Multi-tenant apps', value: 3, max: 10 }, { name: 'Guest access', value: 1, max: 3 }] },
+      { name: 'Effective Privilege', score: 0, weight: 30, detail: '', identityCount: 0, subMetrics: [] },
+      { name: 'Credential Risk', score: 0, weight: 20, detail: '', identityCount: 0, subMetrics: [] },
+      { name: 'Trust & Federation', score: 0, weight: 20, detail: '', identityCount: 0, subMetrics: [] },
+      { name: 'Usage Dormancy', score: 0, weight: 10, detail: '', identityCount: 0, subMetrics: [] },
+      { name: 'Ownership Governance', score: 0, weight: 10, detail: '', identityCount: 0, subMetrics: [] },
+      { name: 'External Exposure', score: 0, weight: 10, detail: '', identityCount: 0, subMetrics: [] },
     ],
     blastRadius: {
-      highRisk: 12.8, lowRisk: 0, orphaned: 44, productionWorkloads: 46,
+      highRisk: 0, lowRisk: 0, orphaned: 0, productionWorkloads: 0,
       categories: [
-        { name: 'Privilege', score: 0.4, color: COLORS.danger },
-        { name: 'Credential', score: 0.1, color: COLORS.warning },
-        { name: 'Exposure', score: 0.2, color: COLORS.elevated },
-        { name: 'Lifecycle', score: 9.9, color: COLORS.accent },
-        { name: 'Visibility', score: 2.1, color: COLORS.purple },
+        { name: 'Privilege', score: 0, color: COLORS.danger },
+        { name: 'Credential', score: 0, color: COLORS.warning },
+        { name: 'Exposure', score: 0, color: COLORS.elevated },
+        { name: 'Lifecycle', score: 0, color: COLORS.accent },
+        { name: 'Visibility', score: 0, color: COLORS.purple },
       ],
     },
     kpis: {
-      privilegedRoles: { value: 2, subtitle: '80% from machines' },
-      dormantPrivileged: { value: 4, subtitle: 'Active roles retained' },
-      ghostAccounts: { value: 3, subtitle: 'Disabled + active RBAC' },
-      subscriptionAccess: { value: 5, subtitle: '3 cross-sub identities' },
-      rbacModifiers: { value: 3, subtitle: 'Custom role defs' },
+      privilegedRoles: { value: 0, subtitle: '' },
+      dormantPrivileged: { value: 0, subtitle: '' },
+      ghostAccounts: { value: 0, subtitle: '' },
+      subscriptionAccess: { value: 0, subtitle: '' },
+      rbacModifiers: { value: 0, subtitle: '' },
     },
-    remediations: [
-      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3 },
-      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1 },
-      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5 },
-      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05 },
-    ],
+    remediations: [],
     governance: {
-      effectivenessScore: 1, effectivenessTier: 'CRITICAL', maturityLevel: 'Ad-Hoc',
-      metrics: [
-        { label: 'Ownership Coverage', value: '4%', target: '80%', status: 'critical', icon: '👤' },
-        { label: 'PIM Enforcement', value: '—', target: '100%', status: 'not-configured', icon: '🔐' },
-        { label: 'Access Reviews', value: '—', target: 'quarterly', status: 'not-configured', icon: '📋' },
-        { label: 'Privileged Monitoring', value: '—', target: 'active', status: 'not-configured', icon: '📡' },
-      ],
-      controlFailures: [
-        { type: 'PREVENTIVE FAILURES', items: [
-          { label: 'Privilege outside PIM', count: 2, color: COLORS.danger },
-          { label: 'Disabled accounts retain active RBAC roles', count: 3, color: COLORS.danger },
-        ] },
-        { type: 'OPERATIONAL GAPS', items: [
-          { label: 'Ownership coverage at 4%', count: 44, color: COLORS.warning },
-          { label: 'Dormant privileged accounts active', count: 4, color: COLORS.warning },
-        ] },
-      ],
-      setupCompletion: { configured: 1, total: 4 },
+      effectivenessScore: 0, effectivenessTier: 'CRITICAL', maturityLevel: 'Unknown',
+      metrics: [], controlFailures: [],
+      setupCompletion: { configured: 0, total: 4 },
     },
     compliance: {
-      frameworks: [
-        { id: 'hipaa', name: 'HIPAA', type: 'Industry', score: 26, totalControls: 167, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 12, controls: [] },
-        { id: 'soc2', name: 'SOC 2 Type II', type: 'Industry', score: 26, totalControls: 200, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 10, controls: [] },
-        { id: 'gdpr', name: 'GDPR', type: 'Industry', score: 26, totalControls: 159, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 8, controls: [] },
-        { id: 'ccpa', name: 'CCPA', type: 'Industry', score: 26, totalControls: 174, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 6, controls: [] },
-        { id: 'pci', name: 'PCI DSS', type: 'Industry', score: 26, totalControls: 180, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 9, controls: [] },
-        { id: 'cis', name: 'CIS Benchmark', type: 'Benchmark', score: 26, totalControls: 150, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 11, controls: [] },
-        { id: 'nist', name: 'NIST 800-53', type: 'Benchmark', score: 26, totalControls: 200, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 14, controls: [] },
-        { id: 'iso27001', name: 'ISO 27001', type: 'Core Governance', score: 26, totalControls: 93, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 7, controls: [] },
-        { id: 'csf', name: 'NIST CSF', type: 'Core Governance', score: 26, totalControls: 108, failedControls: 8, status: 'Initial', trend: 0, identityImpactCount: 10, controls: [] },
-      ],
+      frameworks: [],
       maturity: { preventive: 0, detective: 0, compensating: 0, missing: 0 },
-      progress: { remediation: 26, iaGovernance: 4.5 },
+      progress: { remediation: 0, iaGovernance: 0 },
     },
     riskMovement: {
-      trajectory: [42, 44, 45, 43, 46, 48, 47, 49, 48, 50, 50.2],
-      changes: [
-        { label: 'Critical Identities', before: 0, after: 1, direction: 'up' },
-        { label: 'High-Risk Identities', before: 0, after: 0, direction: 'flat' },
-        { label: 'Ghost Accounts', before: 0, after: 3, direction: 'up' },
-        { label: 'Total Identities', before: 0, after: 57, direction: 'up' },
-        { label: 'New Identities', before: 0, after: 0, direction: 'flat' },
-        { label: 'Removed', before: 0, after: 0, direction: 'flat' },
-      ],
-      mostChanged: { name: 'Usage Dormancy', score: 100, category: 'Lifecycle' },
-      scanMeta: { frequency: 'High', lastRun: new Date().toISOString(), sources: 'Azure RBAC, Entra ID, Graph API', duration: '1m 5s', completeness: '100%' },
+      trajectory: [], changes: [],
+      mostChanged: { name: '', score: 0, category: '' },
+      scanMeta: { frequency: '', lastRun: '', sources: '', duration: '', completeness: '' },
     },
     ticketingIntegration: { configured: false, provider: null, projectKey: null, defaultAssignee: null, jira: null },
   };
 }
 
-// ─── Data Hook ───────────────────────────────────────────────────
+// ─── Data Hook (real API data) ───────────────────────────────────
 
 function useCISOData(): { data: TenantData; loading: boolean } {
   const { withConnection, selectedConnectionId } = useConnection();
   const { activeTenantId } = useAuth();
-  const [data, setData] = useState<TenantData>(buildSampleData);
+  const [data, setData] = useState<TenantData>(buildEmptyData);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -764,52 +694,436 @@ function useCISOData(): { data: TenantData; loading: boolean } {
     async function load() {
       setLoading(true);
       try {
-        const [statsRes, postureRes, summaryRes, compRes] = await Promise.all([
+        // Fetch all data sources in parallel
+        const [attackRes, statsRes, compRes, driftRes, trendsRes, summaryRes] = await Promise.all([
+          fetch(withConnection('/api/overview/attack-surface-score')).catch(() => null),
           fetch(withConnection('/api/stats')).catch(() => null),
-          fetch(withConnection('/api/dashboard/posture')).catch(() => null),
-          fetch(withConnection('/api/identity-summary')).catch(() => null),
           fetch(withConnection('/api/dashboard/compliance')).catch(() => null),
+          fetch(withConnection('/api/drift/latest')).catch(() => null),
+          fetch(withConnection('/api/trends?limit=11')).catch(() => null),
+          fetch(withConnection('/api/identity-summary')).catch(() => null),
         ]);
+
+        const attack = attackRes?.ok ? await attackRes.json() : null;
         const stats = statsRes?.ok ? await statsRes.json() : null;
-        const posture = postureRes?.ok ? await postureRes.json() : null;
-        const summary = summaryRes?.ok ? await summaryRes.json() : null;
         const comp = compRes?.ok ? await compRes.json() : null;
+        const drift = driftRes?.ok ? await driftRes.json() : null;
+        const trends = trendsRes?.ok ? await trendsRes.json() : null;
+        const summary = summaryRes?.ok ? await summaryRes.json() : null;
 
         if (cancelled) return;
-        const base = buildSampleData();
+        const d = buildEmptyData();
 
-        // Overlay real data where available
-        if (stats?.latest_run) {
-          base.tenant.identityCount = stats.latest_run.total_identities || base.tenant.identityCount;
-          if (stats.latest_run.completed_at) base.tenant.lastScan = stats.latest_run.completed_at;
+        // ── Tenant metadata ──
+        if (attack?.data_integrity) {
+          const di = attack.data_integrity;
+          d.tenant.id = String(di.tenant_id || '');
+          d.tenant.name = di.tenant_name || di.organization_name || '';
+          d.tenant.organizationName = di.organization_name || di.tenant_name || '';
+          d.tenant.organizationLogo = di.organization_logo || null;
+          d.tenant.lastScan = di.last_scan || '';
+          d.tenant.scanDuration = di.scan_duration_seconds || 0;
+          d.tenant.scanCompleteness = di.data_completeness_pct || 0;
+          d.tenant.scanConfidence = di.confidence || 'Low';
+          d.tenant.sources = ['Azure RBAC', 'Entra ID', 'Graph API'];
         }
-        if (posture) {
-          const ps = posture.posture_score ?? base.riskScore.current;
-          const prev = posture.previous_posture_score ?? base.riskScore.previous;
-          base.riskScore.current = ps;
-          base.riskScore.previous = prev;
-          base.riskScore.delta = ps - prev;
-          base.riskScore.tier = getTier(ps);
-          base.riskScore.grade = getGrade(ps);
+        if (attack) {
+          d.tenant.identityCount = attack.total_identities || 0;
         }
+        const subCount = summary?.monitored_resources?.azure?.subscriptions || 0;
+        d.tenant.subscriptions = subCount;
+
+        // ── Risk Score ──
+        // Attack surface score: higher = worse. UI shows posture: higher = better.
+        // Invert: posture = 100 - attack_score
+        if (attack) {
+          const posture = Math.round((100 - (attack.score || 0)) * 10) / 10;
+          const prevPosture = stats?.previous_run
+            ? Math.round((100 - (stats.previous_run.avg_risk_score || 0)) * 10) / 10
+            : posture;
+          d.riskScore.current = posture;
+          d.riskScore.previous = prevPosture;
+          d.riskScore.delta = Math.round((posture - prevPosture) * 10) / 10;
+          d.riskScore.tier = getTier(posture);
+          const gradeMap: Record<string, string> = { A: 'A', B: 'B', C: 'C', D: 'D', F: 'F' };
+          d.riskScore.grade = attack.grade ? (gradeMap[attack.grade as string] || getGrade(posture)) : getGrade(posture);
+          d.riskScore.industry = attack.industry_avg != null ? Math.round((100 - attack.industry_avg) * 10) / 10 : 69;
+          d.riskScore.target = attack.posture_target != null ? attack.posture_target : 90;
+          d.riskScore.potentialGain = Math.max(0, d.riskScore.target - posture);
+        }
+        // Trend from /api/trends
+        if (trends?.runs?.length) {
+          d.riskScore.trend = trends.runs.map((r: any) => r.posture_score ?? 0);
+        }
+
+        // ── Pillars ──
+        if (attack?.pillars) {
+          const p = attack.pillars;
+          const ep = p.effective_privilege || {};
+          const cr = p.credential_risk || {};
+          const tf = p.trust_federation || {};
+          const ud = p.usage_dormancy || {};
+          const og = p.ownership_governance || {};
+          const ee = p.external_exposure || {};
+
+          d.pillars = [
+            {
+              name: 'Effective Privilege', score: ep.score || 0, weight: ep.weight || 30,
+              detail: `${ep.detail?.t0t1 || 0} IDs at T0/T1`,
+              identityCount: ep.detail?.t0t1 || 0,
+              subMetrics: [
+                { name: 'T0 (Tenant Owner)', value: ep.detail?.t0 || 0, max: attack.total_identities || 1 },
+                { name: 'T0+T1 privileged', value: ep.detail?.t0t1 || 0, max: attack.total_identities || 1 },
+              ],
+            },
+            {
+              name: 'Credential Risk', score: cr.score || 0, weight: cr.weight || 20,
+              detail: `${(cr.detail?.expired || 0) + (cr.detail?.expiring || 0)} credential issues`,
+              identityCount: (cr.detail?.expired || 0) + (cr.detail?.expiring || 0),
+              subMetrics: [
+                { name: 'Expired', value: cr.detail?.expired || 0, max: cr.detail?.with_creds || 1 },
+                { name: 'Expiring soon', value: cr.detail?.expiring || 0, max: cr.detail?.with_creds || 1 },
+              ],
+            },
+            {
+              name: 'Trust & Federation', score: tf.score || 0, weight: tf.weight || 20,
+              detail: `${tf.detail?.guest_with_roles || 0} guests with roles`,
+              identityCount: tf.detail?.guest_with_roles || 0,
+              subMetrics: [
+                { name: 'Guests with roles', value: tf.detail?.guest_with_roles || 0, max: tf.detail?.guests || 1 },
+                { name: 'Federated', value: tf.detail?.federated || 0, max: tf.detail?.guests || 1 },
+              ],
+            },
+            {
+              name: 'Usage Dormancy', score: ud.score || 0, weight: ud.weight || 10,
+              detail: `${ud.detail?.dormant || 0} dormant identities`,
+              identityCount: ud.detail?.dormant || 0,
+              subMetrics: [
+                { name: 'Dormant', value: ud.detail?.dormant || 0, max: ud.detail?.total || 1 },
+              ],
+            },
+            {
+              name: 'Ownership Governance', score: og.score || 0, weight: og.weight || 10,
+              detail: `${og.detail?.unowned_spns || 0} unowned SPNs`,
+              identityCount: og.detail?.unowned_spns || 0,
+              subMetrics: [
+                { name: 'Unowned SPNs', value: og.detail?.unowned_spns || 0, max: og.detail?.total_spns || 1 },
+              ],
+            },
+            {
+              name: 'External Exposure', score: ee.score || 0, weight: ee.weight || 10,
+              detail: `${ee.detail?.tenant_scope || 0} with tenant-wide scope`,
+              identityCount: ee.detail?.tenant_scope || 0,
+              subMetrics: [
+                { name: 'Tenant-wide scope', value: ee.detail?.tenant_scope || 0, max: ee.detail?.total || 1 },
+              ],
+            },
+          ];
+        }
+
+        // ── Ghost Accounts ──
+        const ghostTotal = stats?.ghost_count || 0;
+        const dormantPrivCount = attack?.attack_opportunities?.dormant_privileged_count || 0;
+        d.ghostAccounts.total = ghostTotal;
+        d.ghostAccounts.privileged = Math.min(dormantPrivCount, ghostTotal);
+        d.ghostAccounts.nonPrivileged = Math.max(0, ghostTotal - d.ghostAccounts.privileged);
+        if (ghostTotal > 0) {
+          d.ghostAccounts.complianceImpact = ['SOC2 CC6.1', 'HIPAA', 'NIST AC-2', 'SOX'];
+          d.ghostAccounts.lastDetected = d.tenant.lastScan;
+        }
+
+        // ── KPIs ──
+        if (attack) {
+          const ao = attack.attack_opportunities || {};
+          const ep = attack.pillars?.effective_privilege?.detail || {};
+          d.kpis.privilegedRoles = { value: (ep.t0 || 0) + (ao.rbac_modifier_count || 0), subtitle: `${ep.t0 || 0} T0 identities` };
+          d.kpis.dormantPrivileged = { value: ao.dormant_privileged_count || 0, subtitle: 'Active roles retained' };
+          d.kpis.ghostAccounts = { value: ghostTotal, subtitle: ghostTotal > 0 ? 'Disabled + active RBAC' : 'None detected' };
+          d.kpis.subscriptionAccess = { value: subCount, subtitle: `${ao.multi_sub_count || 0} cross-sub identities` };
+          d.kpis.rbacModifiers = { value: ao.rbac_modifier_count || 0, subtitle: 'Custom role defs' };
+        }
+
+        // ── Identity Breakdown ──
         if (summary?.categories) {
           const cats = summary.categories as Record<string, { total: number }>;
-          const humanCount = (cats.human_user?.total || 0) + (cats.guest?.total || 0);
+          const humanCount = (cats.human_user?.total || 0);
           const workloadCount = (cats.service_principal?.total || 0) + (cats.managed_identity_system?.total || 0) + (cats.managed_identity_user?.total || 0);
           const guestCount = cats.guest?.total || 0;
-          const total = humanCount + workloadCount;
+          const total = humanCount + workloadCount + guestCount;
           if (total > 0) {
-            base.identityBreakdown = [
-              { type: 'Human Users', count: humanCount - guestCount, percentage: Math.round(((humanCount - guestCount) / total) * 100), color: 'accent' },
+            d.identityBreakdown = [
+              { type: 'Human Users', count: humanCount, percentage: Math.round((humanCount / total) * 100), color: 'accent' },
+              { type: 'Workload Identities', count: workloadCount, percentage: Math.round((workloadCount / total) * 100), color: 'warning' },
+              { type: 'Guest Users', count: guestCount, percentage: Math.round((guestCount / total) * 100), color: 'textDim' },
+            ];
+          }
+        } else if (attack?.nhi_breakdown) {
+          const nb = attack.nhi_breakdown;
+          const humanCount = nb.human || 0;
+          const workloadCount = (nb.service_principal || 0) + (nb.managed_identity_system || 0) + (nb.managed_identity_user || 0);
+          const guestCount = nb.guest || 0;
+          const total = humanCount + workloadCount + guestCount;
+          if (total > 0) {
+            d.identityBreakdown = [
+              { type: 'Human Users', count: humanCount, percentage: Math.round((humanCount / total) * 100), color: 'accent' },
               { type: 'Workload Identities', count: workloadCount, percentage: Math.round((workloadCount / total) * 100), color: 'warning' },
               { type: 'Guest Users', count: guestCount, percentage: Math.round((guestCount / total) * 100), color: 'textDim' },
             ];
           }
         }
 
-        setData(base);
+        // ── Blast Radius ──
+        if (attack?.workload_exposure) {
+          const we = attack.workload_exposure;
+          const ed = we.exposure_distribution || {};
+          d.blastRadius.highRisk = (ed.critical || 0) + (ed.high || 0);
+          d.blastRadius.lowRisk = (ed.medium || 0) + (ed.low || 0);
+          d.blastRadius.orphaned = attack.pillars?.ownership_governance?.detail?.unowned_spns || 0;
+          d.blastRadius.productionWorkloads = we.total || 0;
+          const ca = we.component_averages || {};
+          d.blastRadius.categories = [
+            { name: 'Privilege', score: ca.privilege || 0, color: COLORS.danger },
+            { name: 'Credential', score: ca.credential_risk || 0, color: COLORS.warning },
+            { name: 'Exposure', score: ca.exposure || 0, color: COLORS.elevated },
+            { name: 'Lifecycle', score: ca.lifecycle || 0, color: COLORS.accent },
+            { name: 'Visibility', score: ca.visibility || 0, color: COLORS.purple },
+          ];
+        }
+
+        // ── Delta Changes (from drift) ──
+        if (drift?.has_drift_data) {
+          const dormantPillar = attack?.pillars?.usage_dormancy?.detail?.dormant || 0;
+          const overPriv = attack?.pillars?.effective_privilege?.detail?.t0t1 || 0;
+          const unownedSPs = attack?.pillars?.ownership_governance?.detail?.unowned_spns || 0;
+          const extExposure = attack?.pillars?.external_exposure?.detail?.tenant_scope || 0;
+          d.deltaChanges = [
+            { icon: '\uD83D\uDC64', label: 'Dormant', value: String(dormantPillar), color: dormantPillar > 0 ? 'danger' : 'success' },
+            { icon: '\uD83D\uDD11', label: 'Over-priv', value: String(overPriv), color: overPriv > 0 ? 'warning' : 'success' },
+            { icon: '\uD83D\uDC7B', label: 'Ghost Roles', value: String(ghostTotal), color: ghostTotal > 0 ? 'danger' : 'success' },
+            { icon: '\uD83E\uDD16', label: 'Unowned SPs', value: String(unownedSPs), color: unownedSPs > 0 ? 'elevated' : 'success' },
+            { icon: '\uD83C\uDF10', label: 'Ext exposure', value: String(extExposure), color: extExposure > 0 ? 'accent' : 'success' },
+          ];
+        } else {
+          // No drift data — show current pillar counts as absolute values
+          const dormantPillar = attack?.pillars?.usage_dormancy?.detail?.dormant || 0;
+          const overPriv = attack?.pillars?.effective_privilege?.detail?.t0t1 || 0;
+          const unownedSPs = attack?.pillars?.ownership_governance?.detail?.unowned_spns || 0;
+          const extExposure = attack?.pillars?.external_exposure?.detail?.tenant_scope || 0;
+          d.deltaChanges = [
+            { icon: '\uD83D\uDC64', label: 'Dormant', value: String(dormantPillar), color: dormantPillar > 0 ? 'danger' : 'success' },
+            { icon: '\uD83D\uDD11', label: 'Over-priv', value: String(overPriv), color: overPriv > 0 ? 'warning' : 'success' },
+            { icon: '\uD83D\uDC7B', label: 'Ghost Roles', value: String(ghostTotal), color: ghostTotal > 0 ? 'danger' : 'success' },
+            { icon: '\uD83E\uDD16', label: 'Unowned SPs', value: String(unownedSPs), color: unownedSPs > 0 ? 'elevated' : 'success' },
+            { icon: '\uD83C\uDF10', label: 'Ext exposure', value: String(extExposure), color: extExposure > 0 ? 'accent' : 'success' },
+          ];
+        }
+
+        // ── Governance ──
+        if (attack?.governance) {
+          const gov = attack.governance;
+          const ownerPct = gov.ownership_coverage_pct || 0;
+          const pimPct = gov.pim_adoption_pct || 0;
+          const dormantCleanupPct = gov.dormant_cleanup_pct || 0;
+          const reviewPct = gov.privileged_under_review_pct || 0;
+          // Effectiveness: average of 4 governance percentages on 0-10 scale
+          const avgPct = (ownerPct + pimPct + dormantCleanupPct + reviewPct) / 4;
+          const effScore = Math.round(avgPct / 10);
+          d.governance.effectivenessScore = effScore;
+          d.governance.effectivenessTier = effScore >= 8 ? 'RESILIENT' : effScore >= 5 ? 'CONTROLLED' : effScore >= 3 ? 'ELEVATED' : 'CRITICAL';
+          d.governance.maturityLevel = effScore >= 8 ? 'Optimized' : effScore >= 5 ? 'Managed' : effScore >= 3 ? 'Developing' : effScore >= 1 ? 'Ad-Hoc' : 'Unknown';
+
+          const govStatus = (pct: number) => pct >= 80 ? 'good' : pct >= 40 ? 'warning' : pct > 0 ? 'critical' : 'not-configured';
+          d.governance.metrics = [
+            { label: 'Ownership Coverage', value: `${Math.round(ownerPct)}%`, target: '80%', status: govStatus(ownerPct), icon: '\uD83D\uDC64' },
+            { label: 'PIM Enforcement', value: pimPct > 0 ? `${Math.round(pimPct)}%` : '\u2014', target: '100%', status: govStatus(pimPct), icon: '\uD83D\uDD10' },
+            { label: 'Access Reviews', value: gov.access_reviews_done > 0 ? `${gov.access_reviews_done} done` : '\u2014', target: 'quarterly', status: gov.access_reviews_done > 0 ? 'good' : 'not-configured', icon: '\uD83D\uDCCB' },
+            { label: 'Privileged Monitoring', value: reviewPct > 0 ? `${Math.round(reviewPct)}%` : '\u2014', target: 'active', status: govStatus(reviewPct), icon: '\uD83D\uDCE1' },
+          ];
+
+          // Control failures derived from pillar details
+          const preventiveItems: { label: string; count: number; color: string }[] = [];
+          const operationalItems: { label: string; count: number; color: string }[] = [];
+          const privT0 = attack.pillars?.effective_privilege?.detail?.t0 || 0;
+          if (privT0 > 0 && pimPct < 100) preventiveItems.push({ label: 'Privilege outside PIM', count: privT0, color: COLORS.danger });
+          if (ghostTotal > 0) preventiveItems.push({ label: 'Disabled accounts retain active RBAC roles', count: ghostTotal, color: COLORS.danger });
+          const unownedSpns = attack.pillars?.ownership_governance?.detail?.unowned_spns || 0;
+          if (unownedSpns > 0) operationalItems.push({ label: `Ownership coverage at ${Math.round(ownerPct)}%`, count: unownedSpns, color: COLORS.warning });
+          const dormPriv = attack.attack_opportunities?.dormant_privileged_count || 0;
+          if (dormPriv > 0) operationalItems.push({ label: 'Dormant privileged accounts active', count: dormPriv, color: COLORS.warning });
+
+          d.governance.controlFailures = [];
+          if (preventiveItems.length > 0) d.governance.controlFailures.push({ type: 'PREVENTIVE FAILURES', items: preventiveItems });
+          if (operationalItems.length > 0) d.governance.controlFailures.push({ type: 'OPERATIONAL GAPS', items: operationalItems });
+
+          const configured = [ownerPct > 0, pimPct > 0, gov.access_reviews_done > 0, reviewPct > 0].filter(Boolean).length;
+          d.governance.setupCompletion = { configured, total: 4 };
+        }
+
+        // ── Compliance (from /api/dashboard/compliance) ──
+        if (comp && typeof comp === 'object') {
+          const frameworks: ComplianceFramework[] = [];
+          for (const [key, fw] of Object.entries(comp) as [string, any][]) {
+            if (!fw || typeof fw !== 'object' || !fw.name) continue;
+            frameworks.push({
+              id: key,
+              name: fw.short_name || fw.name,
+              type: fw.category || fw.tier || 'Industry',
+              score: fw.score || 0,
+              totalControls: fw.total_framework_controls || fw.total_controls || 0,
+              failedControls: fw.fail_count || 0,
+              status: fw.score >= 80 ? 'Mature' : fw.score >= 50 ? 'Developing' : fw.score > 0 ? 'Initial' : 'Not Assessed',
+              trend: 0,
+              identityImpactCount: fw.identity_controls_count || 0,
+              controls: (fw.controls || []).map((c: any) => ({
+                id: c.id, name: c.name, status: c.status,
+                severity: c.status === 'fail' ? 'high' : 'medium',
+                evidence: c.detail || '', recommendation: '', identityCount: 0,
+              })),
+            });
+          }
+          d.compliance.frameworks = frameworks;
+          // Maturity summary
+          const passTotal = frameworks.reduce((s, f) => s + (f.score >= 80 ? 1 : 0), 0);
+          const failTotal = frameworks.reduce((s, f) => s + (f.failedControls || 0), 0);
+          d.compliance.maturity = {
+            preventive: passTotal,
+            detective: frameworks.length - passTotal,
+            compensating: 0,
+            missing: failTotal,
+          };
+          const avgScore = frameworks.length > 0 ? Math.round(frameworks.reduce((s, f) => s + f.score, 0) / frameworks.length) : 0;
+          d.compliance.progress = {
+            remediation: avgScore,
+            iaGovernance: (attack?.governance?.ownership_coverage_pct || 0) / 10,
+          };
+        }
+
+        // ── Remediations (dynamic from attack surface data) ──
+        const remCards: Remediation[] = [];
+        if (attack) {
+          const ep = attack.pillars?.effective_privilege?.detail || {};
+          const ao = attack.attack_opportunities || {};
+          const cr = attack.pillars?.credential_risk?.detail || {};
+          const og = attack.pillars?.ownership_governance?.detail || {};
+          const current = d.riskScore.current;
+          const target = d.riskScore.target;
+
+          if ((ep.t0t1 || 0) > 0) {
+            const gain = Math.round((target - current) * 0.3);
+            remCards.push({
+              id: 'r1', type: 'identity-remediation',
+              title: 'Reduce over-privileged identities',
+              subtitle: `${ep.t0t1} identities at T0/T1 privilege across ${subCount} subscriptions`,
+              gain, projectedScore: `~${Math.round(current + gain)}`,
+              status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger',
+              affected: `${ep.t0t1} ids \u00B7 ${subCount} subs`,
+              effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
+              compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3,
+            });
+          }
+          if ((ao.dormant_privileged_count || 0) > 0) {
+            const gain = Math.round((target - current) * 0.2);
+            remCards.push({
+              id: 'r2', type: 'identity-remediation',
+              title: 'Remediate dormant privileged accounts',
+              subtitle: `${ao.dormant_privileged_count} dormant accounts with active privileged roles`,
+              gain, projectedScore: `~${Math.round(current + gain)}`,
+              status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning',
+              affected: `${ao.dormant_privileged_count} ids`,
+              effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
+              compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1,
+            });
+          }
+          if (ghostTotal > 0) {
+            const gain = Math.round((target - current) * 0.15);
+            remCards.push({
+              id: 'r2b', type: 'identity-remediation',
+              title: 'Revoke roles from disabled accounts',
+              subtitle: `${ghostTotal} accounts disabled in Entra ID but retain active RBAC assignments`,
+              gain, projectedScore: `~${Math.round(current + gain)}`,
+              status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger',
+              affected: `${ghostTotal} ids`,
+              effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe',
+              compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5,
+            });
+          }
+          if ((og.unowned_spns || 0) > 0) {
+            const gain = Math.round((target - current) * 0.1);
+            remCards.push({
+              id: 'r3', type: 'identity-remediation',
+              title: 'Assign ownership to unowned SPNs',
+              subtitle: `${og.unowned_spns} service principals without designated owners`,
+              gain, projectedScore: `~${Math.round(current + gain)}`,
+              status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated',
+              affected: `${og.unowned_spns} ids`,
+              effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
+              compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05,
+            });
+          }
+          if ((cr.expired || 0) > 0) {
+            const gain = Math.round((target - current) * 0.15);
+            remCards.push({
+              id: 'r4', type: 'identity-remediation',
+              title: 'Rotate expired credentials',
+              subtitle: `${cr.expired} identities with expired credentials`,
+              gain, projectedScore: `~${Math.round(current + gain)}`,
+              status: 'new', automation: 'Manual', risk: 'MEDIUM', color: 'warning',
+              affected: `${cr.expired} ids`,
+              effort: '~3 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
+              compliance: 'SOC 2, PCI DSS', confidence: 90, productionImpact: false, riskPerDay: 0.2,
+            });
+          }
+        }
+        d.remediations = remCards;
+
+        // ── Projection ──
+        const totalGain = remCards.reduce((s, r) => s + r.gain, 0);
+        const noActionScore = Math.max(0, d.riskScore.current - 3);
+        const remediatedScore = Math.min(100, d.riskScore.current + totalGain);
+        d.projection.noAction = {
+          score: Math.round(noActionScore * 10) / 10,
+          tier: getTier(noActionScore),
+          consequences: d.pillars.filter(p => p.score > 50).map(p => `${p.detail} (${p.name}: ${p.score}%)`),
+          breachImpact: noActionScore < 40 ? 'High' : noActionScore < 60 ? 'Moderate-High' : 'Moderate',
+        };
+        d.projection.remediated = {
+          score: Math.round(remediatedScore * 10) / 10,
+          tier: getTier(remediatedScore),
+          actions: remCards.slice(0, 4).map(r => r.title),
+          breachImpact: remediatedScore >= 80 ? 'Low' : 'Moderate',
+        };
+
+        // ── Risk Movement ──
+        if (trends?.runs?.length) {
+          d.riskMovement.trajectory = trends.runs.map((r: any) => r.posture_score ?? 0);
+        }
+        // Changes from stats + drift
+        const latestRun = stats?.latest_run || {};
+        const prevRun = stats?.previous_run || {};
+        d.riskMovement.changes = [
+          { label: 'Critical Identities', before: prevRun.critical_count || 0, after: latestRun.critical_count || 0, direction: (latestRun.critical_count || 0) > (prevRun.critical_count || 0) ? 'up' : (latestRun.critical_count || 0) < (prevRun.critical_count || 0) ? 'down' : 'flat' },
+          { label: 'High-Risk Identities', before: prevRun.high_count || 0, after: latestRun.high_count || 0, direction: (latestRun.high_count || 0) > (prevRun.high_count || 0) ? 'up' : (latestRun.high_count || 0) < (prevRun.high_count || 0) ? 'down' : 'flat' },
+          { label: 'Ghost Accounts', before: 0, after: ghostTotal, direction: ghostTotal > 0 ? 'up' : 'flat' },
+          { label: 'Total Identities', before: prevRun.total_identities || 0, after: latestRun.total_identities || 0, direction: (latestRun.total_identities || 0) > (prevRun.total_identities || 0) ? 'up' : (latestRun.total_identities || 0) < (prevRun.total_identities || 0) ? 'down' : 'flat' },
+          { label: 'New Identities', before: 0, after: drift?.new_identities_count || 0, direction: (drift?.new_identities_count || 0) > 0 ? 'up' : 'flat' },
+          { label: 'Removed', before: 0, after: drift?.removed_identities_count || 0, direction: (drift?.removed_identities_count || 0) > 0 ? 'down' : 'flat' },
+        ];
+        // Most changed pillar
+        const worstPillar = [...d.pillars].sort((a, b) => b.score - a.score)[0];
+        if (worstPillar) {
+          d.riskMovement.mostChanged = { name: worstPillar.name, score: worstPillar.score, category: worstPillar.name };
+        }
+        d.riskMovement.scanMeta = {
+          frequency: d.tenant.scanDuration > 0 ? 'Scheduled' : 'Unknown',
+          lastRun: d.tenant.lastScan,
+          sources: d.tenant.sources.join(', '),
+          duration: d.tenant.scanDuration > 0 ? `${Math.floor(d.tenant.scanDuration / 60)}m ${d.tenant.scanDuration % 60}s` : 'Unknown',
+          completeness: `${d.tenant.scanCompleteness}%`,
+        };
+
+        setData(d);
       } catch {
-        // Keep sample data
+        setData(buildEmptyData());
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -826,15 +1140,29 @@ function useCISOData(): { data: TenantData; loading: boolean } {
 // ─── Navigation Helpers (v3.0.5 Section 3.1) ─────────────────────
 
 function pillarNav(name: string): string {
-  // Map pillars with direct filter equivalents to real filter params
+  // Use ?pillar=X which triggers server-side contributing_pillar filtering
+  // for EXACT count match with the attack-surface-score engine
   const n = name.toLowerCase();
-  if (n.includes('usage') || n.includes('dormancy')) return '/identities?dormant=true';
-  if (n.includes('ownership') || n.includes('governance')) return '/identities?owner=none';
-  if (n.includes('privilege')) return '/identities?privileged=true';
-  if (n.includes('credential')) return '/identities?credential_status=expired';
-  // For others, use the pillar banner
-  const slug = n.replace(/\s+&\s+/g, '-').replace(/\s+/g, '-');
-  return `/identities?pillar=${slug}`;
+  if (n.includes('privilege'))                     return '/identities?pillar=effective-privilege';
+  if (n.includes('credential'))                    return '/identities?pillar=credential-risk';
+  if (n.includes('trust') || n.includes('feder'))  return '/identities?pillar=trust-federation';
+  if (n.includes('usage') || n.includes('dorma'))  return '/identities?pillar=usage-dormancy';
+  if (n.includes('ownership') || n.includes('gov'))return '/identities?pillar=ownership-governance';
+  if (n.includes('external') || n.includes('expo'))return '/identities?pillar=external-exposure';
+  return '/identities';
+}
+
+function remediationNav(id: string): string {
+  // Map each remediation card to the correct identity filter
+  // Use pillar-based URLs for exact count match where applicable
+  switch (id) {
+    case 'r1': return '/identities?pillar=effective-privilege';
+    case 'r2': return '/identities?activity_status=dormant_strict&privileged=true';
+    case 'r2b': return '/identities?status=disabled&hasRoles=true';
+    case 'r3': return '/identities?pillar=ownership-governance';
+    case 'r4': return '/identities?pillar=credential-risk';
+    default: return '/identities';
+  }
 }
 
 // ── Tab 1: Executive Summary ──
@@ -902,10 +1230,10 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
                 <span>{dc.icon}</span>
                 <span style={{ color: COLORS.textMuted }}>{dc.label}</span>
                 <DN navigateTo={
-                  dc.label === 'Dormant' ? '/identities?dormant=true' :
-                  dc.label === 'Over-priv' ? '/identities?privileged=true' :
+                  dc.label === 'Dormant' ? '/identities?pillar=usage-dormancy' :
+                  dc.label === 'Over-priv' ? '/identities?pillar=effective-privilege' :
                   dc.label === 'Ghost Roles' ? '/identities?status=disabled&hasRoles=true' :
-                  dc.label === 'Unowned SPs' ? '/identities?category=service_principal&owner=none' :
+                  dc.label === 'Unowned SPs' ? '/identities?pillar=ownership-governance' :
                   dc.label === 'Ext exposure' ? '/identities?pillar=external-exposure' :
                   '/identities'
                 }>
@@ -949,7 +1277,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
               <StatBox label="High" value={<DN navigateTo="/identities?risk=high,critical">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
               <StatBox label="Low" value={<DN navigateTo="/identities?risk=low,medium">{d.blastRadius.lowRisk}</DN>} color={COLORS.success} />
-              <StatBox label="Orphan" value={<DN navigateTo="/identities?owner=none">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
+              <StatBox label="Orphan" value={<DN navigateTo="/identities?pillar=ownership-governance">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
             </div>
             <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: COLORS.border }}>
               <div style={{ width: `${Math.max(3, (d.blastRadius.highRisk / (d.blastRadius.highRisk + d.blastRadius.lowRisk + 1)) * 100)}%`, background: COLORS.danger }} />
@@ -1083,15 +1411,8 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
             {expandedPillar === i && p.subMetrics.length > 0 && (
               <div style={{ background: COLORS.surfaceAlt, padding: '10px 16px', borderBottom: `1px solid ${COLORS.border}` }}>
                 {p.subMetrics.map((sm, j) => {
-                  const smNav = sm.name.toLowerCase().includes('dormant') ? '/identities?dormant=true' :
-                    sm.name.toLowerCase().includes('unowned') || sm.name.toLowerCase().includes('ownership') ? '/identities?owner=none' :
-                    sm.name.toLowerCase().includes('owner') || sm.name.toLowerCase().includes('tenant') ? '/identities?privileged=true' :
-                    sm.name.toLowerCase().includes('priv') || sm.name.toLowerCase().includes('high-priv') ? '/identities?privileged=true' :
-                    sm.name.toLowerCase().includes('expired') || sm.name.toLowerCase().includes('cert') ? '/identities?credential_status=expired' :
-                    sm.name.toLowerCase().includes('mfa') ? '/identities?pillar=mfa-enforcement' :
-                    sm.name.toLowerCase().includes('external') || sm.name.toLowerCase().includes('multi-tenant') ? '/identities?category=service_principal' :
-                    sm.name.toLowerCase().includes('guest') ? '/identities?category=guest' :
-                    pillarNav(p.name);
+                  // Sub-metrics navigate to the parent pillar (exact count via contributing_pillar)
+                  const smNav = pillarNav(p.name);
                   return (
                   <div key={j} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 0' }}>
                     <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, width: 120 }}>{sm.name}</span>
@@ -1112,11 +1433,11 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
         {Object.entries(d.kpis).map(([key, kpi]) => {
           const isGhost = key === 'ghostAccounts';
           const valueColor = isGhost && kpi.value > 0 ? COLORS.danger : COLORS.text;
-          const navTo = key === 'privilegedRoles' ? '/identities?privileged=true' :
-            key === 'dormantPrivileged' ? '/identities?privileged=true&dormant=true' :
+          const navTo = key === 'privilegedRoles' ? '/identities?pillar=effective-privilege' :
+            key === 'dormantPrivileged' ? '/identities?activity_status=dormant_strict&privileged=true' :
             key === 'ghostAccounts' ? '/identities?status=disabled&hasRoles=true' :
-            key === 'subscriptionAccess' ? '/identities?pillar=subscription-access' :
-            key === 'rbacModifiers' ? '/identities?pillar=rbac-modifiers' :
+            key === 'subscriptionAccess' ? '/identities?privileged=true' :
+            key === 'rbacModifiers' ? '/identities?privileged=true' :
             '/identities';
           return (
             <CISOCard key={key} style={isGhost && kpi.value > 0 ? { borderColor: `${COLORS.danger}40` } : undefined}>
@@ -1147,7 +1468,7 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
           <StatBox label="Risk" value={<DN navigateTo="/identities?risk=high,critical">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
           <StatBox label="Low" value={<DN navigateTo="/identities?risk=low,medium">{d.blastRadius.lowRisk}</DN>} color={COLORS.success} />
-          <StatBox label="Orphaned" value={<DN navigateTo="/identities?owner=none">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
+          <StatBox label="Orphaned" value={<DN navigateTo="/identities?pillar=ownership-governance">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
         </div>
         <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, marginBottom: 10, fontFamily: FONT.ui }}>Category Scores</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
@@ -1283,11 +1604,11 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
                 marginBottom: 8, fontFamily: FONT.ui,
               }}>▸ {group.type}</div>
               {group.items.map((item, ii) => {
-                const cfNav = item.label.toLowerCase().includes('pim') || item.label.toLowerCase().includes('privilege outside') ? '/identities?privileged=true' :
+                const cfNav = item.label.toLowerCase().includes('pim') || item.label.toLowerCase().includes('privilege outside') ? '/identities?pillar=effective-privilege' :
                   item.label.toLowerCase().includes('disabled') || item.label.toLowerCase().includes('ghost') ? '/identities?status=disabled&hasRoles=true' :
-                  item.label.toLowerCase().includes('ownership') || item.label.toLowerCase().includes('unowned') ? '/identities?owner=none' :
-                  item.label.toLowerCase().includes('dormant') ? '/identities?privileged=true&dormant=true' :
-                  item.label.toLowerCase().includes('credential') || item.label.toLowerCase().includes('expired') ? '/identities?credential_status=expired' :
+                  item.label.toLowerCase().includes('ownership') || item.label.toLowerCase().includes('unowned') ? '/identities?pillar=ownership-governance' :
+                  item.label.toLowerCase().includes('dormant') ? '/identities?pillar=usage-dormancy' :
+                  item.label.toLowerCase().includes('credential') || item.label.toLowerCase().includes('expired') ? '/identities?pillar=credential-risk' :
                   '/identities';
                 return (
                 <div key={ii} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: `1px solid ${COLORS.border}` }}>
@@ -1407,7 +1728,7 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{fw.name}</div>
                     <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
-                      {fw.totalControls} controls · <DN navigateTo={`/identities?pillar=compliance-${fw.id}`}>{fw.failedControls}</DN> failures
+                      {fw.totalControls} controls · <DN navigateTo="/identities?risk=critical,high">{fw.failedControls}</DN> failures
                     </div>
                   </div>
                 </div>
