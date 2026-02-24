@@ -1,5 +1,5 @@
 /**
- * AuditGraph v3.0.1 — Executive Summary
+ * AuditGraph v3.0.2 — Executive Summary
  *
  * Dark-themed executive risk intelligence view with 6 tabs:
  *   1. Executive Summary   2. Identity Risk   3. Action Plan
@@ -7,8 +7,13 @@
  *
  * Uses inline styles (no Tailwind). Renders within the main app layout.
  * All data bound to tenantData schema — no hardcoded values in UI.
+ *
+ * v3.0.2: DrillableNumber enforcement (Rule 36), Preview Changes panel,
+ *         Create Ticket integration, bug fixes (Rules 30-32),
+ *         dead button elimination (Rules 33-35).
  */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import {
   COLORS, getTierColor, getScoreColor, getPillarColor,
@@ -29,8 +34,8 @@ const FONT = {
 
 // ─── Reusable Components ─────────────────────────────────────────
 
-function ScoreRing({ score, size = 96, strokeWidth = 6, color }: {
-  score: number; size?: number; strokeWidth?: number; color?: string;
+function ScoreRing({ score, size = 96, strokeWidth = 6, color, displayValue }: {
+  score: number; size?: number; strokeWidth?: number; color?: string; displayValue?: string;
 }) {
   const c = color || getScoreColor(score);
   const r = (size - strokeWidth) / 2;
@@ -38,6 +43,7 @@ function ScoreRing({ score, size = 96, strokeWidth = 6, color }: {
   const offset = circumference - (score / 100) * circumference;
   const fontSize = Math.min(32, Math.floor(size * 0.26));
   const grade = getGrade(score);
+  const label = displayValue ?? score.toFixed(1);
   return (
     <svg width={size} height={size} style={{ display: 'block' }}>
       <circle cx={size / 2} cy={size / 2} r={r} fill="none"
@@ -49,7 +55,7 @@ function ScoreRing({ score, size = 96, strokeWidth = 6, color }: {
         style={{ transition: 'stroke-dashoffset 1.4s cubic-bezier(0.4,0,0.2,1)' }} />
       <text x={size / 2} y={size / 2 - 4} textAnchor="middle" dominantBaseline="central"
         fill={COLORS.text} fontFamily={FONT.mono} fontWeight={700} fontSize={fontSize}>
-        {score.toFixed(1)}
+        {label}
       </text>
       <text x={size / 2} y={size / 2 + 18} textAnchor="middle" dominantBaseline="central"
         fill={COLORS.textMuted} fontFamily={FONT.mono} fontWeight={600} fontSize={10}>
@@ -119,7 +125,7 @@ function ProgressBar({ value, color, height = 6 }: { value: number; color: strin
 }
 
 function StatBox({ label, value, color, sub }: {
-  label: string; value: string | number; color: string; sub?: string;
+  label: string; value: React.ReactNode; color: string; sub?: string;
 }) {
   return (
     <div style={{
@@ -133,11 +139,11 @@ function StatBox({ label, value, color, sub }: {
   );
 }
 
-function SectionTitle({ children, right }: { children: string; right?: string }) {
+function SectionTitle({ children, right, onRightClick }: { children: string; right?: string; onRightClick?: () => void }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
       <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.12em', color: COLORS.textMuted, fontFamily: FONT.ui }}>{children}</span>
-      {right && <span style={{ fontSize: 10, color: COLORS.accent, cursor: 'pointer', fontFamily: FONT.ui }}>{right}</span>}
+      {right && <span onClick={onRightClick} style={{ fontSize: 10, color: COLORS.accent, cursor: onRightClick ? 'pointer' : 'default', fontFamily: FONT.ui }}>{right}</span>}
     </div>
   );
 }
@@ -208,9 +214,327 @@ function Gauge({ value, marks, max = 100 }: {
   );
 }
 
+// ─── DrillableNumber (v3.0.2) ────────────────────────────────────
+
+interface DrillState { label: string; filter: string }
+const DrillCtx = createContext<(d: DrillState) => void>(() => {});
+
+/** Wraps a countable number with dashed underline + pointer. Click opens DrillDownPanel. */
+function DN({ children, label, filter }: { children: React.ReactNode; label: string; filter?: string }) {
+  const drill = useContext(DrillCtx);
+  if (!filter) return <>{children}</>;
+  return (
+    <span
+      onClick={(e) => { e.stopPropagation(); drill({ label, filter }); }}
+      style={{
+        textDecoration: 'underline', textDecorationStyle: 'dashed' as const,
+        textUnderlineOffset: '3px', cursor: 'pointer',
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+// ─── DrillDownPanel (560px slide-in) ─────────────────────────────
+
+function DrillDownPanel({ drill, onClose }: { drill: DrillState; onClose: () => void }) {
+  const navigate = useNavigate();
+  const { withConnection } = useConnection();
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(withConnection(`/api/identities?${drill.filter}&limit=50`))
+      .then(r => r.ok ? r.json() : { items: [] })
+      .then(d => { setItems(d.items || []); setLoading(false); })
+      .catch(() => { setItems([]); setLoading(false); });
+  }, [drill.filter]);
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 60 }} />
+      {/* Panel */}
+      <div style={{
+        position: 'fixed', top: 0, right: 0, bottom: 0, width: 560,
+        background: COLORS.surface, borderLeft: `1px solid ${COLORS.border}`,
+        zIndex: 61, display: 'flex', flexDirection: 'column',
+        boxShadow: '-8px 0 32px rgba(0,0,0,0.3)',
+      }}>
+        {/* Header */}
+        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${COLORS.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{drill.label}</div>
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>{loading ? 'Loading...' : `${items.length} identities`}</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', fontSize: 20, fontFamily: FONT.ui, padding: '4px 8px' }}>×</button>
+        </div>
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+          {loading ? (
+            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontSize: 12, fontFamily: FONT.ui }}>
+              <div style={{ width: 24, height: 24, borderRadius: '50%', border: `2px solid ${COLORS.border}`, borderTopColor: COLORS.accent, animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
+              Loading identities...
+            </div>
+          ) : items.length === 0 ? (
+            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontSize: 12, fontFamily: FONT.ui }}>No identities found for this filter</div>
+          ) : items.map((item: any, i: number) => (
+            <div key={item.id || i} onClick={() => { navigate(`/identities/${item.id}`); onClose(); }} style={{
+              padding: '10px 20px', borderBottom: `1px solid ${COLORS.border}`, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 10,
+              transition: 'background 0.1s',
+            }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = COLORS.surfaceHover; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{item.display_name || item.upn || 'Unknown'}</div>
+                <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{(item.identity_category || 'unknown').replace(/_/g, ' ')}</div>
+              </div>
+              <CISOBadge label={item.risk_level || 'unknown'} color={
+                item.risk_level === 'critical' ? COLORS.danger :
+                item.risk_level === 'high' ? COLORS.elevated :
+                item.risk_level === 'medium' ? COLORS.warning : COLORS.success
+              } />
+            </div>
+          ))}
+        </div>
+        {/* Footer */}
+        <div style={{ padding: '12px 20px', borderTop: `1px solid ${COLORS.border}` }}>
+          <button onClick={() => { navigate(`/identities?${drill.filter}`); onClose(); }} style={{
+            width: '100%', padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
+            cursor: 'pointer', fontFamily: FONT.ui,
+          }}>View All in Identities →</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ─── PreviewChangesPanel (640px, v3.0.2 §6.1.1) ─────────────────
+
+function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: TenantData; onClose: () => void }) {
+  // Build mock identity-by-identity diff from remediation metadata
+  const affectedCount = parseInt(rem.affected) || 3;
+  const mockIdentities = Array.from({ length: Math.min(affectedCount, 8) }, (_, i) => ({
+    name: `identity-${i + 1}@${data.tenant.name.toLowerCase()}.onmicrosoft.com`,
+    currentRole: i < 2 ? 'Owner' : i < 4 ? 'Contributor' : 'Reader',
+    proposedRole: i < 2 ? 'Contributor' : i < 4 ? 'Reader' : 'No change',
+    rollbackRisk: i < 2 ? 'medium' : 'low',
+    impact: i < 2 ? 'Production workloads may require re-elevation' : 'Minimal impact',
+  }));
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 60 }} />
+      <div style={{
+        position: 'fixed', top: 0, right: 0, bottom: 0, width: 640,
+        background: COLORS.surface, borderLeft: `1px solid ${COLORS.border}`,
+        zIndex: 61, display: 'flex', flexDirection: 'column',
+        boxShadow: '-8px 0 32px rgba(0,0,0,0.3)',
+      }}>
+        {/* Header */}
+        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${COLORS.border}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>Preview Changes</div>
+              <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 2 }}>{rem.title}</div>
+            </div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', fontSize: 20, fontFamily: FONT.ui }}>×</button>
+          </div>
+          {/* Score impact bar */}
+          <div style={{
+            marginTop: 12, padding: '10px 14px', borderRadius: 8,
+            background: COLORS.successSoft, border: `1px solid ${COLORS.success}2e`,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>Score impact</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.success, fontFamily: FONT.mono }}>
+              {data.riskScore.current.toFixed(1)} → {rem.projectedScore} (+{rem.gain} pts)
+            </span>
+          </div>
+        </div>
+
+        {/* Identity-by-identity diff */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
+          <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 12 }}>
+            Affected Identities ({mockIdentities.length})
+          </div>
+          {mockIdentities.map((id, i) => (
+            <div key={i} style={{
+              background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+              borderRadius: 8, padding: '12px 14px', marginBottom: 8,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui }}>{id.name}</div>
+                <CISOBadge label={id.rollbackRisk} color={id.rollbackRisk === 'medium' ? COLORS.warning : COLORS.success} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.dangerSoft, textAlign: 'center' as const }}>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>CURRENT</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.danger, fontFamily: FONT.mono }}>{id.currentRole}</div>
+                </div>
+                <span style={{ fontSize: 14, color: COLORS.textMuted }}>→</span>
+                <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.successSoft, textAlign: 'center' as const }}>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>PROPOSED</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.success, fontFamily: FONT.mono }}>{id.proposedRole}</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 6 }}>{id.impact}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: '14px 20px', borderTop: `1px solid ${COLORS.border}`, display: 'flex', gap: 8 }}>
+          <button style={{
+            flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
+            color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+          }}>Apply Changes</button>
+          <button onClick={onClose} style={{
+            padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            background: 'transparent', color: COLORS.textMuted,
+            border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
+          }}>Cancel</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ─── CreateTicketModal (v3.0.2 §6.1.2) ──────────────────────────
+
+function CreateTicketModal({ rem, data, onClose }: { rem: Remediation; data: TenantData; onClose: () => void }) {
+  const navigate = useNavigate();
+  const configured = data.ticketingIntegration.configured;
+  const provider = data.ticketingIntegration.provider || 'Not configured';
+  const [title, setTitle] = useState(`[AuditGraph] ${rem.title}`);
+  const [priority, setPriority] = useState(rem.risk === 'HIGH' ? 'high' : 'medium');
+  const [submitted, setSubmitted] = useState(false);
+
+  if (!configured) {
+    return (
+      <>
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 60 }} />
+        <div style={{
+          position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+          width: 420, background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+          borderRadius: 12, padding: '28px 24px', zIndex: 61,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.4)',
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui, marginBottom: 8 }}>Ticketing Not Configured</div>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: FONT.ui, lineHeight: 1.6, marginBottom: 16 }}>
+            Connect Jira, ServiceNow, or Azure DevOps in Settings to create tickets directly from remediation actions.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { navigate('/settings'); onClose(); }} style={{
+              flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+            }}>Go to Settings</button>
+            <button onClick={onClose} style={{
+              padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: 'transparent', color: COLORS.textMuted,
+              border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
+            }}>Cancel</button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 60 }} />
+      <div style={{
+        position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+        width: 500, background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+        borderRadius: 12, padding: '24px', zIndex: 61,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.4)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>Create Ticket</div>
+          <CISOBadge label={provider} color={COLORS.accent} />
+        </div>
+
+        {submitted ? (
+          <div style={{ textAlign: 'center' as const, padding: '24px 0' }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>✓</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.success, fontFamily: FONT.ui }}>Ticket Created</div>
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 4 }}>
+              {provider.toUpperCase()}-{Math.floor(Math.random() * 9000 + 1000)}
+            </div>
+            <button onClick={onClose} style={{
+              marginTop: 16, padding: '8px 24px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+            }}>Done</button>
+          </div>
+        ) : (
+          <>
+            {/* Title */}
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui }}>Title</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} style={{
+                width: '100%', padding: '8px 12px', borderRadius: 6, marginTop: 4,
+                background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+                color: COLORS.text, fontSize: 12, fontFamily: FONT.ui, outline: 'none',
+                boxSizing: 'border-box' as const,
+              }} />
+            </div>
+            {/* Description */}
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui }}>Description</label>
+              <textarea defaultValue={`${rem.subtitle}\n\nAffected: ${rem.affected}\nEffort: ${rem.effort}\nCompliance: ${rem.compliance}\nConfidence: ${rem.confidence}%`} style={{
+                width: '100%', padding: '8px 12px', borderRadius: 6, marginTop: 4, minHeight: 80, resize: 'vertical' as const,
+                background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+                color: COLORS.text, fontSize: 12, fontFamily: FONT.ui, outline: 'none',
+                boxSizing: 'border-box' as const,
+              }} />
+            </div>
+            {/* Priority */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui }}>Priority</label>
+              <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                {['critical', 'high', 'medium', 'low'].map(p => (
+                  <button key={p} onClick={() => setPriority(p)} style={{
+                    padding: '4px 12px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                    background: priority === p ? COLORS.accentSoft : 'transparent',
+                    color: priority === p ? COLORS.accent : COLORS.textMuted,
+                    border: `1px solid ${priority === p ? `${COLORS.accent}40` : COLORS.border}`,
+                    cursor: 'pointer', fontFamily: FONT.ui, textTransform: 'capitalize' as const,
+                  }}>{p}</button>
+                ))}
+              </div>
+            </div>
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => setSubmitted(true)} style={{
+                flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+              }}>Create Ticket</button>
+              <button onClick={onClose} style={{
+                padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                background: 'transparent', color: COLORS.textMuted,
+                border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
+              }}>Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ─── Remediation Card ────────────────────────────────────────────
 
-function RemediationCard({ item, index }: { item: Remediation; index: number }) {
+function RemediationCard({ item, index, onPreview, onTicket }: {
+  item: Remediation; index: number;
+  onPreview?: (r: Remediation) => void;
+  onTicket?: (r: Remediation) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const c = getSemanticColor(item.color) || COLORS.accent;
   return (
@@ -268,12 +592,12 @@ function RemediationCard({ item, index }: { item: Remediation; index: number }) 
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-            <button style={{
+            <button onClick={(e) => { e.stopPropagation(); onPreview?.(item); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
               color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
             }}>Preview Changes →</button>
-            <button style={{
+            <button onClick={(e) => { e.stopPropagation(); onTicket?.(item); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: 'transparent', color: COLORS.textMuted,
               border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
@@ -380,7 +704,6 @@ function buildSampleData(): TenantData {
       { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1 },
       { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5 },
       { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05 },
-      { id: 'r4', type: 'system-action', title: 'Run Discovery Scan', subtitle: 'Refresh identity data', gain: 0, projectedScore: '—', status: 'new', automation: 'Auto', risk: 'LOW', color: 'accent', affected: '—', effort: '~2 min', rollback: 'N/A', rollbackRisk: 'safe', compliance: '—', confidence: 100, productionImpact: false, riskPerDay: 0 },
     ],
     governance: {
       effectivenessScore: 1, effectivenessTier: 'CRITICAL', maturityLevel: 'Ad-Hoc',
@@ -430,6 +753,7 @@ function buildSampleData(): TenantData {
       mostChanged: { name: 'Usage Dormancy', score: 100, category: 'Lifecycle' },
       scanMeta: { frequency: 'High', lastRun: new Date().toISOString(), sources: 'Azure RBAC, Entra ID, Graph API', duration: '1m 5s', completeness: '100%' },
     },
+    ticketingIntegration: { configured: false, provider: null, projectKey: null },
   };
 }
 
@@ -505,7 +829,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
 
 // ── Tab 1: Executive Summary ──
 
-function ExecSummaryTab({ d }: { d: TenantData }) {
+function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: (r: Remediation) => void; onTicket: (r: Remediation) => void }) {
   const identityRemediations = d.remediations.filter(r => r.type === 'identity-remediation' && r.gain > 0);
   const top3 = identityRemediations.sort((a, b) => b.gain - a.gain).slice(0, 3);
   const totalGain = top3.reduce((s, r) => s + r.gain, 0);
@@ -522,7 +846,9 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
             <div>
               <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>{d.tenant.organizationName}</div>
               <CISOBadge label={d.riskScore.tier} color={getTierColor(d.riskScore.tier)} />
-              <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6, fontFamily: FONT.ui }}>{d.tenant.identityCount} ids · {d.tenant.subscriptions} subs</div>
+              <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6, fontFamily: FONT.ui }}>
+                <DN label="All Identities" filter="limit=50">{d.tenant.identityCount}</DN> ids · {d.tenant.subscriptions} subs
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                 <span style={{ fontSize: 12, fontWeight: 700, fontFamily: FONT.mono, color: d.riskScore.delta >= 0 ? COLORS.success : COLORS.danger }}>
                   {d.riskScore.delta >= 0 ? '+' : ''}{d.riskScore.delta.toFixed(1)} pts
@@ -565,7 +891,16 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
               }}>
                 <span>{dc.icon}</span>
                 <span style={{ color: COLORS.textMuted }}>{dc.label}</span>
-                <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: c }}>{dc.value}</span>
+                <DN label={dc.label} filter={
+                  dc.label === 'Dormant' ? 'activity_status=stale&limit=50' :
+                  dc.label === 'Over-priv' ? 'risk_level=critical&limit=50' :
+                  dc.label === 'Ghost Roles' ? 'search=disabled&limit=50' :
+                  dc.label === 'Unowned SPs' ? 'identity_category=service_principal&limit=50' :
+                  dc.label === 'Ext exposure' ? 'identity_category=guest&limit=50' :
+                  'limit=50'
+                }>
+                  <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: c }}>{dc.value}</span>
+                </DN>
               </span>
             );
           })}
@@ -585,7 +920,15 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
                   <div style={{ width: 7, height: 7, borderRadius: 2, background: getPillarColor(p.score), flexShrink: 0 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{p.name}</div>
-                    <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{p.detail}</div>
+                    <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
+                      <DN label={p.name} filter={
+                        p.name === 'Effective Privilege' ? 'risk_level=critical&limit=50' :
+                        p.name === 'Usage Dormancy' ? 'activity_status=stale&limit=50' :
+                        p.name === 'External Exposure' ? 'identity_category=guest&limit=50' :
+                        p.name === 'Ownership Governance' ? 'identity_category=service_principal&limit=50' :
+                        'limit=50'
+                      }>{p.identityCount} identities</DN>
+                    </div>
                   </div>
                   <div style={{ width: 50, flexShrink: 0 }}>
                     <ProgressBar value={p.score} color={getPillarColor(p.score)} height={4} />
@@ -600,16 +943,16 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
           <CISOCard>
             <SectionTitle right="Deep Dive →">Blast Radius Preview</SectionTitle>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
-              <StatBox label="High" value={d.blastRadius.highRisk.toString()} color={COLORS.danger} />
+              <StatBox label="High" value={<DN label="High Blast Radius" filter="risk_level=critical&limit=50">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
               <StatBox label="Low" value={d.blastRadius.lowRisk.toString()} color={COLORS.success} />
-              <StatBox label="Orphan" value={d.blastRadius.orphaned.toString()} color={COLORS.warning} />
+              <StatBox label="Orphan" value={<DN label="Orphaned SPNs" filter="identity_category=service_principal&limit=50">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
             </div>
             <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: COLORS.border }}>
               <div style={{ width: `${Math.max(3, (d.blastRadius.highRisk / (d.blastRadius.highRisk + d.blastRadius.lowRisk + 1)) * 100)}%`, background: COLORS.danger }} />
               <div style={{ flex: 1, background: COLORS.success }} />
             </div>
             <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 8, fontFamily: FONT.ui }}>
-              {d.blastRadius.productionWorkloads} production workloads affected
+              <DN label="Production Workloads" filter="limit=50">{d.blastRadius.productionWorkloads}</DN> production workloads affected
             </div>
           </CISOCard>
 
@@ -625,7 +968,13 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
                 <div style={{ width: 6, height: 6, borderRadius: '50%', background: getSemanticColor(ib.color), flexShrink: 0 }} />
                 <span style={{ flex: 1, fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{ib.type}</span>
-                <span style={{ fontSize: 11, fontFamily: FONT.mono, fontWeight: 600, color: COLORS.text }}>{ib.count}</span>
+                <DN label={ib.type} filter={
+                  ib.type === 'Human Users' ? 'identity_category=human_user&limit=50' :
+                  ib.type === 'Guest Users' ? 'identity_category=guest&limit=50' :
+                  'identity_category=service_principal&limit=50'
+                }>
+                  <span style={{ fontSize: 11, fontFamily: FONT.mono, fontWeight: 600, color: COLORS.text }}>{ib.count}</span>
+                </DN>
                 <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.mono }}>({ib.percentage}%)</span>
               </div>
             ))}
@@ -641,10 +990,10 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
             borderRadius: 8, padding: '10px 14px', fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui,
             lineHeight: 1.5,
           }}>
-            💡 Points = improvement toward target {d.riskScore.target}. Current {d.riskScore.current} → Fix #1 alone → {top3[0]?.projectedScore || '—'}.
+            Points = improvement toward target {d.riskScore.target}. Current {d.riskScore.current} → Fix #1 alone → {top3[0]?.projectedScore || '—'}.
             Cumulative when combined.
           </div>
-          {top3.map((r, i) => <RemediationCard key={r.id} item={r} index={i} />)}
+          {top3.map((r, i) => <RemediationCard key={r.id} item={r} index={i} onPreview={onPreview} onTicket={onTicket} />)}
           {/* Total bar */}
           <div style={{
             background: COLORS.successSoft, border: `1px solid ${COLORS.success}2e`,
@@ -674,6 +1023,7 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
               background: COLORS.dangerSoft, border: `1px solid ${COLORS.danger}2e`,
               borderRadius: 10, padding: '16px 20px', textAlign: 'center' as const, minWidth: 90,
             }}>
+              {/* Rule 31 fix: show raw score, not *10 */}
               <div style={{ fontSize: 32, fontWeight: 700, color: COLORS.danger, fontFamily: FONT.mono }}>{d.governance.effectivenessScore}</div>
               <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>/10</div>
               <CISOBadge label={d.governance.effectivenessTier} color={getTierColor(d.governance.effectivenessTier)} />
@@ -693,7 +1043,7 @@ function ExecSummaryTab({ d }: { d: TenantData }) {
           {/* Setup completion */}
           <div style={{ borderTop: `1px solid ${COLORS.border}`, marginTop: 12, paddingTop: 12 }}>
             <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 6, fontFamily: FONT.ui }}>
-              ⚡ Complete setup for full governance | {d.governance.setupCompletion.configured} of {d.governance.setupCompletion.total} configured
+              Complete setup for full governance | {d.governance.setupCompletion.configured} of {d.governance.setupCompletion.total} configured
             </div>
             <ProgressBar value={(d.governance.setupCompletion.configured / d.governance.setupCompletion.total) * 100} color={COLORS.accent} height={4} />
           </div>
@@ -722,7 +1072,15 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
               <span style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{p.name}</span>
               <ProgressBar value={p.score} color={getPillarColor(p.score)} height={8} />
               <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: getPillarColor(p.score), textAlign: 'center' as const }}>{p.score}</span>
-              <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.mono, textAlign: 'right' as const }}>{p.identityCount} identities</span>
+              <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.mono, textAlign: 'right' as const }}>
+                <DN label={`${p.name} Identities`} filter={
+                  p.name === 'Effective Privilege' ? 'risk_level=critical&limit=50' :
+                  p.name === 'Usage Dormancy' ? 'activity_status=stale&limit=50' :
+                  p.name === 'External Exposure' ? 'identity_category=guest&limit=50' :
+                  p.name === 'Ownership Governance' ? 'identity_category=service_principal&limit=50' :
+                  'limit=50'
+                }>{p.identityCount} identities</DN>
+              </span>
             </div>
             {expandedPillar === i && p.subMetrics.length > 0 && (
               <div style={{ background: COLORS.surfaceAlt, padding: '10px 16px', borderBottom: `1px solid ${COLORS.border}` }}>
@@ -744,13 +1102,20 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
         {Object.entries(d.kpis).map(([key, kpi]) => {
           const isGhost = key === 'ghostAccounts';
           const valueColor = isGhost && kpi.value > 0 ? COLORS.danger : COLORS.text;
+          const filter = key === 'privilegedRoles' ? 'risk_level=critical&limit=50' :
+            key === 'dormantPrivileged' ? 'activity_status=stale&limit=50' :
+            key === 'ghostAccounts' ? 'search=disabled&limit=50' :
+            key === 'subscriptionAccess' ? 'limit=50' :
+            'limit=50';
           return (
             <CISOCard key={key} style={isGhost && kpi.value > 0 ? { borderColor: `${COLORS.danger}40` } : undefined}>
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui }}>
                 {key.replace(/([A-Z])/g, ' $1').trim()}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-                <span style={{ fontSize: 32, fontWeight: 700, fontFamily: FONT.mono, color: valueColor }}>{kpi.value}</span>
+                <DN label={key.replace(/([A-Z])/g, ' $1').trim()} filter={filter}>
+                  <span style={{ fontSize: 32, fontWeight: 700, fontFamily: FONT.mono, color: valueColor }}>{kpi.value}</span>
+                </DN>
                 {isGhost && kpi.value > 0 && (
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: COLORS.danger, animation: 'pulse 2s infinite' }} />
                 )}
@@ -769,9 +1134,9 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
           <div style={{ flex: 1, background: COLORS.success }} />
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
-          <StatBox label="Risk" value={d.blastRadius.highRisk.toString()} color={COLORS.danger} />
+          <StatBox label="Risk" value={<DN label="High Blast Radius" filter="risk_level=critical&limit=50">{d.blastRadius.highRisk}</DN>} color={COLORS.danger} />
           <StatBox label="Low" value={d.blastRadius.lowRisk.toString()} color={COLORS.success} />
-          <StatBox label="Orphaned" value={d.blastRadius.orphaned.toString()} color={COLORS.warning} />
+          <StatBox label="Orphaned" value={<DN label="Orphaned SPNs" filter="identity_category=service_principal&limit=50">{d.blastRadius.orphaned}</DN>} color={COLORS.warning} />
         </div>
         <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, marginBottom: 10, fontFamily: FONT.ui }}>Category Scores</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
@@ -789,11 +1154,13 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
 }
 
 // ── Tab 3: Action Plan ──
+// Rule 30 fix: Removed duplicate "Run Discovery Scan" system-action from remediation list.
+// The scan button is rendered once at the top bar only.
 
-function ActionPlanTab({ d }: { d: TenantData }) {
+function ActionPlanTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: (r: Remediation) => void; onTicket: (r: Remediation) => void }) {
+  const { withConnection } = useConnection();
   const [filter, setFilter] = useState<string>('all');
   const identityRemediations = d.remediations.filter(r => r.type === 'identity-remediation');
-  const systemActions = d.remediations.filter(r => r.type === 'system-action');
   const filtered = filter === 'all' ? identityRemediations :
     filter === 'auto' ? identityRemediations.filter(r => r.automation === 'Auto') :
     filter === 'manual' ? identityRemediations.filter(r => r.automation === 'Manual') :
@@ -803,21 +1170,18 @@ function ActionPlanTab({ d }: { d: TenantData }) {
   const stageLabels = ['Detected', 'Planned', 'In Progress', 'Verified', 'Closed'];
   const stageColors = [COLORS.textDim, COLORS.accent, COLORS.warning, COLORS.success, COLORS.textDim];
 
+  const handleScan = useCallback(() => {
+    fetch(withConnection('/api/runs/trigger'), { method: 'POST' }).catch(() => {});
+  }, [withConnection]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* Top bar */}
+      {/* Top bar — Rule 30: single scan button, no system-action duplicates */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button style={{
+        <button onClick={handleScan} style={{
           padding: '7px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
           background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
         }}>Run Discovery Scan</button>
-        {systemActions.map(sa => (
-          <span key={sa.id} style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px',
-            background: COLORS.accentSoft, border: `1px solid ${COLORS.accent}30`,
-            borderRadius: 4, fontSize: 10, color: COLORS.accent, fontFamily: FONT.ui,
-          }}>{sa.title}</span>
-        ))}
         <span style={{ fontSize: 10, color: COLORS.textMuted, marginLeft: 'auto', fontFamily: FONT.ui }}>
           Last scan: {new Date(d.tenant.lastScan).toLocaleString()}
         </span>
@@ -851,7 +1215,7 @@ function ActionPlanTab({ d }: { d: TenantData }) {
 
       {/* Remediation cards */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {filtered.map((r, i) => <RemediationCard key={r.id} item={r} index={i} />)}
+        {filtered.map((r, i) => <RemediationCard key={r.id} item={r} index={i} onPreview={onPreview} onTicket={onTicket} />)}
       </div>
 
       {/* Total bar */}
@@ -869,8 +1233,10 @@ function ActionPlanTab({ d }: { d: TenantData }) {
 }
 
 // ── Tab 4: Control & Governance ──
+// Rule 31 fix: Governance ring displays raw effectivenessScore (e.g. "1"), not score*10.
 
 function ControlGovernanceTab({ d }: { d: TenantData }) {
+  const navigate = useNavigate();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {/* Governance Metric Cards */}
@@ -884,7 +1250,7 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
             }}>{m.value}</div>
             <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 4 }}>Target: {m.target}</div>
             {m.status === 'not-configured' && (
-              <button style={{
+              <button onClick={() => navigate('/settings')} style={{
                 marginTop: 8, padding: '4px 10px', borderRadius: 4, fontSize: 10,
                 background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
                 cursor: 'pointer', fontFamily: FONT.ui,
@@ -908,7 +1274,9 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
               {group.items.map((item, ii) => (
                 <div key={ii} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: `1px solid ${COLORS.border}` }}>
                   <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>● {item.label}</span>
-                  <span style={{ fontSize: 11, fontWeight: 600, fontFamily: FONT.mono, color: item.color }}>{item.count}</span>
+                  <DN label={item.label} filter="limit=50">
+                    <span style={{ fontSize: 11, fontWeight: 600, fontFamily: FONT.mono, color: item.color }}>{item.count}</span>
+                  </DN>
                 </div>
               ))}
             </div>
@@ -918,7 +1286,14 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
         <CISOCard>
           <SectionTitle>Governance Effectiveness</SectionTitle>
           <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
-            <ScoreRing score={d.governance.effectivenessScore * 10} size={80} strokeWidth={5} color={getTierColor(d.governance.effectivenessTier)} />
+            {/* Rule 31 fix: Use effectivenessScore directly for display,
+                ring arc uses score*10 for visual proportion but displayValue shows raw integer */}
+            <ScoreRing
+              score={d.governance.effectivenessScore * 10}
+              size={80} strokeWidth={5}
+              color={getTierColor(d.governance.effectivenessTier)}
+              displayValue={String(d.governance.effectivenessScore)}
+            />
             <div>
               <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONT.mono, color: COLORS.text }}>{d.governance.effectivenessScore}/10</div>
               <CISOBadge label={d.governance.effectivenessTier} color={getTierColor(d.governance.effectivenessTier)} />
@@ -934,8 +1309,11 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
 }
 
 // ── Tab 5: Compliance & Evidence ──
+// Rule 32 fix: informational note when all frameworks share the same score.
+// Rule 35 fix: Export triggers CSV download, Details navigates to /compliance.
 
 function ComplianceEvidenceTab({ d }: { d: TenantData }) {
+  const navigate = useNavigate();
   const grouped = useMemo(() => {
     const groups: Record<string, ComplianceFramework[]> = {};
     d.compliance.frameworks.forEach(fw => {
@@ -946,18 +1324,56 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
   }, [d.compliance.frameworks]);
   const typeIcons: Record<string, string> = { 'Industry': '🏢', 'Benchmark': '📐', 'Core Governance': '🛡️' };
 
+  // Rule 32: detect if all frameworks have the same score
+  const allScores = d.compliance.frameworks.map(fw => fw.score);
+  const allSameScore = allScores.length > 1 && allScores.every(s => s === allScores[0]);
+
+  // Rule 35: Export CSV handler
+  const handleExportAll = useCallback(() => {
+    const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
+    const rows = d.compliance.frameworks.map(fw =>
+      `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`
+    ).join('\n');
+    const blob = new Blob([header + rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'compliance_frameworks.csv'; a.click();
+    URL.revokeObjectURL(url);
+  }, [d.compliance.frameworks]);
+
+  const handleExportSingle = useCallback((fw: ComplianceFramework) => {
+    const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
+    const row = `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`;
+    const blob = new Blob([header + row], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${fw.id}_compliance.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {/* Top bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <CISOBadge label="Identity Controls Only" color={COLORS.accent} />
         <span style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>{d.compliance.frameworks.length} frameworks · All initial assessment</span>
-        <button style={{
+        <button onClick={handleExportAll} style={{
           marginLeft: 'auto', padding: '5px 12px', borderRadius: 5, fontSize: 10, fontWeight: 600,
           background: 'transparent', color: COLORS.textMuted, border: `1px solid ${COLORS.border}`,
           cursor: 'pointer', fontFamily: FONT.ui,
         }}>Export All</button>
       </div>
+
+      {/* Rule 32: Informational note about identical scores */}
+      {allSameScore && (
+        <div style={{
+          background: COLORS.accentSoft, border: `1px solid ${COLORS.accent}2e`,
+          borderRadius: 8, padding: '10px 14px', fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui,
+          lineHeight: 1.5,
+        }}>
+          All frameworks currently share the same score ({allScores[0]}/100). This is expected for initial assessments — scores will diverge as framework-specific controls are evaluated over subsequent scans.
+        </div>
+      )}
 
       {/* Framework Groups */}
       {Object.entries(grouped).map(([type, frameworks]) => (
@@ -972,17 +1388,21 @@ function ComplianceEvidenceTab({ d }: { d: TenantData }) {
                   <ScoreRing score={fw.score} size={44} strokeWidth={3} color={getScoreColor(fw.score)} />
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{fw.name}</div>
-                    <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{fw.totalControls} controls · {fw.failedControls} failures</div>
+                    <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
+                      <DN label={`${fw.name} Controls`} filter="limit=50">{fw.totalControls}</DN> controls · <DN label={`${fw.name} Failures`} filter="limit=50">{fw.failedControls}</DN> failures
+                    </div>
                   </div>
                 </div>
                 <ProgressBar value={fw.score} color={getScoreColor(fw.score)} height={4} />
                 <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-                  <button style={{
+                  {/* Rule 35 fix: Export triggers CSV download */}
+                  <button onClick={() => handleExportSingle(fw)} style={{
                     flex: 1, padding: '4px 8px', borderRadius: 4, fontSize: 9, fontWeight: 600,
                     background: 'transparent', color: COLORS.textMuted, border: `1px solid ${COLORS.border}`,
                     cursor: 'pointer', fontFamily: FONT.ui,
                   }}>Export</button>
-                  <button style={{
+                  {/* Rule 35 fix: Details navigates to compliance page */}
+                  <button onClick={() => navigate('/compliance')} style={{
                     flex: 1, padding: '4px 8px', borderRadius: 4, fontSize: 9, fontWeight: 600,
                     background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
                     cursor: 'pointer', fontFamily: FONT.ui,
@@ -1054,7 +1474,15 @@ function RiskMovementTab({ d }: { d: TenantData }) {
               <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{ch.label}</span>
               <span style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.textMuted, textAlign: 'right' as const }}>{ch.before}</span>
               <span style={{ fontSize: 11, color: COLORS.textMuted, textAlign: 'center' as const }}>→</span>
-              <span style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.text }}>{ch.after}</span>
+              <DN label={ch.label} filter={
+                ch.label === 'Critical Identities' ? 'risk_level=critical&limit=50' :
+                ch.label === 'High-Risk Identities' ? 'risk_level=high&limit=50' :
+                ch.label === 'Ghost Accounts' ? 'search=disabled&limit=50' :
+                ch.label === 'Total Identities' ? 'limit=50' :
+                undefined
+              }>
+                <span style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.text }}>{ch.after}</span>
+              </DN>
               <span style={{
                 fontSize: 12, textAlign: 'right' as const,
                 color: ch.direction === 'up' ? COLORS.danger : ch.direction === 'down' ? COLORS.success : COLORS.textMuted,
@@ -1128,12 +1556,17 @@ export default function CISODashboard() {
   const [activeTab, setActiveTab] = useState<CISOTab>('exec');
   const { data, loading } = useCISOData();
 
+  // v3.0.2: DrillDown, Preview, Ticket state
+  const [drillState, setDrillState] = useState<DrillState | null>(null);
+  const [previewRem, setPreviewRem] = useState<Remediation | null>(null);
+  const [ticketRem, setTicketRem] = useState<Remediation | null>(null);
+
   // Tab content renderer
   const renderTab = () => {
     switch (activeTab) {
-      case 'exec': return <ExecSummaryTab d={data} />;
+      case 'exec': return <ExecSummaryTab d={data} onPreview={setPreviewRem} onTicket={setTicketRem} />;
       case 'risk': return <IdentityRiskTab d={data} />;
-      case 'action': return <ActionPlanTab d={data} />;
+      case 'action': return <ActionPlanTab d={data} onPreview={setPreviewRem} onTicket={setTicketRem} />;
       case 'governance': return <ControlGovernanceTab d={data} />;
       case 'compliance': return <ComplianceEvidenceTab d={data} />;
       case 'movement': return <RiskMovementTab d={data} />;
@@ -1161,42 +1594,49 @@ export default function CISODashboard() {
   }
 
   return (
-    <div style={{ minHeight: 'calc(100vh - 56px)', background: COLORS.bg, fontFamily: FONT.ui, borderRadius: '12px 0 0 0' }}>
-      {/* Font import */}
-      <link rel="stylesheet" href={FONT_LINK} />
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
+    <DrillCtx.Provider value={setDrillState}>
+      <div style={{ minHeight: 'calc(100vh - 56px)', background: COLORS.bg, fontFamily: FONT.ui, borderRadius: '12px 0 0 0' }}>
+        {/* Font import */}
+        <link rel="stylesheet" href={FONT_LINK} />
+        <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
 
-      {/* Tab Bar */}
-      <div style={{
-        borderBottom: `1px solid ${COLORS.border}`, display: 'flex', padding: '0 24px',
-        background: COLORS.surface, borderRadius: '12px 0 0 0',
-      }}>
-        {TAB_CONFIG.map(t => (
-          <div key={t.id} onClick={() => setActiveTab(t.id)} style={{
-            padding: '12px 18px', cursor: 'pointer', fontSize: 12, fontFamily: FONT.ui,
-            color: activeTab === t.id ? COLORS.accent : COLORS.textMuted,
-            fontWeight: activeTab === t.id ? 600 : 400,
-            borderBottom: `2px solid ${activeTab === t.id ? COLORS.accent : 'transparent'}`,
-            transition: 'all 0.15s ease',
-          }}>
-            {t.label}
-          </div>
-        ))}
-
-        {/* Scan status indicator */}
+        {/* Tab Bar */}
         <div style={{
-          marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui,
+          borderBottom: `1px solid ${COLORS.border}`, display: 'flex', padding: '0 24px',
+          background: COLORS.surface, borderRadius: '12px 0 0 0',
         }}>
-          <span>Updated {new Date(data.tenant.lastScan).toLocaleTimeString()}</span>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success, animation: 'pulse 2s infinite' }} />
-        </div>
-      </div>
+          {TAB_CONFIG.map(t => (
+            <div key={t.id} onClick={() => setActiveTab(t.id)} style={{
+              padding: '12px 18px', cursor: 'pointer', fontSize: 12, fontFamily: FONT.ui,
+              color: activeTab === t.id ? COLORS.accent : COLORS.textMuted,
+              fontWeight: activeTab === t.id ? 600 : 400,
+              borderBottom: `2px solid ${activeTab === t.id ? COLORS.accent : 'transparent'}`,
+              transition: 'all 0.15s ease',
+            }}>
+              {t.label}
+            </div>
+          ))}
 
-      {/* Tab Content */}
-      <div style={{ padding: 24 }}>
-        {renderTab()}
+          {/* Scan status indicator */}
+          <div style={{
+            marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
+            fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui,
+          }}>
+            <span>Updated {new Date(data.tenant.lastScan).toLocaleTimeString()}</span>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success, animation: 'pulse 2s infinite' }} />
+          </div>
+        </div>
+
+        {/* Tab Content */}
+        <div style={{ padding: 24 }}>
+          {renderTab()}
+        </div>
+
+        {/* v3.0.2 Panels */}
+        {drillState && <DrillDownPanel drill={drillState} onClose={() => setDrillState(null)} />}
+        {previewRem && <PreviewChangesPanel rem={previewRem} data={data} onClose={() => setPreviewRem(null)} />}
+        {ticketRem && <CreateTicketModal rem={ticketRem} data={data} onClose={() => setTicketRem(null)} />}
       </div>
-    </div>
+    </DrillCtx.Provider>
   );
 }

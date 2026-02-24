@@ -4,7 +4,8 @@
  * Color tokens, scoring helpers, and TypeScript interfaces.
  * All dashboard components MUST use these tokens — no raw hex values.
  *
- * v3.0.1: Ghost accounts (disabled + active RBAC roles) surfaced across all 6 tabs.
+ * v3.0.2: DrillableNumber enforcement, Preview Changes panel, Create Ticket integration,
+ *          bug fixes (Rules 30-32), dead button elimination (Rules 33-35).
  */
 
 // ─── Color Tokens ────────────────────────────────────────────────
@@ -255,6 +256,12 @@ export interface RiskMovementChange {
   direction: string;
 }
 
+export interface TicketingIntegration {
+  configured: boolean;
+  provider: string | null; // 'jira' | 'servicenow' | 'azure_devops'
+  projectKey: string | null;
+}
+
 export interface RiskMovement {
   trajectory: number[];
   changes: RiskMovementChange[];
@@ -282,4 +289,5 @@ export interface TenantData {
   governance: Governance;
   compliance: ComplianceData;
   riskMovement: RiskMovement;
+  ticketingIntegration: TicketingIntegration;
 }
