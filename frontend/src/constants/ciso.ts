@@ -1,13 +1,14 @@
 /**
- * AuditGraph v3.0.3 CISO Dashboard — Design System
+ * AuditGraph v3.0.4 CISO Dashboard — Design System
  *
  * Color tokens, scoring helpers, and TypeScript interfaces.
  * All dashboard components MUST use these tokens — no raw hex values.
  *
  * v3.0.2: DrillableNumber enforcement, Preview Changes panel, Create Ticket integration,
  *          bug fixes (Rules 30-32), dead button elimination (Rules 33-35).
- * v3.0.3: identityStore (real scan data), remediationDiffs (real role diffs),
- *          data source attribution, no fabricated data (Rules 37-40).
+ * v3.0.3: identityStore (real scan data), data source attribution (Rules 37-40).
+ * v3.0.4: Eliminated separate remediationDiffs — role diffs embedded in
+ *          remediation.changes[]. "Connect Azure" bug fixed (Rule 33/39 updated).
  */
 
 // ─── Color Tokens ────────────────────────────────────────────────
@@ -199,6 +200,7 @@ export interface Remediation {
   productionImpact: boolean;
   riskPerDay: number;
   affectedIdentityIds: string[];
+  changes: RemediationChange[];
 }
 
 export interface GovernanceMetric {
@@ -287,7 +289,8 @@ export interface IdentityRecord {
   createdDate: string | null;
 }
 
-export interface RemediationDiff {
+/** Per-identity role change diff, embedded in remediation.changes[] (v3.0.4). */
+export interface RemediationChange {
   identityId: string;
   currentRole: string;
   currentScope: string;
@@ -327,5 +330,4 @@ export interface TenantData {
   riskMovement: RiskMovement;
   ticketingIntegration: TicketingIntegration;
   identityStore: Record<string, IdentityRecord>;
-  remediationDiffs: Record<string, RemediationDiff[]>;
 }

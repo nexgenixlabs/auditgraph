@@ -1,5 +1,5 @@
 /**
- * AuditGraph v3.0.3 — Executive Summary
+ * AuditGraph v3.0.4 — Executive Summary
  *
  * Dark-themed executive risk intelligence view with 6 tabs:
  *   1. Executive Summary   2. Identity Risk   3. Action Plan
@@ -11,8 +11,9 @@
  * v3.0.2: DrillableNumber enforcement (Rule 36), Preview Changes panel,
  *         Create Ticket integration, bug fixes (Rules 30-32),
  *         dead button elimination (Rules 33-35).
- * v3.0.3: identityStore (real scan data), remediationDiffs (real role diffs),
- *         data source attribution, no fabricated data (Rules 37-40).
+ * v3.0.3: identityStore (real scan data), data source attribution (Rules 37-40).
+ * v3.0.4: Eliminated separate remediationDiffs — role diffs embedded in
+ *         remediation.changes[]. "Connect Azure" bug fixed (Rule 33/39).
  */
 import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -21,7 +22,7 @@ import {
   COLORS, getTierColor, getScoreColor, getPillarColor,
   getTier, getGrade, getSemanticColor,
   type TenantData, type Remediation, type ComplianceFramework,
-  type IdentityRecord, type RemediationDiff,
+  type IdentityRecord, type RemediationChange,
 } from '../constants/ciso';
 
 // ─── Font Injection ──────────────────────────────────────────────
@@ -372,26 +373,31 @@ function DrillDownPanel({ drill, data, onClose }: { drill: DrillState; data: Ten
   );
 }
 
-// ─── PreviewChangesPanel (640px, v3.0.3: remediationDiffs) ───────
+// ─── PreviewChangesPanel (640px, v3.0.4: rem.changes[]) ─────────
 
 function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: TenantData; onClose: () => void }) {
-  const navigate = useNavigate();
+  const { withConnection } = useConnection();
 
-  // v3.0.3 Rule 39: Read from remediationDiffs, never fabricate
-  const diffs: RemediationDiff[] = data.remediationDiffs[rem.id] || [];
-  const hasDiffs = diffs.length > 0;
+  // v3.0.4 Rule 39: Read directly from remediation.changes[] (embedded by scan engine)
+  const changes: RemediationChange[] = rem.changes || [];
+  const hasChanges = changes.length > 0;
 
   // Resolve display names from identityStore
-  const resolvedDiffs = useMemo(() => {
-    return diffs.map(diff => {
-      const identity = data.identityStore[diff.identityId];
+  const resolvedChanges = useMemo(() => {
+    return changes.map(ch => {
+      const identity = data.identityStore[ch.identityId];
       return {
-        ...diff,
-        displayName: identity?.displayName || identity?.upn || diff.identityId,
+        ...ch,
+        displayName: identity?.displayName || identity?.upn || ch.identityId,
         upn: identity?.upn || '',
       };
     });
-  }, [diffs, data.identityStore]);
+  }, [changes, data.identityStore]);
+
+  const handleScan = useCallback(() => {
+    fetch(withConnection('/api/runs/trigger'), { method: 'POST' }).catch(() => {});
+    onClose();
+  }, [withConnection, onClose]);
 
   const riskColor = (level: string) =>
     level === 'critical' ? COLORS.danger :
@@ -431,52 +437,52 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
-          {!hasDiffs ? (
-            /* v3.0.3: Empty state when no diffs — prompt to connect Azure */
+          {!hasChanges ? (
+            /* v3.0.4 Rule 33: Empty state — "Run Discovery Scan", never "Connect Azure" */
             <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontFamily: FONT.ui }}>
               <div style={{ fontSize: 28, marginBottom: 12 }}>📋</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, marginBottom: 6 }}>No role change diffs available</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, marginBottom: 6 }}>Role change details pending</div>
               <div style={{ fontSize: 11, lineHeight: 1.6, marginBottom: 16 }}>
-                Connect Azure and run a discovery scan to generate role change previews from the remediation engine.
+                Role change details will be available after the next discovery scan completes.
               </div>
-              <button onClick={() => { navigate('/settings'); onClose(); }} style={{
+              <button onClick={handleScan} style={{
                 padding: '8px 20px', borderRadius: 6, fontSize: 11, fontWeight: 600,
                 background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-              }}>Connect Azure →</button>
+              }}>Run Discovery Scan</button>
             </div>
           ) : (
             <>
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 12 }}>
-                Affected Identities ({resolvedDiffs.length})
+                Affected Identities ({resolvedChanges.length})
               </div>
-              {resolvedDiffs.map((diff, i) => (
+              {resolvedChanges.map((ch, i) => (
                 <div key={i} style={{
                   background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
                   borderRadius: 8, padding: '12px 14px', marginBottom: 8,
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{diff.displayName}</div>
-                      {diff.upn && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{diff.upn}</div>}
+                      <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ch.displayName}</div>
+                      {ch.upn && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{ch.upn}</div>}
                     </div>
-                    <CISOBadge label={diff.riskLevel} color={riskColor(diff.riskLevel)} />
+                    <CISOBadge label={ch.riskLevel} color={riskColor(ch.riskLevel)} />
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, marginTop: 8, alignItems: 'center' }}>
                     <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.dangerSoft, textAlign: 'center' as const }}>
                       <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>CURRENT</div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.danger, fontFamily: FONT.mono }}>{diff.currentRole}</div>
-                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{diff.currentScope}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.danger, fontFamily: FONT.mono }}>{ch.currentRole}</div>
+                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ch.currentScope}</div>
                     </div>
                     <span style={{ fontSize: 14, color: COLORS.textMuted }}>→</span>
                     <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.successSoft, textAlign: 'center' as const }}>
                       <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>PROPOSED</div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.success, fontFamily: FONT.mono }}>{diff.proposedRole}</div>
-                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{diff.proposedScope}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.success, fontFamily: FONT.mono }}>{ch.proposedRole}</div>
+                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ch.proposedScope}</div>
                     </div>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
-                    <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{diff.impact}</span>
-                    {diff.reversible && <span style={{ fontSize: 9, color: COLORS.success, fontFamily: FONT.ui }}>Reversible</span>}
+                    <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{ch.impact}</span>
+                    {ch.reversible && <span style={{ fontSize: 9, color: COLORS.success, fontFamily: FONT.ui }}>Reversible</span>}
                   </div>
                 </div>
               ))}
@@ -486,7 +492,7 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
 
         {/* Footer */}
         <div style={{ padding: '14px 20px', borderTop: `1px solid ${COLORS.border}`, display: 'flex', gap: 8 }}>
-          {hasDiffs && (
+          {hasChanges && (
             <button style={{
               flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
@@ -494,12 +500,12 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
             }}>Apply Changes</button>
           )}
           <button onClick={onClose} style={{
-            flex: hasDiffs ? undefined : 1, padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            flex: hasChanges ? undefined : 1, padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
             background: 'transparent', color: COLORS.textMuted,
             border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
           }}>Cancel</button>
         </div>
-        {/* v3.0.3 Rule 40: Data source attribution */}
+        {/* Rule 40: Data source attribution */}
         <DataSourceFooter lastScan={data.tenant.lastScan} />
       </div>
     </>
@@ -800,10 +806,10 @@ function buildSampleData(): TenantData {
       rbacModifiers: { value: 3, subtitle: 'Custom role defs' },
     },
     remediations: [
-      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3, affectedIdentityIds: [] },
-      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1, affectedIdentityIds: [] },
-      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5, affectedIdentityIds: [] },
-      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05, affectedIdentityIds: [] },
+      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3, affectedIdentityIds: [], changes: [] },
+      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1, affectedIdentityIds: [], changes: [] },
+      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5, affectedIdentityIds: [], changes: [] },
+      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05, affectedIdentityIds: [], changes: [] },
     ],
     governance: {
       effectivenessScore: 1, effectivenessTier: 'CRITICAL', maturityLevel: 'Ad-Hoc',
@@ -855,7 +861,6 @@ function buildSampleData(): TenantData {
     },
     ticketingIntegration: { configured: false, provider: null, projectKey: null, defaultAssignee: null, jira: null },
     identityStore: {},
-    remediationDiffs: {},
   };
 }
 
