@@ -1,11 +1,13 @@
 /**
- * AuditGraph v3.0.1 CISO Dashboard — Design System
+ * AuditGraph v3.0.3 CISO Dashboard — Design System
  *
  * Color tokens, scoring helpers, and TypeScript interfaces.
  * All dashboard components MUST use these tokens — no raw hex values.
  *
  * v3.0.2: DrillableNumber enforcement, Preview Changes panel, Create Ticket integration,
  *          bug fixes (Rules 30-32), dead button elimination (Rules 33-35).
+ * v3.0.3: identityStore (real scan data), remediationDiffs (real role diffs),
+ *          data source attribution, no fabricated data (Rules 37-40).
  */
 
 // ─── Color Tokens ────────────────────────────────────────────────
@@ -196,6 +198,7 @@ export interface Remediation {
   confidence: number;
   productionImpact: boolean;
   riskPerDay: number;
+  affectedIdentityIds: string[];
 }
 
 export interface GovernanceMetric {
@@ -260,6 +263,39 @@ export interface TicketingIntegration {
   configured: boolean;
   provider: string | null; // 'jira' | 'servicenow' | 'azure_devops'
   projectKey: string | null;
+  defaultAssignee: string | null;
+  jira: {
+    cloudUrl: string | null;
+    projectId: string | null;
+    issueTypeId: string | null;
+    priorityMapping: Record<string, string>;
+  } | null;
+}
+
+export interface IdentityRecord {
+  id: string;
+  displayName: string;
+  upn: string;
+  type: string;
+  status: string;
+  lastSignIn: string | null;
+  riskScore: number;
+  riskLevel: string;
+  roles: string[];
+  owner: string | null;
+  groups: string[];
+  createdDate: string | null;
+}
+
+export interface RemediationDiff {
+  identityId: string;
+  currentRole: string;
+  currentScope: string;
+  proposedRole: string;
+  proposedScope: string;
+  riskLevel: string;
+  impact: string;
+  reversible: boolean;
 }
 
 export interface RiskMovement {
@@ -290,4 +326,6 @@ export interface TenantData {
   compliance: ComplianceData;
   riskMovement: RiskMovement;
   ticketingIntegration: TicketingIntegration;
+  identityStore: Record<string, IdentityRecord>;
+  remediationDiffs: Record<string, RemediationDiff[]>;
 }

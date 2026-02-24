@@ -1,5 +1,5 @@
 /**
- * AuditGraph v3.0.2 — Executive Summary
+ * AuditGraph v3.0.3 — Executive Summary
  *
  * Dark-themed executive risk intelligence view with 6 tabs:
  *   1. Executive Summary   2. Identity Risk   3. Action Plan
@@ -11,6 +11,8 @@
  * v3.0.2: DrillableNumber enforcement (Rule 36), Preview Changes panel,
  *         Create Ticket integration, bug fixes (Rules 30-32),
  *         dead button elimination (Rules 33-35).
+ * v3.0.3: identityStore (real scan data), remediationDiffs (real role diffs),
+ *         data source attribution, no fabricated data (Rules 37-40).
  */
 import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -19,6 +21,7 @@ import {
   COLORS, getTierColor, getScoreColor, getPillarColor,
   getTier, getGrade, getSemanticColor,
   type TenantData, type Remediation, type ComplianceFramework,
+  type IdentityRecord, type RemediationDiff,
 } from '../constants/ciso';
 
 // ─── Font Injection ──────────────────────────────────────────────
@@ -214,18 +217,19 @@ function Gauge({ value, marks, max = 100 }: {
   );
 }
 
-// ─── DrillableNumber (v3.0.2) ────────────────────────────────────
+// ─── DrillableNumber (v3.0.2, enhanced v3.0.3) ──────────────────
 
-interface DrillState { label: string; filter: string }
+interface DrillState { label: string; filter: string; identityIds?: string[] }
 const DrillCtx = createContext<(d: DrillState) => void>(() => {});
 
-/** Wraps a countable number with dashed underline + pointer. Click opens DrillDownPanel. */
-function DN({ children, label, filter }: { children: React.ReactNode; label: string; filter?: string }) {
+/** Wraps a countable number with dashed underline + pointer. Click opens DrillDownPanel.
+ *  v3.0.3: accepts identityIds to resolve from identityStore instead of API fetch. */
+function DN({ children, label, filter, identityIds }: { children: React.ReactNode; label: string; filter?: string; identityIds?: string[] }) {
   const drill = useContext(DrillCtx);
   if (!filter) return <>{children}</>;
   return (
     <span
-      onClick={(e) => { e.stopPropagation(); drill({ label, filter }); }}
+      onClick={(e) => { e.stopPropagation(); drill({ label, filter, identityIds }); }}
       style={{
         textDecoration: 'underline', textDecorationStyle: 'dashed' as const,
         textUnderlineOffset: '3px', cursor: 'pointer',
@@ -236,27 +240,77 @@ function DN({ children, label, filter }: { children: React.ReactNode; label: str
   );
 }
 
-// ─── DrillDownPanel (560px slide-in) ─────────────────────────────
+// ─── Data Source Attribution (v3.0.3 Rule 40) ───────────────────
 
-function DrillDownPanel({ drill, onClose }: { drill: DrillState; onClose: () => void }) {
+function DataSourceFooter({ lastScan }: { lastScan: string }) {
+  return (
+    <div style={{
+      padding: '8px 20px', borderTop: `1px solid ${COLORS.border}`,
+      fontSize: 10, color: COLORS.textDim, fontFamily: FONT.ui,
+      display: 'flex', alignItems: 'center', gap: 6,
+    }}>
+      <span style={{ width: 4, height: 4, borderRadius: '50%', background: COLORS.success, flexShrink: 0 }} />
+      Source: Azure RBAC scan · Entra ID · Last updated: {new Date(lastScan).toLocaleString()}
+    </div>
+  );
+}
+
+// ─── DrillDownPanel (560px slide-in, v3.0.3: identityStore) ─────
+
+function DrillDownPanel({ drill, data, onClose }: { drill: DrillState; data: TenantData; onClose: () => void }) {
   const navigate = useNavigate();
   const { withConnection } = useConnection();
-  const [items, setItems] = useState<any[]>([]);
+  const [apiItems, setApiItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // v3.0.3 Rule 37: Resolve from identityStore when identityIds are provided
+  const storeItems: IdentityRecord[] = useMemo(() => {
+    if (!drill.identityIds?.length) return [];
+    return drill.identityIds
+      .map(id => data.identityStore[id])
+      .filter((r): r is IdentityRecord => !!r);
+  }, [drill.identityIds, data.identityStore]);
+
+  const useStore = storeItems.length > 0;
+
+  // Fallback to API when no identityIds or identityStore is empty
   useEffect(() => {
+    if (useStore) { setLoading(false); return; }
     setLoading(true);
     fetch(withConnection(`/api/identities?${drill.filter}&limit=50`))
       .then(r => r.ok ? r.json() : { items: [] })
-      .then(d => { setItems(d.items || []); setLoading(false); })
-      .catch(() => { setItems([]); setLoading(false); });
-  }, [drill.filter]);
+      .then(d => { setApiItems(d.items || []); setLoading(false); })
+      .catch(() => { setApiItems([]); setLoading(false); });
+  }, [drill.filter, useStore]);
+
+  // Normalize items to a common shape for rendering
+  const items = useMemo(() => {
+    if (useStore) {
+      return storeItems.map(r => ({
+        id: r.id,
+        displayName: r.displayName,
+        upn: r.upn,
+        type: r.type,
+        riskLevel: r.riskLevel,
+      }));
+    }
+    return apiItems.map((item: any) => ({
+      id: item.id,
+      displayName: item.display_name || item.upn || 'Unknown',
+      upn: item.upn || '',
+      type: (item.identity_category || 'unknown').replace(/_/g, ' '),
+      riskLevel: item.risk_level || 'unknown',
+    }));
+  }, [useStore, storeItems, apiItems]);
+
+  const riskColor = (level: string) =>
+    level === 'critical' ? COLORS.danger :
+    level === 'high' ? COLORS.elevated :
+    level === 'medium' ? COLORS.warning : COLORS.success;
 
   return (
     <>
-      {/* Backdrop */}
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 60 }} />
-      {/* Panel */}
       <div style={{
         position: 'fixed', top: 0, right: 0, bottom: 0, width: 560,
         background: COLORS.surface, borderLeft: `1px solid ${COLORS.border}`,
@@ -267,7 +321,10 @@ function DrillDownPanel({ drill, onClose }: { drill: DrillState; onClose: () => 
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${COLORS.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{drill.label}</div>
-            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>{loading ? 'Loading...' : `${items.length} identities`}</div>
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: FONT.ui }}>
+              {loading ? 'Loading...' : `${items.length} identities`}
+              {useStore && <span style={{ marginLeft: 6, color: COLORS.success, fontSize: 10 }}>(from scan)</span>}
+            </div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', fontSize: 20, fontFamily: FONT.ui, padding: '4px 8px' }}>×</button>
         </div>
@@ -279,8 +336,12 @@ function DrillDownPanel({ drill, onClose }: { drill: DrillState; onClose: () => 
               Loading identities...
             </div>
           ) : items.length === 0 ? (
-            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontSize: 12, fontFamily: FONT.ui }}>No identities found for this filter</div>
-          ) : items.map((item: any, i: number) => (
+            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontFamily: FONT.ui }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>🔍</div>
+              <div style={{ fontSize: 12 }}>No identities found</div>
+              <div style={{ fontSize: 10, marginTop: 4 }}>Run a discovery scan to populate identity data</div>
+            </div>
+          ) : items.map((item, i) => (
             <div key={item.id || i} onClick={() => { navigate(`/identities/${item.id}`); onClose(); }} style={{
               padding: '10px 20px', borderBottom: `1px solid ${COLORS.border}`, cursor: 'pointer',
               display: 'flex', alignItems: 'center', gap: 10,
@@ -290,18 +351,14 @@ function DrillDownPanel({ drill, onClose }: { drill: DrillState; onClose: () => 
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{item.display_name || item.upn || 'Unknown'}</div>
-                <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{(item.identity_category || 'unknown').replace(/_/g, ' ')}</div>
+                <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{item.displayName}</div>
+                <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{item.type}</div>
               </div>
-              <CISOBadge label={item.risk_level || 'unknown'} color={
-                item.risk_level === 'critical' ? COLORS.danger :
-                item.risk_level === 'high' ? COLORS.elevated :
-                item.risk_level === 'medium' ? COLORS.warning : COLORS.success
-              } />
+              <CISOBadge label={item.riskLevel} color={riskColor(item.riskLevel)} />
             </div>
           ))}
         </div>
-        {/* Footer */}
+        {/* Footer: View All + Data Source Attribution (Rule 40) */}
         <div style={{ padding: '12px 20px', borderTop: `1px solid ${COLORS.border}` }}>
           <button onClick={() => { navigate(`/identities?${drill.filter}`); onClose(); }} style={{
             width: '100%', padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
@@ -309,23 +366,37 @@ function DrillDownPanel({ drill, onClose }: { drill: DrillState; onClose: () => 
             cursor: 'pointer', fontFamily: FONT.ui,
           }}>View All in Identities →</button>
         </div>
+        <DataSourceFooter lastScan={data.tenant.lastScan} />
       </div>
     </>
   );
 }
 
-// ─── PreviewChangesPanel (640px, v3.0.2 §6.1.1) ─────────────────
+// ─── PreviewChangesPanel (640px, v3.0.3: remediationDiffs) ───────
 
 function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: TenantData; onClose: () => void }) {
-  // Build mock identity-by-identity diff from remediation metadata
-  const affectedCount = parseInt(rem.affected) || 3;
-  const mockIdentities = Array.from({ length: Math.min(affectedCount, 8) }, (_, i) => ({
-    name: `identity-${i + 1}@${data.tenant.name.toLowerCase()}.onmicrosoft.com`,
-    currentRole: i < 2 ? 'Owner' : i < 4 ? 'Contributor' : 'Reader',
-    proposedRole: i < 2 ? 'Contributor' : i < 4 ? 'Reader' : 'No change',
-    rollbackRisk: i < 2 ? 'medium' : 'low',
-    impact: i < 2 ? 'Production workloads may require re-elevation' : 'Minimal impact',
-  }));
+  const navigate = useNavigate();
+
+  // v3.0.3 Rule 39: Read from remediationDiffs, never fabricate
+  const diffs: RemediationDiff[] = data.remediationDiffs[rem.id] || [];
+  const hasDiffs = diffs.length > 0;
+
+  // Resolve display names from identityStore
+  const resolvedDiffs = useMemo(() => {
+    return diffs.map(diff => {
+      const identity = data.identityStore[diff.identityId];
+      return {
+        ...diff,
+        displayName: identity?.displayName || identity?.upn || diff.identityId,
+        upn: identity?.upn || '',
+      };
+    });
+  }, [diffs, data.identityStore]);
+
+  const riskColor = (level: string) =>
+    level === 'critical' ? COLORS.danger :
+    level === 'high' ? COLORS.elevated :
+    level === 'medium' ? COLORS.warning : COLORS.success;
 
   return (
     <>
@@ -358,49 +429,78 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
           </div>
         </div>
 
-        {/* Identity-by-identity diff */}
+        {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
-          <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 12 }}>
-            Affected Identities ({mockIdentities.length})
-          </div>
-          {mockIdentities.map((id, i) => (
-            <div key={i} style={{
-              background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
-              borderRadius: 8, padding: '12px 14px', marginBottom: 8,
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui }}>{id.name}</div>
-                <CISOBadge label={id.rollbackRisk} color={id.rollbackRisk === 'medium' ? COLORS.warning : COLORS.success} />
+          {!hasDiffs ? (
+            /* v3.0.3: Empty state when no diffs — prompt to connect Azure */
+            <div style={{ textAlign: 'center' as const, padding: 48, color: COLORS.textMuted, fontFamily: FONT.ui }}>
+              <div style={{ fontSize: 28, marginBottom: 12 }}>📋</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, marginBottom: 6 }}>No role change diffs available</div>
+              <div style={{ fontSize: 11, lineHeight: 1.6, marginBottom: 16 }}>
+                Connect Azure and run a discovery scan to generate role change previews from the remediation engine.
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, marginTop: 8, alignItems: 'center' }}>
-                <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.dangerSoft, textAlign: 'center' as const }}>
-                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>CURRENT</div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.danger, fontFamily: FONT.mono }}>{id.currentRole}</div>
-                </div>
-                <span style={{ fontSize: 14, color: COLORS.textMuted }}>→</span>
-                <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.successSoft, textAlign: 'center' as const }}>
-                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>PROPOSED</div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.success, fontFamily: FONT.mono }}>{id.proposedRole}</div>
-                </div>
-              </div>
-              <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 6 }}>{id.impact}</div>
+              <button onClick={() => { navigate('/settings'); onClose(); }} style={{
+                padding: '8px 20px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+              }}>Connect Azure →</button>
             </div>
-          ))}
+          ) : (
+            <>
+              <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 12 }}>
+                Affected Identities ({resolvedDiffs.length})
+              </div>
+              {resolvedDiffs.map((diff, i) => (
+                <div key={i} style={{
+                  background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+                  borderRadius: 8, padding: '12px 14px', marginBottom: 8,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.text, fontFamily: FONT.ui, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{diff.displayName}</div>
+                      {diff.upn && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{diff.upn}</div>}
+                    </div>
+                    <CISOBadge label={diff.riskLevel} color={riskColor(diff.riskLevel)} />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                    <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.dangerSoft, textAlign: 'center' as const }}>
+                      <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>CURRENT</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.danger, fontFamily: FONT.mono }}>{diff.currentRole}</div>
+                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{diff.currentScope}</div>
+                    </div>
+                    <span style={{ fontSize: 14, color: COLORS.textMuted }}>→</span>
+                    <div style={{ padding: '6px 10px', borderRadius: 4, background: COLORS.successSoft, textAlign: 'center' as const }}>
+                      <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>PROPOSED</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.success, fontFamily: FONT.mono }}>{diff.proposedRole}</div>
+                      <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{diff.proposedScope}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
+                    <span style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>{diff.impact}</span>
+                    {diff.reversible && <span style={{ fontSize: 9, color: COLORS.success, fontFamily: FONT.ui }}>Reversible</span>}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
         </div>
 
         {/* Footer */}
         <div style={{ padding: '14px 20px', borderTop: `1px solid ${COLORS.border}`, display: 'flex', gap: 8 }}>
-          <button style={{
-            flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
-            color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-          }}>Apply Changes</button>
+          {hasDiffs && (
+            <button style={{
+              flex: 1, padding: '8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.purple})`,
+              color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
+            }}>Apply Changes</button>
+          )}
           <button onClick={onClose} style={{
-            padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            flex: hasDiffs ? undefined : 1, padding: '8px 16px', borderRadius: 6, fontSize: 11, fontWeight: 600,
             background: 'transparent', color: COLORS.textMuted,
             border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
           }}>Cancel</button>
         </div>
+        {/* v3.0.3 Rule 40: Data source attribution */}
+        <DataSourceFooter lastScan={data.tenant.lastScan} />
       </div>
     </>
   );
@@ -700,10 +800,10 @@ function buildSampleData(): TenantData {
       rbacModifiers: { value: 3, subtitle: 'Custom role defs' },
     },
     remediations: [
-      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3 },
-      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1 },
-      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5 },
-      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05 },
+      { id: 'r1', type: 'identity-remediation', title: 'Reduce over-privileged identities', subtitle: '6 ids hold TO/TI privileges across 5 subscriptions', gain: 79, projectedScore: '~76', status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger', affected: '6 ids · 5 subs · 46 wklds', effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3, affectedIdentityIds: [] },
+      { id: 'r2', type: 'identity-remediation', title: 'Remediate dormant privileged accounts', subtitle: '4 dormant accounts with active privileged roles', gain: 42, projectedScore: '~68', status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning', affected: '4 ids · 2 subs · 0 wklds', effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1, affectedIdentityIds: [] },
+      { id: 'r2b', type: 'identity-remediation', title: 'Revoke roles from disabled accounts', subtitle: '3 accounts are disabled in Entra ID but retain active RBAC assignments — immediate security risk', gain: 35, projectedScore: '~70', status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger', affected: '3 ids · 2 subs · 0 wklds', effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5, affectedIdentityIds: [] },
+      { id: 'r3', type: 'identity-remediation', title: 'Assign ownership to unowned SPNs', subtitle: '44 service principals without designated owners', gain: 29, projectedScore: '~62', status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated', affected: '44 ids · 0 subs · 0 wklds', effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe', compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05, affectedIdentityIds: [] },
     ],
     governance: {
       effectivenessScore: 1, effectivenessTier: 'CRITICAL', maturityLevel: 'Ad-Hoc',
@@ -753,7 +853,9 @@ function buildSampleData(): TenantData {
       mostChanged: { name: 'Usage Dormancy', score: 100, category: 'Lifecycle' },
       scanMeta: { frequency: 'High', lastRun: new Date().toISOString(), sources: 'Azure RBAC, Entra ID, Graph API', duration: '1m 5s', completeness: '100%' },
     },
-    ticketingIntegration: { configured: false, provider: null, projectKey: null },
+    ticketingIntegration: { configured: false, provider: null, projectKey: null, defaultAssignee: null, jira: null },
+    identityStore: {},
+    remediationDiffs: {},
   };
 }
 
@@ -769,16 +871,18 @@ function useCISOData(): { data: TenantData; loading: boolean } {
     async function load() {
       setLoading(true);
       try {
-        const [statsRes, postureRes, summaryRes, compRes] = await Promise.all([
+        const [statsRes, postureRes, summaryRes, compRes, identitiesRes] = await Promise.all([
           fetch(withConnection('/api/stats')).catch(() => null),
           fetch(withConnection('/api/dashboard/posture')).catch(() => null),
           fetch(withConnection('/api/identity-summary')).catch(() => null),
           fetch(withConnection('/api/dashboard/compliance')).catch(() => null),
+          fetch(withConnection('/api/identities?limit=500')).catch(() => null),
         ]);
         const stats = statsRes?.ok ? await statsRes.json() : null;
         const posture = postureRes?.ok ? await postureRes.json() : null;
         const summary = summaryRes?.ok ? await summaryRes.json() : null;
         const comp = compRes?.ok ? await compRes.json() : null;
+        const identities = identitiesRes?.ok ? await identitiesRes.json() : null;
 
         if (cancelled) return;
         const base = buildSampleData();
@@ -810,6 +914,29 @@ function useCISOData(): { data: TenantData; loading: boolean } {
               { type: 'Guest Users', count: guestCount, percentage: Math.round((guestCount / total) * 100), color: 'textDim' },
             ];
           }
+        }
+
+        // v3.0.3: Build identityStore from real scan data (Rule 37)
+        if (identities?.items?.length) {
+          const store: Record<string, IdentityRecord> = {};
+          for (const item of identities.items) {
+            const id = String(item.id);
+            store[id] = {
+              id,
+              displayName: item.display_name || item.upn || 'Unknown',
+              upn: item.upn || '',
+              type: (item.identity_category || 'unknown').replace(/_/g, ' '),
+              status: item.activity_status || item.status || 'unknown',
+              lastSignIn: item.last_sign_in || null,
+              riskScore: item.risk_score || 0,
+              riskLevel: item.risk_level || 'unknown',
+              roles: [],
+              owner: null,
+              groups: [],
+              createdDate: item.created_date || null,
+            };
+          }
+          base.identityStore = store;
         }
         setData(base);
       } catch {
@@ -1632,8 +1759,8 @@ export default function CISODashboard() {
           {renderTab()}
         </div>
 
-        {/* v3.0.2 Panels */}
-        {drillState && <DrillDownPanel drill={drillState} onClose={() => setDrillState(null)} />}
+        {/* v3.0.3 Panels */}
+        {drillState && <DrillDownPanel drill={drillState} data={data} onClose={() => setDrillState(null)} />}
         {previewRem && <PreviewChangesPanel rem={previewRem} data={data} onClose={() => setPreviewRem(null)} />}
         {ticketRem && <CreateTicketModal rem={ticketRem} data={data} onClose={() => setTicketRem(null)} />}
       </div>
