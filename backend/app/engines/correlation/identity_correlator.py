@@ -41,6 +41,11 @@ class IdentityCorrelator:
         total_humans = 0
         total_links = 0
 
+        # Method 0: Exact display name match (catches UPN-null disabled accounts)
+        h, l = self._match_by_exact_display_name(tenant_id, regular, privileged)
+        total_humans += h
+        total_links += l
+
         # Method 1: Naming convention (highest signal)
         h, l = self._match_by_naming_convention(tenant_id, regular, privileged, config)
         total_humans += h
@@ -80,26 +85,104 @@ class IdentityCorrelator:
         return config
 
     def _fetch_users(self, run_id):
-        """Fetch human_user identities from the latest run, split by category."""
+        """Fetch latest version of all human_user/guest identities tenant-wide, split by category.
+
+        Uses DISTINCT ON to get the most recent version of each identity across
+        all discovery runs for the tenant — disabled/deleted accounts from older
+        runs are included so that correlation can find pairs that no longer
+        co-exist in the same run.
+        """
+        tenant_id = self.db._tenant_id
         cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("""
-                SELECT id, identity_id, display_name, object_id, upn,
-                       employee_id_entra, department, manager_id, manager_upn,
-                       job_title, account_category, enabled, created_datetime,
-                       last_sign_in
-                FROM identities
-                WHERE discovery_run_id = %s
-                  AND identity_category IN ('human_user', 'guest')
-                  AND deleted_at IS NULL
-            """, (run_id,))
+                SELECT DISTINCT ON (i.object_id)
+                    i.id, i.identity_id, i.display_name, i.object_id, i.upn,
+                    i.employee_id_entra, i.department, i.manager_id, i.manager_upn,
+                    i.job_title, i.account_category, i.enabled, i.created_datetime,
+                    i.last_sign_in, i.deleted_at
+                FROM identities i
+                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                WHERE dr.tenant_id = %s
+                  AND i.identity_category IN ('human_user', 'guest')
+                ORDER BY i.object_id, i.discovery_run_id DESC
+            """, (tenant_id,))
             users = [dict(r) for r in cursor.fetchall()]
         finally:
             cursor.close()
 
-        regular = [u for u in users if u.get('account_category') == 'regular']
-        privileged = [u for u in users if u.get('account_category') == 'privileged']
+        config = self._load_config()
+        regular = []
+        privileged = []
+        for u in users:
+            cat = u.get('account_category')
+            if not cat or cat == 'unknown':
+                cat = self._classify_category(u.get('upn'), u.get('display_name'), config)
+                u['account_category'] = cat
+            if cat == 'regular':
+                regular.append(u)
+            elif cat == 'privileged':
+                privileged.append(u)
         return regular, privileged
+
+    @staticmethod
+    def _classify_category(upn, display_name, config):
+        """Classify account as regular/privileged based on UPN prefix/suffix patterns."""
+        local_part = ''
+        if upn and '@' in upn:
+            local_part = upn.split('@')[0].lower()
+        elif upn:
+            local_part = upn.lower()
+
+        if not local_part and display_name:
+            # Fallback: use display_name lowered as last resort
+            local_part = display_name.strip().lower().replace(' ', '.')
+
+        if not local_part:
+            return 'regular'
+
+        prefixes = [p.strip() for p in config.get('ice_privileged_prefixes', '').split(',') if p.strip()]
+        suffixes = [s.strip() for s in config.get('ice_privileged_suffixes', '').split(',') if s.strip()]
+
+        for prefix in prefixes:
+            if local_part.startswith(prefix):
+                return 'privileged'
+        for suffix in suffixes:
+            if local_part.endswith(suffix):
+                return 'privileged'
+
+        return 'regular'
+
+    def _match_by_exact_display_name(self, tenant_id, regular, privileged):
+        """Match regular ↔ privileged accounts sharing the exact same display_name.
+
+        This catches the common case where a disabled account has upn=NULL but
+        the display_name still matches the active account's display_name.
+        """
+        reg_by_name = {}
+        for u in regular:
+            name = (u.get('display_name') or '').strip().lower()
+            if name:
+                reg_by_name.setdefault(name, []).append(u)
+
+        humans_created = 0
+        links_created = 0
+
+        for priv in privileged:
+            if self._already_linked(priv.get('object_id')):
+                continue
+            name = (priv.get('display_name') or '').strip().lower()
+            if name and name in reg_by_name:
+                for reg in reg_by_name[name]:
+                    if self._already_linked(reg.get('object_id')):
+                        continue
+                    h, l = self._create_link_pair(
+                        tenant_id, reg, priv, 'display_name_exact', 85.0)
+                    humans_created += h
+                    links_created += l
+                    break  # One match per privileged account
+
+        return humans_created, links_created
 
     def _match_by_naming_convention(self, tenant_id, regular, privileged, config):
         """Strip prefix/suffix from privileged UPN, match against regular UPNs."""

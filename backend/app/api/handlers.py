@@ -355,11 +355,30 @@ def get_stats():
         except Exception:
             pass
 
+        # Zombie personas: disabled account with correlated active account
+        zombie_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT hi.id)
+                FROM human_identities hi
+                JOIN identity_links il1 ON il1.human_identity_id = hi.id
+                JOIN identity_links il2 ON il2.human_identity_id = hi.id
+                    AND il2.identity_db_id != il1.identity_db_id
+                JOIN identities i1 ON i1.id = il1.identity_db_id
+                JOIN identities i2 ON i2.id = il2.identity_db_id
+                WHERE (i1.enabled = FALSE OR i1.deleted_at IS NOT NULL)
+                  AND i2.enabled = TRUE AND i2.deleted_at IS NULL
+            """)
+            zombie_count = cursor.fetchone()[0] or 0
+        except Exception:
+            pass
+
         result = {
             "latest_run": latest,
             "previous_run": previous_run,
             "total_discovery_runs": total_runs,
             "ghost_count": ghost_count,
+            "zombie_count": zombie_count,
             "disabled_count": disabled_count,
             "deleted_count": deleted_count,
         }
@@ -16557,18 +16576,147 @@ def get_dashboard_identity_correlation():
             # Total open findings
             total_findings = sum(findings_by_severity.values())
 
+            # Zombie persona count
+            zombie_count = 0
+            zombie_pairs = []
+            try:
+                cursor.execute("""
+                    SELECT DISTINCT ON (hi.id)
+                        hi.id AS human_id, hi.display_name AS human_name,
+                        i1.display_name AS disabled_name, i1.upn AS disabled_upn,
+                        i2.display_name AS active_name, i2.upn AS active_upn,
+                        i2.risk_score AS active_risk
+                    FROM human_identities hi
+                    JOIN identity_links il1 ON il1.human_identity_id = hi.id
+                    JOIN identity_links il2 ON il2.human_identity_id = hi.id
+                        AND il2.identity_db_id != il1.identity_db_id
+                    JOIN identities i1 ON i1.id = il1.identity_db_id
+                    JOIN identities i2 ON i2.id = il2.identity_db_id
+                    WHERE hi.tenant_id = %s
+                      AND (i1.enabled = FALSE OR i1.deleted_at IS NOT NULL)
+                      AND i2.enabled = TRUE AND i2.deleted_at IS NULL
+                    ORDER BY hi.id
+                """, (tid,))
+                rows = cursor.fetchall()
+                zombie_count = len(rows)
+                zombie_pairs = [
+                    {
+                        'human_name': r['human_name'],
+                        'disabled_name': r['disabled_name'] or r['disabled_upn'],
+                        'active_name': r['active_name'] or r['active_upn'],
+                        'active_risk': r['active_risk'],
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                pass
+
             return jsonify({
                 'humans_linked': humans,
                 'total_links': links,
                 'open_findings': total_findings,
                 'findings_by_severity': findings_by_severity,
+                'zombie_count': zombie_count,
+                'zombie_pairs': zombie_pairs,
             })
         except Exception:
             return jsonify({
                 'humans_linked': 0, 'total_links': 0,
                 'open_findings': 0, 'findings_by_severity': {},
+                'zombie_count': 0, 'zombie_pairs': [],
             })
         finally:
             cursor.close()
     finally:
+        db.close()
+
+
+def get_correlation_accounts():
+    """GET /api/correlation/accounts — correlated accounts for a given identity."""
+    db = _db()
+    identity_id = request.args.get('identity_id', type=int)
+    object_id = request.args.get('object_id')
+
+    if not identity_id and not object_id:
+        db.close()
+        return jsonify({'error': 'identity_id or object_id required'}), 400
+
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Find the identity_link for the given identity
+        if identity_id:
+            cursor.execute(
+                "SELECT human_identity_id FROM identity_links WHERE identity_db_id = %s LIMIT 1",
+                (identity_id,))
+        else:
+            cursor.execute(
+                "SELECT human_identity_id FROM identity_links WHERE account_object_id = %s LIMIT 1",
+                (object_id,))
+
+        link_row = cursor.fetchone()
+        if not link_row:
+            return jsonify({'human_identity': None, 'accounts': [], 'zombie_persona': False})
+
+        human_id = link_row['human_identity_id']
+
+        # Fetch human identity
+        cursor.execute(
+            "SELECT id, display_name, employee_id, department FROM human_identities WHERE id = %s",
+            (human_id,))
+        human = cursor.fetchone()
+
+        # Fetch all linked accounts
+        cursor.execute("""
+            SELECT il.identity_db_id, il.account_type, il.account_upn,
+                   il.account_object_id, il.account_enabled, il.link_method,
+                   il.link_confidence, il.verified,
+                   i.display_name, i.enabled, i.deleted_at, i.risk_score,
+                   i.risk_level, i.tier, i.identity_category
+            FROM identity_links il
+            JOIN identities i ON i.id = il.identity_db_id
+            WHERE il.human_identity_id = %s
+            ORDER BY il.account_type
+        """, (human_id,))
+        links = cursor.fetchall()
+
+        # Determine zombie status: any disabled+active pair?
+        has_disabled = any(
+            (not l['enabled'] or l['deleted_at'] is not None) for l in links
+        )
+        has_active = any(
+            (l['enabled'] and l['deleted_at'] is None) for l in links
+        )
+        is_zombie = has_disabled and has_active
+
+        accounts = []
+        for l in links:
+            accounts.append({
+                'id': l['identity_db_id'],
+                'object_id': l['account_object_id'],
+                'display_name': l['display_name'] or l['account_upn'],
+                'upn': l['account_upn'],
+                'account_type': l['account_type'],
+                'enabled': l['enabled'],
+                'deleted': l['deleted_at'] is not None,
+                'is_zombie': (not l['enabled'] or l['deleted_at'] is not None) and is_zombie,
+                'risk_score': l['risk_score'],
+                'risk_level': l['risk_level'],
+                'privilege_tier': f"T{l['tier']}" if l['tier'] is not None else 'T3',
+                'link_method': l['link_method'],
+                'link_confidence': l['link_confidence'],
+                'verified': l['verified'],
+            })
+
+        return jsonify({
+            'human_identity': dict(human) if human else None,
+            'accounts': accounts,
+            'zombie_persona': is_zombie,
+            'link_method': links[0]['link_method'] if links else None,
+            'link_confidence': links[0]['link_confidence'] if links else None,
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cursor.close()
         db.close()

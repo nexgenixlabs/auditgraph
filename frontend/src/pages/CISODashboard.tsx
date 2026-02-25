@@ -830,6 +830,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
 
         // ── Ghost Accounts ──
         const ghostTotal = stats?.ghost_count || 0;
+        const zombieTotal = stats?.zombie_count || 0;
         const dormantPrivCount = attack?.attack_opportunities?.dormant_privileged_count || 0;
         d.ghostAccounts.total = ghostTotal;
         d.ghostAccounts.privileged = Math.min(dormantPrivCount, ghostTotal);
@@ -907,6 +908,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             { icon: '\uD83D\uDC64', label: 'Dormant', value: String(dormantPillar), color: dormantPillar > 0 ? 'danger' : 'success' },
             { icon: '\uD83D\uDD11', label: 'Over-priv', value: String(overPriv), color: overPriv > 0 ? 'warning' : 'success' },
             { icon: '\uD83D\uDC7B', label: 'Ghost Roles', value: String(ghostTotal), color: ghostTotal > 0 ? 'danger' : 'success' },
+            { icon: '\uD83E\uDDDF', label: 'Zombies', value: String(zombieTotal), color: zombieTotal > 0 ? 'danger' : 'success' },
             { icon: '\uD83E\uDD16', label: 'Unowned SPs', value: String(unownedSPs), color: unownedSPs > 0 ? 'elevated' : 'success' },
             { icon: '\uD83C\uDF10', label: 'Ext exposure', value: String(extExposure), color: extExposure > 0 ? 'accent' : 'success' },
           ];
@@ -920,6 +922,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             { icon: '\uD83D\uDC64', label: 'Dormant', value: String(dormantPillar), color: dormantPillar > 0 ? 'danger' : 'success' },
             { icon: '\uD83D\uDD11', label: 'Over-priv', value: String(overPriv), color: overPriv > 0 ? 'warning' : 'success' },
             { icon: '\uD83D\uDC7B', label: 'Ghost Roles', value: String(ghostTotal), color: ghostTotal > 0 ? 'danger' : 'success' },
+            { icon: '\uD83E\uDDDF', label: 'Zombies', value: String(zombieTotal), color: zombieTotal > 0 ? 'danger' : 'success' },
             { icon: '\uD83E\uDD16', label: 'Unowned SPs', value: String(unownedSPs), color: unownedSPs > 0 ? 'elevated' : 'success' },
             { icon: '\uD83C\uDF10', label: 'Ext exposure', value: String(extExposure), color: extExposure > 0 ? 'accent' : 'success' },
           ];
@@ -1111,6 +1114,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
           { label: 'Critical Identities', before: prevRun.critical_count || 0, after: latestRun.critical_count || 0, direction: (latestRun.critical_count || 0) > (prevRun.critical_count || 0) ? 'up' : (latestRun.critical_count || 0) < (prevRun.critical_count || 0) ? 'down' : 'flat' },
           { label: 'High-Risk Identities', before: prevRun.high_count || 0, after: latestRun.high_count || 0, direction: (latestRun.high_count || 0) > (prevRun.high_count || 0) ? 'up' : (latestRun.high_count || 0) < (prevRun.high_count || 0) ? 'down' : 'flat' },
           { label: 'Ghost Accounts', before: 0, after: ghostTotal, direction: ghostTotal > 0 ? 'up' : 'flat' },
+          { label: 'Zombie Personas', before: 0, after: zombieTotal, direction: zombieTotal > 0 ? 'up' : 'flat' },
           { label: 'Total Identities', before: prevRun.total_identities || 0, after: latestRun.total_identities || 0, direction: (latestRun.total_identities || 0) > (prevRun.total_identities || 0) ? 'up' : (latestRun.total_identities || 0) < (prevRun.total_identities || 0) ? 'down' : 'flat' },
           { label: 'New Identities', before: 0, after: drift?.new_identities_count || 0, direction: (drift?.new_identities_count || 0) > 0 ? 'up' : 'flat' },
           { label: 'Removed', before: 0, after: drift?.removed_identities_count || 0, direction: (drift?.removed_identities_count || 0) > 0 ? 'down' : 'flat' },
@@ -1241,6 +1245,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
                   dc.label === 'Dormant' ? '/identities?pillar=usage-dormancy' :
                   dc.label === 'Over-priv' ? '/identities?pillar=effective-privilege' :
                   dc.label === 'Ghost Roles' ? '/identities?status=disabled&hasRoles=true' :
+                  dc.label === 'Zombies' ? '/identity-correlation' :
                   dc.label === 'Unowned SPs' ? '/identities?pillar=ownership-governance' :
                   dc.label === 'Ext exposure' ? '/identities?pillar=external-exposure' :
                   '/identities'
@@ -1899,6 +1904,7 @@ function RiskMovementTab({ d }: { d: TenantData }) {
                 ch.label === 'Critical Identities' ? '/identities?risk_level=critical' :
                 ch.label === 'High-Risk Identities' ? '/identities?risk_level=high' :
                 ch.label === 'Ghost Accounts' ? '/identities?status=disabled&hasRoles=true' :
+                ch.label === 'Zombie Personas' ? '/identity-correlation' :
                 ch.label === 'New Identities' ? '/identities' :
                 ch.label === 'Removed' ? '/identities?status=disabled' :
                 ch.label === 'Total Identities' ? '/identities' :

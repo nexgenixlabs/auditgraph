@@ -255,6 +255,7 @@ from app.api.handlers import (
     get_correlation_config,
     save_correlation_config,
     get_dashboard_identity_correlation,
+    get_correlation_accounts,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -1663,6 +1664,10 @@ def create_app():
     @app.get("/api/dashboard/identity-correlation")
     def dashboard_identity_correlation():
         return get_dashboard_identity_correlation()
+
+    @app.get("/api/correlation/accounts")
+    def correlation_accounts():
+        return get_correlation_accounts()
 
     # -----------------------
     # Start background scheduler (only in main process, not reloader)

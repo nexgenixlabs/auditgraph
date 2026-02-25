@@ -443,6 +443,11 @@ export default function IdentityDetail() {
   const [anomalyData, setAnomalyData] = useState<{anomalies: any[]; count: number} | null>(null);
   const [anomalyLoading, setAnomalyLoading] = useState(false);
   const [riskHistory, setRiskHistory] = useState<{run_id: number; date: string; risk_score: number; risk_level: string}[]>([]);
+  const [correlatedAccounts, setCorrelatedAccounts] = useState<{
+    human_identity: { id: number; display_name: string } | null;
+    accounts: { id: number; object_id: string; display_name: string; upn: string; account_type: string; enabled: boolean; deleted: boolean; is_zombie: boolean; risk_score: number; risk_level: string; privilege_tier: string; link_method: string; link_confidence: number; verified: boolean }[];
+    zombie_persona: boolean;
+  } | null>(null);
 
   // Simulation state (What If tab)
   const [simRemovedRoles, setSimRemovedRoles] = useState<Set<string>>(new Set());
@@ -522,6 +527,17 @@ export default function IdentityDetail() {
     fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/risk-history?limit=20`))
       .then(res => res.ok ? res.json() : null)
       .then(json => { if (!cancelled && json?.points) setRiskHistory(json.points); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [id]);
+
+  // Fetch correlated accounts (non-blocking)
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    fetch(withConnection(`/api/correlation/accounts?identity_id=${encodeURIComponent(id)}`))
+      .then(res => res.ok ? res.json() : null)
+      .then(json => { if (!cancelled && json) setCorrelatedAccounts(json); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [id]);
@@ -893,6 +909,70 @@ export default function IdentityDetail() {
               {/* Overview Tab */}
               {activeTab === 'overview' && (
                 <div className="space-y-6">
+                  {/* Correlated Accounts / Zombie Warning */}
+                  {correlatedAccounts && correlatedAccounts.accounts.length > 1 && (
+                    <div>
+                      {correlatedAccounts.zombie_persona && (
+                        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-3 flex items-start gap-3">
+                          <svg className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                          </svg>
+                          <div>
+                            <div className="text-sm font-semibold text-red-800">Zombie Persona Detected</div>
+                            <div className="text-xs text-red-600 mt-1">
+                              This identity is part of a zombie persona — a disabled account retains access via this correlated active account.
+                              The human behind these accounts may still have access despite their primary account being disabled.
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <div className="border rounded-xl p-4">
+                        <div className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                          Correlated Accounts
+                          {correlatedAccounts.human_identity && (
+                            <span className="text-xs font-normal text-gray-500">
+                              — {correlatedAccounts.human_identity.display_name}
+                            </span>
+                          )}
+                        </div>
+                        <div className="space-y-2">
+                          {correlatedAccounts.accounts.map((acct) => (
+                            <div key={acct.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50">
+                              <Link to={`/identities/${acct.id}`} className="text-sm font-medium text-blue-600 hover:underline flex-1 min-w-0 truncate">
+                                {acct.display_name || acct.upn || acct.object_id}
+                              </Link>
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                acct.account_type === 'privileged' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'
+                              }`}>
+                                {acct.account_type}
+                              </span>
+                              {acct.enabled ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-green-100 text-green-700">Active</span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">
+                                  {acct.deleted ? 'Deleted' : 'Disabled'}
+                                </span>
+                              )}
+                              {acct.is_zombie && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">Zombie</span>
+                              )}
+                              {acct.risk_level && (
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                  acct.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                                  acct.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                                  acct.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                                  'bg-green-100 text-green-700'
+                                }`}>
+                                  {acct.risk_level}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Identity Security Posture — 4-quadrant view */}
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>

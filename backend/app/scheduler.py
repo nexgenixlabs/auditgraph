@@ -670,16 +670,18 @@ def _run_ghost_detection(current_run_id: int, db: Database):
 
 
 def _run_identity_correlation(current_run_id: int, db: Database):
-    """Run Identity Correlation Engine: link regular ↔ privileged accounts, detect orphans."""
+    """Run Identity Correlation Engine: link regular ↔ privileged accounts, detect orphans + zombies."""
     try:
         from app.engines.correlation.identity_correlator import IdentityCorrelator
         from app.engines.correlation.orphaned_detector import OrphanedAccountDetector
+        from app.engines.correlation.zombie_detector import ZombiePersonaDetector
 
         correlator = IdentityCorrelator(db)
         result = correlator.correlate(current_run_id)
         logger.info(f"ICE correlation: {result}")
 
-        if result.get('status') == 'completed' and result.get('links_created', 0) > 0:
+        # Always run orphan detection (existing links from prior runs should be re-checked)
+        if result.get('status') == 'completed':
             detector = OrphanedAccountDetector(db)
             orphan_anomalies = detector.detect(current_run_id)
             if orphan_anomalies:
@@ -699,6 +701,27 @@ def _run_identity_correlation(current_run_id: int, db: Database):
                     }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
             else:
                 logger.info("ICE orphan detection: no orphaned privileged accounts found")
+
+            # Zombie persona detection: disabled account with correlated active account
+            zombie = ZombiePersonaDetector(db)
+            zombie_anomalies = zombie.detect(current_run_id)
+            if zombie_anomalies:
+                count = db.save_anomalies(current_run_id, zombie_anomalies)
+                logger.info(f"ICE zombie detection: {count} zombie personas found")
+                _generate_anomaly_notifications(current_run_id, zombie_anomalies, db)
+                critical = [a for a in zombie_anomalies if a.get('severity') == 'critical']
+                if critical:
+                    _dispatch_notification('anomaly_detected', {
+                        'title': f'{len(critical)} Zombie Personas Detected',
+                        'description': (
+                            f'Run #{current_run_id}: '
+                            f'{", ".join(a["identity_name"] for a in critical[:3])} '
+                            f'retain access via correlated active accounts'
+                        ),
+                        'severity': 'critical',
+                    }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+            else:
+                logger.info("ICE zombie detection: no zombie personas found")
     except Exception as e:
         logger.error(f"Identity correlation failed: {e}")
         logger.exception(e)
