@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import DrillableNumber from '../components/DrillableNumber';
 
 /* ───────── Types ───────── */
 
@@ -558,7 +559,7 @@ export default function Compliance() {
   return (
     <div style={{
       minHeight: "100vh", background: C.bg, color: C.text,
-      fontFamily: "'DM Sans', -apple-system, system-ui, sans-serif",
+      fontFamily: "'Inter', -apple-system, system-ui, sans-serif",
       padding: "28px 32px",
     }}>
       {/* Header */}
@@ -657,30 +658,32 @@ export default function Compliance() {
             </div>
           </button>
 
-          {/* SA Governance */}
+          {/* SA Governance — only show when tier_summary has governance data */}
+          {saGov && (
           <button onClick={() => navigate('/service-accounts')} style={{
             padding: "16px 20px", borderRadius: 10, textAlign: 'left' as const, width: '100%',
             background: 'var(--bg-elevated)', border: `1px solid ${C.border}`, cursor: 'pointer', transition: 'opacity 0.15s',
           }} className="hover:opacity-70">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>SA Governance Compliance</span>
-              <span style={{ fontSize: 14, fontWeight: 800, color: saGov ? (saGov.score >= 50 ? C.warning : C.critical) : C.critical, fontFamily: mono }}>
-                {saGov?.score ?? 0}%
+              <span style={{ fontSize: 14, fontWeight: 800, color: saGov.score >= 50 ? C.warning : C.critical, fontFamily: mono }}>
+                {saGov.score}%
               </span>
             </div>
-            <MiniBar value={saGov?.score ?? 0} color={saGov && saGov.score >= 50 ? C.warning : C.critical} />
+            <MiniBar value={saGov.score} color={saGov.score >= 50 ? C.warning : C.critical} />
             <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 11, fontFamily: mono }}>
               <span style={{ color: C.textMuted }}>
-                Passing: <span style={{ color: C.good, fontWeight: 600 }}>{saGov?.passing ?? 0}</span>
+                Passing: <span style={{ color: C.good, fontWeight: 600 }}>{saGov.passing}</span>
               </span>
               <span style={{ color: C.textMuted }}>
-                Warnings: <span style={{ color: C.warning, fontWeight: 600 }}>{saGov?.warnings ?? 0}</span>
+                Warnings: <span style={{ color: C.warning, fontWeight: 600 }}>{saGov.warnings}</span>
               </span>
               <span style={{ color: C.textMuted }}>
-                Failing: <span style={{ color: C.critical, fontWeight: 600 }}>{saGov?.failing ?? 0}</span>
+                Failing: <span style={{ color: C.critical, fontWeight: 600 }}>{saGov.failing}</span>
               </span>
             </div>
           </button>
+          )}
         </div>
 
         {/* Overall Summary Bar */}
@@ -694,11 +697,13 @@ export default function Compliance() {
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
               Overall Identity Controls Posture:
             </span>
-            <span style={{
-              fontSize: 16, fontWeight: 800,
-              color: overallAvg >= 80 ? C.good : overallAvg >= 50 ? C.warning : C.critical,
-              fontFamily: mono,
-            }}>{overallAvg}%</span>
+            <DrillableNumber to="/compliance" format={false}>
+              <span style={{
+                fontSize: 16, fontWeight: 800,
+                color: overallAvg >= 80 ? C.good : overallAvg >= 50 ? C.warning : C.critical,
+                fontFamily: mono,
+              }}>{overallAvg}%</span>
+            </DrillableNumber>
             <span style={{
               padding: "2px 8px", borderRadius: 4, fontSize: 9, fontWeight: 700,
               background: overallAvg >= 80 ? "rgba(34,197,94,0.12)" : overallAvg >= 50 ? "rgba(245,158,11,0.12)" : "rgba(239,68,68,0.12)",
@@ -710,13 +715,13 @@ export default function Compliance() {
             </span>
           </div>
           <div style={{ display: "flex", gap: 14, fontSize: 10, fontFamily: mono, color: C.textMuted }}>
-            <span>Frameworks Active: <span style={{ color: C.text, fontWeight: 600 }}>
+            <span>Frameworks Active: <DrillableNumber to="/compliance" format={false}><span style={{ color: C.text, fontWeight: 600 }}>
               {Object.keys(data.frameworks).length}
-            </span></span>
+            </span></DrillableNumber></span>
             <span style={{ color: 'var(--border-default)' }}>|</span>
-            <span>Total Identity Controls: <span style={{ color: C.text, fontWeight: 600 }}>
+            <span>Total Identity Controls: <DrillableNumber to="/compliance" format={false}><span style={{ color: C.text, fontWeight: 600 }}>
               {data.total_controls}
-            </span></span>
+            </span></DrillableNumber></span>
             <span style={{ color: 'var(--border-default)' }}>|</span>
             <span>Last Assessed: <span style={{ color: C.text, fontWeight: 600 }}>
               {new Date(data.generated_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}

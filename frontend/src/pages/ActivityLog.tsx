@@ -35,6 +35,16 @@ const ACTION_CONFIG: Record<string, { label: string; shortLabel: string; color: 
   soar_playbook_deleted: { label: 'SOAR Playbook Deleted', shortLabel: 'SOAR Del', color: 'text-gray-700', bg: 'bg-gray-50', icon: '-' },
   soar_playbook_tested: { label: 'SOAR Playbook Tested', shortLabel: 'SOAR Test', color: 'text-amber-700', bg: 'bg-amber-50', icon: 'T' },
   soar_action_manual: { label: 'SOAR Manual Trigger', shortLabel: 'SOAR Man', color: 'text-cyan-700', bg: 'bg-cyan-50', icon: '!' },
+  auth_login: { label: 'Login', shortLabel: 'Login', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
+  auth_logout: { label: 'Logout', shortLabel: 'Logout', color: 'text-gray-700', bg: 'bg-gray-50', icon: '<' },
+  connection_deleted: { label: 'Connection Deleted', shortLabel: 'Conn Del', color: 'text-red-700', bg: 'bg-red-50', icon: '-' },
+  correlation_config: { label: 'Correlation Config', shortLabel: 'Correlation', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
+  export: { label: 'Data Exported', shortLabel: 'Export', color: 'text-blue-700', bg: 'bg-blue-50', icon: 'E' },
+  governance_decision: { label: 'Governance Decision', shortLabel: 'Governance', color: 'text-indigo-700', bg: 'bg-indigo-50', icon: 'G' },
+  settings: { label: 'Settings Changed', shortLabel: 'Settings', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
+  user_created: { label: 'User Created', shortLabel: 'User New', color: 'text-green-700', bg: 'bg-green-50', icon: '+' },
+  user_deleted: { label: 'User Deleted', shortLabel: 'User Del', color: 'text-red-700', bg: 'bg-red-50', icon: '-' },
+  user_updated: { label: 'User Updated', shortLabel: 'User Edit', color: 'text-orange-700', bg: 'bg-orange-50', icon: '*' },
 };
 
 function getActionConfig(type: string) {

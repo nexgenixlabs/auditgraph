@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -108,7 +108,37 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access';
+
+interface EffectiveAccessEntry {
+  role_name: string;
+  role_source: 'azure_rbac' | 'entra_directory';
+  access_level: 'Admin' | 'Write' | 'Read';
+  category: string;
+  scope: string;
+  scope_display: string;
+  scope_type: string;
+  resource_type: string | null;
+  risk_level: string;
+  assigned_on: string | null;
+  usage_status: string;
+  permissions: string[];
+  why_critical: string | null;
+}
+
+interface EffectiveAccessData {
+  identity_id: string;
+  display_name: string;
+  effective_access: EffectiveAccessEntry[];
+  summary: {
+    admin_scopes: number;
+    write_scopes: number;
+    read_scopes: number;
+    total_roles: number;
+    total_permissions: number;
+    categories: string[];
+  };
+}
 
 interface RemediationItem {
   id: number;
@@ -374,12 +404,14 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'permissions', label: 'Permissions', icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z' },
     { id: 'credentials', label: 'Credentials', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
     { id: 'ownership', label: 'Ownership', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
+    { id: 'effective_access' as TabId, label: 'Effective Access', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
     { id: 'access_graph' as TabId, label: 'Access Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
     { id: 'anomalies' as TabId, label: 'Anomalies', icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z' },
     { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
     { id: 'lifecycle' as TabId, label: 'Lifecycle', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
+    { id: 'sensitive_access' as TabId, label: 'Sensitive Access', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
     { id: 'simulate' as TabId, label: 'What If', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
     { id: 'timeline' as TabId, label: 'Timeline', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
@@ -442,10 +474,13 @@ export default function IdentityDetail() {
   const [identityGroups, setIdentityGroups] = useState<{id: number; name: string; color: string; group_type: string}[]>([]);
   const [anomalyData, setAnomalyData] = useState<{anomalies: any[]; count: number} | null>(null);
   const [anomalyLoading, setAnomalyLoading] = useState(false);
+  const [effectiveAccessData, setEffectiveAccessData] = useState<EffectiveAccessData | null>(null);
+  const [effectiveAccessLoading, setEffectiveAccessLoading] = useState(false);
+  const [sensitiveAccessData, setSensitiveAccessData] = useState<any>(null);
   const [riskHistory, setRiskHistory] = useState<{run_id: number; date: string; risk_score: number; risk_level: string}[]>([]);
   const [correlatedAccounts, setCorrelatedAccounts] = useState<{
     human_identity: { id: number; display_name: string } | null;
-    accounts: { id: number; object_id: string; display_name: string; upn: string; account_type: string; enabled: boolean; deleted: boolean; is_zombie: boolean; risk_score: number; risk_level: string; privilege_tier: string; link_method: string; link_confidence: number; verified: boolean }[];
+    accounts: { id: number; identity_id?: string; object_id: string; display_name: string; upn: string; account_type: string; enabled: boolean; deleted: boolean; is_zombie: boolean; risk_score: number; risk_level: string; privilege_tier: string; link_method: string; link_confidence: number; verified: boolean }[];
     zombie_persona: boolean;
   } | null>(null);
 
@@ -606,6 +641,28 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [activeTab, id, anomalyData, anomalyLoading]);
 
+  // Lazy-load Effective Access data when tab is selected
+  useEffect(() => {
+    if (activeTab !== 'effective_access' || effectiveAccessData || effectiveAccessLoading || !id) return;
+    let cancelled = false;
+    setEffectiveAccessLoading(true);
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/effective-access`))
+      .then(res => res.ok ? res.json() : Promise.reject('Effective access fetch failed'))
+      .then(json => { if (!cancelled) setEffectiveAccessData(json); })
+      .catch(() => { if (!cancelled) setEffectiveAccessData({ identity_id: id, display_name: '', effective_access: [], summary: { admin_scopes: 0, write_scopes: 0, read_scopes: 0, total_roles: 0, total_permissions: 0, categories: [] } }); })
+      .finally(() => { if (!cancelled) setEffectiveAccessLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, effectiveAccessData, effectiveAccessLoading]);
+
+  // Fetch sensitive access data for effective_access and sensitive_access tabs
+  useEffect(() => {
+    if ((activeTab !== 'effective_access' && activeTab !== 'sensitive_access') || sensitiveAccessData || !id) return;
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/sensitive-access`))
+      .then(res => res.ok ? res.json() : null)
+      .then(json => { if (json) setSensitiveAccessData(json); })
+      .catch(() => {});
+  }, [activeTab, id, sensitiveAccessData, withConnection]);
+
   // Load identity groups
   useEffect(() => {
     if (!id) return;
@@ -715,12 +772,14 @@ export default function IdentityDetail() {
     permissions: (data?.graph_permissions || []).length + (data?.app_roles || []).length,
     credentials: identity?.credential_count ?? 0,
     ownership: (data?.owners || []).length,
+    effective_access: effectiveAccessData?.summary?.total_roles ?? (data?.roles || []).length,
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
     anomalies: anomalyData?.count ?? 0,
     pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
     remediation: remediationData?.summary?.total ?? 0,
     lifecycle: lifecycleData?.total_events ?? 0,
+    sensitive_access: 0,
     simulate: 0,
     timeline: 0,
   };
@@ -938,7 +997,7 @@ export default function IdentityDetail() {
                         <div className="space-y-2">
                           {correlatedAccounts.accounts.map((acct) => (
                             <div key={acct.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50">
-                              <Link to={`/identities/${acct.id}`} className="text-sm font-medium text-blue-600 hover:underline flex-1 min-w-0 truncate">
+                              <Link to={`/identities/${acct.identity_id || acct.id}`} className="text-sm font-medium text-blue-600 hover:underline flex-1 min-w-0 truncate">
                                 {acct.display_name || acct.upn || acct.object_id}
                               </Link>
                               <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
@@ -1544,6 +1603,150 @@ export default function IdentityDetail() {
                     </div>
                   )}
                   <DataSource label="Microsoft Graph API" apiSource="/servicePrincipals/{id}/owners" collectedAt={data?.evidence?.collected_at} />
+                </div>
+              )}
+
+              {/* Effective Access Tab */}
+              {activeTab === 'effective_access' && (
+                <div className="space-y-4">
+                  {effectiveAccessLoading ? (
+                    <div className="text-center py-8 text-gray-400">Loading effective access...</div>
+                  ) : !effectiveAccessData || effectiveAccessData.effective_access.length === 0 ? (
+                    <div className="text-center py-8">
+                      <div className="text-sm text-gray-500">No role assignments found for this identity.</div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Summary Bar */}
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: 'Admin', count: effectiveAccessData.summary.admin_scopes, color: 'bg-red-100 text-red-700 border-red-200' },
+                          { label: 'Write', count: effectiveAccessData.summary.write_scopes, color: 'bg-amber-100 text-amber-700 border-amber-200' },
+                          { label: 'Read', count: effectiveAccessData.summary.read_scopes, color: 'bg-blue-100 text-blue-700 border-blue-200' },
+                        ].map(s => (
+                          <div key={s.label} className={`rounded-xl border p-3 text-center ${s.color}`}>
+                            <div className="text-2xl font-bold">{s.count}</div>
+                            <div className="text-xs font-semibold uppercase tracking-wider">{s.label} Scopes</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Sensitive Data Warning */}
+                      {sensitiveAccessData && sensitiveAccessData.blast_radius?.total_sensitive > 0 && (
+                        <div className="rounded-xl border p-3" style={{ background: 'rgba(239,68,68,0.06)', borderColor: 'rgba(239,68,68,0.2)' }}>
+                          <div className="flex items-center gap-3 text-xs">
+                            <span className="font-bold text-red-500">SENSITIVE DATA EXPOSURE</span>
+                            <span className="text-gray-500">This identity can access</span>
+                            {Object.entries(sensitiveAccessData.blast_radius?.by_classification || {}).map(([cls, count]) => (
+                              <span key={cls} className="px-2 py-0.5 rounded text-[10px] font-bold font-mono" style={{
+                                background: cls === 'PHI' ? 'rgba(239,68,68,0.12)' : cls === 'PCI' ? 'rgba(251,191,36,0.12)' : 'rgba(96,165,250,0.12)',
+                                color: cls === 'PHI' ? '#F87171' : cls === 'PCI' ? '#FBBF24' : '#60A5FA',
+                              }}>{count as number} {cls}</span>
+                            ))}
+                            <span className="text-gray-500">classified resources</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Stats row */}
+                      <div className="flex items-center gap-4 text-xs text-gray-500 px-1">
+                        <span><span className="font-semibold text-gray-700">{effectiveAccessData.summary.total_roles}</span> total roles</span>
+                        <span><span className="font-semibold text-gray-700">{effectiveAccessData.summary.total_permissions}</span> effective permissions</span>
+                        <span>Categories: {effectiveAccessData.summary.categories.join(', ') || 'None'}</span>
+                      </div>
+
+                      {/* Access Table */}
+                      <div className="border rounded-xl overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wider">
+                              <th className="px-4 py-2.5">Access Level</th>
+                              <th className="px-4 py-2.5">Role</th>
+                              <th className="px-4 py-2.5">Source</th>
+                              <th className="px-4 py-2.5">Scope</th>
+                              <th className="px-4 py-2.5">Category</th>
+                              <th className="px-4 py-2.5">Risk</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {effectiveAccessData.effective_access.map((entry, idx) => (
+                              <tr key={idx} className="hover:bg-gray-50 group">
+                                <td className="px-4 py-3">
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${
+                                    entry.access_level === 'Admin' ? 'bg-red-100 text-red-700' :
+                                    entry.access_level === 'Write' ? 'bg-amber-100 text-amber-700' :
+                                    'bg-blue-100 text-blue-700'
+                                  }`}>
+                                    {entry.access_level}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="font-medium text-gray-900">{entry.role_name}</div>
+                                  {entry.why_critical && (
+                                    <div className="text-[10px] text-red-500 mt-0.5 max-w-xs truncate" title={entry.why_critical}>
+                                      {entry.why_critical}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <span className={`text-xs font-medium ${entry.role_source === 'azure_rbac' ? 'text-blue-600' : 'text-purple-600'}`}>
+                                    {entry.role_source === 'azure_rbac' ? 'Azure RBAC' : 'Entra ID'}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="text-gray-700 max-w-[200px] truncate" title={entry.scope}>
+                                    {entry.scope_display}
+                                  </div>
+                                  <div className="text-[10px] text-gray-400">{entry.scope_type}</div>
+                                </td>
+                                <td className="px-4 py-3 text-xs text-gray-500">{entry.category}</td>
+                                <td className="px-4 py-3">
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    entry.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                                    entry.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                                    entry.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                                    'bg-gray-100 text-gray-500'
+                                  }`}>
+                                    {entry.risk_level}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Expanded Permissions */}
+                      <div className="space-y-3">
+                        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-1">Permission Details</div>
+                        {effectiveAccessData.effective_access.map((entry, idx) => (
+                          <details key={idx} className="border rounded-lg overflow-hidden">
+                            <summary className="px-4 py-2.5 bg-gray-50 cursor-pointer hover:bg-gray-100 flex items-center gap-2 text-sm">
+                              <span className={`w-2 h-2 rounded-full ${
+                                entry.access_level === 'Admin' ? 'bg-red-500' :
+                                entry.access_level === 'Write' ? 'bg-amber-500' : 'bg-blue-500'
+                              }`} />
+                              <span className="font-medium text-gray-800">{entry.role_name}</span>
+                              <span className="text-gray-400 text-xs">@ {entry.scope_display}</span>
+                              <span className="ml-auto text-xs text-gray-400">{entry.permissions.length} permissions</span>
+                            </summary>
+                            <div className="px-4 py-3 space-y-1.5">
+                              {entry.permissions.map((perm, pIdx) => (
+                                <div key={pIdx} className="flex items-center gap-2 text-xs text-gray-600">
+                                  <span className={`w-1 h-1 rounded-full ${
+                                    entry.access_level === 'Admin' ? 'bg-red-400' :
+                                    entry.access_level === 'Write' ? 'bg-amber-400' : 'bg-blue-400'
+                                  }`} />
+                                  {perm}
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <DataSource label="AuditGraph Permission Resolver" apiSource="/api/identities/{id}/effective-access" collectedAt={data?.evidence?.collected_at} />
                 </div>
               )}
 
@@ -2529,6 +2732,7 @@ export default function IdentityDetail() {
                 </div>
               )}
 
+              {activeTab === 'sensitive_access' && <SensitiveAccessTab identityId={id!} />}
               {activeTab === 'timeline' && <TimelineTab identityId={id!} />}
             </div>
           </div>
@@ -2811,6 +3015,130 @@ const EVENT_LABELS: Record<string, string> = {
   soar_action: 'SOAR Action',
   remediation: 'Remediation',
 };
+
+const SENS_CLASS_COLORS: Record<string, { bg: string; fg: string }> = {
+  PHI: { bg: 'rgba(239,68,68,0.12)', fg: '#F87171' },
+  PCI: { bg: 'rgba(251,191,36,0.12)', fg: '#FBBF24' },
+  PII: { bg: 'rgba(96,165,250,0.12)', fg: '#60A5FA' },
+};
+
+function SensitiveAccessTab({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
+  const navigate = useNavigate();
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(withConnection(`/api/identities/${identityId}/sensitive-access`));
+        if (res.ok) setData(await res.json());
+      } catch { /* ignore */ }
+      setLoading(false);
+    })();
+  }, [identityId, withConnection]);
+
+  if (loading) return <div className="p-8 text-center text-gray-500">Loading sensitive access data...</div>;
+  if (!data || !data.sensitive_resources || data.sensitive_resources.length === 0) {
+    return (
+      <div className="p-8 text-center">
+        <div className="text-gray-400 text-lg mb-2">No Sensitive Access Detected</div>
+        <div className="text-gray-500 text-sm">
+          This identity does not have RBAC access to any classified resources.
+          <br />
+          <button onClick={() => navigate('/data-security')} className="text-blue-500 underline mt-2 text-sm">
+            Classify resources in Data Security
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const br = data.blast_radius || {};
+  const resources = data.sensitive_resources;
+
+  return (
+    <div className="p-6">
+      {/* Blast Radius Summary */}
+      <div className="grid grid-cols-4 gap-3 mb-6">
+        <div className="rounded-lg p-4" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+          <div className="text-2xl font-bold font-mono" style={{ color: '#F87171' }}>{br.total_sensitive || 0}</div>
+          <div className="text-xs text-gray-500">Sensitive Resources</div>
+        </div>
+        {(['PHI', 'PCI', 'PII'] as const).map(cls => {
+          const count = (br.by_classification || {})[cls] || 0;
+          const c = SENS_CLASS_COLORS[cls];
+          return (
+            <div key={cls} className="rounded-lg p-4" style={{ background: c.bg, border: `1px solid ${c.fg}33` }}>
+              <div className="text-2xl font-bold font-mono" style={{ color: c.fg }}>{count}</div>
+              <div className="text-xs text-gray-500">{cls} Resources</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Access Table */}
+      <div className="bg-white rounded-lg border overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b">
+              {['Resource', 'Type', 'Classification', 'Access Level', 'Role', 'Access Source', 'Risk'].map(h => (
+                <th key={h} className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {resources.map((r: any, i: number) => (
+              <tr key={i} className="border-b hover:bg-gray-50 cursor-pointer"
+                onClick={() => navigate(`/resources/detail?rid=${encodeURIComponent(r.resource_path)}`)}>
+                <td className="px-4 py-3 font-medium">{r.resource_name}</td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-medium"
+                    style={{
+                      background: r.resource_type === 'storage_account' ? 'rgba(59,130,246,0.12)' : 'rgba(139,92,246,0.12)',
+                      color: r.resource_type === 'storage_account' ? '#60A5FA' : '#A78BFA',
+                    }}>
+                    {r.resource_type === 'storage_account' ? 'Storage' : 'Key Vault'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-bold font-mono"
+                    style={{
+                      background: SENS_CLASS_COLORS[r.classification]?.bg || 'rgba(255,255,255,0.06)',
+                      color: SENS_CLASS_COLORS[r.classification]?.fg || '#999',
+                    }}>
+                    {r.classification}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-semibold"
+                    style={{
+                      background: r.access_level === 'Admin' ? 'rgba(239,68,68,0.12)' : r.access_level === 'Write' ? 'rgba(251,191,36,0.12)' : 'rgba(96,165,250,0.12)',
+                      color: r.access_level === 'Admin' ? '#F87171' : r.access_level === 'Write' ? '#FBBF24' : '#60A5FA',
+                    }}>
+                    {r.access_level}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-gray-600 text-xs">{r.role_name}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs capitalize">{r.access_source?.replace('_', ' ')}</td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-bold uppercase"
+                    style={{
+                      background: r.resource_risk_level === 'critical' ? 'rgba(255,23,68,0.12)' : r.resource_risk_level === 'high' ? 'rgba(255,109,0,0.12)' : 'rgba(255,179,0,0.12)',
+                      color: r.resource_risk_level === 'critical' ? '#FF1744' : r.resource_risk_level === 'high' ? '#FF6D00' : '#FFB300',
+                    }}>
+                    {r.resource_risk_level}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 function TimelineTab({ identityId }: { identityId: string }) {
   const { withConnection } = useConnection();

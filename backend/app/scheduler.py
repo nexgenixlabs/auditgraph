@@ -436,6 +436,9 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
         # Phase 51: Save compliance snapshot
         _save_compliance_snapshot(current_run_id, db)
 
+        # AGIRS: Compute and persist AGIRS scores
+        _compute_agirs_scores(current_run_id, db_tenant_id, db)
+
         db.close()
 
     except Exception as e:
@@ -481,6 +484,26 @@ def _save_compliance_snapshot(run_id: int, db: Database):
         logger.info(f"Compliance snapshots saved for run #{run_id} ({len(frameworks)} frameworks)")
     except Exception as e:
         logger.error(f"Error saving compliance snapshot: {e}")
+
+
+def _compute_agirs_scores(run_id: int, tenant_id: int, db: Database):
+    """Compute and persist AGIRS (AuditGraph Identity Risk Score) for the run."""
+    try:
+        from app.engines.risk.agirs_engine import AGIRSEngine
+        engine = AGIRSEngine(db)
+        result = engine.compute(tenant_id, run_id)
+        if result.get('agirs_score') is not None:
+            logger.info(
+                f"AGIRS computed for run #{run_id}: "
+                f"{result['agirs_score']:.1f} "
+                f"(HIRI={result['hiri_score']:.1f}, "
+                f"NHIRI={result['nhiri_score']:.1f}, "
+                f"GEI={result['gei_score']:.1f})"
+            )
+        else:
+            logger.info(f"AGIRS: no data to compute for run #{run_id}")
+    except Exception as e:
+        logger.error(f"Error computing AGIRS scores: {e}")
 
 
 def _fire_webhook_events(current_run_id: int, changes: dict, db: Database):

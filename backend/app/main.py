@@ -194,6 +194,7 @@ from app.api.handlers import (
     copilot_suggestions,
     get_identity_timeline,
     get_identity_attack_paths,
+    get_identity_effective_access,
     get_integration_settings,
     save_integration_settings,
     test_integration_webhook,
@@ -256,6 +257,16 @@ from app.api.handlers import (
     save_correlation_config,
     get_dashboard_identity_correlation,
     get_correlation_accounts,
+    get_identity_risk_summary,
+    get_dangerous_identities,
+    # Phase 91: Sensitive Data Intelligence
+    get_resource_classifications,
+    classify_resource,
+    declassify_resource,
+    auto_classify_resources,
+    get_sensitive_access_for_identity,
+    get_resource_access_map,
+    get_blast_radius_summary,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -828,6 +839,17 @@ def create_app():
         return get_stats()
 
     # -----------------------
+    # AGIRS: Identity Risk Summary (Rule 57 SSOT)
+    # -----------------------
+    @app.get("/api/identity-risk-summary")
+    def identity_risk_summary():
+        return get_identity_risk_summary()
+
+    @app.get("/api/dangerous-identities")
+    def dangerous_identities():
+        return get_dangerous_identities()
+
+    # -----------------------
     # Dashboard posture (credential health, trends)
     # -----------------------
     @app.get("/api/dashboard/posture")
@@ -1391,6 +1413,44 @@ def create_app():
         return get_data_security_summary()
 
     # -----------------------
+    # Sensitive Data Intelligence (Phase 91)
+    # -----------------------
+    @app.get("/api/resources/classifications")
+    @require_role('compliance', 'reader', 'admin')
+    def resource_classifications():
+        return get_resource_classifications()
+
+    @app.post("/api/resources/<int:resource_id>/classify")
+    @require_role('admin')
+    def resource_classify(resource_id):
+        return classify_resource(resource_id)
+
+    @app.delete("/api/resources/<int:resource_id>/classify")
+    @require_role('admin')
+    def resource_declassify(resource_id):
+        return declassify_resource(resource_id)
+
+    @app.post("/api/resources/auto-classify")
+    @require_role('admin')
+    def resource_auto_classify():
+        return auto_classify_resources()
+
+    @app.get("/api/identities/<identity_id>/sensitive-access")
+    @require_role('compliance', 'reader', 'admin')
+    def identity_sensitive_access(identity_id):
+        return get_sensitive_access_for_identity(identity_id)
+
+    @app.get("/api/resources/<int:resource_id>/access-map")
+    @require_role('compliance', 'reader', 'admin')
+    def resource_access_map(resource_id):
+        return get_resource_access_map(resource_id)
+
+    @app.get("/api/blast-radius/summary")
+    @require_role('compliance', 'reader', 'admin')
+    def blast_radius_summary():
+        return get_blast_radius_summary()
+
+    # -----------------------
     # Activity Log (Phase 17)
     # -----------------------
     @app.get("/api/activity")
@@ -1550,6 +1610,10 @@ def create_app():
     @app.get("/api/identities/<identity_id>/attack-paths")
     def identity_attack_paths(identity_id):
         return get_identity_attack_paths(identity_id)
+
+    @app.get("/api/identities/<identity_id>/effective-access")
+    def identity_effective_access(identity_id):
+        return get_identity_effective_access(identity_id)
 
     # -----------------------
     # Phase 83: Slack/Teams Integrations

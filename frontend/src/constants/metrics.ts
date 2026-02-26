@@ -276,10 +276,11 @@ export const LIFECYCLE_STATE_CONFIG: Record<string, { label: string; badgeClass:
 };
 
 export const OWNER_STATUS_CONFIG: Record<string, { label: string; badgeClass: string }> = {
-  owned:        { label: 'Owned',        badgeClass: 'bg-green-100 text-green-700' },
-  single_owner: { label: 'Single Owner', badgeClass: 'bg-yellow-100 text-yellow-700' },
-  orphaned:     { label: 'Orphaned',     badgeClass: 'bg-red-100 text-red-700' },
-  unknown:      { label: 'Unknown',      badgeClass: 'bg-gray-100 text-gray-500' },
+  owned:          { label: 'Owned',          badgeClass: 'bg-green-100 text-green-700' },
+  single_owner:   { label: 'Single Owner',   badgeClass: 'bg-yellow-100 text-yellow-700' },
+  resource_bound: { label: 'Resource Bound', badgeClass: 'bg-teal-100 text-teal-700' },
+  orphaned:       { label: 'Orphaned',       badgeClass: 'bg-red-100 text-red-700' },
+  unknown:        { label: 'Unknown',        badgeClass: 'bg-gray-100 text-gray-500' },
 };
 
 export const SCOPE_FLAG_CONFIG: Record<string, { label: string; badgeClass: string }> = {
@@ -308,6 +309,36 @@ export const WORKLOAD_TYPE_CONFIG: Record<string, { label: string; badgeClass: s
   app_registration: { label: 'App Registration',  badgeClass: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300', shortLabel: 'APP' },
   managed_identity: { label: 'Managed Identity',  badgeClass: 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300', shortLabel: 'MI' },
 };
+
+// ── AGIRS Scoring Tiers ──────────────────────────────────────────────
+
+export const AGIRS_TIERS: Record<string, [number, number]> = {
+  A: [90, 100],
+  B: [75, 89],
+  C: [60, 74],
+  D: [40, 59],
+  F: [0, 39],
+};
+
+export const AGIRS_COLORS: Record<string, string> = {
+  A: '#22c55e',
+  B: '#84cc16',
+  C: '#eab308',
+  D: '#f97316',
+  F: '#ef4444',
+};
+
+export function getAGIRSTier(score: number): string {
+  if (score >= 90) return 'A';
+  if (score >= 75) return 'B';
+  if (score >= 60) return 'C';
+  if (score >= 40) return 'D';
+  return 'F';
+}
+
+export function getAGIRSColor(score: number): string {
+  return AGIRS_COLORS[getAGIRSTier(score)] || AGIRS_COLORS.F;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

@@ -81,6 +81,73 @@ def _get_pillar_filter_sql(pillar: str) -> str:
     return PILLAR_SQL.get(pillar, "")
 
 
+def _get_agirs_factor_sql(factor: str) -> str:
+    """Return SQL AND clause that replicates the EXACT counting logic from
+    agirs_engine.py for each HIRI/NHIRI sub-metric.  This ensures the
+    drill-down count matches the AGIRS dashboard number precisely."""
+    AGIRS_SQL = {
+        # HIRI — H1: Ghost humans (disabled/deleted but still has roles)
+        "h1_ghost": """
+            AND i.identity_category IN ('human_user', 'guest')
+            AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL OR i.status IN ('disabled', 'deleted'))
+            AND (
+                EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+            )""",
+        # HIRI — H2: Dormant privileged (stale + has T0/T1/T2 role)
+        "h2_dormant_priv": """
+            AND i.identity_category IN ('human_user', 'guest')
+            AND i.activity_status IN ('stale', 'never_used')
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                    AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator'))
+            )""",
+        # HIRI — H3: Over-privileged (risk_score >= 70 OR tier = 'T0')
+        "h3_over_priv": """
+            AND i.identity_category IN ('human_user', 'guest')
+            AND (COALESCE(i.risk_score, 0) >= 70 OR i.tier = 'T0')""",
+        # HIRI — H4: External guests with privileged roles
+        "h4_ext_guest": """
+            AND i.identity_category = 'guest'
+            AND (
+                EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                    AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator'))
+            )""",
+        # NHIRI — N1: Orphaned NHI (no owner)
+        "n1_orphaned": """
+            AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+            AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
+            AND NOT EXISTS (SELECT 1 FROM spn_owners so WHERE so.identity_db_id = i.id)""",
+        # NHIRI — N2: Dormant NHI (inactive + has roles)
+        "n2_dormant": """
+            AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+            AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
+            AND i.activity_status IN ('stale', 'never_used', 'inactive')
+            AND (
+                EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+            )""",
+        # NHIRI — N3: Zombie NHI (stale + high risk + valid creds)
+        "n3_zombie": """
+            AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+            AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
+            AND i.activity_status IN ('stale', 'never_used')
+            AND COALESCE(i.risk_score, 0) >= 70
+            AND i.credential_count > 0
+            AND (i.credential_expiration IS NULL OR i.credential_expiration > NOW())""",
+        # NHIRI — N4: Expired/expiring credentials
+        "n4_expired": """
+            AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+            AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
+            AND i.credential_count > 0
+            AND i.credential_expiration IS NOT NULL
+            AND i.credential_expiration < NOW() + INTERVAL '30 days'""",
+    }
+    return AGIRS_SQL.get(factor, "")
+
+
 def _db() -> Database:
     """Create a Database connection with RLS tenant context from JWT.
 
@@ -404,6 +471,12 @@ def get_identities():
         search: Filter by display_name contains
         limit: Max results to return (default: no limit)
         offset: Skip N results (default: 0)
+        status: Filter by status (disabled, deleted, active)
+        hasRoles: boolean — only identities with RBAC or Entra role assignments
+        activity_status: Filter by activity status (stale, never_used, inactive, active)
+        privilege_tier: Filter by privilege tier (T0, T1, T2, T3)
+        agirs_factor: AGIRS sub-metric filter (h1_ghost, h2_dormant_priv, h3_over_priv,
+                       h4_ext_guest, n1_orphaned, n2_dormant, n3_zombie, n4_expired)
     """
     db = _db()
     risk_filter = request.args.get("risk_level")
@@ -416,6 +489,11 @@ def get_identities():
     hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
     show_deleted = request.args.get('show_deleted', 'false').lower() == 'true'
     contributing_pillar = request.args.get("contributing_pillar")
+    status_filter = request.args.get("status")
+    has_roles_filter = request.args.get("hasRoles")
+    activity_filter = request.args.get("activity_status")
+    privilege_tier_filter = request.args.get("privilege_tier")
+    agirs_factor = request.args.get("agirs_factor")
 
     cursor = db.conn.cursor()
 
@@ -459,6 +537,40 @@ def get_identities():
         if search:
             query += " AND LOWER(i.display_name) LIKE %s"
             params.append(f"%{search.lower()}%")
+
+        # AGIRS-aligned filters — exact SQL matches agirs_engine.py counting
+        if agirs_factor:
+            agirs_sql = _get_agirs_factor_sql(agirs_factor)
+            if agirs_sql:
+                query += agirs_sql
+
+        if status_filter:
+            if status_filter == 'disabled':
+                query += " AND (i.enabled = FALSE OR i.status IN ('disabled', 'deleted'))"
+            elif status_filter == 'active':
+                query += " AND COALESCE(i.enabled, TRUE) = TRUE AND COALESCE(i.status, 'active') NOT IN ('disabled', 'deleted')"
+
+        if has_roles_filter and has_roles_filter.lower() == 'true':
+            query += """ AND (
+                EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+            )"""
+
+        if activity_filter:
+            allowed = {'stale', 'never_used', 'inactive', 'active', 'recently_created', 'unknown'}
+            vals = [v.strip() for v in activity_filter.split(',') if v.strip() in allowed]
+            if vals:
+                placeholders = ','.join(['%s'] * len(vals))
+                query += f" AND COALESCE(i.activity_status, 'unknown') IN ({placeholders})"
+                params.extend(vals)
+
+        if privilege_tier_filter:
+            allowed_tiers = {'T0', 'T1', 'T2', 'T3'}
+            tiers = [t.strip() for t in privilege_tier_filter.split(',') if t.strip() in allowed_tiers]
+            if tiers:
+                placeholders = ','.join(['%s'] * len(tiers))
+                query += f" AND COALESCE(i.tier, 'T3') IN ({placeholders})"
+                params.extend(tiers)
 
         subscription_filter = request.args.get("subscription_id")
         if subscription_filter:
@@ -551,7 +663,10 @@ def get_identity_details(identity_id: str):
                    dr.completed_at as run_completed_at,
                    -- Status resolver fields
                    i.enabled,
-                   i.deleted_at
+                   i.deleted_at,
+                   -- Additional detail fields
+                   i.last_sign_in,
+                   COALESCE(i.is_microsoft_system, false) as is_microsoft_system
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -618,6 +733,8 @@ def get_identity_details(identity_id: str):
             "ca_mfa_enforced": bool(row[28]) if row[28] is not None else False,
             "risk_factors": row[29] if row[29] else [],
             "discovery_run_id": row[30],
+            "last_sign_in": row[34].isoformat() if row[34] else None,
+            "is_microsoft_system": bool(row[35]),
         }
 
         run_completed_at = row[31].isoformat() if row[31] else None
@@ -2007,7 +2124,6 @@ def _identity_list_select():
                 AND gp.risk_level IS NOT NULL
             ) as graph_max_risk,
             i.enabled,
-            i.last_sign_in,
             CASE
                 WHEN EXISTS (
                     SELECT 1 FROM entra_role_assignments era
@@ -2135,7 +2251,7 @@ def _map_identity_row(row):
 
     # Canonical status via resolver
     enabled_val = row[32] if row[32] is not None else True
-    deleted_at_val = row[46] if len(row) > 46 else None
+    deleted_at_val = row[45] if len(row) > 45 else None
     resolved = resolve_status({
         'status': row[23] or 'active',
         'enabled': enabled_val,
@@ -2179,20 +2295,19 @@ def _map_identity_row(row):
         "app_role_count": int(row[30] or 0),
         "graph_max_risk": row[31] or "info",
         "enabled": enabled_val,
-        "last_sign_in": row[33].isoformat() if row[33] else None,
-        "privilege_tier": int(row[34]) if row[34] is not None else 3,
-        "pim_eligible_count": int(row[35] or 0),
-        "has_permanent_assignment": bool(row[36]) if row[36] is not None else False,
-        "ca_coverage_status": row[37] or None,
-        "ca_mfa_enforced": bool(row[38]) if row[38] is not None else False,
-        "subscription_id": row[39] or None,
-        "subscription_name": row[40] or None,
-        "primary_subscription_id": row[41] or None,
-        "additional_subscription_count": int(row[42] or 0),
-        "effective_scope": row[43] if len(row) > 43 and row[43] else "none",
-        "is_microsoft_system": bool(row[44]) if len(row) > 44 and row[44] is not None else False,
-        "permission_plane": row[45] if len(row) > 45 and row[45] else "entra_id",
-        "privileged_level": "privileged" if int(row[34] or 3) == 0 else "elevated" if int(row[34] or 3) == 1 else "standard",
+        "privilege_tier": int(row[33]) if row[33] is not None else 3,
+        "pim_eligible_count": int(row[34] or 0),
+        "has_permanent_assignment": bool(row[35]) if row[35] is not None else False,
+        "ca_coverage_status": row[36] or None,
+        "ca_mfa_enforced": bool(row[37]) if row[37] is not None else False,
+        "subscription_id": row[38] or None,
+        "subscription_name": row[39] or None,
+        "primary_subscription_id": row[40] or None,
+        "additional_subscription_count": int(row[41] or 0),
+        "effective_scope": row[42] if len(row) > 42 and row[42] else "none",
+        "is_microsoft_system": bool(row[43]) if len(row) > 43 and row[43] is not None else False,
+        "permission_plane": row[44] if len(row) > 44 and row[44] else "entra_id",
+        "privileged_level": "privileged" if int(row[33] or 3) == 0 else "elevated" if int(row[33] or 3) == 1 else "standard",
         "credential_health": (
             "none" if int(row[5] or 0) == 0
             else "expired" if (row[7] or "").lower() == "expired"
@@ -3463,7 +3578,7 @@ def get_attack_surface_score():
         # Compute industry_avg as posture equivalent of the tenant's mean identity risk score
         # avg_risk_score is 0-100 (higher = riskier), posture = 100 - attack_surface_score
         # Industry avg is the mean posture across all scored identities in this tenant
-        industry_avg_posture = round(100 - avg_risk_score) if avg_risk_score > 0 else None
+        industry_avg_posture = max(0, min(100, round(100 - avg_risk_score))) if avg_risk_score > 0 else None
         posture_target_setting = db.get_setting('posture_target', tenant_id=tid) if tid else None
 
         return jsonify({
@@ -6647,7 +6762,7 @@ def export_data(export_type):
     Returns structured JSON for client-side CSV/JSON file generation.
     Supported types: identities, compliance, drift, risk-summary
     """
-    VALID_TYPES = {'identities', 'compliance', 'drift', 'risk-summary'}
+    VALID_TYPES = {'identities', 'compliance', 'drift', 'risk-summary', 'evidence-package', 'sensitive-data'}
     if export_type not in VALID_TYPES:
         return jsonify({'error': f'Invalid export type. Valid: {", ".join(sorted(VALID_TYPES))}'}), 400
 
@@ -6659,6 +6774,10 @@ def export_data(export_type):
         return _export_drift()
     elif export_type == 'risk-summary':
         return _export_risk_summary()
+    elif export_type == 'evidence-package':
+        return _export_evidence_package()
+    elif export_type == 'sensitive-data':
+        return _export_sensitive_data()
 
 
 def _export_identities():
@@ -7028,6 +7147,219 @@ def _export_risk_summary():
             'conditional_access': data.get('conditional_access'),
             'top_risks': top_risks,
             'remediation_priorities': data.get('remediation_summary', {}).get('top_priorities', []),
+        })
+    finally:
+        db.close()
+
+
+def _export_evidence_package():
+    """Export comprehensive HIPAA-aligned evidence package bundling all audit data."""
+    db = _db()
+    try:
+        data = db.get_report_data()
+        if data is None:
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        # Get organization name
+        tid = _tenant_id()
+        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+
+        # Privileged access: identities with critical/high risk
+        privileged = []
+        for tr in data.get('top_risks', []):
+            privileged.append({
+                'identity_id': tr.get('identity_id'),
+                'display_name': tr.get('display_name'),
+                'identity_category': tr.get('identity_category'),
+                'risk_level': tr.get('risk_level'),
+                'risk_score': tr.get('risk_score'),
+                'risk_reasons': tr.get('risk_reasons', []),
+                'remediations': [r.get('title') for r in tr.get('remediations', [])],
+            })
+
+        # HIPAA compliance gaps
+        hipaa_gaps = []
+        try:
+            cursor = db.conn.cursor()
+            run_ids = _latest_run_ids(cursor, tid, _connection_id())
+            if run_ids:
+                # Get compliance intelligence for HIPAA
+                from app.engines.compliance import COMPLIANCE_FRAMEWORKS
+                for fw in COMPLIANCE_FRAMEWORKS:
+                    if 'hipaa' in fw.get('key', '').lower():
+                        for ctrl in fw.get('controls', []):
+                            hipaa_gaps.append({
+                                'control_id': ctrl['control_id'],
+                                'name': ctrl['name'],
+                                'metric': ctrl['metric'],
+                                'framework': fw['name'],
+                            })
+            cursor.close()
+        except Exception:
+            pass
+
+        try:
+            _log(db, 'export', 'HIPAA evidence package export generated',
+                            {'export_type': 'evidence-package'})
+        except Exception:
+            pass
+
+        # Sensitive data access section
+        sensitive_data_section = {}
+        try:
+            cursor2 = db.conn.cursor(cursor_factory=RealDictCursor)
+            run_ids2 = _latest_run_ids(cursor2, tid, _connection_id())
+            if run_ids2:
+                classified_resources = []
+                for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+                    cursor2.execute(f"""
+                        SELECT name, resource_id, data_classification, classification_source, risk_level, risk_score
+                        FROM {table}
+                        WHERE discovery_run_id = ANY(%s) AND data_classification IS NOT NULL
+                    """, (run_ids2,))
+                    for row in cursor2.fetchall():
+                        classified_resources.append({
+                            'name': row['name'], 'resource_path': row['resource_id'],
+                            'classification': row['data_classification'], 'source': row.get('classification_source'),
+                            'resource_type': rtype, 'risk_level': row.get('risk_level', 'info'),
+                        })
+                sensitive_data_section = {
+                    'classified_resource_count': len(classified_resources),
+                    'classified_resources': classified_resources,
+                    'by_classification': {},
+                }
+                for cr in classified_resources:
+                    c = cr['classification']
+                    sensitive_data_section['by_classification'][c] = sensitive_data_section['by_classification'].get(c, 0) + 1
+            cursor2.close()
+        except Exception:
+            pass
+
+        return jsonify({
+            'export_type': 'evidence-package',
+            'metadata': {
+                'organization': org_name or 'Organization',
+                'generated_at': datetime.utcnow().isoformat(),
+                'framework': 'HIPAA',
+                'run_id': data.get('run_id'),
+                'identity_count': data.get('stats', {}).get('total_identities', 0),
+                'collected_at': data.get('collected_at'),
+            },
+            'risk_distribution': data.get('stats'),
+            'credential_health': data.get('credential_health'),
+            'conditional_access': data.get('conditional_access'),
+            'privileged_access': privileged,
+            'hipaa_controls': hipaa_gaps,
+            'remediation_priorities': data.get('remediation_summary', {}).get('top_priorities', []),
+            'evidence_sources': data.get('evidence', {}).get('sources', {}),
+            'sensitive_data_access': sensitive_data_section,
+        })
+    finally:
+        db.close()
+
+
+def _export_sensitive_data():
+    """Export sensitive data classification + access mapping for compliance evidence."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tid = _tenant_id()
+        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery runs found'}), 404
+
+        # Get classified resources
+        classified = []
+        for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+            cursor.execute(f"""
+                SELECT name, resource_id, data_classification, classification_source,
+                       classification_confidence, classified_by, classified_at,
+                       risk_level, risk_score, resource_group, subscription_name
+                FROM {table}
+                WHERE discovery_run_id = ANY(%s) AND data_classification IS NOT NULL
+            """, (run_ids,))
+            for row in cursor.fetchall():
+                r = dict(row)
+                r['resource_type'] = rtype
+                r['classified_at'] = r['classified_at'].isoformat() if r.get('classified_at') else None
+                classified.append(r)
+
+        # Get blast radius data
+        # Get all identities and their role assignments to compute access
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_type, i.identity_category,
+                   i.risk_level, i.risk_score
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND NOT COALESCE(i.is_microsoft_system, false)
+        """, (run_ids,))
+        identities = cursor.fetchall()
+
+        id_list = [i['id'] for i in identities]
+        identity_roles = {}
+        if id_list:
+            cursor.execute("""
+                SELECT identity_db_id, role_name, scope
+                FROM role_assignments WHERE identity_db_id = ANY(%s)
+            """, (id_list,))
+            for ra in cursor.fetchall():
+                db_id = ra['identity_db_id']
+                if db_id not in identity_roles:
+                    identity_roles[db_id] = []
+                identity_roles[db_id].append(ra)
+
+        # Compute access map
+        access_map = []
+        for ident in identities:
+            roles = identity_roles.get(ident['id'], [])
+            if not roles:
+                continue
+            for res in classified:
+                res_id_full = (res.get('resource_id') or '').lower()
+                res_rg = (res.get('resource_group') or '').lower()
+                res_sub = (res.get('subscription_name') or '').lower()
+                for ra in roles:
+                    scope = (ra.get('scope') or '').lower()
+                    matched = False
+                    if res_id_full and scope == res_id_full:
+                        matched = True
+                    elif res_rg and f'/resourcegroups/{res_rg}' in scope and '/providers/' not in scope.split(f'/resourcegroups/{res_rg}')[-1]:
+                        matched = True
+                    elif scope == '/':
+                        matched = True
+                    if matched:
+                        access_map.append({
+                            'identity_name': ident['display_name'],
+                            'identity_id': ident['identity_id'],
+                            'identity_category': ident.get('identity_category', ''),
+                            'resource_name': res['name'],
+                            'resource_type': res['resource_type'],
+                            'classification': res['data_classification'],
+                            'role_name': ra['role_name'],
+                            'identity_risk': ident.get('risk_level', 'info'),
+                        })
+                        break
+
+        cursor.close()
+
+        try:
+            _log(db, 'export', 'Sensitive data access export generated', {'export_type': 'sensitive-data'})
+        except Exception:
+            pass
+
+        return jsonify({
+            'export_type': 'sensitive-data',
+            'metadata': {
+                'organization': org_name or 'Organization',
+                'generated_at': datetime.utcnow().isoformat(),
+                'total_classified_resources': len(classified),
+                'total_access_mappings': len(access_map),
+            },
+            'classified_resources': classified,
+            'access_map': access_map,
         })
     finally:
         db.close()
@@ -9899,7 +10231,8 @@ def get_resources():
                        default_network_action, NULL::text AS public_network_access,
                        COALESCE(ip_rules_count, 0) AS ip_rules_count,
                        COALESCE(vnet_rules_count, 0) AS vnet_rules_count,
-                       COALESCE(private_endpoint_count, 0) AS private_endpoint_count
+                       COALESCE(private_endpoint_count, 0) AS private_endpoint_count,
+                       data_classification, classification_source
                 FROM azure_storage_accounts
                 WHERE discovery_run_id = ANY(%s)
             """)
@@ -9932,7 +10265,8 @@ def get_resources():
                        default_network_action, public_network_access,
                        COALESCE(ip_rules_count, 0) AS ip_rules_count,
                        COALESCE(vnet_rules_count, 0) AS vnet_rules_count,
-                       COALESCE(private_endpoint_count, 0) AS private_endpoint_count
+                       COALESCE(private_endpoint_count, 0) AS private_endpoint_count,
+                       data_classification, classification_source
                 FROM azure_key_vaults
                 WHERE discovery_run_id = ANY(%s)
             """)
@@ -9962,6 +10296,13 @@ def get_resources():
         if search:
             where_clauses.append("(r.name ILIKE %s OR r.resource_group ILIKE %s)")
             filter_params.extend([f'%{search}%', f'%{search}%'])
+        classification = request.args.get('classification', '')
+        if classification:
+            if classification == 'unclassified':
+                where_clauses.append("r.data_classification IS NULL")
+            else:
+                where_clauses.append("r.data_classification = %s")
+                filter_params.append(classification.upper())
 
         where_sql = ""
         if where_clauses:
@@ -10884,6 +11225,718 @@ def get_data_security_summary():
                 'key_vault': kv_comp_avgs,
             },
             'top_risks': top_risks_out,
+        })
+    finally:
+        db.close()
+
+
+# ─── Phase 91: Sensitive Data Intelligence ────────────────────────
+
+# Auto-classification patterns for resource names and tags
+_PHI_PATTERNS = [
+    'phi', 'patient', 'health', 'medical', 'hipaa',
+    'ehr', 'emr', 'clinical', 'diagnosis', 'treatment',
+    'prescription', 'insurance', 'claim', 'lab-result',
+    'radiology', 'pharmacy', 'fhir', 'hl7', 'dicom',
+]
+_PCI_PATTERNS = [
+    'payment', 'card', 'pci', 'transaction',
+    'billing', 'invoice', 'stripe', 'merchant',
+    'checkout', 'credit', 'debit',
+]
+_PII_PATTERNS = [
+    'pii', 'personal', 'ssn', 'identity',
+    'address', 'email-data', 'user-data', 'employee',
+    'hr-data', 'salary', 'dob', 'passport',
+]
+
+
+def _auto_classify_resource_name(name: str) -> tuple:
+    """Match resource name against classification patterns.
+    Returns (classification, pattern_matched) or (None, None)."""
+    if not name:
+        return None, None
+    lower = name.lower().replace('_', '-').replace('.', '-')
+    for pat in _PHI_PATTERNS:
+        if pat in lower:
+            return 'PHI', pat
+    for pat in _PCI_PATTERNS:
+        if pat in lower:
+            return 'PCI', pat
+    for pat in _PII_PATTERNS:
+        if pat in lower:
+            return 'PII', pat
+    return None, None
+
+
+def _auto_classify_tags(tags: dict) -> tuple:
+    """Match Azure resource tags against classification patterns.
+    Returns (classification, tag_key) or (None, None)."""
+    if not tags or not isinstance(tags, dict):
+        return None, None
+    # Check tag keys and values
+    for key, val in tags.items():
+        combined = f"{key} {val}".lower()
+        for pat in _PHI_PATTERNS:
+            if pat in combined:
+                return 'PHI', f"tag:{key}"
+        for pat in _PCI_PATTERNS:
+            if pat in combined:
+                return 'PCI', f"tag:{key}"
+        for pat in _PII_PATTERNS:
+            if pat in combined:
+                return 'PII', f"tag:{key}"
+    return None, None
+
+
+def get_resource_classifications():
+    """GET /api/resources/classifications — list classified resources + stats."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'classified': [], 'unclassified_count': 0,
+                'total_resources': 0,
+                'by_classification': {'PHI': 0, 'PCI': 0, 'PII': 0, 'unclassified': 0},
+            })
+
+        classified = []
+        totals = {'PHI': 0, 'PCI': 0, 'PII': 0, 'unclassified': 0}
+        total_resources = 0
+
+        for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+            cursor.execute(f"""
+                SELECT id, name, resource_id, data_classification, classification_source,
+                       classification_confidence, classified_by, classified_at, classification_notes,
+                       risk_level, risk_score, resource_group, subscription_name
+                FROM {table}
+                WHERE discovery_run_id = ANY(%s)
+            """, (run_ids,))
+            for row in cursor.fetchall():
+                total_resources += 1
+                cls = row.get('data_classification')
+                if cls and cls in totals:
+                    totals[cls] += 1
+                    classified.append({
+                        'resource_id': row['id'],
+                        'resource_db_id': row['id'],
+                        'resource_path': row['resource_id'],
+                        'resource_name': row['name'],
+                        'resource_type': rtype,
+                        'classification': cls,
+                        'source': row.get('classification_source'),
+                        'confidence': row.get('classification_confidence', 'medium'),
+                        'classified_by': row.get('classified_by'),
+                        'classified_at': row['classified_at'].isoformat() if row.get('classified_at') else None,
+                        'notes': row.get('classification_notes'),
+                        'risk_level': row.get('risk_level', 'info'),
+                        'risk_score': row.get('risk_score', 0),
+                        'resource_group': row.get('resource_group'),
+                        'subscription_name': row.get('subscription_name'),
+                    })
+                else:
+                    totals['unclassified'] += 1
+
+        cursor.close()
+        return jsonify({
+            'classified': classified,
+            'unclassified_count': totals['unclassified'],
+            'total_resources': total_resources,
+            'by_classification': totals,
+        })
+    finally:
+        db.close()
+
+
+def classify_resource(resource_id):
+    """POST /api/resources/<id>/classify — manually classify a resource."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        data = request.get_json(force=True)
+        classification = data.get('classification', '').upper()
+        if classification not in ('PHI', 'PCI', 'PII'):
+            return jsonify({'error': 'classification must be PHI, PCI, or PII'}), 400
+
+        notes = data.get('notes', '')
+        user = g.current_user.get('display_name', 'unknown') if hasattr(g, 'current_user') and g.current_user else 'unknown'
+        resource_type = data.get('resource_type', '')  # optional: 'storage_account' or 'key_vault'
+
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery runs found'}), 404
+
+        # Try both tables (or specific one if resource_type given)
+        tables = []
+        if resource_type == 'storage_account':
+            tables = [('azure_storage_accounts', 'storage_account')]
+        elif resource_type == 'key_vault':
+            tables = [('azure_key_vaults', 'key_vault')]
+        else:
+            tables = [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]
+
+        for table, rtype in tables:
+            cursor.execute(f"""
+                UPDATE {table}
+                SET data_classification = %s,
+                    classification_source = 'manual',
+                    classification_confidence = 'high',
+                    classified_by = %s,
+                    classified_at = NOW(),
+                    classification_notes = %s
+                WHERE id = %s AND discovery_run_id = ANY(%s)
+                RETURNING id, name
+            """, (classification, user, notes, resource_id, run_ids))
+            row = cursor.fetchone()
+            if row:
+                db.conn.commit()
+                cursor.close()
+                _log(db, 'resource_classified', f'Classified {row["name"]} as {classification}', {
+                    'resource_id': resource_id, 'classification': classification, 'source': 'manual',
+                })
+                return jsonify({
+                    'resource_id': resource_id,
+                    'resource_name': row['name'],
+                    'classification': classification,
+                    'source': 'manual',
+                    'classified_at': 'now',
+                })
+
+        cursor.close()
+        return jsonify({'error': 'Resource not found'}), 404
+    finally:
+        db.close()
+
+
+def declassify_resource(resource_id):
+    """DELETE /api/resources/<id>/classify — remove classification."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery runs found'}), 404
+
+        for table in ['azure_storage_accounts', 'azure_key_vaults']:
+            cursor.execute(f"""
+                UPDATE {table}
+                SET data_classification = NULL,
+                    classification_source = NULL,
+                    classification_confidence = NULL,
+                    classified_by = NULL,
+                    classified_at = NULL,
+                    classification_notes = NULL
+                WHERE id = %s AND discovery_run_id = ANY(%s)
+                RETURNING id, name
+            """, (resource_id, run_ids))
+            row = cursor.fetchone()
+            if row:
+                db.conn.commit()
+                cursor.close()
+                return jsonify({'resource_id': resource_id, 'status': 'declassified'})
+        cursor.close()
+        return jsonify({'error': 'Resource not found'}), 404
+    finally:
+        db.close()
+
+
+def auto_classify_resources():
+    """POST /api/resources/auto-classify — run pattern detection on all resources."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'classified': 0, 'skipped': 0, 'already_classified': 0, 'patterns_matched': []})
+
+        classified_count = 0
+        skipped = 0
+        already = 0
+        patterns_matched = []
+        user = g.current_user.get('display_name', 'auto') if hasattr(g, 'current_user') and g.current_user else 'auto'
+
+        for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+            cursor.execute(f"""
+                SELECT id, name, tags, data_classification
+                FROM {table}
+                WHERE discovery_run_id = ANY(%s)
+            """, (run_ids,))
+            for row in cursor.fetchall():
+                if row.get('data_classification'):
+                    already += 1
+                    continue
+
+                # Try name match first, then tags
+                cls, pattern = _auto_classify_resource_name(row['name'])
+                source = 'auto_name'
+                if not cls:
+                    cls, pattern = _auto_classify_tags(row.get('tags') or {})
+                    source = 'auto_tag'
+
+                if cls:
+                    cursor.execute(f"""
+                        UPDATE {table}
+                        SET data_classification = %s,
+                            classification_source = %s,
+                            classification_confidence = 'medium',
+                            classified_by = %s,
+                            classified_at = NOW()
+                        WHERE id = %s
+                    """, (cls, source, user, row['id']))
+                    classified_count += 1
+                    patterns_matched.append({
+                        'resource_name': row['name'],
+                        'resource_type': rtype,
+                        'pattern': pattern,
+                        'classification': cls,
+                        'source': source,
+                    })
+                else:
+                    skipped += 1
+
+        db.conn.commit()
+        cursor.close()
+
+        if classified_count > 0:
+            _log(db, 'auto_classify', f'Auto-classified {classified_count} resources', {
+                'classified': classified_count, 'skipped': skipped,
+            })
+
+        return jsonify({
+            'classified': classified_count,
+            'skipped': skipped,
+            'already_classified': already,
+            'patterns_matched': patterns_matched,
+        })
+    finally:
+        db.close()
+
+
+def get_sensitive_access_for_identity(identity_id):
+    """GET /api/identities/<id>/sensitive-access — which sensitive resources can this identity access."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'identity_id': identity_id, 'sensitive_resources': [], 'blast_radius': {}})
+
+        # Resolve identity
+        cursor.execute("SELECT id, display_name FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s)", (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            # Try by integer id
+            try:
+                cursor.execute("SELECT id, display_name FROM identities WHERE id = %s", (int(identity_id),))
+                ident = cursor.fetchone()
+            except (ValueError, TypeError):
+                pass
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = ident['id']
+        display_name = ident['display_name']
+
+        # Get role assignments for this identity
+        cursor.execute("""
+            SELECT role_name, scope, scope_type, risk_level
+            FROM role_assignments
+            WHERE identity_db_id = %s
+        """, (db_id,))
+        role_assignments = cursor.fetchall()
+
+        # Get classified resources
+        classified_resources = []
+        for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+            cursor.execute(f"""
+                SELECT id, name, resource_id, resource_group, subscription_id,
+                       data_classification, risk_level, risk_score
+                FROM {table}
+                WHERE discovery_run_id = ANY(%s)
+                AND data_classification IS NOT NULL
+            """, (run_ids,))
+            for row in cursor.fetchall():
+                row['_type'] = rtype
+                classified_resources.append(row)
+
+        # Match: identity role assignments → classified resources via scope hierarchy
+        sensitive = []
+        for res in classified_resources:
+            res_id_full = res['resource_id'] or ''
+            res_rg = res.get('resource_group', '') or ''
+            res_sub = res.get('subscription_id', '') or ''
+
+            for ra in role_assignments:
+                scope = (ra.get('scope') or '').lower()
+                # Direct resource match
+                if res_id_full and res_id_full.lower() == scope:
+                    access_source = 'direct'
+                # Resource group match
+                elif res_rg and f'/resourcegroups/{res_rg.lower()}' in scope and '/providers/' not in scope.split(f'/resourcegroups/{res_rg.lower()}')[-1]:
+                    access_source = 'resource_group'
+                # Subscription match
+                elif res_sub and scope == f'/subscriptions/{res_sub.lower()}':
+                    access_source = 'subscription'
+                elif scope == '/':
+                    access_source = 'root'
+                else:
+                    continue
+
+                # Determine access level from role
+                role_name = (ra.get('role_name') or '').lower()
+                if role_name in ('owner', 'user access administrator'):
+                    access_level = 'Admin'
+                elif role_name in ('contributor', 'storage account contributor', 'storage blob data contributor', 'key vault administrator', 'key vault secrets officer', 'key vault crypto officer'):
+                    access_level = 'Write'
+                else:
+                    access_level = 'Read'
+
+                sensitive.append({
+                    'resource_db_id': res['id'],
+                    'resource_name': res['name'],
+                    'resource_type': res['_type'],
+                    'resource_path': res_id_full,
+                    'classification': res['data_classification'],
+                    'access_level': access_level,
+                    'role_name': ra['role_name'],
+                    'access_source': access_source,
+                    'resource_risk_level': res.get('risk_level', 'info'),
+                    'resource_risk_score': res.get('risk_score', 0),
+                })
+                break  # One match per resource is enough
+
+        # Compute blast radius
+        by_classification = {}
+        by_access_level = {}
+        for s in sensitive:
+            by_classification[s['classification']] = by_classification.get(s['classification'], 0) + 1
+            by_access_level[s['access_level']] = by_access_level.get(s['access_level'], 0) + 1
+
+        cursor.close()
+        return jsonify({
+            'identity_id': identity_id,
+            'display_name': display_name,
+            'sensitive_resources': sensitive,
+            'blast_radius': {
+                'total_sensitive': len(sensitive),
+                'by_classification': by_classification,
+                'by_access_level': by_access_level,
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_resource_access_map(resource_id):
+    """GET /api/resources/<id>/access-map — which identities can access this resource."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'resource': {}, 'identities_with_access': [], 'total_identities': 0})
+
+        # Find the resource
+        resource = None
+        for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+            cursor.execute(f"""
+                SELECT id, name, resource_id, resource_group, subscription_id,
+                       data_classification, risk_level, risk_score
+                FROM {table}
+                WHERE id = %s AND discovery_run_id = ANY(%s)
+            """, (resource_id, run_ids))
+            row = cursor.fetchone()
+            if row:
+                resource = dict(row)
+                resource['resource_type'] = rtype
+                break
+
+        if not resource:
+            cursor.close()
+            return jsonify({'error': 'Resource not found'}), 404
+
+        res_id_full = (resource.get('resource_id') or '').lower()
+        res_rg = (resource.get('resource_group') or '').lower()
+        res_sub = (resource.get('subscription_id') or '').lower()
+
+        # Find all role assignments that cover this resource's scope
+        scope_conditions = []
+        params = []
+        if res_id_full:
+            scope_conditions.append("LOWER(ra.scope) = %s")
+            params.append(res_id_full)
+        if res_rg:
+            # Match RG-level scope (not containing /providers/ after the RG)
+            scope_conditions.append("LOWER(ra.scope) LIKE %s")
+            params.append(f'%/resourcegroups/{res_rg}')
+        if res_sub:
+            scope_conditions.append("LOWER(ra.scope) = %s")
+            params.append(f'/subscriptions/{res_sub}')
+        scope_conditions.append("ra.scope = '/'")
+
+        if not scope_conditions:
+            cursor.close()
+            return jsonify({'resource': resource, 'identities_with_access': [], 'total_identities': 0})
+
+        where_clause = " OR ".join(scope_conditions)
+
+        cursor.execute(f"""
+            SELECT DISTINCT ON (i.id)
+                   i.id, i.identity_id, i.display_name, i.identity_type,
+                   i.identity_category, i.risk_level, i.risk_score,
+                   ra.role_name, ra.scope, ra.scope_type
+            FROM role_assignments ra
+            JOIN identities i ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = ANY(%s)
+              AND ({where_clause})
+            ORDER BY i.id, ra.scope DESC
+        """, [run_ids] + params)
+
+        identities = []
+        by_access = {}
+        by_type = {}
+        for row in cursor.fetchall():
+            role_name = (row.get('role_name') or '').lower()
+            if role_name in ('owner', 'user access administrator'):
+                access_level = 'Admin'
+            elif role_name in ('contributor', 'storage account contributor', 'storage blob data contributor', 'key vault administrator', 'key vault secrets officer', 'key vault crypto officer'):
+                access_level = 'Write'
+            else:
+                access_level = 'Read'
+
+            scope = (row.get('scope') or '').lower()
+            if res_id_full and scope == res_id_full:
+                scope_type = 'direct'
+            elif res_rg and f'/resourcegroups/{res_rg}' in scope:
+                scope_type = 'resource_group'
+            elif scope == '/':
+                scope_type = 'root'
+            else:
+                scope_type = 'subscription'
+
+            identities.append({
+                'identity_db_id': row['id'],
+                'identity_id': row['identity_id'],
+                'display_name': row['display_name'],
+                'identity_type': row['identity_type'] or '',
+                'identity_category': row['identity_category'] or '',
+                'access_level': access_level,
+                'role_name': row['role_name'],
+                'scope_path': row['scope'],
+                'scope_type': scope_type,
+                'risk_level': row['risk_level'] or 'info',
+                'risk_score': row.get('risk_score', 0),
+            })
+
+            by_access[access_level] = by_access.get(access_level, 0) + 1
+            cat = row.get('identity_category') or row.get('identity_type') or 'unknown'
+            by_type[cat] = by_type.get(cat, 0) + 1
+
+        cursor.close()
+        return jsonify({
+            'resource': {
+                'id': resource['id'],
+                'name': resource['name'],
+                'resource_type': resource['resource_type'],
+                'classification': resource.get('data_classification'),
+                'risk_level': resource.get('risk_level', 'info'),
+            },
+            'identities_with_access': identities,
+            'total_identities': len(identities),
+            'by_access_level': by_access,
+            'by_identity_type': by_type,
+        })
+    finally:
+        db.close()
+
+
+def get_blast_radius_summary():
+    """GET /api/blast-radius/summary — identities with access to sensitive resources."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        tenant_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'identities_with_sensitive_access': [],
+                'summary': {
+                    'total_identities_with_phi_access': 0,
+                    'total_identities_with_pci_access': 0,
+                    'total_identities_with_pii_access': 0,
+                },
+            })
+
+        # Get all classified resources
+        classified = []
+        for table, rtype in [('azure_storage_accounts', 'storage_account'), ('azure_key_vaults', 'key_vault')]:
+            cursor.execute(f"""
+                SELECT id, name, resource_id, resource_group, subscription_id, data_classification
+                FROM {table}
+                WHERE discovery_run_id = ANY(%s) AND data_classification IS NOT NULL
+            """, (run_ids,))
+            for row in cursor.fetchall():
+                row['_type'] = rtype
+                classified.append(row)
+
+        if not classified:
+            cursor.close()
+            return jsonify({
+                'identities_with_sensitive_access': [],
+                'summary': {
+                    'total_identities_with_phi_access': 0,
+                    'total_identities_with_pci_access': 0,
+                    'total_identities_with_pii_access': 0,
+                },
+            })
+
+        # Get all identities
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_type, i.identity_category,
+                   i.risk_level, i.risk_score
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND NOT COALESCE(i.is_microsoft_system, false)
+        """, (run_ids,))
+        identities = cursor.fetchall()
+
+        # Get all role assignments for these identities
+        id_list = [i['id'] for i in identities]
+        if not id_list:
+            cursor.close()
+            return jsonify({
+                'identities_with_sensitive_access': [],
+                'summary': {
+                    'total_identities_with_phi_access': 0,
+                    'total_identities_with_pci_access': 0,
+                    'total_identities_with_pii_access': 0,
+                },
+            })
+
+        cursor.execute("""
+            SELECT identity_db_id, role_name, scope
+            FROM role_assignments
+            WHERE identity_db_id = ANY(%s)
+        """, (id_list,))
+        # Build identity → roles map
+        identity_roles = {}
+        for ra in cursor.fetchall():
+            db_id = ra['identity_db_id']
+            if db_id not in identity_roles:
+                identity_roles[db_id] = []
+            identity_roles[db_id].append(ra)
+
+        # For each identity, check which classified resources they can access
+        results = []
+        phi_ids = set()
+        pci_ids = set()
+        pii_ids = set()
+
+        for ident in identities:
+            roles = identity_roles.get(ident['id'], [])
+            if not roles:
+                continue
+
+            phi_count = 0
+            pci_count = 0
+            pii_count = 0
+            highest_access = 'Read'
+
+            for res in classified:
+                res_id_full = (res.get('resource_id') or '').lower()
+                res_rg = (res.get('resource_group') or '').lower()
+                res_sub = (res.get('subscription_id') or '').lower()
+                cls = res['data_classification']
+
+                for ra in roles:
+                    scope = (ra.get('scope') or '').lower()
+                    matched = False
+                    if res_id_full and scope == res_id_full:
+                        matched = True
+                    elif res_rg and f'/resourcegroups/{res_rg}' in scope and '/providers/' not in scope.split(f'/resourcegroups/{res_rg}')[-1]:
+                        matched = True
+                    elif res_sub and scope == f'/subscriptions/{res_sub}':
+                        matched = True
+                    elif scope == '/':
+                        matched = True
+
+                    if matched:
+                        role_name = (ra.get('role_name') or '').lower()
+                        if role_name in ('owner', 'user access administrator'):
+                            al = 'Admin'
+                        elif 'contributor' in role_name or 'officer' in role_name or 'administrator' in role_name:
+                            al = 'Write'
+                        else:
+                            al = 'Read'
+
+                        if al == 'Admin' or (al == 'Write' and highest_access != 'Admin'):
+                            highest_access = al
+                        elif highest_access == 'Read':
+                            highest_access = al
+
+                        if cls == 'PHI':
+                            phi_count += 1
+                            phi_ids.add(ident['id'])
+                        elif cls == 'PCI':
+                            pci_count += 1
+                            pci_ids.add(ident['id'])
+                        elif cls == 'PII':
+                            pii_count += 1
+                            pii_ids.add(ident['id'])
+                        break
+
+            total_sensitive = phi_count + pci_count + pii_count
+            if total_sensitive > 0:
+                results.append({
+                    'identity_db_id': ident['id'],
+                    'identity_id': ident['identity_id'],
+                    'display_name': ident['display_name'],
+                    'identity_type': ident.get('identity_type', ''),
+                    'identity_category': ident.get('identity_category', ''),
+                    'risk_level': ident.get('risk_level', 'info'),
+                    'risk_score': ident.get('risk_score', 0),
+                    'sensitive_resources_count': total_sensitive,
+                    'phi_count': phi_count,
+                    'pci_count': pci_count,
+                    'pii_count': pii_count,
+                    'highest_access': highest_access,
+                })
+
+        results.sort(key=lambda x: x['sensitive_resources_count'], reverse=True)
+
+        cursor.close()
+        return jsonify({
+            'identities_with_sensitive_access': results,
+            'summary': {
+                'total_identities_with_phi_access': len(phi_ids),
+                'total_identities_with_pci_access': len(pci_ids),
+                'total_identities_with_pii_access': len(pii_ids),
+                'total_classified_resources': len(classified),
+                'highest_risk_identity': results[0]['display_name'] if results else None,
+            },
         })
     finally:
         db.close()
@@ -14409,6 +15462,333 @@ def get_identity_attack_paths(identity_id):
         db.close()
 
 
+# ── Effective Access v1: Role → Permission Expansion ────────────
+
+# Static Azure role → access level + permission mapping.
+# Covers the most common Azure built-in roles. Custom roles default to 'Write'.
+AZURE_ROLE_PERMISSIONS = {
+    'Owner': {
+        'access_level': 'Admin',
+        'category': 'Management',
+        'permissions': ['Full resource control', 'Assign roles to others', 'Create/delete any resource', 'Manage billing'],
+    },
+    'Contributor': {
+        'access_level': 'Write',
+        'category': 'Management',
+        'permissions': ['Create/delete resources', 'Modify resource configuration', 'Cannot assign roles'],
+    },
+    'Reader': {
+        'access_level': 'Read',
+        'category': 'Management',
+        'permissions': ['View resources', 'View resource configuration', 'Cannot modify'],
+    },
+    'User Access Administrator': {
+        'access_level': 'Admin',
+        'category': 'IAM',
+        'permissions': ['Grant any Azure role', 'Revoke any Azure role', 'Manage access policies', 'Privilege escalation risk'],
+    },
+    'Storage Blob Data Contributor': {
+        'access_level': 'Write',
+        'category': 'Data',
+        'permissions': ['Read/write/delete blob data', 'Manage blob containers'],
+    },
+    'Storage Blob Data Reader': {
+        'access_level': 'Read',
+        'category': 'Data',
+        'permissions': ['Read blob data', 'List blob containers'],
+    },
+    'Storage Blob Data Owner': {
+        'access_level': 'Admin',
+        'category': 'Data',
+        'permissions': ['Full blob data control', 'Set ACLs', 'Assign data roles'],
+    },
+    'Key Vault Administrator': {
+        'access_level': 'Admin',
+        'category': 'Security',
+        'permissions': ['Full key vault control', 'Manage secrets', 'Manage keys', 'Manage certificates', 'Purge deleted items'],
+    },
+    'Key Vault Secrets Officer': {
+        'access_level': 'Write',
+        'category': 'Security',
+        'permissions': ['Create/update/delete secrets', 'Backup/restore secrets'],
+    },
+    'Key Vault Secrets User': {
+        'access_level': 'Read',
+        'category': 'Security',
+        'permissions': ['Read secret contents', 'List secrets'],
+    },
+    'Key Vault Certificates Officer': {
+        'access_level': 'Write',
+        'category': 'Security',
+        'permissions': ['Create/update/delete certificates', 'Manage certificate issuers'],
+    },
+    'Key Vault Crypto User': {
+        'access_level': 'Read',
+        'category': 'Security',
+        'permissions': ['Perform cryptographic operations', 'Read key metadata'],
+    },
+    'Virtual Machine Contributor': {
+        'access_level': 'Write',
+        'category': 'Compute',
+        'permissions': ['Create/delete VMs', 'Modify VM configuration', 'Start/stop/restart VMs', 'Attach disks'],
+    },
+    'Network Contributor': {
+        'access_level': 'Write',
+        'category': 'Network',
+        'permissions': ['Create/delete network resources', 'Modify NSG rules', 'Manage VNets/subnets', 'Manage load balancers'],
+    },
+    'SQL DB Contributor': {
+        'access_level': 'Write',
+        'category': 'Data',
+        'permissions': ['Manage SQL databases', 'Cannot access database content', 'Cannot manage SQL servers'],
+    },
+    'Monitoring Reader': {
+        'access_level': 'Read',
+        'category': 'Monitoring',
+        'permissions': ['Read monitoring data', 'View dashboards', 'View alert rules'],
+    },
+    'Monitoring Contributor': {
+        'access_level': 'Write',
+        'category': 'Monitoring',
+        'permissions': ['Create/modify alert rules', 'Manage action groups', 'Manage diagnostic settings'],
+    },
+    'Log Analytics Reader': {
+        'access_level': 'Read',
+        'category': 'Monitoring',
+        'permissions': ['View log data', 'Run queries', 'View workspaces'],
+    },
+    'Security Reader': {
+        'access_level': 'Read',
+        'category': 'Security',
+        'permissions': ['View security policies', 'View security alerts', 'View Defender recommendations'],
+    },
+    'Security Admin': {
+        'access_level': 'Admin',
+        'category': 'Security',
+        'permissions': ['Manage security policies', 'Manage security alerts', 'Configure Defender for Cloud'],
+    },
+    'Managed Identity Operator': {
+        'access_level': 'Write',
+        'category': 'IAM',
+        'permissions': ['Assign managed identities to resources', 'Read managed identity properties'],
+    },
+    'Managed Identity Contributor': {
+        'access_level': 'Write',
+        'category': 'IAM',
+        'permissions': ['Create/delete user-assigned managed identities', 'Manage identity tags'],
+    },
+}
+
+ENTRA_ROLE_PERMISSIONS = {
+    'Global Administrator': {
+        'access_level': 'Admin',
+        'category': 'Directory',
+        'permissions': ['Full Entra ID control', 'Manage all directory settings', 'Assign any Entra role', 'Reset any password'],
+    },
+    'Privileged Role Administrator': {
+        'access_level': 'Admin',
+        'category': 'Directory',
+        'permissions': ['Manage role assignments in Entra', 'Manage PIM settings', 'Assign Global Administrator'],
+    },
+    'User Administrator': {
+        'access_level': 'Write',
+        'category': 'Directory',
+        'permissions': ['Create/delete users', 'Reset passwords', 'Manage user properties', 'Manage group memberships'],
+    },
+    'Application Administrator': {
+        'access_level': 'Admin',
+        'category': 'Application',
+        'permissions': ['Manage all app registrations', 'Manage enterprise applications', 'Consent to app permissions', 'Manage app proxy'],
+    },
+    'Cloud Application Administrator': {
+        'access_level': 'Admin',
+        'category': 'Application',
+        'permissions': ['Manage app registrations (except app proxy)', 'Manage enterprise applications', 'Consent to app permissions'],
+    },
+    'Security Administrator': {
+        'access_level': 'Admin',
+        'category': 'Security',
+        'permissions': ['Manage security features', 'View security reports', 'Manage Conditional Access', 'Manage Identity Protection'],
+    },
+    'Conditional Access Administrator': {
+        'access_level': 'Write',
+        'category': 'Security',
+        'permissions': ['Create/manage Conditional Access policies', 'Manage named locations', 'View sign-in logs'],
+    },
+    'Exchange Administrator': {
+        'access_level': 'Admin',
+        'category': 'Service',
+        'permissions': ['Full Exchange Online control', 'Manage mailboxes', 'Manage transport rules'],
+    },
+    'SharePoint Administrator': {
+        'access_level': 'Admin',
+        'category': 'Service',
+        'permissions': ['Full SharePoint Online control', 'Manage site collections', 'Manage sharing settings'],
+    },
+    'Teams Administrator': {
+        'access_level': 'Admin',
+        'category': 'Service',
+        'permissions': ['Full Teams control', 'Manage Teams policies', 'Manage calling/meeting settings'],
+    },
+    'Helpdesk Administrator': {
+        'access_level': 'Write',
+        'category': 'Directory',
+        'permissions': ['Reset passwords for non-admins', 'Force sign-out', 'Manage service requests'],
+    },
+    'Directory Readers': {
+        'access_level': 'Read',
+        'category': 'Directory',
+        'permissions': ['Read directory information', 'View user/group properties', 'View device registrations'],
+    },
+}
+
+
+def get_identity_effective_access(identity_id: str):
+    """GET /api/identities/<id>/effective-access — resolve actual permissions per role."""
+    db = _db()
+    cursor = db.conn.cursor()
+
+    try:
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        cursor.execute(
+            "SELECT id, display_name FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) ORDER BY discovery_run_id DESC LIMIT 1",
+            (identity_id, run_ids))
+        id_row = cursor.fetchone()
+        if not id_row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = id_row[0]
+        display_name = id_row[1]
+
+        # Fetch Azure RBAC assignments (role_assignments has no discovery_run_id — scoped via identity_db_id)
+        cursor.execute("""
+            SELECT role_name, scope, scope_type, resource_type, resource_name,
+                   role_type, risk_level, created_on, usage_status, why_critical
+            FROM role_assignments
+            WHERE identity_db_id = %s
+            ORDER BY CASE WHEN risk_level = 'critical' THEN 0 WHEN risk_level = 'high' THEN 1
+                          WHEN risk_level = 'medium' THEN 2 ELSE 3 END
+        """, (db_id,))
+        rbac_rows = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT role_name, directory_scope, role_type, risk_level, assigned_on, usage_status, why_critical
+            FROM entra_role_assignments
+            WHERE identity_db_id = %s
+            ORDER BY CASE WHEN risk_level = 'critical' THEN 0 WHEN risk_level = 'high' THEN 1
+                          WHEN risk_level = 'medium' THEN 2 ELSE 3 END
+        """, (db_id,))
+        entra_rows = cursor.fetchall()
+
+        effective_access = []
+        admin_scopes = 0
+        write_scopes = 0
+        read_scopes = 0
+        total_permissions = 0
+        categories_seen = set()
+
+        for r in rbac_rows:
+            role_name = r[0] or 'Unknown'
+            role_info = AZURE_ROLE_PERMISSIONS.get(role_name, {
+                'access_level': 'Write', 'category': 'Custom',
+                'permissions': [f'Custom role: {role_name}'],
+            })
+            access_level = role_info['access_level']
+            perms = role_info['permissions']
+
+            if access_level == 'Admin':
+                admin_scopes += 1
+            elif access_level == 'Write':
+                write_scopes += 1
+            else:
+                read_scopes += 1
+            total_permissions += len(perms)
+            categories_seen.add(role_info['category'])
+
+            scope_str = r[1] or '/'
+            scope_display = scope_str
+            if r[4]:
+                scope_display = r[4]
+            elif '/subscriptions/' in scope_str:
+                parts = scope_str.split('/')
+                if 'resourceGroups' in parts:
+                    rg_idx = parts.index('resourceGroups')
+                    scope_display = parts[rg_idx + 1] if rg_idx + 1 < len(parts) else scope_str
+                else:
+                    scope_display = parts[-1] if len(parts) > 2 else scope_str
+
+            effective_access.append({
+                'role_name': role_name,
+                'role_source': 'azure_rbac',
+                'access_level': access_level,
+                'category': role_info['category'],
+                'scope': scope_str,
+                'scope_display': scope_display,
+                'scope_type': r[2] or 'unknown',
+                'resource_type': r[3] or None,
+                'risk_level': r[6] or 'info',
+                'assigned_on': r[7].isoformat() if r[7] else None,
+                'usage_status': r[8] or 'unknown',
+                'permissions': perms,
+                'why_critical': r[9] or None,
+            })
+
+        for r in entra_rows:
+            role_name = r[0] or 'Unknown'
+            role_info = ENTRA_ROLE_PERMISSIONS.get(role_name, {
+                'access_level': 'Write', 'category': 'Directory',
+                'permissions': [f'Entra role: {role_name}'],
+            })
+            access_level = role_info['access_level']
+            perms = role_info['permissions']
+
+            if access_level == 'Admin':
+                admin_scopes += 1
+            elif access_level == 'Write':
+                write_scopes += 1
+            else:
+                read_scopes += 1
+            total_permissions += len(perms)
+            categories_seen.add(role_info['category'])
+
+            effective_access.append({
+                'role_name': role_name,
+                'role_source': 'entra_directory',
+                'access_level': access_level,
+                'category': role_info['category'],
+                'scope': r[1] or '/',
+                'scope_display': 'Tenant-wide' if not r[1] or r[1] == '/' else r[1],
+                'scope_type': 'directory',
+                'resource_type': None,
+                'risk_level': r[3] or 'info',
+                'assigned_on': r[4].isoformat() if r[4] else None,
+                'usage_status': r[5] or 'unknown',
+                'permissions': perms,
+                'why_critical': r[6] or None,
+            })
+
+        cursor.close()
+
+        return jsonify({
+            'identity_id': identity_id,
+            'display_name': display_name,
+            'effective_access': effective_access,
+            'summary': {
+                'admin_scopes': admin_scopes,
+                'write_scopes': write_scopes,
+                'read_scopes': read_scopes,
+                'total_roles': len(effective_access),
+                'total_permissions': total_permissions,
+                'categories': sorted(categories_seen),
+            },
+        })
+    finally:
+        db.close()
+
+
 # ── Phase 83: Slack/Teams Integrations Settings ────────────────
 
 def get_integration_settings():
@@ -16634,7 +18014,7 @@ def get_dashboard_identity_correlation():
 def get_correlation_accounts():
     """GET /api/correlation/accounts — correlated accounts for a given identity."""
     db = _db()
-    identity_id = request.args.get('identity_id', type=int)
+    identity_id = request.args.get('identity_id')
     object_id = request.args.get('object_id')
 
     if not identity_id and not object_id:
@@ -16643,11 +18023,27 @@ def get_correlation_accounts():
 
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Find the identity_link for the given identity
+        # Resolve identity_id: accept both int (db_id) and UUID string
+        resolved_db_id = None
         if identity_id:
+            try:
+                resolved_db_id = int(identity_id)
+            except (ValueError, TypeError):
+                # It's a UUID string — look up the db_id from identities table
+                run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+                if run_ids:
+                    cursor.execute(
+                        "SELECT id FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) ORDER BY discovery_run_id DESC LIMIT 1",
+                        (identity_id, run_ids))
+                    id_row = cursor.fetchone()
+                    if id_row:
+                        resolved_db_id = id_row['id']
+
+        # Find the identity_link for the given identity
+        if resolved_db_id:
             cursor.execute(
                 "SELECT human_identity_id FROM identity_links WHERE identity_db_id = %s LIMIT 1",
-                (identity_id,))
+                (resolved_db_id,))
         else:
             cursor.execute(
                 "SELECT human_identity_id FROM identity_links WHERE account_object_id = %s LIMIT 1",
@@ -16671,7 +18067,7 @@ def get_correlation_accounts():
                    il.account_object_id, il.account_enabled, il.link_method,
                    il.link_confidence, il.verified,
                    i.display_name, i.enabled, i.deleted_at, i.risk_score,
-                   i.risk_level, i.tier, i.identity_category
+                   i.risk_level, i.tier, i.identity_category, i.identity_id
             FROM identity_links il
             JOIN identities i ON i.id = il.identity_db_id
             WHERE il.human_identity_id = %s
@@ -16692,6 +18088,7 @@ def get_correlation_accounts():
         for l in links:
             accounts.append({
                 'id': l['identity_db_id'],
+                'identity_id': l['identity_id'],
                 'object_id': l['account_object_id'],
                 'display_name': l['display_name'] or l['account_upn'],
                 'upn': l['account_upn'],
@@ -16719,4 +18116,152 @@ def get_correlation_accounts():
         return jsonify({'error': str(e)}), 500
     finally:
         cursor.close()
+        db.close()
+
+
+# ─── AGIRS: Identity Risk Summary ────────────────────────────────
+
+def get_identity_risk_summary():
+    """SSOT endpoint for all AGIRS data (Rule 57). Reads persisted scores — no recomputation."""
+    db = _db()
+    try:
+        latest, previous = db.get_latest_agirs_scores()
+
+        if not latest:
+            return jsonify({
+                'agirs': None,
+                'hiri': None,
+                'nhiri': None,
+                'gei': None,
+                'dangerous_identities': [],
+                'previous': None,
+            })
+
+        hiri_bd = latest.get('hiri_breakdown') or {}
+        nhiri_bd = latest.get('nhiri_breakdown') or {}
+        gei_bd = latest.get('gei_breakdown') or {}
+
+        # Compute tier from AGIRS score
+        agirs_score = latest.get('agirs_score')
+        tier = 'F'
+        if agirs_score is not None:
+            if agirs_score >= 90:
+                tier = 'A'
+            elif agirs_score >= 75:
+                tier = 'B'
+            elif agirs_score >= 60:
+                tier = 'C'
+            elif agirs_score >= 40:
+                tier = 'D'
+
+        # Delta from previous
+        delta = None
+        if previous and agirs_score is not None and previous.get('agirs_score') is not None:
+            delta = round(agirs_score - previous['agirs_score'], 2)
+
+        result = {
+            'agirs': {
+                'score': agirs_score,
+                'tier': tier,
+                'delta': delta,
+            },
+            'hiri': {
+                'score': hiri_bd.get('score'),
+                'human_count': hiri_bd.get('human_count', 0),
+                'h1_ghost': hiri_bd.get('h1_ghost', 0),
+                'h2_dormant_priv': hiri_bd.get('h2_dormant_priv', 0),
+                'h3_over_priv': hiri_bd.get('h3_over_priv', 0),
+                'h4_ext_guest': hiri_bd.get('h4_ext_guest', 0),
+                'h5_zombie': hiri_bd.get('h5_zombie', 0),
+            } if hiri_bd else None,
+            'nhiri': {
+                'score': nhiri_bd.get('score'),
+                'nhi_count': nhiri_bd.get('nhi_count', 0),
+                'phantom_breakdown': nhiri_bd.get('phantom_breakdown', {}),
+            } if nhiri_bd else None,
+            'gei': {
+                'score': gei_bd.get('score'),
+                'components': gei_bd.get('components', []),
+            } if gei_bd else None,
+            'dangerous_identities': latest.get('dangerous_identities', []),
+            'previous': {
+                'agirs': previous.get('agirs_score'),
+                'hiri': (previous.get('hiri_breakdown') or {}).get('score'),
+                'nhiri': (previous.get('nhiri_breakdown') or {}).get('score'),
+                'gei': (previous.get('gei_breakdown') or {}).get('score'),
+            } if previous else None,
+        }
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_dangerous_identities():
+    """Return top N identities by blast_radius_score with drill-down data."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 5, type=int)
+        category = request.args.get('category', 'all')
+
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'identities': []})
+
+        rid_tuple = tuple(run_ids)
+        cat_filter = ""
+        if category == 'human':
+            cat_filter = "AND i.identity_category IN ('human_user', 'guest')"
+        elif category == 'nhi':
+            cat_filter = "AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')"
+
+        cursor.execute(f"""
+            SELECT
+                i.id,
+                i.display_name,
+                i.identity_category,
+                COALESCE(i.blast_radius_score, 0) as blast_radius_score,
+                COALESCE(i.risk_score, 0) as risk_score,
+                COALESCE(i.tier, 'T3') as tier,
+                COALESCE(i.activity_status, 'unknown') as activity_status
+            FROM identities i
+            WHERE i.discovery_run_id IN %s
+              AND COALESCE(i.deleted_at, '9999-01-01') > NOW()
+              AND COALESCE(i.blast_radius_score, 0) > 0
+              {cat_filter}
+            ORDER BY i.blast_radius_score DESC
+            LIMIT %s
+        """, (rid_tuple, limit))
+
+        identities = []
+        for row in cursor.fetchall():
+            id_, name, cat, br_score, risk, tier, activity = row
+            risk_factors = []
+            if tier in ('T0', 'T1'):
+                risk_factors.append(f'{tier} Privilege')
+            if activity in ('stale', 'never_used'):
+                risk_factors.append(f'Dormant ({activity})')
+            if risk >= 70:
+                risk_factors.append(f'Risk score {risk}')
+
+            identities.append({
+                'id': id_,
+                'display_name': name or 'Unknown',
+                'identity_category': cat,
+                'blast_radius_score': float(br_score),
+                'risk_score': int(risk),
+                'tier': tier,
+                'key_risk_factors': risk_factors[:5],
+                'navigateTo': f'/identities/{id_}',
+            })
+
+        cursor.close()
+        return jsonify({'identities': identities})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
         db.close()

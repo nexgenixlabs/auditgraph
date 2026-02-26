@@ -288,6 +288,8 @@ export default function IdentitiesPage() {
   const [workloadFilter, setWorkloadFilter] = useState(false);
   const [contextBanner, setContextBanner] = useState<string | null>(null);
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
+  const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('risk_level');
@@ -342,6 +344,11 @@ export default function IdentitiesPage() {
 
     // Reset pillar filter (only set if ?pillar=X is present)
     if (!params.get('pillar')) setContributingPillar(null);
+
+    // AGIRS factor drill-down (exact-match server-side filter)
+    const agirsParam = params.get('agirs_factor');
+    setAgirsFactor(agirsParam || null);
+    setShowDeleted(params.get('show_deleted') === 'true');
 
     // Category: identity_category, category (also map CISO values: Human→human_user, ServicePrincipal→service_principal)
     const catParam = params.get('identity_category') || params.get('category');
@@ -428,7 +435,20 @@ export default function IdentitiesPage() {
     const hasRolesParam = params.get('hasRoles');
     const statusParamForBanner = params.get('status');
     const catParamForBanner = params.get('category') || params.get('identity_category');
-    if (activityParamForBanner === 'dormant_strict' && params.get('privileged') === 'true') {
+    // AGIRS factor banners
+    const AGIRS_BANNER: Record<string, string> = {
+      h1_ghost: 'HIRI — Ghost Humans: disabled/deleted accounts with active role assignments',
+      h2_dormant_priv: 'HIRI — Dormant Privileged: stale/never-used humans with privileged roles',
+      h3_over_priv: 'HIRI — Over-Privileged: humans with risk score \u226570 or T0 tier',
+      h4_ext_guest: 'HIRI — Privileged Guests: external guests with privileged role assignments',
+      n1_orphaned: 'NHIRI — Orphaned: non-human identities with no assigned owner',
+      n2_dormant: 'NHIRI — Dormant NHIs: inactive non-human identities with active roles',
+      n3_zombie: 'NHIRI — Zombie NHIs: stale + high-risk + valid credentials',
+      n4_expired: 'NHIRI — Expired Credentials: NHIs with credentials expiring within 30 days',
+    };
+    if (agirsParam && AGIRS_BANNER[agirsParam]) {
+      setContextBanner(AGIRS_BANNER[agirsParam]);
+    } else if (activityParamForBanner === 'dormant_strict' && params.get('privileged') === 'true') {
       setContextBanner('Dormant accounts with active privileged roles (stale or never used)');
     } else if (activityParamForBanner === 'dormant_strict') {
       setContextBanner('Dormant identities (stale or never used — excludes idle)');
@@ -471,6 +491,8 @@ export default function IdentitiesPage() {
         const params = new URLSearchParams();
         params.set('hide_microsoft', String(!showMicrosoft));
         if (contributingPillar) params.set('contributing_pillar', contributingPillar);
+        if (agirsFactor) params.set('agirs_factor', agirsFactor);
+        if (showDeleted) params.set('show_deleted', 'true');
         if (connectionParam) params.append(...connectionParam.split('=') as [string, string]);
         const resp = await fetch(`/api/identities?${params}`);
         if (!resp.ok) throw new Error('Failed to fetch identities');
@@ -524,7 +546,7 @@ export default function IdentitiesPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, [showMicrosoft, selectedConnectionId, contributingPillar]);
+  }, [showMicrosoft, selectedConnectionId, contributingPillar, agirsFactor, showDeleted]);
 
   // ─── Batch risk histories for sparkline column ─────────────────
   useEffect(() => {
@@ -1108,8 +1130,16 @@ export default function IdentitiesPage() {
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">All Identities</h2>
-          <p className="text-sm text-gray-500">Full identity inventory — click any row for deep-dive</p>
+          <h2 className="text-2xl font-bold text-gray-900">
+            {new URLSearchParams(location.search).get('identity_category') === 'guest'
+              ? 'External & Guest Identities'
+              : 'Identity Inventory'}
+          </h2>
+          <p className="text-sm text-gray-500">
+            {new URLSearchParams(location.search).get('identity_category') === 'guest'
+              ? 'External users, guests, and B2B collaborators'
+              : 'Full identity inventory — click any row for deep-dive'}
+          </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* View toggle */}

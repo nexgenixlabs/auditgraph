@@ -301,7 +301,7 @@ export default function Dashboard() {
   // ── Render ─────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6" style={{ fontFamily: "'Inter', sans-serif" }}>
       {/* Page Header */}
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>

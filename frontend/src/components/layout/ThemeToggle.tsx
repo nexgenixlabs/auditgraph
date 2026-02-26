@@ -13,19 +13,19 @@ export default function ThemeToggle() {
       }}
     >
       <button
-        onClick={() => setTheme('obsidian')}
+        onClick={() => setTheme('sentinel')}
         className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-colors"
         style={{
-          backgroundColor: theme === 'obsidian' ? 'var(--accent-primary-bg)' : 'transparent',
-          color: theme === 'obsidian' ? 'var(--accent-primary)' : 'var(--text-tertiary)',
+          backgroundColor: theme === 'sentinel' ? 'var(--accent-primary-bg)' : 'transparent',
+          color: theme === 'sentinel' ? 'var(--accent-primary)' : 'var(--text-tertiary)',
         }}
-        title="Obsidian Dark"
+        title="Midnight Sentinel"
       >
         {/* Moon icon */}
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
         </svg>
-        <span className="hidden sm:inline">Obsidian</span>
+        <span className="hidden sm:inline">Sentinel</span>
       </button>
       <button
         onClick={() => setTheme('arctic')}

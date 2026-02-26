@@ -16,30 +16,36 @@
 // ─── Color Tokens ────────────────────────────────────────────────
 
 export const COLORS = {
-  // Backgrounds
-  bg:           "#080c14",
-  surface:      "#0f1520",
-  surfaceAlt:   "#141c2b",
-  surfaceHover: "#1a2438",
-  border:       "#1c2740",
-  borderAccent: "#2a3d5c",
+  // Backgrounds — MUST have visible separation between layers
+  bg:           "#060a12",     // Page background — darkest layer
+  surface:      "#0d1321",     // Card background — visibly lighter than bg
+  surfaceAlt:   "#131b2e",     // Nested card / expandable row
+  surfaceHover: "#1a2540",     // Hover state on interactive cards
+  border:       "#1e2d4a",     // Default border — visible against surface
+  borderAccent: "#2e4470",     // Hover/active border — clearly visible
 
-  // Text
-  text:         "#e2e8f0",
-  textMuted:    "#64748b",
-  textDim:      "#3e4f6a",
+  // Text — WCAG AA MINIMUM ENFORCED
+  text:         "#e8ecf4",     // Primary text — ALL body text, titles, values
+  textSecondary:"#94a3b8",     // Labels, descriptions, secondary info
+  textMuted:    "#64748b",     // ONLY for decorative elements, dividers
+  textDim:      "#475569",     // ONLY for disabled/inactive states
 
   // Semantic
   accent:       "#3b82f6",
-  accentSoft:   "rgba(59,130,246,0.12)",
+  accentSoft:   "rgba(59,130,246,0.15)",
   danger:       "#ef4444",
-  dangerSoft:   "rgba(239,68,68,0.10)",
+  dangerSoft:   "rgba(239,68,68,0.12)",
   warning:      "#f59e0b",
-  warningSoft:  "rgba(245,158,11,0.08)",
+  warningSoft:  "rgba(245,158,11,0.10)",
   success:      "#10b981",
-  successSoft:  "rgba(16,185,129,0.10)",
+  successSoft:  "rgba(16,185,129,0.12)",
   elevated:     "#f97316",
   purple:       "#8b5cf6",
+
+  // Score Triad (v4.0)
+  hiri:         "#f97316",     // HIRI — orange
+  nhiri:        "#8b5cf6",     // NHIRI (Phantom) — purple
+  gei:          "#3b82f6",     // GEI — blue
 };
 
 // ─── Scoring Helpers ─────────────────────────────────────────────
@@ -285,6 +291,55 @@ export interface RiskMovement {
   };
 }
 
+// ─── AGIRS Types ─────────────────────────────────────────────────
+
+export interface HIRIBreakdown {
+  score: number;
+  human_count: number;
+  h1_ghost: number;
+  h2_dormant_priv: number;
+  h3_over_priv: number;
+  h4_ext_guest: number;
+  h5_zombie: number;
+}
+
+export interface NHIRIBreakdown {
+  score: number;
+  nhi_count: number;
+  phantom_breakdown: {
+    orphaned: number;
+    dormant: number;
+    zombie_nhi: number;
+    expired_creds: number;
+    ownerless_apps: number;
+  };
+}
+
+export interface GEIBreakdown {
+  score: number;
+  components: Array<{ name: string; score: number; configured: boolean }>;
+}
+
+export interface DangerousIdentity {
+  id: number;
+  display_name: string;
+  identity_category: string;
+  blast_radius_score: number;
+  risk_score: number;
+  tier: string;
+  key_risk_factors: string[];
+  navigateTo?: string;
+}
+
+export interface AGIRSData {
+  agirs: { score: number; tier: string; delta: number | null } | null;
+  hiri: HIRIBreakdown | null;
+  nhiri: NHIRIBreakdown | null;
+  gei: GEIBreakdown | null;
+  dangerous_identities: DangerousIdentity[];
+  previous: { agirs: number | null; hiri: number | null; nhiri: number | null; gei: number | null } | null;
+}
+
 export interface TenantData {
   tenant: TenantMeta;
   riskScore: RiskScore;
@@ -300,4 +355,5 @@ export interface TenantData {
   compliance: ComplianceData;
   riskMovement: RiskMovement;
   ticketingIntegration: TicketingIntegration;
+  agirs: AGIRSData;
 }

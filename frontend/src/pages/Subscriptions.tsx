@@ -54,8 +54,8 @@ export default function Subscriptions() {
 
   const fetchData = () => {
     Promise.all([
-      fetch(withConnection('/api/subscriptions')).then(r => r.json()),
-      fetch(withConnection('/api/subscriptions/stats')).then(r => r.json()),
+      fetch(withConnection('/api/subscriptions')).then(r => r.ok ? r.json() : { subscriptions: [], billing: null }),
+      fetch(withConnection('/api/subscriptions/stats')).then(r => r.ok ? r.json() : null),
     ])
       .then(([subsData, statsData]) => {
         setSubs(subsData.subscriptions || []);
@@ -80,10 +80,8 @@ export default function Subscriptions() {
       if (res.ok) {
         fetchData();
       } else {
-        const data = await res.json();
-        if (data.upgrade_required) {
-          setActivateError(data.error);
-        }
+        const data = await res.json().catch(() => ({}));
+        setActivateError(data.error || 'Activation failed');
       }
     } finally {
       setActivating(null);
@@ -92,9 +90,15 @@ export default function Subscriptions() {
 
   const handleDeactivate = async (id: number) => {
     setActivating(id);
+    setActivateError(null);
     try {
       const res = await fetch(withConnection(`/api/subscriptions/${id}/deactivate`), { method: 'PUT' });
-      if (res.ok) fetchData();
+      if (res.ok) {
+        fetchData();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setActivateError(data.error || 'Deactivation failed');
+      }
     } finally {
       setActivating(null);
     }

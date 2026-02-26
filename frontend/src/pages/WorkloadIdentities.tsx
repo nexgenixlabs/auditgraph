@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { WORKLOAD_TYPE_CONFIG, LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG } from '../constants/metrics';
@@ -141,6 +141,12 @@ const WorkloadIdentities: React.FC = () => {
   const [sortCol, setSortCol] = useState('exposure_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState(searchParams.get('search') || '');
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    searchTimerRef.current = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(searchTimerRef.current);
+  }, [search]);
   const [exposureLevel, setExposureLevel] = useState(searchParams.get('exposure') || '');
   const [lifecycleFilter, setLifecycleFilter] = useState(searchParams.get('lifecycle') || '');
   const [ownerFilter, setOwnerFilter] = useState(searchParams.get('owner') || '');
@@ -187,7 +193,7 @@ const WorkloadIdentities: React.FC = () => {
     if (scopeFilter) params.set('scope', scopeFilter);
     if (crossSub) params.set('cross_subscription', 'true');
     if (riskLevel) params.set('risk_level', riskLevel);
-    if (search) params.set('search', search);
+    if (debouncedSearch) params.set('search', debouncedSearch);
     params.set('sort', sortCol);
     params.set('dir', sortDir);
     params.set('limit', String(limit));
@@ -199,7 +205,7 @@ const WorkloadIdentities: React.FC = () => {
       .then(d => { setItems(d.items || []); setTotal(d.total || 0); })
       .catch(() => { setItems([]); setTotal(0); })
       .finally(() => setLoading(false));
-  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, scopeFilter, crossSub, riskLevel, search, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
+  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, scopeFilter, crossSub, riskLevel, debouncedSearch, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
 
   const openDetail = (row: WorkloadRow) => {
     navigate(`/workload-identities/${row.workload_id}?type=${row.identity_type}`);
@@ -340,7 +346,7 @@ const WorkloadIdentities: React.FC = () => {
             { label: 'Can Escalate', value: stats.can_escalate_count, color: 'text-purple-600 dark:text-purple-400', sub: 'Priv escalation', show: true, onClick: () => { setCanEscalate(true); updateParams('escalate', 'true'); } },
             { label: 'Zombie', value: stats.zombie_count, color: 'text-gray-600 dark:text-gray-400', sub: 'Dormant + risky', show: true, onClick: () => { setLifecycleFilter('likely_dormant'); updateParams('lifecycle', 'likely_dormant'); } },
             { label: 'Risky Sign-Ins', value: stats.telemetry?.risky_sign_ins ?? 0, color: 'text-red-500 dark:text-red-400', sub: 'P2 risk detection', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/workload-identities?risk_level=critical') },
-            { label: 'Anomalies', value: stats.telemetry?.unresolved_anomalies ?? 0, color: 'text-violet-600 dark:text-violet-400', sub: 'Unresolved', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/anomalies') },
+            { label: 'Anomalies', value: stats.telemetry?.unresolved_anomalies ?? 0, color: 'text-violet-600 dark:text-violet-400', sub: 'Unresolved', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/workload-identities?anomaly=unresolved') },
           ].filter(c => c.show).map(c => (
             <button key={c.label} onClick={c.onClick} className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
               <p className="text-xs text-gray-500 dark:text-slate-400">{c.label}</p>

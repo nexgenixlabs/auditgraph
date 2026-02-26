@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename } from '../utils/exportUtils';
@@ -103,13 +103,13 @@ function StatCard({ label, value, color, subtitle, onClick, active }: {
   label: string; value: number; color: string; subtitle?: string; onClick?: () => void; active?: boolean;
 }) {
   const colorMap: Record<string, string> = {
-    blue: 'bg-blue-50 border-blue-200 text-blue-700',
-    red: 'bg-red-50 border-red-200 text-red-700',
-    orange: 'bg-orange-50 border-orange-200 text-orange-700',
-    yellow: 'bg-yellow-50 border-yellow-200 text-yellow-700',
-    green: 'bg-green-50 border-green-200 text-green-700',
-    purple: 'bg-purple-50 border-purple-200 text-purple-700',
-    gray: 'bg-gray-50 border-gray-200 text-gray-600',
+    blue: 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-950/40 dark:border-blue-800 dark:text-blue-300',
+    red: 'bg-red-50 border-red-200 text-red-700 dark:bg-red-950/40 dark:border-red-800 dark:text-red-300',
+    orange: 'bg-orange-50 border-orange-200 text-orange-700 dark:bg-orange-950/40 dark:border-orange-800 dark:text-orange-300',
+    yellow: 'bg-yellow-50 border-yellow-200 text-yellow-700 dark:bg-yellow-950/40 dark:border-yellow-800 dark:text-yellow-300',
+    green: 'bg-green-50 border-green-200 text-green-700 dark:bg-green-950/40 dark:border-green-800 dark:text-green-300',
+    purple: 'bg-purple-50 border-purple-200 text-purple-700 dark:bg-purple-950/40 dark:border-purple-800 dark:text-purple-300',
+    gray: 'bg-gray-50 border-gray-200 text-gray-600 dark:bg-gray-800/40 dark:border-gray-700 dark:text-gray-300',
   };
   return (
     <div
@@ -117,8 +117,8 @@ function StatCard({ label, value, color, subtitle, onClick, active }: {
       className={`border rounded-lg p-3 ${colorMap[color] || colorMap.blue} ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''} ${active ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}
     >
       <div className="text-2xl font-bold">{value}</div>
-      <div className="text-xs font-medium text-gray-600">{label}</div>
-      {subtitle && <div className="text-[10px] text-gray-500 mt-0.5">{subtitle}</div>}
+      <div className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{label}</div>
+      {subtitle && <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>{subtitle}</div>}
     </div>
   );
 }
@@ -128,7 +128,7 @@ function SortHeader({ label, field, currentField, currentDir, onSort }: {
 }) {
   const isActive = currentField === field;
   return (
-    <th className="px-3 py-2.5 cursor-pointer select-none hover:bg-gray-100 whitespace-nowrap text-xs" onClick={() => onSort(field)}>
+    <th className="px-3 py-2.5 cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-slate-700 whitespace-nowrap text-xs" onClick={() => onSort(field)}>
       <div className="flex items-center gap-0.5">
         <span>{label}</span>
         <span className={`text-[10px] ${isActive ? 'text-blue-600' : 'text-gray-400'}`}>
@@ -166,11 +166,11 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
   const highRiskPerms = (app.high_risk_permissions as string[]) || [];
 
   return (
-    <div className="fixed inset-y-0 right-0 w-[480px] bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col overflow-hidden">
+    <div className="fixed inset-y-0 right-0 w-[480px] shadow-2xl border-l z-50 flex flex-col overflow-hidden" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
       {/* Header */}
-      <div className="px-5 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between shrink-0">
+      <div className="px-5 py-4 border-b flex items-center justify-between shrink-0" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-elevated, var(--bg-primary))' }}>
         <div>
-          <h2 className="text-base font-bold text-gray-900 truncate max-w-[320px]" title={name}>{name}</h2>
+          <h2 className="text-base font-bold truncate max-w-[320px]" style={{ color: 'var(--text-primary)' }} title={name}>{name}</h2>
           <div className="flex items-center gap-2 mt-1">
             <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(app.risk_level as string)] || 'bg-gray-100 text-gray-600'}`}>
               {(app.risk_level as string) || 'info'}
@@ -180,7 +180,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
             </span>
           </div>
         </div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg font-bold">x</button>
+        <button onClick={onClose} className="text-lg font-bold" style={{ color: 'var(--text-secondary)' }}>x</button>
       </div>
 
       {/* Scrollable content */}
@@ -188,7 +188,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
         {/* Risk Summary */}
         {riskReasons.length > 0 && (
           <section>
-            <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">Risk Summary</h3>
+            <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>Risk Summary</h3>
             <div className="bg-red-50 border border-red-200 rounded-lg p-3 space-y-1">
               {riskReasons.map((point, i) => (
                 <div key={i} className="flex items-start gap-2 text-xs text-red-800">
@@ -202,30 +202,30 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 
         {/* App Details */}
         <section>
-          <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">App Details</h3>
+          <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>App Details</h3>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-            <span className="text-gray-500">App ID</span>
+            <span style={{ color: 'var(--text-secondary)' }}>App ID</span>
             <span className="font-mono text-[10px] break-all">{(app.app_id as string) || '\u2014'}</span>
-            <span className="text-gray-500">Object ID</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Object ID</span>
             <span className="font-mono text-[10px] break-all">{(app.app_object_id as string) || '\u2014'}</span>
-            <span className="text-gray-500">Created</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Created</span>
             <span>{app.created_datetime ? new Date(app.created_datetime as string).toLocaleDateString() : '\u2014'}</span>
-            <span className="text-gray-500">Publisher Domain</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Publisher Domain</span>
             <span>{(app.publisher_domain as string) || '\u2014'}</span>
-            <span className="text-gray-500">Audience</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Audience</span>
             <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${AUDIENCE_BADGE[(app.sign_in_audience as string)] || 'bg-gray-100 text-gray-600'}`}>
               {AUDIENCE_LABEL[(app.sign_in_audience as string)] || (app.sign_in_audience as string) || 'Unknown'}
             </span>
-            <span className="text-gray-500">Third-Party</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Third-Party</span>
             <span>{app.is_third_party ? 'Yes' : 'No'}</span>
-            <span className="text-gray-500">Approval Status</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Approval Status</span>
             <span className="capitalize">{(app.approval_status as string) || 'unknown'}</span>
           </div>
         </section>
 
         {/* Permissions */}
         <section>
-          <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">
+          <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>
             Permissions ({(app.permission_count as number) || 0})
           </h3>
           <div className="grid grid-cols-2 gap-3 mb-2">
@@ -253,28 +253,28 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 
         {/* Credentials */}
         <section>
-          <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">
+          <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>
             Credentials ({(app.secret_count as number || 0) + (app.certificate_count as number || 0)})
           </h3>
           {credDetails.length === 0 ? (
-            <p className="text-xs text-gray-400 italic">No credentials</p>
+            <p className="text-xs italic" style={{ color: 'var(--text-secondary)' }}>No credentials</p>
           ) : (
             <div className="space-y-2">
               {credDetails.map((c, i) => {
                 const endDate = c.end as string | null;
                 const isExpired = endDate ? new Date(endDate) < new Date() : false;
                 return (
-                  <div key={i} className={`border rounded-md p-2.5 text-xs ${isExpired ? 'border-red-200 bg-red-50/50' : 'border-gray-200'}`}>
+                  <div key={i} className={`border rounded-md p-2.5 text-xs ${isExpired ? 'border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/30' : ''}`} style={isExpired ? undefined : { borderColor: 'var(--border-default)' }}>
                     <div className="flex items-center justify-between">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
                         (c.type as string) === 'secret' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'
                       }`}>{(c.type as string) || '?'}</span>
-                      <span className={`text-[10px] font-semibold ${isExpired ? 'text-red-600' : 'text-gray-500'}`}>
+                      <span className={`text-[10px] font-semibold ${isExpired ? 'text-red-600' : ''}`} style={isExpired ? undefined : { color: 'var(--text-secondary)' }}>
                         {endDate ? (isExpired ? 'EXPIRED' : `Expires ${daysUntil(endDate)}`) : 'No expiry'}
                       </span>
                     </div>
-                    {!!c.display_name && <div className="text-gray-600 mt-1 truncate">{c.display_name as string}</div>}
-                    <div className="text-[10px] text-gray-400 mt-0.5 font-mono truncate">
+                    {!!c.display_name && <div className="mt-1 truncate" style={{ color: 'var(--text-primary)' }}>{c.display_name as string}</div>}
+                    <div className="text-[10px] mt-0.5 font-mono truncate" style={{ color: 'var(--text-secondary)' }}>
                       Key: {((c.key_id as string) || '').slice(0, 16)}...
                     </div>
                   </div>
@@ -286,7 +286,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 
         {/* Owners */}
         <section>
-          <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">
+          <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>
             Owners ({owners.length})
           </h3>
           {owners.length === 0 ? (
@@ -297,9 +297,9 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
           ) : (
             <div className="space-y-1">
               {owners.map((o, i) => (
-                <div key={i} className="text-xs border border-gray-100 rounded p-2">
-                  <span className="font-medium">{o.display_name as string}</span>
-                  {!!o.upn && <span className="text-gray-400 ml-2 text-[10px]">{o.upn as string}</span>}
+                <div key={i} className="text-xs border rounded p-2" style={{ borderColor: 'var(--border-default)' }}>
+                  <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{o.display_name as string}</span>
+                  {!!o.upn && <span className="ml-2 text-[10px]" style={{ color: 'var(--text-secondary)' }}>{o.upn as string}</span>}
                 </div>
               ))}
             </div>
@@ -309,7 +309,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
         {/* Redirect URIs */}
         {redirectUris.length > 0 && (
           <section>
-            <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">
+            <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>
               Redirect URIs ({redirectUris.length})
             </h3>
             <div className="space-y-1">
@@ -318,10 +318,10 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
                 const isHttp = uri.toLowerCase().startsWith('http://') && !isLocalhost;
                 return (
                   <div key={i} className={`text-xs border rounded p-2 font-mono text-[10px] break-all ${
-                    isLocalhost ? 'border-yellow-200 bg-yellow-50 text-yellow-800' :
-                    isHttp ? 'border-red-200 bg-red-50 text-red-800' :
-                    'border-gray-100 text-gray-700'
-                  }`}>
+                    isLocalhost ? 'border-yellow-200 bg-yellow-50 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-300' :
+                    isHttp ? 'border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300' :
+                    ''
+                  }`} style={(!isLocalhost && !isHttp) ? { borderColor: 'var(--border-default)', color: 'var(--text-primary)' } : undefined}>
                     {uri}
                     {isLocalhost && <span className="ml-2 text-yellow-600 font-sans font-semibold">[localhost]</span>}
                     {isHttp && <span className="ml-2 text-red-600 font-sans font-semibold">[HTTP]</span>}
@@ -334,11 +334,11 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 
         {/* Linked SPN */}
         <section>
-          <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">Linked Service Principal</h3>
+          <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>Linked Service Principal</h3>
           {detail.linked_spn ? (
-            <div className="border border-gray-200 rounded-md p-3 text-xs">
+            <div className="border rounded-md p-3 text-xs" style={{ borderColor: 'var(--border-default)' }}>
               <div className="flex items-center justify-between">
-                <span className="font-medium">{detail.linked_spn.display_name}</span>
+                <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{detail.linked_spn.display_name}</span>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${ACTIVITY_BADGE[safeLower(detail.linked_spn.activity_status)] || ACTIVITY_BADGE.unknown}`}>
                   {detail.linked_spn.activity_status || 'unknown'}
                 </span>
@@ -351,8 +351,8 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
               </button>
             </div>
           ) : (
-            <div className="bg-gray-50 border border-gray-200 rounded-md p-3">
-              <p className="text-xs text-gray-500 italic">No Service Principal — this app has never been consented or used.</p>
+            <div className="border rounded-md p-3" style={{ backgroundColor: 'var(--bg-elevated, var(--bg-primary))', borderColor: 'var(--border-default)' }}>
+              <p className="text-xs italic" style={{ color: 'var(--text-secondary)' }}>No Service Principal — this app has never been consented or used.</p>
             </div>
           )}
         </section>
@@ -360,7 +360,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
         {/* Recommendations */}
         {detail.recommendations.length > 0 && (
           <section>
-            <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">Recommendations</h3>
+            <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-secondary)' }}>Recommendations</h3>
             <div className="space-y-2">
               {detail.recommendations.map((rec, i) => (
                 <div key={i} className={`border rounded-lg p-3 ${PRIORITY_BADGE[rec.priority] || PRIORITY_BADGE.info}`}>
@@ -396,6 +396,12 @@ export default function AppRegistrations() {
   const [credFilter, setCredFilter] = useState('');
   const [audienceFilter, setAudienceFilter] = useState('');
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    searchTimerRef.current = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(searchTimerRef.current);
+  }, [search]);
   const [sortField, setSortField] = useState<SortField>('risk_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -418,8 +424,8 @@ export default function AppRegistrations() {
   useEffect(() => {
     if (!initialized) return;
     fetch(withConnection('/api/app-registrations/stats'))
-      .then(r => r.json())
-      .then(setStats)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setStats(d))
       .catch(() => {});
   }, [initialized, selectedConnectionId]);
 
@@ -435,10 +441,10 @@ export default function AppRegistrations() {
     if (riskFilter) params.set('risk_level', riskFilter);
     if (credFilter) params.set('credential_status', credFilter);
     if (audienceFilter) params.set('audience', audienceFilter);
-    if (search) params.set('search', search);
+    if (debouncedSearch) params.set('search', debouncedSearch);
 
     fetch(withConnection(`/api/app-registrations?${params}`), { signal: abort.signal })
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : { items: [], total: 0 })
       .then(data => {
         setItems(data.items || []);
         setTotal(data.total || 0);
@@ -446,15 +452,15 @@ export default function AppRegistrations() {
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [initialized, riskFilter, credFilter, audienceFilter, search, sortField, sortDir, selectedConnectionId]);
+  }, [initialized, riskFilter, credFilter, audienceFilter, debouncedSearch, sortField, sortDir, selectedConnectionId]);
 
   // Fetch detail when selected
   useEffect(() => {
     if (!selectedAppId) { setDetail(null); return; }
     setDetailLoading(true);
     fetch(withConnection(`/api/app-registrations/${selectedAppId}`))
-      .then(r => r.json())
-      .then(d => { setDetail(d); setDetailLoading(false); })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setDetail(d); setDetailLoading(false); })
       .catch(() => setDetailLoading(false));
   }, [selectedAppId]);
 
@@ -543,8 +549,8 @@ export default function AppRegistrations() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">App Registrations</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>App Registrations</h1>
+          <p className="text-sm mt-0.5" style={{ color: 'var(--text-secondary)' }}>
             Entra ID application definitions — permissions, credentials, ownership audit
           </p>
         </div>
@@ -552,7 +558,8 @@ export default function AppRegistrations() {
           <button
             onClick={handleCSVExport}
             disabled={sorted.length === 0}
-            className="px-3 py-1.5 text-xs font-medium bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-40"
+            className="px-3 py-1.5 text-xs font-medium rounded-md border disabled:opacity-40"
+            style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', borderColor: 'var(--border-default)' }}
           >
             Export CSV
           </button>
@@ -607,7 +614,7 @@ export default function AppRegistrations() {
         <select
           value={riskFilter}
           onChange={e => setRiskFilter(e.target.value)}
-          className="border border-gray-300 rounded-md px-2.5 py-1.5 text-xs bg-white"
+          className="border rounded-md px-2.5 py-1.5 text-xs" style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', borderColor: 'var(--border-default)' }}
         >
           <option value="">All Risk Levels</option>
           <option value="critical">Critical</option>
@@ -620,7 +627,7 @@ export default function AppRegistrations() {
         <select
           value={credFilter}
           onChange={e => setCredFilter(e.target.value)}
-          className="border border-gray-300 rounded-md px-2.5 py-1.5 text-xs bg-white"
+          className="border rounded-md px-2.5 py-1.5 text-xs" style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', borderColor: 'var(--border-default)' }}
         >
           <option value="">All Credentials</option>
           <option value="expired">Expired</option>
@@ -631,7 +638,7 @@ export default function AppRegistrations() {
         <select
           value={audienceFilter}
           onChange={e => setAudienceFilter(e.target.value)}
-          className="border border-gray-300 rounded-md px-2.5 py-1.5 text-xs bg-white"
+          className="border rounded-md px-2.5 py-1.5 text-xs" style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', borderColor: 'var(--border-default)' }}
         >
           <option value="">All Audiences</option>
           <option value="AzureADMyOrg">Single Tenant</option>
@@ -644,7 +651,8 @@ export default function AppRegistrations() {
           placeholder="Search by name..."
           value={search}
           onChange={e => setSearch(e.target.value)}
-          className="border border-gray-300 rounded-md px-2.5 py-1.5 text-xs w-48"
+          className="border rounded-md px-2.5 py-1.5 text-xs w-48"
+          style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', borderColor: 'var(--border-default)' }}
         />
 
         {hasFilters && (
@@ -656,16 +664,16 @@ export default function AppRegistrations() {
           </button>
         )}
 
-        <span className="ml-auto text-xs text-gray-400">
+        <span className="ml-auto text-xs" style={{ color: 'var(--text-secondary)' }}>
           {total} result{total !== 1 ? 's' : ''}
         </span>
       </div>
 
       {/* Table */}
-      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <div className="border rounded-lg overflow-hidden" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-gray-50 border-b border-gray-200">
+          <table className="w-full text-left text-xs" style={{ color: 'var(--text-primary)' }}>
+            <thead className="border-b" style={{ backgroundColor: 'var(--bg-elevated, var(--bg-primary))', borderColor: 'var(--border-default)' }}>
               <tr>
                 <SortHeader label="Name" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
@@ -677,12 +685,12 @@ export default function AppRegistrations() {
                 <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y" style={{ borderColor: 'var(--border-default)' }}>
               {loading && (
-                <tr><td colSpan={8} className="text-center py-12 text-gray-400">Loading...</td></tr>
+                <tr><td colSpan={8} className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>Loading...</td></tr>
               )}
               {!loading && sorted.length === 0 && (
-                <tr><td colSpan={8} className="text-center py-12 text-gray-400">No app registrations found</td></tr>
+                <tr><td colSpan={8} className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>No app registrations found</td></tr>
               )}
               {!loading && sorted.map(row => {
                 const cs = credStatus(row);
@@ -690,17 +698,17 @@ export default function AppRegistrations() {
                   <tr
                     key={row.app_id}
                     onClick={() => setSelectedAppId(row.app_id)}
-                    className={`cursor-pointer hover:bg-blue-50/50 transition-colors ${selectedAppId === row.app_id ? 'bg-blue-50' : ''}`}
+                    className={`cursor-pointer hover:bg-blue-50/50 dark:hover:bg-blue-950/30 transition-colors ${selectedAppId === row.app_id ? 'bg-blue-50 dark:bg-blue-950/30' : ''}`}
                   >
                     <td className="px-3 py-2.5 max-w-[200px]">
-                      <div className="font-medium text-gray-900 truncate" title={row.display_name}>{row.display_name}</div>
-                      <div className="text-[10px] text-gray-400 font-mono truncate">{row.app_id}</div>
+                      <div className="font-medium truncate" style={{ color: 'var(--text-primary)' }} title={row.display_name}>{row.display_name}</div>
+                      <div className="text-[10px] font-mono truncate" style={{ color: 'var(--text-secondary)' }}>{row.app_id}</div>
                     </td>
                     <td className="px-3 py-2.5">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(row.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
                         {row.risk_level}
                       </span>
-                      <div className="text-[10px] text-gray-400 mt-0.5">{row.risk_score} pts</div>
+                      <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{row.risk_score} pts</div>
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-1.5">
@@ -719,13 +727,13 @@ export default function AppRegistrations() {
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-1">
-                        <span className="text-gray-600">{row.secret_count + row.certificate_count}</span>
+                        <span style={{ color: 'var(--text-primary)' }}>{row.secret_count + row.certificate_count}</span>
                         <span className={`px-1 py-0.5 rounded text-[9px] font-semibold ${CRED_RISK_BADGE[cs.key] || CRED_RISK_BADGE.none}`}>
                           {cs.label}
                         </span>
                       </div>
                       {row.next_expiry && (
-                        <div className="text-[10px] text-gray-400 mt-0.5">{daysUntil(row.next_expiry)}</div>
+                        <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{daysUntil(row.next_expiry)}</div>
                       )}
                     </td>
                     <td className="px-3 py-2.5">
@@ -733,9 +741,9 @@ export default function AppRegistrations() {
                         <span className="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded text-[10px] font-semibold">None</span>
                       ) : (
                         <div>
-                          <span className="text-gray-700">{row.owner_count}</span>
+                          <span style={{ color: 'var(--text-primary)' }}>{row.owner_count}</span>
                           {row.primary_owner && (
-                            <div className="text-[10px] text-gray-400 truncate max-w-[120px]" title={row.primary_owner}>{row.primary_owner}</div>
+                            <div className="text-[10px] truncate max-w-[120px]" style={{ color: 'var(--text-secondary)' }} title={row.primary_owner}>{row.primary_owner}</div>
                           )}
                         </div>
                       )}
@@ -751,10 +759,10 @@ export default function AppRegistrations() {
                           {row.spn_activity_status || 'unknown'}
                         </span>
                       ) : (
-                        <span className="text-[10px] text-gray-400 italic">No SPN</span>
+                        <span className="text-[10px] italic" style={{ color: 'var(--text-secondary)' }}>No SPN</span>
                       )}
                     </td>
-                    <td className="px-3 py-2.5 text-gray-500 whitespace-nowrap">
+                    <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>
                       {row.created_datetime ? new Date(row.created_datetime).toLocaleDateString() : '\u2014'}
                     </td>
                   </tr>
@@ -770,8 +778,8 @@ export default function AppRegistrations() {
         <AppRegDrillDown detail={detail} onClose={() => setSelectedAppId(null)} />
       )}
       {selectedAppId && detailLoading && (
-        <div className="fixed inset-y-0 right-0 w-[480px] bg-white shadow-2xl border-l border-gray-200 z-50 flex items-center justify-center">
-          <div className="text-sm text-gray-400">Loading...</div>
+        <div className="fixed inset-y-0 right-0 w-[480px] shadow-2xl border-l z-50 flex items-center justify-center" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+          <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>Loading...</div>
         </div>
       )}
 

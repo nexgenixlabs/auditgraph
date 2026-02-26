@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { useConnection } from '../../contexts/ConnectionContext';
+import { CLOUD_BRAND } from '../../constants/design';
 import ThemeToggle from './ThemeToggle';
 
 interface TopBarProps {
@@ -14,13 +16,22 @@ const ROLE_COLORS: Record<string, string> = {
   compliance: 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300',
 };
 
+const CLOUD_BRAND_DOT: Record<string, string> = {
+  azure: CLOUD_BRAND.azure,
+  aws: CLOUD_BRAND.aws,
+  gcp: CLOUD_BRAND.gcp,
+};
+
 const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout, isSuperAdmin, activeTenantId, activeTenantName, switchTenant } = useAuth();
+  const { connections, selectedConnectionId, setSelectedConnectionId } = useConnection();
   const [unreadCount, setUnreadCount] = useState(0);
   const [tenantDropdownOpen, setTenantDropdownOpen] = useState(false);
+  const [scopeDropdownOpen, setScopeDropdownOpen] = useState(false);
   const [tenantsList, setTenantsList] = useState<{ id: number; name: string }[]>([]);
+  const scopeRef = useRef<HTMLDivElement>(null);
 
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent);
 
@@ -53,7 +64,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
   const isActive = (path: string) => location.pathname.startsWith(path);
 
   return (
-    <header className="fixed top-0 left-0 right-0 h-14 bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-700 z-40 flex items-center px-4">
+    <header className="topbar-glass fixed top-0 left-0 right-0 h-14 bg-white border-b border-gray-200 z-40 flex items-center px-4">
       {/* Left: Logo & Brand */}
       <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition mr-6">
         <img
@@ -68,6 +79,59 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
           </p>
         </div>
       </Link>
+
+      {/* Scope Selector (only when 2+ connections) */}
+      {connections.length >= 2 && (() => {
+        const selected = connections.find(c => c.id === selectedConnectionId);
+        const brandColor = selected ? CLOUD_BRAND_DOT[selected.cloud] || CLOUD_BRAND.azure : undefined;
+        return (
+          <div className="relative" ref={scopeRef}>
+            <button
+              onClick={() => setScopeDropdownOpen(!scopeDropdownOpen)}
+              style={brandColor ? { borderLeftColor: brandColor, borderLeftWidth: 3 } : undefined}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 dark:bg-slate-800 text-gray-700 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700 border border-gray-200 dark:border-slate-600 transition"
+            >
+              {selected && (
+                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: brandColor }} />
+              )}
+              <span>{selected ? selected.label : 'All Connections'}</span>
+              <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {scopeDropdownOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setScopeDropdownOpen(false)} />
+                <div className="absolute left-0 mt-1 w-52 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-600 rounded-lg shadow-lg z-50 py-1">
+                  <button
+                    onClick={() => { setSelectedConnectionId(null); setScopeDropdownOpen(false); }}
+                    className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-slate-700 transition flex items-center gap-2 ${
+                      selectedConnectionId === null ? 'font-bold text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-slate-300'
+                    }`}
+                  >
+                    All Connections
+                  </button>
+                  {connections.map(c => {
+                    const dotColor = CLOUD_BRAND_DOT[c.cloud] || CLOUD_BRAND.azure;
+                    return (
+                      <button
+                        key={c.id}
+                        onClick={() => { setSelectedConnectionId(c.id); setScopeDropdownOpen(false); }}
+                        className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-slate-700 transition flex items-center gap-2 ${
+                          selectedConnectionId === c.id ? 'font-bold text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dotColor }} />
+                        {c.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Center: Search */}
       <div className="flex-1 flex justify-center">
@@ -85,7 +149,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
 
       {/* Right: Actions */}
       <div className="flex items-center gap-1">
-        {/* Theme toggle (Obsidian / Carbon) */}
+        {/* Theme toggle (Sentinel / Arctic) */}
         <ThemeToggle />
 
         {/* Copilot button */}

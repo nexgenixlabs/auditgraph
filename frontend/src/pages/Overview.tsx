@@ -285,7 +285,7 @@ function getTimeAgo(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-const F = { ui: '"DM Sans", -apple-system, sans-serif', data: '"JetBrains Mono", monospace' };
+const F = { ui: '"Inter", -apple-system, sans-serif', data: '"JetBrains Mono", monospace' };
 
 const P = {
   bgPage: 'var(--ciso-bg-page)',

@@ -56,6 +56,7 @@ import Subscriptions from './pages/Subscriptions';
 import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
 import CISODashboard from './pages/CISODashboard';
+import RemediationCenter from './pages/RemediationCenter';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
@@ -66,7 +67,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { TenantProvider, useTenant } from './contexts/TenantContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { ThemeProvider } from './contexts/ThemeContext';
-import ConnectionSwitcher from './components/ConnectionSwitcher';
+// ConnectionSwitcher removed — scope selection now in TopBar
 
 function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode; requiredRole?: string }) {
   const { user, loading } = useAuth();
@@ -235,8 +236,6 @@ function AppContent() {
 
               {/* Page Content */}
               <main className="pl-60 pt-14 min-h-screen w-full overflow-x-hidden">
-                {/* Connection Switcher (shows only with 2+ connections, in normal flow) */}
-                <ConnectionSwitcher />
                 <Routes>
                   <Route path="/" element={
                     tenantStage !== 'active'
@@ -248,6 +247,7 @@ function AppContent() {
                       ? <Navigate to="/" replace />
                       : <ErrorBoundary><Dashboard /></ErrorBoundary>
                   } />
+                  <Route path="/remediation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationCenter /></ErrorBoundary>} />
                   <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />

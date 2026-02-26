@@ -4105,6 +4105,111 @@ class Database:
         cursor.close()
         return count
 
+    # ─── AGIRS Scoring ─────────────────────────────────────────────
+
+    _agirs_ensured = False
+
+    def _ensure_agirs_scores_table(self):
+        if Database._agirs_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agirs_scores (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL,
+                    run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    agirs_score NUMERIC(5,2),
+                    hiri_score NUMERIC(5,2),
+                    nhiri_score NUMERIC(5,2),
+                    gei_score NUMERIC(5,2),
+                    hiri_breakdown JSONB,
+                    nhiri_breakdown JSONB,
+                    gei_breakdown JSONB,
+                    dangerous_identities JSONB,
+                    human_count INTEGER,
+                    nhi_count INTEGER,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_agirs_scores_tenant ON agirs_scores(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_agirs_scores_run ON agirs_scores(run_id)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS blast_radius_score NUMERIC(7,2) DEFAULT 0")
+            self.conn.commit()
+            Database._agirs_ensured = True
+        except Exception as e:
+            self.conn.rollback()
+            print(f"  ⚠️ agirs_scores table creation error: {e}")
+        finally:
+            cursor.close()
+
+    def save_agirs_scores(self, run_id, scores_dict):
+        """Persist AGIRS scores for a discovery run."""
+        self._ensure_agirs_scores_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO agirs_scores (
+                tenant_id, run_id, agirs_score, hiri_score, nhiri_score, gei_score,
+                hiri_breakdown, nhiri_breakdown, gei_breakdown,
+                dangerous_identities, human_count, nhi_count
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            self._tenant_id,
+            run_id,
+            scores_dict.get('agirs_score'),
+            scores_dict.get('hiri_score'),
+            scores_dict.get('nhiri_score'),
+            scores_dict.get('gei_score'),
+            json.dumps(scores_dict.get('hiri_breakdown')),
+            json.dumps(scores_dict.get('nhiri_breakdown')),
+            json.dumps(scores_dict.get('gei_breakdown')),
+            json.dumps(scores_dict.get('dangerous_identities')),
+            scores_dict.get('human_count', 0),
+            scores_dict.get('nhi_count', 0),
+        ))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        return row[0] if row else None
+
+    def get_latest_agirs_scores(self):
+        """Return the latest AGIRS scores for the current tenant (+ previous for delta)."""
+        self._ensure_agirs_scores_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT agirs_score, hiri_score, nhiri_score, gei_score,
+                   hiri_breakdown, nhiri_breakdown, gei_breakdown,
+                   dangerous_identities, human_count, nhi_count, created_at
+            FROM agirs_scores
+            ORDER BY created_at DESC
+            LIMIT 2
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+
+        if not rows:
+            return None, None
+
+        def _row_to_dict(r):
+            return {
+                'agirs_score': float(r[0]) if r[0] is not None else None,
+                'hiri_score': float(r[1]) if r[1] is not None else None,
+                'nhiri_score': float(r[2]) if r[2] is not None else None,
+                'gei_score': float(r[3]) if r[3] is not None else None,
+                'hiri_breakdown': r[4] if isinstance(r[4], dict) else (json.loads(r[4]) if r[4] else None),
+                'nhiri_breakdown': r[5] if isinstance(r[5], dict) else (json.loads(r[5]) if r[5] else None),
+                'gei_breakdown': r[6] if isinstance(r[6], dict) else (json.loads(r[6]) if r[6] else None),
+                'dangerous_identities': r[7] if isinstance(r[7], list) else (json.loads(r[7]) if r[7] else []),
+                'human_count': r[8] or 0,
+                'nhi_count': r[9] or 0,
+                'created_at': r[10].isoformat() if r[10] else None,
+            }
+
+        latest = _row_to_dict(rows[0])
+        previous = _row_to_dict(rows[1]) if len(rows) > 1 else None
+        return latest, previous
+
     # ─── Phase 52: Azure Resource Discovery ──────────────────────────
 
     def _ensure_azure_storage_accounts_table(self):
@@ -4163,6 +4268,12 @@ class Database:
             ('risk_components', 'JSONB DEFAULT \'{}\''),
             ('blast_radius_score', 'INTEGER DEFAULT 0'),
             ('critical_overrides', 'JSONB DEFAULT \'[]\''),
+            ('data_classification', 'VARCHAR(20)'),
+            ('classification_source', 'VARCHAR(20)'),
+            ('classification_confidence', 'VARCHAR(10)'),
+            ('classified_by', 'VARCHAR(100)'),
+            ('classified_at', 'TIMESTAMPTZ'),
+            ('classification_notes', 'TEXT'),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE azure_storage_accounts ADD COLUMN {col} {defn}")
@@ -4228,6 +4339,12 @@ class Database:
             ('risk_components', 'JSONB DEFAULT \'{}\''),
             ('blast_radius_score', 'INTEGER DEFAULT 0'),
             ('critical_overrides', 'JSONB DEFAULT \'[]\''),
+            ('data_classification', 'VARCHAR(20)'),
+            ('classification_source', 'VARCHAR(20)'),
+            ('classification_confidence', 'VARCHAR(10)'),
+            ('classified_by', 'VARCHAR(100)'),
+            ('classified_at', 'TIMESTAMPTZ'),
+            ('classification_notes', 'TEXT'),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE azure_key_vaults ADD COLUMN {col} {defn}")

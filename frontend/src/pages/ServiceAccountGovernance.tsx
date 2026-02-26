@@ -269,7 +269,7 @@ export default function ServiceAccountGovernance() {
 
   // ─── Render ───
   return (
-    <div style={{ background: G.bg, fontFamily: "'DM Sans', sans-serif" }} className="min-h-screen -m-4 -mt-4 p-8">
+    <div style={{ background: G.bg, fontFamily: "'Inter', sans-serif" }} className="min-h-screen -m-4 -mt-4 p-8">
       <style>{`
         @keyframes gov-fade-up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
         .gov-card { animation: gov-fade-up 0.4s ease-out both; }

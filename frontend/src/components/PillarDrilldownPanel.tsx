@@ -23,7 +23,7 @@ const C = {
   textDim:      '#475569',
 };
 const F = {
-  body:    "'DM Sans', 'Outfit', sans-serif",
+  body:    "'Inter', 'Outfit', sans-serif",
   mono:    "'JetBrains Mono', 'Fira Code', monospace",
 };
 

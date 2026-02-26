@@ -6,7 +6,7 @@
 // ── Colors ─────────────────────────────────────────────────────────
 
 export const COLORS = {
-  brand: '#1E3A5F',
+  brand: '#0B1220',
   brandLight: 'var(--accent-primary)',
   background: 'var(--bg-primary)',
   card: 'var(--bg-secondary)',
@@ -26,7 +26,7 @@ export const COLORS = {
 export const RISK_COLORS = {
   critical:   { color: 'var(--accent-danger)',  bg: 'var(--tint-red)' },
   high:       { color: 'var(--accent-warning)', bg: 'var(--tint-orange)' },
-  medium:     { color: '#FACC15',               bg: 'var(--tint-yellow)' },
+  medium:     { color: '#FBBF24',               bg: 'var(--tint-yellow)' },
   low:        { color: 'var(--accent-success)',  bg: 'var(--tint-green)' },
   info:       { color: 'var(--accent-primary)',  bg: 'var(--tint-blue)' },
 } as const;
@@ -41,10 +41,10 @@ export const FRAMEWORK_COLORS = {
 // ── Score Thresholds ───────────────────────────────────────────────
 
 export function scoreToColor(score: number): string {
-  if (score <= 20) return '#16A34A';
+  if (score <= 20) return '#10B981';
   if (score <= 40) return '#84CC16';
-  if (score <= 60) return '#FACC15';
-  if (score <= 80) return '#F97316';
+  if (score <= 60) return '#FBBF24';
+  if (score <= 80) return '#F59E0B';
   return '#DC2626';
 }
 
@@ -63,6 +63,21 @@ export function scoreToSeverity(score: number): string {
   if (score <= 80) return 'very_high';
   return 'critical';
 }
+
+// ── Identity Type & Cloud Brand Colors ────────────────────────────
+
+export const IDENTITY_TYPE_COLORS = {
+  human: '#3B82F6',
+  nonHuman: '#A855F7',
+  guest: '#F59E0B',
+  privileged: '#EF4444',
+} as const;
+
+export const CLOUD_BRAND = {
+  azure: '#2563EB',
+  aws: '#FF9900',
+  gcp: '#34A853',
+} as const;
 
 // ── Dashboard Tab Definitions ──────────────────────────────────────
 

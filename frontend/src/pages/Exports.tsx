@@ -59,6 +59,28 @@ const EXPORT_CARDS: ExportCard[] = [
       </svg>
     ),
   },
+  {
+    key: 'evidence-package',
+    title: 'HIPAA Evidence Package',
+    description: 'Comprehensive audit evidence bundle: privileged access, compliance gaps, remediation priorities, credential health, sensitive data access — ready for HIPAA auditors.',
+    formats: ['json'],
+    icon: (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+      </svg>
+    ),
+  },
+  {
+    key: 'sensitive-data',
+    title: 'Sensitive Data Access Map',
+    description: 'Classification inventory (PHI/PCI/PII) with identity-to-resource access mappings — who can reach sensitive data and via which roles.',
+    formats: ['json'],
+    icon: (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+    ),
+  },
 ];
 
 const CSV_COLUMNS_MAP: Record<string, typeof IDENTITY_CSV_COLUMNS> = {
@@ -95,23 +117,23 @@ export default function Exports() {
           rows = data.identities || [];
         } else if (exportType === 'compliance') {
           rows = (data.gap_analysis || []).map((g: any) => ({
-            framework: g.framework_name,
+            framework: g.framework,
             control_id: g.control_id,
             control_name: g.control_name,
             status: g.status,
-            current_value: g.value,
-            threshold: g.pass_threshold,
+            current_value: g.current_value,
+            threshold: g.threshold,
             detail: g.detail,
           }));
           // If no gaps, export all controls
           if (rows.length === 0 && data.all_controls) {
             rows = data.all_controls.map((c: any) => ({
-              framework: c.framework_name,
+              framework: c.framework,
               control_id: c.control_id,
               control_name: c.control_name,
               status: c.status,
-              current_value: c.value,
-              threshold: c.pass_threshold,
+              current_value: c.current_value,
+              threshold: c.threshold,
               detail: c.detail,
             }));
           }
@@ -137,8 +159,8 @@ export default function Exports() {
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Export Center</h2>
-        <p className="text-sm text-gray-500 mt-1">
+        <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Export Center</h2>
+        <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
           Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
         </p>
       </div>
@@ -146,14 +168,14 @@ export default function Exports() {
       {/* Export cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {EXPORT_CARDS.map(card => (
-          <div key={card.key} className="bg-white rounded-xl border shadow-sm p-6 flex flex-col">
+          <div key={card.key} className="rounded-xl border shadow-sm p-6 flex flex-col" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
             <div className="flex items-start gap-3 mb-3">
-              <div className="p-2 bg-blue-50 text-blue-600 rounded-lg flex-shrink-0">
+              <div className="p-2 rounded-lg flex-shrink-0" style={{ backgroundColor: 'rgba(59,130,246,0.1)', color: '#3B82F6' }}>
                 {card.icon}
               </div>
               <div className="min-w-0">
-                <h3 className="text-base font-semibold text-gray-900">{card.title}</h3>
-                <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{card.description}</p>
+                <h3 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>{card.title}</h3>
+                <p className="text-xs mt-0.5 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>{card.description}</p>
               </div>
             </div>
 
@@ -196,7 +218,7 @@ export default function Exports() {
       </div>
 
       {/* Info */}
-      <div className="bg-gray-50 border rounded-xl p-4 text-xs text-gray-500 space-y-1">
+      <div className="border rounded-xl p-4 text-xs space-y-1" style={{ backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))', color: 'var(--text-secondary)', borderColor: 'var(--border-default)' }}>
         <p><strong>CSV</strong> format is optimized for spreadsheet import (Excel, Google Sheets). Compliance CSV exports gap analysis controls.</p>
         <p><strong>JSON</strong> format includes full structured data suitable for SIEM, GRC platforms, or programmatic consumption.</p>
         <p>All exports reflect the latest discovery run data. Export events are recorded in the activity log.</p>

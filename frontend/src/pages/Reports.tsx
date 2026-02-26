@@ -1,19 +1,38 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { generateReport, generateExecutiveReport, generateComplianceReport } from '../utils/pdfGenerator';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
 
 type ReportType = 'full' | 'executive' | 'compliance';
 
+const TYPE_MAP: Record<string, ReportType> = {
+  executive: 'executive',
+  audit: 'full',
+  full: 'full',
+  compliance: 'compliance',
+  scheduled: 'full', // scheduled tab defaults to full, handled below
+};
+
 export default function Reports() {
   const { addToast } = useToast();
   const { withConnection } = useConnection();
+  const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientName, setClientName] = useState('');
   const [lastGenerated, setLastGenerated] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<any>(null);
-  const [reportType, setReportType] = useState<ReportType>('full');
+  const typeParam = searchParams.get('type');
+  const [reportType, setReportType] = useState<ReportType>(
+    TYPE_MAP[typeParam || ''] || 'full'
+  );
+
+  // Sync report type when URL param changes
+  useEffect(() => {
+    const t = searchParams.get('type');
+    if (t && TYPE_MAP[t]) setReportType(TYPE_MAP[t]);
+  }, [searchParams]);
 
   async function handleGenerate() {
     setLoading(true);
@@ -233,7 +252,7 @@ export default function Reports() {
               <div>
                 <div className="text-sm font-medium text-gray-700 mb-2">By Category</div>
                 <div className="space-y-1.5">
-                  {Object.entries(previewData.remediation_summary.by_category as Record<string, number>).map(([cat, count]) => (
+                  {Object.entries((previewData.remediation_summary.by_category || {}) as Record<string, number>).map(([cat, count]) => (
                     <div key={cat} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
                       <span className="text-xs text-gray-700 capitalize">{cat.replace(/_/g, ' ')}</span>
                       <span className="text-xs font-semibold text-gray-900">{count}</span>
@@ -244,7 +263,7 @@ export default function Reports() {
               <div>
                 <div className="text-sm font-medium text-gray-700 mb-2">By Impact</div>
                 <div className="space-y-1.5">
-                  {Object.entries(previewData.remediation_summary.by_impact as Record<string, number>).map(([impact, count]) => {
+                  {Object.entries((previewData.remediation_summary.by_impact || {}) as Record<string, number>).map(([impact, count]) => {
                     const colors: Record<string, string> = {
                       critical: 'bg-red-50 text-red-700',
                       high: 'bg-orange-50 text-orange-700',
