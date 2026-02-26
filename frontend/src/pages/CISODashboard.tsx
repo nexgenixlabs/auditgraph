@@ -31,6 +31,7 @@ import {
   type Pillar, type GovernanceMetric,
 } from '../constants/ciso';
 import { getAGIRSColor } from '../constants/metrics';
+import { formatDate } from '../utils/displayHelpers';
 
 // ─── Typography Helpers ──────────────────────────────────────────
 
@@ -44,13 +45,14 @@ const FONT = {
 function ScoreRing({ score, size = 96, strokeWidth = 6, color, displayValue }: {
   score: number; size?: number; strokeWidth?: number; color?: string; displayValue?: string;
 }) {
-  const c = color || getScoreColor(score);
+  const isNoData = score === 0 && !displayValue;
+  const c = isNoData ? COLORS.textDim : (color || getScoreColor(score));
   const r = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * r;
-  const offset = circumference - (score / 100) * circumference;
+  const offset = isNoData ? circumference : circumference - (score / 100) * circumference;
   const fontSize = Math.min(32, Math.floor(size * 0.26));
-  const grade = getGrade(score);
-  const label = displayValue ?? score.toFixed(1);
+  const grade = isNoData ? '' : getGrade(score);
+  const label = isNoData ? 'N/A' : (displayValue ?? score.toFixed(1));
   return (
     <svg width={size} height={size} style={{ display: 'block' }}>
       <circle cx={size / 2} cy={size / 2} r={r} fill="none"
@@ -60,14 +62,16 @@ function ScoreRing({ score, size = 96, strokeWidth = 6, color, displayValue }: {
         strokeDasharray={circumference} strokeDashoffset={offset}
         transform={`rotate(-90 ${size / 2} ${size / 2})`}
         style={{ transition: 'stroke-dashoffset 1.4s cubic-bezier(0.4,0,0.2,1)' }} />
-      <text x={size / 2} y={size / 2 - 4} textAnchor="middle" dominantBaseline="central"
-        fill={COLORS.text} fontFamily={FONT.mono} fontWeight={700} fontSize={fontSize}>
+      <text x={size / 2} y={isNoData ? size / 2 : size / 2 - 4} textAnchor="middle" dominantBaseline="central"
+        fill={isNoData ? COLORS.textMuted : COLORS.text} fontFamily={FONT.mono} fontWeight={isNoData ? 600 : 700} fontSize={isNoData ? Math.floor(fontSize * 0.7) : fontSize}>
         {label}
       </text>
-      <text x={size / 2} y={size / 2 + 18} textAnchor="middle" dominantBaseline="central"
-        fill={COLORS.textSecondary} fontFamily={FONT.mono} fontWeight={600} fontSize={10}>
-        {grade}
-      </text>
+      {!isNoData && (
+        <text x={size / 2} y={size / 2 + 18} textAnchor="middle" dominantBaseline="central"
+          fill={COLORS.textSecondary} fontFamily={FONT.mono} fontWeight={600} fontSize={10}>
+          {grade}
+        </text>
+      )}
     </svg>
   );
 }
@@ -398,7 +402,7 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
           display: 'flex', alignItems: 'center', gap: 6,
         }}>
           <span style={{ width: 4, height: 4, borderRadius: '50%', background: COLORS.success, flexShrink: 0 }} />
-          Source: Azure RBAC scan · Entra ID · Last updated: {new Date(data.tenant.lastScan).toLocaleString()}
+          Source: Azure RBAC scan · Entra ID · Last updated: {formatDate(data.tenant.lastScan, 'No scan data')}
         </div>
       </div>
     </>
@@ -632,13 +636,13 @@ function buildEmptyData(): TenantData {
     },
     riskScore: {
       current: 0, previous: 0, delta: 0,
-      tier: 'CRITICAL', grade: 'F',
+      tier: 'NO DATA', grade: '—',
       industry: 0, target: 90, potentialGain: 0,
       trend: [],
     },
     projection: {
-      noAction: { score: 0, tier: 'CRITICAL', consequences: [], breachImpact: 'Unknown' },
-      remediated: { score: 0, tier: 'CRITICAL', actions: [], breachImpact: 'Unknown' },
+      noAction: { score: 0, tier: 'NO DATA', consequences: [], breachImpact: 'Unknown' },
+      remediated: { score: 0, tier: 'NO DATA', actions: [], breachImpact: 'Unknown' },
     },
     ghostAccounts: {
       total: 0, privileged: 0, nonPrivileged: 0,
@@ -673,7 +677,7 @@ function buildEmptyData(): TenantData {
     },
     remediations: [],
     governance: {
-      effectivenessScore: 0, effectivenessTier: 'CRITICAL', maturityLevel: 'Unknown',
+      effectivenessScore: 0, effectivenessTier: 'NO DATA', maturityLevel: 'Not assessed',
       metrics: [], controlFailures: [],
       setupCompletion: { configured: 0, total: 4 },
     },
@@ -1608,7 +1612,8 @@ function HeroPanel({ d, execView }: { d: TenantData; execView: boolean }) {
 }
 
 function RiskDriverRow({ pillar, isLast }: { pillar: Pillar; isLast: boolean }) {
-  const c = getPillarColor(pillar.score);
+  const isZero = pillar.score === 0;
+  const c = isZero ? COLORS.textMuted : getPillarColor(pillar.score);
   const nav = pillarNav(pillar.name);
   return (
     <div style={{
@@ -1617,14 +1622,14 @@ function RiskDriverRow({ pillar, isLast }: { pillar: Pillar; isLast: boolean }) 
       borderBottom: isLast ? 'none' : `1px solid ${COLORS.border}`,
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{pillar.name}</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: isZero ? COLORS.textMuted : COLORS.text, fontFamily: FONT.ui }}>{pillar.name}</div>
         <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, marginTop: 1 }}>
           <DN navigateTo={nav}>{pillar.identityCount}</DN> identities contributing
         </div>
       </div>
       <DN navigateTo={nav} tooltip={`View ${pillar.name} identities`}>
         <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: c, flexShrink: 0, width: 36, textAlign: 'right' as const, display: 'inline-block' }}>
-          {pillar.score}
+          {isZero ? '—' : pillar.score}
         </span>
       </DN>
     </div>
@@ -2065,16 +2070,19 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
       <CISOCard>
         <SectionTitle>Risk Pillars</SectionTitle>
         <div style={{ fontSize: 10, color: COLORS.textSecondary, marginBottom: 12, fontFamily: FONT.ui }}>Score scale: 0 = no risk · 100 = maximum risk</div>
-        {d.pillars.map((p, i) => (
+        {d.pillars.map((p, i) => {
+          const pZero = p.score === 0;
+          const pColor = pZero ? COLORS.textMuted : getPillarColor(p.score);
+          return (
           <div key={i}>
             <div onClick={() => setExpandedPillar(expandedPillar === i ? null : i)} style={{
               display: 'grid', gridTemplateColumns: '200px 1fr 80px 120px', alignItems: 'center',
               padding: '10px 0', borderBottom: `1px solid ${COLORS.border}`, cursor: 'pointer',
             }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{p.name}</span>
-              <ProgressBar value={p.score} color={getPillarColor(p.score)} height={8} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: pZero ? COLORS.textMuted : COLORS.text, fontFamily: FONT.ui }}>{p.name}</span>
+              <ProgressBar value={p.score} color={pColor} height={8} />
               <DN navigateTo={pillarNav(p.name)}>
-                <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: getPillarColor(p.score), textAlign: 'center' as const }}>{p.score}</span>
+                <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: pColor, textAlign: 'center' as const }}>{pZero ? '—' : p.score}</span>
               </DN>
               <span style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.mono, textAlign: 'right' as const }}>
                 <DN navigateTo={pillarNav(p.name)}>{p.identityCount}</DN> contributing
@@ -2097,14 +2105,16 @@ function IdentityRiskTab({ d }: { d: TenantData }) {
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </CISOCard>
 
       {/* KPI Cards — 5 columns per v3.0.1 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 14 }}>
         {Object.entries(d.kpis).map(([key, kpi]) => {
           const isGhost = key === 'ghostAccounts';
-          const valueColor = isGhost && kpi.value > 0 ? COLORS.danger : COLORS.text;
+          const isZeroValue = kpi.value === 0;
+          const valueColor = isZeroValue ? COLORS.textMuted : (isGhost && kpi.value > 0 ? COLORS.danger : COLORS.text);
           const navTo = key === 'privilegedRoles' ? '/identities?pillar=effective-privilege' :
             key === 'dormantPrivileged' ? '/identities?activity_status=dormant_strict&privileged=true' :
             key === 'ghostAccounts' ? '/identities?status=disabled&hasRoles=true' :
@@ -2195,7 +2205,7 @@ function ActionPlanTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: (
           background: COLORS.accent, color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
         }}>Run Discovery Scan</button>
         <span style={{ fontSize: 10, color: COLORS.textSecondary, marginLeft: 'auto', fontFamily: FONT.ui }}>
-          Last scan: {new Date(d.tenant.lastScan).toLocaleString()}
+          Last scan: {formatDate(d.tenant.lastScan, 'No scan data')}
         </span>
       </div>
 
@@ -2647,7 +2657,7 @@ function RiskMovementTab({ d }: { d: TenantData }) {
             <div key={key} style={{ textAlign: 'center' as const }}>
               <div style={{ fontSize: 9, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>{key}</div>
               <div style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.text, marginTop: 2 }}>
-                {key === 'lastRun' ? new Date(val).toLocaleString() : isNum && metaNav ? (
+                {key === 'lastRun' ? formatDate(String(val), 'No data') : isNum && metaNav ? (
                   <DN navigateTo={metaNav}>{val}</DN>
                 ) : val}
               </div>
@@ -2741,7 +2751,7 @@ export default function CISODashboard() {
           marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
           fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui,
         }}>
-          <span>Updated {new Date(data.tenant.lastScan).toLocaleTimeString()}</span>
+          <span>Updated {formatDate(data.tenant.lastScan, 'No scan data')}</span>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success, animation: 'pulse 2s infinite' }} />
         </div>
       </div>

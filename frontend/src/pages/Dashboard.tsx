@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { CATEGORY_DISPLAY_ORDER, EXPOSURE_LEVEL_CONFIG } from '../constants/metrics';
 import { DASHBOARD_TABS, type DashboardTab, COLORS } from '../constants/design';
 import { useConnection } from '../contexts/ConnectionContext';
+import { formatDate } from '../utils/displayHelpers';
 
 import StatsCard from '../components/StatsCard';
 import ViewAllButton from '../components/ViewAllButton';
@@ -315,7 +316,7 @@ export default function Dashboard() {
           </p>
           {latest?.completed_at && (
             <p className="text-xs mt-0.5" style={{ color: COLORS.textMuted }}>
-              Data as of {new Date(latest.completed_at).toLocaleString()} · Run #{stats?.latest_run?.id}
+              Data as of {formatDate(latest.completed_at, 'No data')} · Run #{stats?.latest_run?.id}
             </p>
           )}
         </div>
@@ -359,7 +360,7 @@ export default function Dashboard() {
           </button>
           {schedulerInfo && (
             <span className="text-xs" style={{ color: COLORS.textMuted }} title={`Interval: every ${schedulerInfo.interval_hours}h`}>
-              Next: {schedulerInfo.next_run ? new Date(schedulerInfo.next_run).toLocaleString() : 'N/A'}
+              Next: {formatDate(schedulerInfo.next_run, 'N/A')}
             </span>
           )}
           <ViewAllButton />
@@ -631,7 +632,7 @@ export default function Dashboard() {
                         <span className={`w-2 h-2 rounded-full ${run.status === 'completed' ? 'bg-green-500' : run.status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
                         <span className="font-medium" style={{ color: COLORS.textPrimary }}>Run #{run.id}</span>
                         <span className="text-xs" style={{ color: COLORS.textSecondary }}>
-                          {run.completed_at ? new Date(run.completed_at).toLocaleString() : run.started_at ? new Date(run.started_at).toLocaleString() : '—'}
+                          {formatDate(run.completed_at, '') || formatDate(run.started_at, '') || '—'}
                         </span>
                       </div>
                       <div className="flex items-center gap-4 text-xs">

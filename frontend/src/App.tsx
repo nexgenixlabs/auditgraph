@@ -230,7 +230,7 @@ function AppContent() {
         {/* All other routes - with sidebar + topbar, protected */}
         <Route path="/*" element={
           <ProtectedRoute>
-            <div className="min-h-screen bg-gray-50 dark:bg-slate-950">
+            <div className="min-h-screen" style={{ backgroundColor: 'var(--bg-surface)' }}>
               {/* Top Bar */}
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
@@ -244,7 +244,7 @@ function AppContent() {
               <CopilotPanel open={copilotOpen} onClose={() => setCopilotOpen(false)} />
 
               {/* Page Content */}
-              <main className="pl-60 pt-14 min-h-screen w-full overflow-x-hidden">
+              <main className="min-h-screen w-full overflow-x-hidden" style={{ paddingLeft: 'var(--sidebar-width, 220px)', paddingTop: 'var(--header-height, 56px)' }}>
                 <Routes>
                   <Route path="/" element={
                     tenantStage !== 'active'

@@ -129,8 +129,8 @@ export default function OnboardingWizard() {
     const doneCount = checklist.filter(c => c.done).length;
     const pct = Math.round((doneCount / checklist.length) * 100);
     return (
-      <div className="min-h-screen bg-[#0B1220] flex flex-col items-center justify-center px-4 py-12">
-        <div className="w-full max-w-lg bg-[#111827] border border-gray-700 rounded-2xl p-8">
+      <div className="min-h-screen bg-ob-surface flex flex-col items-center justify-center px-4 py-12">
+        <div className="w-full max-w-lg bg-ob-raised border border-gray-700 rounded-2xl p-8">
           <h2 className="text-xl font-bold text-white mb-1">Setup Progress</h2>
           <p className="text-sm text-gray-400 mb-6">{doneCount} of {checklist.length} steps completed</p>
 
@@ -174,7 +174,7 @@ export default function OnboardingWizard() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0B1220] flex flex-col items-center justify-center px-4 py-12">
+    <div className="min-h-screen bg-ob-surface flex flex-col items-center justify-center px-4 py-12">
       {/* Logo + Title */}
       <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-white">AuditGraph Setup</h1>
@@ -203,7 +203,7 @@ export default function OnboardingWizard() {
       </div>
 
       {/* Card */}
-      <div className="w-full max-w-xl bg-[#111827] border border-gray-700 rounded-2xl shadow-lg p-8">
+      <div className="w-full max-w-xl bg-ob-raised border border-gray-700 rounded-2xl shadow-lg p-8">
         {error && (
           <div className="mb-4 p-3 rounded-lg bg-red-900/30 border border-red-700 text-red-300 text-sm">
             {error}

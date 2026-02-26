@@ -16,25 +16,25 @@
 // ─── Color Tokens ────────────────────────────────────────────────
 
 export const COLORS = {
-  // Backgrounds — MUST have visible separation between layers
-  bg:           "#060a12",     // Page background — darkest layer
-  surface:      "#0d1321",     // Card background — visibly lighter than bg
-  surfaceAlt:   "#131b2e",     // Nested card / expandable row
-  surfaceHover: "#1a2540",     // Hover state on interactive cards
-  border:       "#1e2d4a",     // Default border — visible against surface
-  borderAccent: "#2e4470",     // Hover/active border — clearly visible
+  // Backgrounds — Obsidian Command aligned
+  bg:           "#06090f",     // Page background — deepest layer
+  surface:      "#0c1220",     // Card background — surface
+  surfaceAlt:   "#111a2e",     // Nested card / expandable row — raised
+  surfaceHover: "#162038",     // Hover state on interactive cards — elevated
+  border:       "#1e2d4a",     // Default border
+  borderAccent: "#2a3f66",     // Hover/active border — strong
 
-  // Text — WCAG AA MINIMUM ENFORCED
-  text:         "#e8ecf4",     // Primary text — ALL body text, titles, values
-  textSecondary:"#94a3b8",     // Labels, descriptions, secondary info
-  textMuted:    "#64748b",     // ONLY for decorative elements, dividers
-  textDim:      "#475569",     // ONLY for disabled/inactive states
+  // Text — WCAG AA on #0c1220
+  text:         "#e8ecf4",     // Primary text — headings, values
+  textSecondary:"#8b9dc3",     // Labels, descriptions — secondary
+  textMuted:    "#5a6f96",     // Decorative, timestamps — tertiary
+  textDim:      "#3d5078",     // Disabled/inactive — muted
 
   // Semantic
-  accent:       "#3b82f6",
-  accentSoft:   "rgba(59,130,246,0.15)",
-  danger:       "#ef4444",
-  dangerSoft:   "rgba(239,68,68,0.12)",
+  accent:       "#2563eb",
+  accentSoft:   "rgba(37,99,235,0.12)",
+  danger:       "#dc2626",
+  dangerSoft:   "rgba(220,38,38,0.12)",
   warning:      "#f59e0b",
   warningSoft:  "rgba(245,158,11,0.10)",
   success:      "#10b981",
@@ -45,7 +45,7 @@ export const COLORS = {
   // Score Triad (v4.0)
   hiri:         "#f97316",     // HIRI — orange
   nhiri:        "#8b5cf6",     // NHIRI (Phantom) — purple
-  gei:          "#3b82f6",     // GEI — blue
+  gei:          "#2563eb",     // GEI — blue (matches accent)
 };
 
 // ─── Scoring Helpers ─────────────────────────────────────────────

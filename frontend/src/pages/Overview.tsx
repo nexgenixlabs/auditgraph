@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useConnection } from '../contexts/ConnectionContext';
+import { formatDate, formatRelativeTime, formatCompleteness, formatFrequency } from '../utils/displayHelpers';
 
 // ═══════════════════════════════════════════════════════════════════════
 // TYPES
@@ -194,12 +195,14 @@ interface TenantData {
 // ═══════════════════════════════════════════════════════════════════════
 
 function getTier(score: number): string {
+  if (score === 0) return 'No Data';
   if (score <= 40) return 'Critical';
   if (score <= 60) return 'Elevated';
   if (score <= 80) return 'Controlled';
   return 'Resilient';
 }
 function getGrade(score: number): string {
+  if (score === 0) return '—';
   if (score <= 20) return 'F';
   if (score <= 40) return 'D';
   if (score <= 60) return 'C';
@@ -207,11 +210,11 @@ function getGrade(score: number): string {
   return 'A';
 }
 function getTierColor(tier: string): string {
-  const m: Record<string, string> = { Critical: '#ff4444', Elevated: '#ff8c00', Controlled: '#eab308', Resilient: '#22c55e' };
+  const m: Record<string, string> = { 'No Data': '#5a6f96', Critical: '#ff4444', Elevated: '#ff8c00', Controlled: '#eab308', Resilient: '#22c55e' };
   return m[tier] || '#64748b';
 }
 function getTierBg(tier: string): string {
-  const m: Record<string, string> = { Critical: 'rgba(255,68,68,0.15)', Elevated: 'rgba(255,140,0,0.15)', Controlled: 'rgba(234,179,8,0.15)', Resilient: 'rgba(34,197,94,0.15)' };
+  const m: Record<string, string> = { 'No Data': 'rgba(90,111,150,0.12)', Critical: 'rgba(255,68,68,0.15)', Elevated: 'rgba(255,140,0,0.15)', Controlled: 'rgba(234,179,8,0.15)', Resilient: 'rgba(34,197,94,0.15)' };
   return m[tier] || 'rgba(255,255,255,0.05)';
 }
 function getPillarColor(score: number): string {
@@ -271,6 +274,7 @@ function getProductionExposurePct(affected: number, total: number): number {
   return Math.round((affected / total) * 100);
 }
 function getCompletenessColor(pct: number): string {
+  if (pct === 0) return '#5a6f96';
   if (pct >= 95) return '#22c55e';
   if (pct >= 80) return '#eab308';
   return '#ff4444';
@@ -791,11 +795,12 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
 // ═══════════════════════════════════════════════════════════════════════
 
 function ScoreRing({ score, grade, size = 110 }: { score: number; grade: string; size?: number }) {
+  const isNoData = score === 0;
   const strokeWidth = Math.max(4, Math.round(size * 0.07));
   const padding = Math.round(size * 0.05);
   const r = (size / 2) - strokeWidth - padding;
   const circ = 2 * Math.PI * r;
-  const offset = circ * (1 - score / 100);
+  const offset = isNoData ? circ : circ * (1 - score / 100);
   const tier = getTier(score);
   const color = getTierColor(tier);
   const scoreFontSize = Math.min(32, Math.round(size * 0.24));
@@ -807,7 +812,7 @@ function ScoreRing({ score, grade, size = 110 }: { score: number; grade: string;
   const gradeY = cy + Math.round(size * 0.14);
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
-      style={{ filter: `drop-shadow(0 0 8px ${color}55)` }}>
+      style={{ filter: isNoData ? undefined : `drop-shadow(0 0 8px ${color}55)` }}>
       <circle cx={cx} cy={cy} r={r} fill="none"
         stroke={P.bgActive} strokeWidth={strokeWidth} />
       <circle cx={cx} cy={cy} r={r} fill="none"
@@ -816,16 +821,18 @@ function ScoreRing({ score, grade, size = 110 }: { score: number; grade: string;
         strokeLinecap="round"
         transform={`rotate(-90 ${cx} ${cy})`}
         style={{ transition: 'stroke-dashoffset 1.5s ease' }} />
-      <text x={cx} y={scoreY}
+      <text x={cx} y={isNoData ? cy : scoreY}
         textAnchor="middle" dominantBaseline="central"
-        style={{ fontFamily: F.data, fontSize: scoreFontSize, fontWeight: 800, fill: P.textBright }}>
-        {score.toFixed(1)}
+        style={{ fontFamily: F.data, fontSize: isNoData ? gradeFontSize : scoreFontSize, fontWeight: isNoData ? 600 : 800, fill: isNoData ? P.textDim : P.textBright }}>
+        {isNoData ? 'NO DATA' : score.toFixed(1)}
       </text>
-      <text x={cx} y={gradeY}
-        textAnchor="middle" dominantBaseline="central"
-        style={{ fontFamily: F.data, fontSize: gradeFontSize, fill: P.textMuted }}>
-        {grade}
-      </text>
+      {!isNoData && (
+        <text x={cx} y={gradeY}
+          textAnchor="middle" dominantBaseline="central"
+          style={{ fontFamily: F.data, fontSize: gradeFontSize, fill: P.textMuted }}>
+          {grade}
+        </text>
+      )}
     </svg>
   );
 }
@@ -2189,11 +2196,11 @@ function RiskMovementTab({ d, nav }: { d: TenantData; nav: Nav }) {
       <Card style={{ background: P.bgCardMuted }}>
         <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
           {[
-            { l: 'Confidence', v: d.tenant.scanConfidence },
-            { l: 'Last Scan', v: new Date(d.tenant.lastScan).toLocaleString() },
-            { l: 'Sources', v: d.tenant.sources.join(', ') },
-            { l: 'Duration', v: `${d.tenant.scanDuration.toFixed(1)}s` },
-            { l: 'Completeness', v: `${d.tenant.scanCompleteness}%` },
+            { l: 'Confidence', v: d.tenant.scanConfidence || 'No data' },
+            { l: 'Last Scan', v: formatDate(d.tenant.lastScan, 'No scan data') },
+            { l: 'Sources', v: d.tenant.sources?.length ? d.tenant.sources.join(', ') : 'No data' },
+            { l: 'Duration', v: d.tenant.scanDuration ? `${d.tenant.scanDuration.toFixed(1)}s` : '—' },
+            { l: 'Completeness', v: formatCompleteness(d.tenant.scanCompleteness).text },
           ].map((f, i) => (
             <div key={i}>
               <span style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, textTransform: 'uppercase', marginRight: 6 }}>{f.l}:</span>
@@ -2350,7 +2357,7 @@ export default function Overview() {
             <span style={{ fontFamily: F.data, fontSize: 10, color: '#22c55e' }}>Potential: <DrillableNumber value={`+${d.riskScore.potentialGain}`} label="Potential gain from remediations" onClick={() => setActiveTab('action')} /></span>
           </div>
           <div style={{ marginTop: 4, fontFamily: F.data, fontSize: 10, color: P.textFaint }}>
-            {'\u2022'} {d.tenant.cloud} {'\u2022'} <DrillableNumber value={d.tenant.subscriptions} label="View subscriptions" onClick={() => navigate('/subscriptions')} /> subs {'\u2022'} {new Date(d.tenant.lastScan).toLocaleString()}
+            {'\u2022'} {d.tenant.cloud} {'\u2022'} <DrillableNumber value={d.tenant.subscriptions} label="View subscriptions" onClick={() => navigate('/subscriptions')} /> subs {'\u2022'} {formatDate(d.tenant.lastScan, 'No scan data')}
           </div>
         </div>
 

@@ -158,6 +158,7 @@ export default function AccessReviews() {
   // Campaigns
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [metrics, setMetrics] = useState<Metrics | null>(null);
 
@@ -194,6 +195,7 @@ export default function AccessReviews() {
 
   const loadCampaigns = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const url = statusFilter ? `/api/access-reviews?status=${statusFilter}` : '/api/access-reviews';
       const res = await fetch(withConnection(url));
@@ -201,11 +203,11 @@ export default function AccessReviews() {
       const data = await res.json();
       setCampaigns(data.campaigns || []);
     } catch {
-      addToast('Failed to load campaigns', 'error');
+      setLoadError('Failed to load access review campaigns. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, addToast, withConnection]);
+  }, [statusFilter, withConnection]);
 
   const loadMetrics = useCallback(async () => {
     try {
@@ -541,12 +543,25 @@ export default function AccessReviews() {
       </div>
 
       {/* Loading */}
-      {loading && campaigns.length === 0 && (
+      {loading && campaigns.length === 0 && !loadError && (
         <div style={{ textAlign: 'center', padding: 60, color: AR.textMuted }}>Loading campaigns...</div>
       )}
 
+      {/* Error State */}
+      {!loading && loadError && (
+        <div style={{ background: AR.surface, border: '1px solid rgba(220,38,38,0.3)', borderRadius: 12,
+                      padding: 60, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: '#dc2626', fontWeight: 600, marginBottom: 8 }}>Unable to load campaigns</div>
+          <div style={{ color: AR.textMuted, fontSize: 13, marginBottom: 16 }}>{loadError}</div>
+          <button onClick={loadCampaigns} style={{
+            padding: '8px 20px', borderRadius: 8, border: `1px solid ${AR.surfaceBorder}`,
+            background: AR.surface, color: AR.text, fontSize: 13, cursor: 'pointer',
+          }}>Retry</button>
+        </div>
+      )}
+
       {/* Empty State */}
-      {!loading && campaigns.length === 0 && (
+      {!loading && !loadError && campaigns.length === 0 && (
         <div style={{ background: AR.surface, border: `1px solid ${AR.surfaceBorder}`, borderRadius: 12,
                       padding: 60, textAlign: 'center' }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>&#128203;</div>

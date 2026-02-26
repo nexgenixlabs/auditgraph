@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { shouldShowRemediation } from '../utils/displayHelpers';
 
 // ─── Theme constants ───
 const R = {
@@ -125,6 +126,8 @@ export default function RemediationCenter() {
   }, [searchParams]);
 
   const filtered = actions.filter(a => {
+    // Hide items with 0% confidence AND 0 risk reduction
+    if (!shouldShowRemediation({ confidence: a.confidence, riskReduction: a.risk_reduction })) return false;
     if (statusFilter !== 'all' && a.status !== statusFilter) return false;
     if (priorityFilter !== 'all' && a.priority !== priorityFilter) return false;
     return true;
@@ -267,7 +270,7 @@ export default function RemediationCenter() {
                         <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 dark:bg-slate-700 dark:text-slate-400">Manual</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono" style={{ color: a.confidence >= 80 ? '#4ADE80' : a.confidence >= 60 ? '#FFB300' : '#FF6D00' }}>
+                    <td className="px-4 py-3 text-right font-mono" style={{ color: a.confidence === 0 ? 'var(--text-muted)' : a.confidence >= 80 ? '#4ADE80' : a.confidence >= 60 ? '#FFB300' : '#FF6D00' }}>
                       {a.confidence}%
                     </td>
                     <td className="px-4 py-3 text-center">

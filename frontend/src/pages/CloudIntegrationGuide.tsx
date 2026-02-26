@@ -147,7 +147,7 @@ export default function CloudIntegrationGuide() {
       {/* Steps */}
       <div className="space-y-4">
         {config.steps.map((step, i) => (
-          <div key={i} className="bg-[#111827] border border-gray-700 rounded-lg p-5">
+          <div key={i} className="bg-ob-raised border border-gray-700 rounded-lg p-5">
             <div className="flex items-start gap-4">
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${
                 activeCloud === 'azure' ? 'bg-blue-600' :
@@ -172,7 +172,7 @@ export default function CloudIntegrationGuide() {
 
       {/* Permissions summary */}
       {activeCloud === 'azure' && (
-        <div className="bg-[#111827] border border-gray-700 rounded-lg p-5">
+        <div className="bg-ob-raised border border-gray-700 rounded-lg p-5">
           <h3 className="text-sm font-semibold text-white mb-3">Required Permissions Summary</h3>
           <table className="w-full text-xs">
             <thead>

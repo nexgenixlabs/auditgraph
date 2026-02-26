@@ -1,21 +1,16 @@
 import { useThemeContext } from '../contexts/ThemeContext';
 
 /**
- * Thin wrapper around ThemeContext.
- * `dark` is true when theme is 'sentinel', false for 'arctic'.
- * `toggle` cycles between sentinel and arctic.
+ * Obsidian Command — dark-only theme.
+ * `dark` is always true. `toggle` is a no-op.
  */
 export function useTheme() {
   const { theme, setTheme } = useThemeContext();
 
-  const toggle = () => {
-    setTheme(theme === 'sentinel' ? 'arctic' : 'sentinel');
-  };
-
   return {
     theme,
-    dark: theme === 'sentinel',
+    dark: true,
     setTheme,
-    toggle,
+    toggle: () => {},
   };
 }

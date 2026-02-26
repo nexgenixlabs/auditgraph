@@ -1518,10 +1518,11 @@ export default function IdentitiesPage() {
 
       {/* KPI Summary Strip */}
       {!loading && identities.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 mb-3">
           {[
             { label: 'Total', value: identities.length, onClick: () => { setRiskFilter('all'); setCategoryFilter('all'); setActivityFilter('all'); setCredentialFilter('all'); setTierFilter('all'); navigate('/identities', { replace: true }); } },
             { label: 'Privileged', value: identities.filter(i => i.privileged_level === 'privileged').length, color: 'text-red-700 bg-red-50 border-red-200', onClick: () => { setTierFilter([0]); navigate('/identities?privilege_tier=0', { replace: true }); } },
+            { label: 'NHI', value: identities.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || '')).length, color: 'text-purple-700 bg-purple-50 border-purple-200', onClick: () => { setWorkloadFilter(true); navigate('/identities?workload=true', { replace: true }); } },
             { label: 'External', value: identities.filter(i => i.identity_category === 'guest').length, color: 'text-pink-700 bg-pink-50 border-pink-200', onClick: () => { setCategoryFilter('guest'); navigate('/identities?identity_category=guest', { replace: true }); } },
             { label: 'Zombie', value: identities.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'never'; }).length, color: 'text-orange-700 bg-orange-50 border-orange-200', onClick: () => { setActivityFilter('dormant'); navigate('/identities?activity_status=dormant', { replace: true }); } },
             { label: 'Cred Risk', value: identities.filter(i => i.credential_health === 'expired' || i.credential_health === 'expiring').length, color: 'text-amber-700 bg-amber-50 border-amber-200', onClick: () => { setCredentialFilter('expired'); navigate('/identities?credential_status=expired', { replace: true }); } },
