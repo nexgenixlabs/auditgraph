@@ -8,6 +8,7 @@ import {
   formatCents,
   type CloudConfig,
 } from '../../constants/pricing';
+import { api, ApiError } from '../../services/apiClient';
 
 interface Tenant {
   id: number;
@@ -134,13 +135,9 @@ export default function AdminTenants() {
   } | null>(null);
 
   const fetchTenants = useCallback(() => {
-    fetch('/api/clients')
-      .then(r => {
-        if (!r.ok) throw new Error(`Failed to load clients (${r.status})`);
-        return r.json();
-      })
+    api.get('/clients')
       .then(d => setTenants(d.tenants || []))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load clients'))
+      .catch((err: any) => setError(err instanceof ApiError ? err.message : 'Failed to load clients'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -149,13 +146,7 @@ export default function AdminTenants() {
   async function handleProvision(tenantId: number) {
     setError(null);
     try {
-      const res = await fetch(`/api/clients/${tenantId}/provision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(provisionForm),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to provision tenant');
+      const data = await api.post(`/clients/${tenantId}/provision`, provisionForm);
       setSuccess(data.message || 'Tenant provisioned successfully');
       setShowProvision(null);
       setProvisionForm({ admin_username: '', admin_display_name: '', admin_password: '' });
@@ -167,22 +158,14 @@ export default function AdminTenants() {
 
   async function toggleEnabled(t: Tenant) {
     try {
-      await fetch(`/api/clients/${t.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !t.enabled }),
-      });
+      await api.put(`/clients/${t.id}`, { enabled: !t.enabled });
       fetchTenants();
     } catch { /* ignore */ }
   }
 
   async function changePlan(t: Tenant, plan: string) {
     try {
-      await fetch(`/api/admin/clients/${t.id}/plan`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan }),
-      });
+      await api.put(`/admin/clients/${t.id}/plan`, { plan });
       fetchTenants();
     } catch { /* ignore */ }
   }
@@ -191,11 +174,7 @@ export default function AdminTenants() {
     if (!showDeleteConfirm) return;
     setError(null);
     try {
-      const res = await fetch(`/api/clients/${showDeleteConfirm.id}`, { method: 'DELETE' });
-      const text = await res.text();
-      let data: Record<string, string> = {};
-      try { data = JSON.parse(text); } catch { /* non-JSON response */ }
-      if (!res.ok) throw new Error(data.error || `Failed to delete tenant (${res.status})`);
+      await api.del(`/clients/${showDeleteConfirm.id}`);
       setSuccess(`Tenant "${showDeleteConfirm.name}" deleted successfully`);
       setShowDeleteConfirm(null);
       setDeleteConfirmName('');
@@ -209,13 +188,7 @@ export default function AdminTenants() {
     if (!showEdit) return;
     setError(null);
     try {
-      const res = await fetch(`/api/clients/${showEdit.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: editForm.name }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update tenant');
+      await api.put(`/clients/${showEdit.id}`, { name: editForm.name });
       setSuccess(`Tenant updated successfully`);
       setShowEdit(null);
       fetchTenants();
@@ -250,15 +223,7 @@ export default function AdminTenants() {
         reader.onload = () => resolve(reader.result as string);
         reader.readAsDataURL(logoFile);
       });
-      const res = await fetch(`/api/clients/${tenantId}/logo`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ logo: dataUrl }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to upload logo');
-      }
+      await api.post(`/clients/${tenantId}/logo`, { logo: dataUrl });
       setSuccess('Logo uploaded');
       setLogoFile(null);
       setLogoPreview(null);
@@ -272,11 +237,7 @@ export default function AdminTenants() {
 
   async function handleLogoDelete(tenantId: number) {
     try {
-      const res = await fetch(`/api/clients/${tenantId}/logo`, { method: 'DELETE' });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to delete logo');
-      }
+      await api.del(`/clients/${tenantId}/logo`);
       setSuccess('Logo removed');
       fetchTenants();
     } catch (err: unknown) {
@@ -309,8 +270,7 @@ export default function AdminTenants() {
     setShowConfigure(t);
     setTenantBilling(null);
     // Fetch billing data for this tenant
-    fetch(`/api/admin/clients/${t.id}/billing`)
-      .then(r => r.ok ? r.json() : null)
+    api.get(`/admin/clients/${t.id}/billing`)
       .then(data => { if (data) setTenantBilling(data); })
       .catch(() => {});
   }
@@ -334,13 +294,7 @@ export default function AdminTenants() {
       if (configTerm > 0 && !showConfigure.license_activated_at) {
         payload.license_activated_at = new Date().toISOString();
       }
-      const res = await fetch(`/api/clients/${showConfigure.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
+      await api.put(`/clients/${showConfigure.id}`, payload);
       setSuccess(`Cloud configuration saved for "${showConfigure.name}"`);
       setShowConfigure(null);
       fetchTenants();

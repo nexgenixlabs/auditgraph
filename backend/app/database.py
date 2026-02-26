@@ -8816,6 +8816,106 @@ class Database:
         return updated
 
     # ================================================================
+    # Phase 6: Scan Schedules
+    # ================================================================
+
+    def _ensure_scan_schedules(self):
+        _ensure_scan_schedules_table(self.conn)
+
+    def get_scan_schedules(self, tenant_id):
+        """Get all scan schedules for a tenant."""
+        self._ensure_scan_schedules()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT s.*, c.label as connection_label, c.cloud
+            FROM scan_schedules s
+            LEFT JOIN cloud_connections c ON c.id = s.connection_id
+            WHERE s.tenant_id = %s
+            ORDER BY s.created_at DESC
+        """, (tenant_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def create_scan_schedule(self, tenant_id, connection_id, label, frequency,
+                             cron_expression, next_run_at, created_by):
+        """Create a new scan schedule."""
+        self._ensure_scan_schedules()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO scan_schedules
+            (tenant_id, connection_id, label, frequency, cron_expression,
+             next_run_at, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (tenant_id, connection_id, label, frequency, cron_expression,
+              next_run_at, created_by))
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def update_scan_schedule(self, schedule_id, tenant_id, **kwargs):
+        """Update a scan schedule."""
+        self._ensure_scan_schedules()
+        allowed = {'label', 'frequency', 'cron_expression', 'next_run_at', 'enabled', 'connection_id'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+        if not updates:
+            return None
+        set_clause = ', '.join(f'{k} = %s' for k in updates)
+        values = list(updates.values()) + [schedule_id, tenant_id]
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            UPDATE scan_schedules SET {set_clause}, updated_at = NOW()
+            WHERE id = %s AND tenant_id = %s
+            RETURNING *
+        """, values)
+        row = cursor.fetchone()
+        self.conn.commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def delete_scan_schedule(self, schedule_id, tenant_id):
+        """Delete a scan schedule."""
+        self._ensure_scan_schedules()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM scan_schedules WHERE id = %s AND tenant_id = %s",
+            (schedule_id, tenant_id))
+        deleted = cursor.rowcount
+        self.conn.commit()
+        cursor.close()
+        return deleted > 0
+
+    def get_due_scan_schedules(self):
+        """Get all enabled schedules that are due (admin connection, no RLS)."""
+        self._ensure_scan_schedules()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT s.*, t.name as tenant_name
+            FROM scan_schedules s
+            JOIN tenants t ON t.id = s.tenant_id
+            WHERE s.enabled = true AND s.next_run_at <= NOW()
+            ORDER BY s.next_run_at ASC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def mark_scan_schedule_run(self, schedule_id, status, next_run_at):
+        """Update schedule after a run completes."""
+        self._ensure_scan_schedules()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE scan_schedules
+            SET last_run_at = NOW(), last_run_status = %s,
+                next_run_at = %s, updated_at = NOW()
+            WHERE id = %s
+        """, (status, next_run_at, schedule_id))
+        self.conn.commit()
+        cursor.close()
+
+    # ================================================================
     # Platform Settings (seller info for invoices)
     # ================================================================
 
@@ -10534,3 +10634,83 @@ def _ensure_orphaned_findings_table(conn):
     finally:
         cursor.close()
     _orphaned_findings_ensured = True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 6: Scan Schedules
+# ──────────────────────────────────────────────────────────────────────────────
+
+_scan_schedules_ensured = False
+
+
+def _ensure_scan_schedules_table(conn):
+    """Create scan_schedules table for scheduled discovery scans."""
+    global _scan_schedules_ensured
+    if _scan_schedules_ensured:
+        return
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scan_schedules (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                connection_id INTEGER,
+                label VARCHAR(100),
+                frequency VARCHAR(20) NOT NULL DEFAULT 'daily',
+                cron_expression VARCHAR(100) DEFAULT '0 2 * * *',
+                next_run_at TIMESTAMPTZ,
+                last_run_at TIMESTAMPTZ,
+                last_run_status VARCHAR(20),
+                enabled BOOLEAN DEFAULT true,
+                created_by INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scan_schedules_tenant ON scan_schedules(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scan_schedules_next ON scan_schedules(next_run_at) WHERE enabled = true")
+        cursor.execute("ALTER TABLE scan_schedules ENABLE ROW LEVEL SECURITY")
+        # RLS policy
+        cursor.execute("""
+            DO $$ BEGIN
+                CREATE POLICY tenant_strict_scan_schedules ON scan_schedules
+                    USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)
+                    WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer);
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  ⚠️ scan_schedules table creation error: {e}")
+    finally:
+        cursor.close()
+    _scan_schedules_ensured = True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 6: Stripe Integration Support
+# ──────────────────────────────────────────────────────────────────────────────
+
+_stripe_columns_ensured = False
+
+
+def _ensure_stripe_columns(conn):
+    """Add Stripe-related columns to tenants and cloud_subscriptions."""
+    global _stripe_columns_ensured
+    if _stripe_columns_ensured:
+        return
+    cursor = conn.cursor()
+    try:
+        # Stripe customer ID on tenants
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(100)")
+        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(100)")
+        # Stripe price item ID on cloud_subscriptions
+        cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_item_id VARCHAR(100)")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  ⚠️ stripe columns migration error: {e}")
+    finally:
+        cursor.close()
+    _stripe_columns_ensured = True

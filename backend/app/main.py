@@ -278,6 +278,16 @@ from app.api.handlers import (
     get_blast_radius_summary,
     # Phase 5: Launch Readiness
     validate_launch_readiness,
+    # Phase 6: Scan Schedules, Stripe, Pilot, Password Policy
+    get_scan_schedules_list,
+    create_scan_schedule_handler,
+    update_scan_schedule_handler,
+    delete_scan_schedule_handler,
+    get_stripe_status,
+    stripe_webhook_handler,
+    create_stripe_customer_handler,
+    create_pilot_tenant,
+    get_password_policy,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -321,6 +331,29 @@ def create_app():
         # ICE tables (human_identities, identity_links, orphaned_privileged_findings)
         from app.database import _ensure_orphaned_findings_table
         _ensure_orphaned_findings_table(_db_init.conn)
+        # Phase 6: Scan schedules + Stripe columns
+        from app.database import _ensure_scan_schedules_table, _ensure_stripe_columns
+        _ensure_scan_schedules_table(_db_init.conn)
+        _ensure_stripe_columns(_db_init.conn)
+        # Phase 6: Performance indexes for scale (500+ identities)
+        _perf_cursor = _db_init.conn.cursor()
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_identities_tenant_run ON identities(tenant_id, discovery_run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_identities_tenant_risk ON identities(tenant_id, risk_level)",
+            "CREATE INDEX IF NOT EXISTS idx_identities_tenant_cat ON identities(tenant_id, identity_category)",
+            "CREATE INDEX IF NOT EXISTS idx_identities_tenant_status ON identities(tenant_id, activity_status)",
+            "CREATE INDEX IF NOT EXISTS idx_role_assignments_tenant ON role_assignments(tenant_id, identity_db_id)",
+            "CREATE INDEX IF NOT EXISTS idx_drift_tenant_created ON drift_reports(tenant_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_sa_tenant_run ON azure_storage_accounts(tenant_id, discovery_run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_kv_tenant_run ON azure_key_vaults(tenant_id, discovery_run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_tenant_created ON activity_log(tenant_id, created_at DESC)",
+        ]:
+            try:
+                _perf_cursor.execute(idx_sql)
+            except Exception:
+                _db_init.conn.rollback()
+        _db_init.conn.commit()
+        _perf_cursor.close()
         _db_init.close()
     except Exception as e:
         print(f"  ⚠️ Could not ensure tables/backfill: {e}")
@@ -1738,6 +1771,61 @@ def create_app():
     @app.get("/api/identities/<path:identity_id>/subscriptions")
     def identity_subscriptions(identity_id):
         return get_identity_subscriptions(identity_id)
+
+    # -----------------------
+    # Phase 6: Scan Schedules
+    # -----------------------
+    @app.get("/api/scan-schedules")
+    @require_role('admin', 'security_admin')
+    def scan_schedules_list():
+        return get_scan_schedules_list()
+
+    @app.post("/api/scan-schedules")
+    @require_role('admin')
+    def scan_schedule_create():
+        return create_scan_schedule_handler()
+
+    @app.put("/api/scan-schedules/<int:schedule_id>")
+    @require_role('admin')
+    def scan_schedule_update(schedule_id):
+        return update_scan_schedule_handler(schedule_id)
+
+    @app.delete("/api/scan-schedules/<int:schedule_id>")
+    @require_role('admin')
+    def scan_schedule_delete(schedule_id):
+        return delete_scan_schedule_handler(schedule_id)
+
+    # -----------------------
+    # Phase 6: Stripe Billing
+    # -----------------------
+    @app.get("/api/billing/stripe-status")
+    @require_role('admin')
+    def billing_stripe_status():
+        return get_stripe_status()
+
+    @app.post("/api/billing/stripe-webhook")
+    def billing_stripe_webhook():
+        return stripe_webhook_handler()
+
+    @app.post("/api/admin/tenants/<int:tenant_id>/stripe-customer")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_create_stripe_customer(tenant_id):
+        return create_stripe_customer_handler(tenant_id)
+
+    # -----------------------
+    # Phase 6: Pilot Setup
+    # -----------------------
+    @app.post("/api/admin/pilot-setup")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_pilot_setup():
+        return create_pilot_tenant()
+
+    # -----------------------
+    # Phase 6: Password Policy
+    # -----------------------
+    @app.get("/api/auth/password-policy")
+    def auth_password_policy():
+        return get_password_policy()
 
     # -----------------------
     # ICE: Identity Correlation Engine

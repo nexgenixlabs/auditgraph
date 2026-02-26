@@ -7,6 +7,7 @@ import {
   formatCentsExact,
 } from '../../constants/pricing';
 import { generateInvoicePdf, type Invoice } from '../../utils/invoicePdfGenerator';
+import { api } from '../../services/apiClient';
 
 interface BillingSummary {
   total_mrr_cents: number;
@@ -133,24 +134,23 @@ export default function AdminBilling() {
   function fetchInvoices() {
     const params = new URLSearchParams();
     if (invoiceFilter) params.set('status', invoiceFilter);
-    fetch(`/api/admin/invoices?${params}`).then(r => r.ok ? r.json() : { invoices: [] })
-      .then(d => setInvoices(d.invoices || []))
+    api.get(`/admin/invoices?${params}`).then(d => setInvoices(d.invoices || []))
       .catch(() => {});
   }
 
   function fetchPlatformSettings() {
-    fetch('/api/admin/platform-settings').then(r => r.ok ? r.json() : null)
+    api.get('/admin/platform-settings')
       .then(d => { if (d) { setPlatformSettings(d); setSettingsForm(prev => ({ ...prev, ...d })); } })
       .catch(() => {});
   }
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/admin/billing/summary').then(r => r.ok ? r.json() : null),
-      fetch('/api/clients').then(r => r.ok ? r.json() : { tenants: [] }),
-      fetch('/api/admin/billing/events?limit=20').then(r => r.ok ? r.json() : { events: [] }),
+      api.get('/admin/billing/summary').catch(() => null),
+      api.get('/clients').catch(() => ({ tenants: [] })),
+      api.get('/admin/billing/events?limit=20').catch(() => ({ events: [] })),
     ])
-      .then(([summaryData, tenantsData, eventsData]) => {
+      .then(([summaryData, tenantsData, eventsData]: any[]) => {
         if (summaryData) setSummary(summaryData);
         setTenants(tenantsData.tenants || []);
         setEvents(eventsData.events || []);
@@ -168,12 +168,7 @@ export default function AdminBilling() {
     if (!genTenantId || !genPeriodStart || !genPeriodEnd) return;
     setGenerating(true);
     try {
-      const res = await fetch(`/api/admin/tenants/${genTenantId}/invoices`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ period_start: genPeriodStart, period_end: genPeriodEnd, notes: genNotes }),
-      });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
+      await api.post(`/admin/tenants/${genTenantId}/invoices`, { period_start: genPeriodStart, period_end: genPeriodEnd, notes: genNotes });
       setShowGenerate(false);
       setGenTenantId(''); setGenPeriodStart(''); setGenPeriodEnd(''); setGenNotes('');
       fetchInvoices();
@@ -191,32 +186,21 @@ export default function AdminBilling() {
       return;
     }
     if (action === 'send') {
-      await fetch(`/api/admin/invoices/${invoiceId}/send`, { method: 'POST' });
+      await api.post(`/admin/invoices/${invoiceId}/send`);
       fetchInvoices();
       return;
     }
     // status change (paid, void)
-    await fetch(`/api/admin/invoices/${invoiceId}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: action }),
-    });
+    await api.patch(`/admin/invoices/${invoiceId}/status`, { status: action });
     fetchInvoices();
   }
 
   async function handleSavePlatformSettings() {
     setSavingSettings(true);
     try {
-      const res = await fetch('/api/admin/platform-settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settingsForm),
-      });
-      if (res.ok) {
-        const d = await res.json();
-        setPlatformSettings(d);
-        setEditingSettings(false);
-      }
+      const d = await api.post('/admin/platform-settings', settingsForm);
+      setPlatformSettings(d);
+      setEditingSettings(false);
     } catch {
       // error silently handled
     } finally {

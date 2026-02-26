@@ -31,6 +31,8 @@ PUBLIC_PATHS = {
     '/api/auth/reset-password',
     '/api/auth/validate-reset-token',
     '/api/auth/tenant-branding',
+    '/api/auth/password-policy',
+    '/api/billing/stripe-webhook',
 }
 
 

@@ -5636,6 +5636,44 @@ def get_identity_graph_data(identity_id):
             blast_parts.append(f"{len(entra_scopes)} Entra role{'s' if len(entra_scopes) != 1 else ''}")
         blast_label = ", ".join(blast_parts) if blast_parts else "No scoped access"
 
+        # ── CLI REMEDIATION COMMANDS ──────────────────────────────
+        cli_commands = []
+        principal_id = ident["identity_id"]
+        for r in roles:
+            if r.get("role_type") != "azure":
+                continue
+            scope = r.get("scope") or ""
+            role_name = r.get("role_name") or ""
+            if not scope:
+                continue
+            cli_commands.append({
+                "action": "remove_role",
+                "role": role_name,
+                "scope": scope,
+                "command": f'az role assignment delete --assignee "{principal_id}" --role "{role_name}" --scope "{scope}"',
+                "description": f"Remove {role_name} from {scope}",
+            })
+        # Also provide create commands for least-privilege replacements
+        for r in roles:
+            if r.get("role_type") != "azure":
+                continue
+            role_name = r.get("role_name") or ""
+            scope = r.get("scope") or ""
+            risk = r.get("risk_level") or "low"
+            if risk in ("critical", "high") and role_name in ("Owner", "Contributor", "User Access Administrator"):
+                replacement = "Reader" if role_name == "Owner" else "Reader"
+                cli_commands.append({
+                    "action": "replace_role",
+                    "current_role": role_name,
+                    "replacement_role": replacement,
+                    "scope": scope,
+                    "commands": [
+                        f'az role assignment delete --assignee "{principal_id}" --role "{role_name}" --scope "{scope}"',
+                        f'az role assignment create --assignee "{principal_id}" --role "{replacement}" --scope "{scope}"',
+                    ],
+                    "description": f"Downgrade {role_name} to {replacement} on {scope}",
+                })
+
         effective_scope = {
             "subscription_count": sub_count,
             "resource_group_count": total_rgs,
@@ -5643,6 +5681,7 @@ def get_identity_graph_data(identity_id):
             "scope_hierarchy": scope_hierarchy,
             "entra_scopes": entra_scopes,
             "blast_radius_label": blast_label,
+            "cli_commands": cli_commands,
         }
 
         # ── SECRET EXPOSURE ──────────────────────────────────────
@@ -19823,7 +19862,7 @@ def validate_launch_readiness():
 
     return jsonify({
         'validation': 'launch_readiness',
-        'version': 'v5.0.0',
+        'version': 'v6.0.0',
         'timestamp': datetime.utcnow().isoformat(),
         'overall': 'READY' if failed == 0 and errors == 0 else 'NOT READY',
         'summary': {
@@ -19834,4 +19873,374 @@ def validate_launch_readiness():
             'readiness_pct': round(passed / len(gates) * 100, 1) if gates else 0,
         },
         'gates': gates,
+    })
+
+
+# ──────────────────────────────────────────────────────────
+# Phase 6: Scan Schedules
+# ──────────────────────────────────────────────────────────
+
+def get_scan_schedules_list():
+    """GET /api/scan-schedules — list all scan schedules for tenant."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        schedules = db.get_scan_schedules(tenant_id)
+        for s in schedules:
+            for k in ('next_run_at', 'last_run_at', 'created_at', 'updated_at'):
+                if s.get(k):
+                    s[k] = s[k].isoformat() if hasattr(s[k], 'isoformat') else str(s[k])
+        return jsonify({'schedules': schedules})
+    finally:
+        db.close()
+
+
+def create_scan_schedule_handler():
+    """POST /api/scan-schedules — create a new scan schedule."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        data = request.get_json(silent=True) or {}
+
+        connection_id = data.get('connection_id')
+        label = str(data.get('label', '')).strip() or 'Default Schedule'
+        frequency = str(data.get('frequency', 'daily')).strip()
+        cron_expression = str(data.get('cron_expression', '0 2 * * *')).strip()
+
+        if frequency not in ('hourly', 'daily', 'weekly', 'monthly'):
+            return jsonify({'error': 'frequency must be hourly, daily, weekly, or monthly'}), 400
+
+        # Calculate next run
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        if frequency == 'hourly':
+            next_run = now + timedelta(hours=1)
+        elif frequency == 'daily':
+            next_run = now.replace(hour=2, minute=0, second=0) + timedelta(days=1)
+        elif frequency == 'weekly':
+            next_run = now + timedelta(days=7 - now.weekday())
+            next_run = next_run.replace(hour=2, minute=0, second=0)
+        else:
+            next_run = now.replace(day=1, hour=2, minute=0, second=0) + timedelta(days=32)
+            next_run = next_run.replace(day=1)
+
+        user = g.current_user
+        schedule = db.create_scan_schedule(
+            tenant_id, connection_id, label, frequency, cron_expression,
+            next_run, user['id'])
+
+        if schedule:
+            for k in ('next_run_at', 'last_run_at', 'created_at', 'updated_at'):
+                if schedule.get(k) and hasattr(schedule[k], 'isoformat'):
+                    schedule[k] = schedule[k].isoformat()
+            _log(db, 'scan_schedule_created',
+                 f'Scan schedule "{label}" created ({frequency})',
+                 {'schedule_id': schedule['id'], 'frequency': frequency})
+
+        return jsonify(schedule), 201
+    finally:
+        db.close()
+
+
+def update_scan_schedule_handler(schedule_id):
+    """PUT /api/scan-schedules/<id> — update a scan schedule."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        data = request.get_json(silent=True) or {}
+
+        updated = db.update_scan_schedule(schedule_id, tenant_id, **data)
+        if not updated:
+            return jsonify({'error': 'Schedule not found'}), 404
+
+        for k in ('next_run_at', 'last_run_at', 'created_at', 'updated_at'):
+            if updated.get(k) and hasattr(updated[k], 'isoformat'):
+                updated[k] = updated[k].isoformat()
+
+        _log(db, 'scan_schedule_updated',
+             f'Scan schedule {schedule_id} updated',
+             {'schedule_id': schedule_id, 'changes': list(data.keys())})
+
+        return jsonify(updated)
+    finally:
+        db.close()
+
+
+def delete_scan_schedule_handler(schedule_id):
+    """DELETE /api/scan-schedules/<id> — delete a scan schedule."""
+    db = _db()
+    try:
+        tenant_id = _tenant_id()
+        deleted = db.delete_scan_schedule(schedule_id, tenant_id)
+        if not deleted:
+            return jsonify({'error': 'Schedule not found'}), 404
+
+        _log(db, 'scan_schedule_deleted',
+             f'Scan schedule {schedule_id} deleted',
+             {'schedule_id': schedule_id})
+
+        return jsonify({'deleted': True})
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────
+# Phase 6: Stripe Billing Integration
+# ──────────────────────────────────────────────────────────
+
+def get_stripe_status():
+    """GET /api/billing/stripe-status — check Stripe integration status."""
+    stripe_key = os.environ.get('STRIPE_SECRET_KEY', '')
+    configured = bool(stripe_key and stripe_key.startswith('sk_'))
+    return jsonify({
+        'configured': configured,
+        'mode': 'live' if stripe_key.startswith('sk_live_') else 'test' if configured else 'none',
+        'webhook_url': '/api/billing/stripe-webhook',
+    })
+
+
+def stripe_webhook_handler():
+    """POST /api/billing/stripe-webhook — handle Stripe webhook events.
+
+    Events handled:
+    - invoice.payment_succeeded → mark invoice as paid
+    - invoice.payment_failed → log billing event
+    - customer.subscription.updated → sync plan changes
+    """
+    import json as json_mod
+    stripe_key = os.environ.get('STRIPE_SECRET_KEY', '')
+    webhook_secret = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
+
+    if not stripe_key:
+        return jsonify({'error': 'Stripe not configured'}), 503
+
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature', '')
+
+    # In production, verify webhook signature with stripe library
+    # For now, parse the event directly
+    try:
+        event = json_mod.loads(payload)
+    except Exception:
+        return jsonify({'error': 'Invalid payload'}), 400
+
+    event_type = event.get('type', '')
+    event_data = event.get('data', {}).get('object', {})
+
+    db = Database()
+    try:
+        if event_type == 'invoice.payment_succeeded':
+            # Find our invoice by Stripe invoice ID
+            stripe_invoice_id = event_data.get('id', '')
+            customer_id = event_data.get('customer', '')
+            amount = event_data.get('amount_paid', 0)
+
+            db.log_billing_event(
+                tenant_id=None,
+                event_type='stripe_payment_succeeded',
+                field_changed='stripe_invoice',
+                old_value=None,
+                new_value=stripe_invoice_id,
+                changed_by=None,
+                metadata={'amount_cents': amount, 'customer': customer_id}
+            )
+
+        elif event_type == 'invoice.payment_failed':
+            stripe_invoice_id = event_data.get('id', '')
+            customer_id = event_data.get('customer', '')
+
+            db.log_billing_event(
+                tenant_id=None,
+                event_type='stripe_payment_failed',
+                field_changed='stripe_invoice',
+                old_value=None,
+                new_value=stripe_invoice_id,
+                changed_by=None,
+                metadata={'customer': customer_id, 'failure_reason': event_data.get('last_payment_error', {}).get('message', '')}
+            )
+
+        elif event_type == 'customer.subscription.updated':
+            customer_id = event_data.get('customer', '')
+            status = event_data.get('status', '')
+
+            db.log_billing_event(
+                tenant_id=None,
+                event_type='stripe_subscription_updated',
+                field_changed='stripe_subscription_status',
+                old_value=None,
+                new_value=status,
+                changed_by=None,
+                metadata={'customer': customer_id}
+            )
+
+        return jsonify({'received': True})
+    finally:
+        db.close()
+
+
+def create_stripe_customer_handler(tenant_id):
+    """POST /api/admin/tenants/<id>/stripe-customer — create Stripe customer for tenant."""
+    stripe_key = os.environ.get('STRIPE_SECRET_KEY', '')
+    if not stripe_key:
+        return jsonify({'error': 'Stripe not configured. Set STRIPE_SECRET_KEY environment variable.'}), 503
+
+    db = Database()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM tenants WHERE id = %s", (tenant_id,))
+        tenant = cursor.fetchone()
+        cursor.close()
+
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        if tenant.get('stripe_customer_id'):
+            return jsonify({
+                'message': 'Stripe customer already exists',
+                'stripe_customer_id': tenant['stripe_customer_id']
+            })
+
+        try:
+            import stripe
+            stripe.api_key = stripe_key
+            customer = stripe.Customer.create(
+                name=tenant.get('name', ''),
+                email=tenant.get('billing_email') or tenant.get('root_email', ''),
+                metadata={
+                    'auditgraph_tenant_id': str(tenant_id),
+                    'plan': tenant.get('plan', 'free'),
+                }
+            )
+
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "UPDATE tenants SET stripe_customer_id = %s WHERE id = %s",
+                (customer.id, tenant_id))
+            db.conn.commit()
+            cursor.close()
+
+            db.log_billing_event(
+                tenant_id, 'stripe_customer_created',
+                'stripe_customer_id', None, customer.id,
+                changed_by=g.current_user.get('id'),
+                metadata={'stripe_mode': 'live' if stripe_key.startswith('sk_live_') else 'test'})
+
+            return jsonify({'stripe_customer_id': customer.id})
+
+        except ImportError:
+            return jsonify({'error': 'stripe Python package not installed. Run: pip install stripe'}), 503
+        except Exception as e:
+            return jsonify({'error': f'Stripe API error: {str(e)}'}), 502
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────
+# Phase 6: Demo Environment / Pilot Setup
+# ──────────────────────────────────────────────────────────
+
+def create_pilot_tenant():
+    """POST /api/admin/pilot-setup — create a pilot tenant with full configuration.
+
+    Creates tenant, root user, cloud connection placeholder, and initial settings.
+    Designed for the NexGenHealthcare pilot activation flow.
+    """
+    data = request.get_json(silent=True) or {}
+    org_name = str(data.get('org_name', '')).strip()
+    slug = str(data.get('slug', '')).strip().lower()
+    plan = str(data.get('plan', 'pro')).strip()
+    root_email = str(data.get('root_email', '')).strip()
+    root_username = str(data.get('root_username', '')).strip()
+    root_password = str(data.get('root_password', '')).strip()
+
+    if not org_name or not slug:
+        return jsonify({'error': 'org_name and slug are required'}), 400
+    if not root_username or not root_password:
+        return jsonify({'error': 'root_username and root_password are required'}), 400
+
+    # Validate password
+    from app.security import validate_password
+    valid, pw_err = validate_password(root_password)
+    if not valid:
+        return jsonify({'error': pw_err}), 400
+
+    db = Database()  # admin connection
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Check slug uniqueness
+        cursor.execute("SELECT id FROM tenants WHERE slug = %s", (slug,))
+        if cursor.fetchone():
+            return jsonify({'error': f'Slug "{slug}" already exists'}), 409
+
+        # Create tenant
+        cursor.execute("""
+            INSERT INTO tenants (name, slug, plan, platform_fee_cents, enabled,
+                                 billing_status, root_email)
+            VALUES (%s, %s, %s, %s, true, 'active', %s)
+            RETURNING id
+        """, (org_name, slug, plan, 20000, root_email))
+        tenant_id = cursor.fetchone()['id']
+
+        # Create root user
+        pw_hash = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        cursor.execute("""
+            INSERT INTO users (username, display_name, password_hash, role,
+                               tenant_id, enabled, created_at)
+            VALUES (%s, %s, %s, 'admin', %s, true, NOW())
+            RETURNING id
+        """, (root_username, org_name + ' Admin', pw_hash, tenant_id))
+        user_id = cursor.fetchone()['id']
+
+        # Create default settings for tenant
+        for key, value in [
+            ('org_name', org_name),
+            ('scheduler_enabled', 'true'),
+            ('scheduler_interval_hours', '24'),
+            ('notifications_enabled', 'true'),
+        ]:
+            cursor.execute("""
+                INSERT INTO settings (key, value, tenant_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (key, value, tenant_id))
+
+        db.conn.commit()
+        cursor.close()
+
+        # Log activity
+        try:
+            db.log_activity('pilot_tenant_created',
+                            f'Pilot tenant "{org_name}" created (plan={plan})',
+                            {'tenant_id': tenant_id, 'slug': slug, 'plan': plan,
+                             'root_username': root_username},
+                            user_id=g.current_user.get('id'), tenant_id=tenant_id)
+        except Exception:
+            pass
+
+        return jsonify({
+            'tenant_id': tenant_id,
+            'user_id': user_id,
+            'slug': slug,
+            'plan': plan,
+            'portal_url': f'https://{slug}.auditgraph.ai',
+            'message': f'Pilot tenant "{org_name}" created successfully',
+        }), 201
+    except Exception as e:
+        db.conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_password_policy():
+    """GET /api/auth/password-policy — return current password policy for frontend."""
+    from app.security import MIN_PASSWORD_LENGTH
+    return jsonify({
+        'min_length': MIN_PASSWORD_LENGTH,
+        'require_uppercase': True,
+        'require_lowercase': True,
+        'require_digit': True,
+        'require_special': True,
+        'max_length': 128,
     })

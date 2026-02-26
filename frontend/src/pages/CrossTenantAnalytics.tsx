@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { api } from '../services/apiClient';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -96,9 +97,7 @@ export default function CrossTenantAnalytics() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch('/api/analytics/clients');
-        if (!res.ok) throw new Error(`API error: ${res.status}`);
-        const json = await res.json();
+        const json = await api.get('/analytics/clients');
         setData(json);
       } catch (e: any) {
         setError(e?.message || 'Failed to load analytics');

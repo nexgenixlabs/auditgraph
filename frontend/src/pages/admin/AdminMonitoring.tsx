@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { api } from '../../services/apiClient';
 
 interface TenantMetric {
   id: number;
@@ -64,11 +65,11 @@ export default function AdminMonitoring() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/analytics/clients').then(r => r.ok ? r.json() : { tenants: [] }),
-      fetch('/api/health').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/system/health').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/analytics/login-sessions?limit=50${portalFilter ? `&portal=${portalFilter}` : ''}`).then(r => r.ok ? r.json() : { sessions: [] }).catch(() => ({ sessions: [] })),
-    ]).then(([analytics, healthData, systemData, sessionData]) => {
+      api.get('/analytics/clients').catch(() => ({ tenants: [] })),
+      api.get('/health').catch(() => null),
+      api.get('/system/health').catch(() => null),
+      api.get(`/analytics/login-sessions?limit=50${portalFilter ? `&portal=${portalFilter}` : ''}`).catch(() => ({ sessions: [] })),
+    ]).then(([analytics, healthData, systemData, sessionData]: any[]) => {
       setMetrics(analytics.tenants || []);
       setHealth(healthData);
       if (systemData?.api) setSystem(systemData.api);

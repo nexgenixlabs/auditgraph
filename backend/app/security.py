@@ -144,19 +144,29 @@ def add_security_headers(response):
 
 # ── Password Policy ──────────────────────────────────────────────────────────
 
-MIN_PASSWORD_LENGTH = 8
+MIN_PASSWORD_LENGTH = 12   # HIPAA-compliant minimum (Phase 6 upgrade)
 MAX_PASSWORD_LENGTH = 128
+
+# Top common passwords blocklist (abbreviated — expand in production)
+BLOCKED_PASSWORDS = {
+    'password1234', 'password123!', 'changeme1234', 'welcome12345',
+    'qwerty123456', 'admin1234567', 'letmein12345', 'monkey123456',
+    'dragon123456', 'master123456', '123456789abc', 'abc123456789',
+    'iloveyou1234', 'trustno1pass', 'sunshine1234', 'princess1234',
+    'football1234', 'charlie12345', 'shadow123456', 'michael12345',
+}
 
 
 def validate_password(password: str) -> tuple[bool, str | None]:
-    """Validate password meets security policy.
+    """Validate password meets HIPAA-grade security policy.
 
     Requirements:
-    - 8-128 characters
+    - 12-128 characters (HIPAA minimum)
     - At least 1 uppercase letter
     - At least 1 lowercase letter
     - At least 1 digit
     - At least 1 special character
+    - Not in common password blocklist
 
     Returns (valid: bool, error_message: str | None)
     """
@@ -172,4 +182,6 @@ def validate_password(password: str) -> tuple[bool, str | None]:
         return False, 'Password must contain at least one digit.'
     if not any(c in '!@#$%^&*()_+-=[]{}|;:,.<>?/~`' for c in password):
         return False, 'Password must contain at least one special character.'
+    if password.lower() in BLOCKED_PASSWORDS:
+        return False, 'This password is too common. Please choose a stronger password.'
     return True, None

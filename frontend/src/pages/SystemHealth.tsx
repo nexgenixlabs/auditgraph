@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { api as apiClient } from '../services/apiClient';
 
 interface HealthResponse {
   service: string;
@@ -63,12 +64,12 @@ export default function SystemHealth() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [hRes, dRes] = await Promise.all([
-        fetch('/api/health'),
-        fetch('/api/system/health'),
+      const [h, d] = await Promise.all([
+        apiClient.get<HealthResponse>('/health').catch(() => null),
+        apiClient.get<SystemHealthResponse>('/system/health').catch(() => null),
       ]);
-      if (hRes.ok) setHealth(await hRes.json());
-      if (dRes.ok) setDetail(await dRes.json());
+      if (h) setHealth(h);
+      if (d) setDetail(d);
       setLastRefresh(new Date());
     } catch {
       // silent

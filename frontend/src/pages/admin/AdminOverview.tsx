@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { getTermLabel } from '../../constants/pricing';
+import { api } from '../../services/apiClient';
 
 interface TenantMetric {
   id: number;
@@ -56,11 +57,7 @@ export default function AdminOverview() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/analytics/clients')
-      .then(r => {
-        if (!r.ok) throw new Error('Forbidden');
-        return r.json();
-      })
+    api.get<AnalyticsData>('/analytics/clients')
       .then(setData)
       .catch(() => {})
       .finally(() => setLoading(false));

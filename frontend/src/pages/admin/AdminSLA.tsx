@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { api } from '../../services/apiClient';
 
 interface SLATarget {
   target: number;
@@ -38,8 +39,7 @@ export default function AdminSLA() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/system/sla')
-      .then(r => r.ok ? r.json() : null)
+    api.get<SLAData>('/system/sla')
       .then(setData)
       .catch(() => {})
       .finally(() => setLoading(false));

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { SUBSCRIPTION_TERMS } from '../../constants/pricing';
+import { api, ApiError } from '../../services/apiClient';
 
 const RESERVED_SLUGS = new Set([
   'admin', 'api', 'www', 'app', 'portal', 'login', 'auth', 'sso',
@@ -75,17 +76,11 @@ export default function AdminOnboarding() {
     setError(null);
     setProcessing(true);
     try {
-      const res = await fetch('/api/clients', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create client');
+      const data = await api.post('/clients', form);
       setCreatedSlug(data.tenant.slug);
       setSuccess(true);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create client');
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Failed to create client');
     } finally {
       setProcessing(false);
     }

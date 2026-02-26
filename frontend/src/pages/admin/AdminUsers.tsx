@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
+import { api, ApiError } from '../../services/apiClient';
 
 type PortalRole = 'superadmin' | 'poweradmin' | 'billing' | 'reader';
 
@@ -60,12 +61,10 @@ export default function AdminUsers() {
 
   const fetchUsers = useCallback(async () => {
     try {
-      const res = await fetch('/api/portal-users');
-      if (!res.ok) throw new Error('Failed to load portal users');
-      const data = await res.json();
+      const data = await api.get('/portal-users');
       setUsers(data.users || []);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load users');
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load users');
     } finally {
       setLoading(false);
     }
@@ -78,10 +77,7 @@ export default function AdminUsers() {
     setCreateLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await api.post('/users', {
           username: createForm.username,
           display_name: createForm.display_name,
           password: createForm.password,
@@ -90,12 +86,7 @@ export default function AdminUsers() {
           role: 'admin',
           portal_role: createForm.portal_role,
           is_superadmin: createForm.portal_role === 'superadmin',
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to create user');
-      }
+        });
       setSuccess('Portal user created successfully');
       setShowCreate(false);
       setCreateForm({ username: '', display_name: '', password: '', email: '', phone: '', portal_role: 'reader' });

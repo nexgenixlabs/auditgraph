@@ -40,6 +40,7 @@ import logging
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
 from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
@@ -1109,6 +1110,79 @@ def mark_overdue_invoices():
         db.close()
 
 
+def check_scan_schedules():
+    """Phase 6: Check for due scan schedules and trigger discovery runs."""
+    from app.database import Database
+    db = Database()  # admin connection to see all tenants
+    try:
+        due_schedules = db.get_due_scan_schedules()
+        if not due_schedules:
+            return
+
+        logger.info(f"Found {len(due_schedules)} due scan schedules")
+
+        for sched in due_schedules:
+            tenant_id = sched['tenant_id']
+            schedule_id = sched['id']
+            tenant_name = sched.get('tenant_name', f'Tenant {tenant_id}')
+
+            logger.info(f"Triggering scheduled scan for {tenant_name} (schedule {schedule_id})")
+
+            try:
+                # Trigger discovery for this tenant
+                tenant_db = Database(tenant_id=tenant_id)
+                try:
+                    # Import and run discovery (same as manual trigger)
+                    from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+                    connections = tenant_db.get_cloud_connections(tenant_id)
+
+                    ran = False
+                    for conn_row in connections:
+                        if conn_row.get('cloud') == 'azure' and conn_row.get('enabled'):
+                            try:
+                                engine = AzureDiscoveryEngine(conn_row, tenant_db)
+                                engine.discover()
+                                ran = True
+                            except Exception as de:
+                                logger.error(f"Discovery error for tenant {tenant_id}: {de}")
+                    if not ran:
+                        logger.warning(f"No enabled Azure connections for tenant {tenant_id}")
+
+                finally:
+                    tenant_db.close()
+
+                # Calculate next run
+                from datetime import datetime, timedelta, timezone
+                now = datetime.now(timezone.utc)
+                freq = sched.get('frequency', 'daily')
+                if freq == 'hourly':
+                    next_run = now + timedelta(hours=1)
+                elif freq == 'weekly':
+                    next_run = now + timedelta(days=7)
+                elif freq == 'monthly':
+                    next_run = now + timedelta(days=30)
+                else:
+                    next_run = now + timedelta(days=1)
+
+                db.mark_scan_schedule_run(schedule_id, 'completed', next_run)
+                logger.info(f"Scheduled scan completed for {tenant_name}, next: {next_run}")
+
+            except Exception as e:
+                logger.error(f"Scheduled scan failed for {tenant_name}: {e}")
+                from datetime import datetime, timedelta, timezone
+                now = datetime.now(timezone.utc)
+                next_run = now + timedelta(hours=1)  # Retry in 1 hour on failure
+                try:
+                    db.mark_scan_schedule_run(schedule_id, 'failed', next_run)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.error(f"Scan schedule checker error: {e}")
+    finally:
+        db.close()
+
+
 # Global scheduler instance
 scheduler = None
 
@@ -1194,6 +1268,17 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Phase 6: Scan schedule checker — every 60 seconds
+    scheduler.add_job(
+        func=check_scan_schedules,
+        trigger=IntervalTrigger(seconds=60),
+        id='check_scan_schedules',
+        name='Scan Schedule Checker (every 60s)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
 
@@ -1202,6 +1287,7 @@ def start_scheduler():
     logger.info(f"📊 Report: {report_name} (enabled={report_enabled})")
     logger.info("🗑️ Retention: Daily at 03:00 UTC")
     logger.info("📋 Invoice overdue: Daily at 02:00 UTC")
+    logger.info("🔄 Scan schedules: Every 60 seconds")
 
     # Get next run times
     job = scheduler.get_job('scheduled_discovery')

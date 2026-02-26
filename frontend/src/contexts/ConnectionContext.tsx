@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
+import { api } from '../services/apiClient';
 
 interface CloudConnection {
   id: number;
@@ -37,14 +38,13 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       setLoading(false);
       return;
     }
-    fetch('/api/client/connections')
-      .then(r => r.ok ? r.json() : { connections: [] })
+    api.get<{ connections: CloudConnection[] }>('/client/connections')
       .then(data => {
         setConnections(
           (data.connections || []).filter((c: CloudConnection) => c.status === 'connected')
         );
       })
-      .catch(() => {})
+      .catch(() => setConnections([]))
       .finally(() => setLoading(false));
   }, [user]);
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { DEFAULT_WIDGET_ORDER, mergePreferences } from '../components/dashboard/widgetRegistry';
 import type { WidgetPref } from '../components/dashboard/widgetRegistry';
+import { api } from '../services/apiClient';
 
 export function useDashboardPreferences() {
   const [widgets, setWidgets] = useState<WidgetPref[]>(DEFAULT_WIDGET_ORDER);
@@ -13,13 +14,10 @@ export function useDashboardPreferences() {
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch('/api/dashboard/preferences');
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled) {
-            const merged = mergePreferences(data.preferences?.widgets ?? null);
-            setWidgets(merged);
-          }
+        const data = await api.get('/dashboard/preferences');
+        if (!cancelled) {
+          const merged = mergePreferences(data.preferences?.widgets ?? null);
+          setWidgets(merged);
         }
       } catch { /* use defaults */ }
       finally { if (!cancelled) setLoading(false); }
@@ -49,16 +47,9 @@ export function useDashboardPreferences() {
   const save = useCallback(async () => {
     setSaving(true);
     try {
-      const res = await fetch('/api/dashboard/preferences', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ widgets }),
-      });
-      if (res.ok) {
-        setDirty(false);
-        return true;
-      }
-      return false;
+      await api.put('/dashboard/preferences', { widgets });
+      setDirty(false);
+      return true;
     } catch { return false; }
     finally { setSaving(false); }
   }, [widgets]);
@@ -66,7 +57,7 @@ export function useDashboardPreferences() {
   const reset = useCallback(async () => {
     setSaving(true);
     try {
-      await fetch('/api/dashboard/preferences', { method: 'DELETE' });
+      await api.del('/dashboard/preferences');
       setWidgets(DEFAULT_WIDGET_ORDER);
       setDirty(false);
     } catch { /* ignore */ }

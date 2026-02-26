@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { formatCentsExact } from '../constants/pricing';
 import { generateInvoicePdf, type Invoice } from '../utils/invoicePdfGenerator';
+import { api } from '../services/apiClient';
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '\u2014';
@@ -13,10 +14,9 @@ export default function Invoices() {
   const [expanded, setExpanded] = useState<number | null>(null);
 
   useEffect(() => {
-    fetch('/api/client/invoices')
-      .then(r => r.ok ? r.json() : { invoices: [] })
+    api.get<{ invoices: Invoice[] }>('/client/invoices')
       .then(d => setInvoices(d.invoices || []))
-      .catch(() => {})
+      .catch(() => setInvoices([]))
       .finally(() => setLoading(false));
   }, []);
 
