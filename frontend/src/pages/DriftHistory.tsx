@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
@@ -69,6 +69,14 @@ interface FullDriftReport {
       current_status: string;
       change_reason?: string;
     }>;
+    classification_changes?: Array<{
+      change_type: string;
+      resource_id: string;
+      resource_name: string;
+      resource_type: string;
+      new_classification: string | null;
+      previous_classification: string | null;
+    }>;
   };
 }
 
@@ -110,6 +118,13 @@ export default function DriftHistory() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detail, setDetail] = useState<FullDriftReport | null>(null);
 
+  // Snapshot comparison
+  const [showCompare, setShowCompare] = useState(false);
+  const [compareFrom, setCompareFrom] = useState('');
+  const [compareTo, setCompareTo] = useState('');
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareResult, setCompareResult] = useState<any>(null);
+
   // Collapsible sections in detail view
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     new_identities: true,
@@ -118,6 +133,7 @@ export default function DriftHistory() {
     permission_changes: true,
     risk_changes: true,
     credential_changes: true,
+    classification_changes: true,
   });
 
   useEffect(() => {
@@ -165,6 +181,27 @@ export default function DriftHistory() {
   function toggleSection(key: string) {
     setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
   }
+
+  const runCompare = useCallback(async () => {
+    if (!compareFrom || !compareTo) {
+      addToast('Select both dates', 'error');
+      return;
+    }
+    setCompareLoading(true);
+    setCompareResult(null);
+    try {
+      const res = await fetch(withConnection(`/api/snapshots/compare?from=${compareFrom}&to=${compareTo}`));
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || `Compare failed (${res.status})`);
+      }
+      setCompareResult(await res.json());
+    } catch (e: any) {
+      addToast(e?.message || 'Comparison failed', 'error');
+    } finally {
+      setCompareLoading(false);
+    }
+  }, [compareFrom, compareTo, withConnection, addToast]);
 
   // Summary stats
   const totalReports = reports.length;
@@ -223,12 +260,149 @@ export default function DriftHistory() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-gray-900">Drift History</h2>
-        <p className="text-sm text-gray-600 mt-1">
-          Timeline of identity changes across discovery runs
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Drift History</h2>
+          <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
+            Timeline of identity changes across discovery runs
+          </p>
+        </div>
+        <button
+          onClick={() => setShowCompare(!showCompare)}
+          className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
+            showCompare
+              ? 'bg-blue-600 text-white border-blue-600'
+              : 'text-blue-600 border-blue-300 hover:bg-blue-50'
+          }`}
+        >
+          {showCompare ? 'Hide Compare' : 'Compare Snapshots'}
+        </button>
       </div>
+
+      {/* Snapshot Comparison Panel */}
+      {showCompare && (
+        <div className="rounded-xl border p-5 space-y-4" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+          <div className="flex items-end gap-4 flex-wrap">
+            <div>
+              <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>From Date</label>
+              <input
+                type="date"
+                value={compareFrom}
+                onChange={e => setCompareFrom(e.target.value)}
+                className="px-3 py-2 rounded-lg border text-sm"
+                style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>To Date</label>
+              <input
+                type="date"
+                value={compareTo}
+                onChange={e => setCompareTo(e.target.value)}
+                className="px-3 py-2 rounded-lg border text-sm"
+                style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+              />
+            </div>
+            <button
+              onClick={runCompare}
+              disabled={compareLoading || !compareFrom || !compareTo}
+              className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              {compareLoading ? 'Comparing...' : 'Compare'}
+            </button>
+          </div>
+
+          {/* Comparison results */}
+          {compareResult && (
+            <div className="space-y-4">
+              {/* Summary cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <CompareCard label="From" sublabel={compareResult.from_run?.completed_at ? new Date(compareResult.from_run.completed_at).toLocaleDateString() : compareResult.from_date} value={String(compareResult.from_run?.total_identities ?? 0)} detail={`Run #${compareResult.from_run?.run_id}`} />
+                <CompareCard label="To" sublabel={compareResult.to_run?.completed_at ? new Date(compareResult.to_run.completed_at).toLocaleDateString() : compareResult.to_date} value={String(compareResult.to_run?.total_identities ?? 0)} detail={`Run #${compareResult.to_run?.run_id}`} />
+                <CompareCard label="Added" sublabel="New identities" value={`+${compareResult.summary?.added_count ?? 0}`} detail="" color="text-green-600" />
+                <CompareCard label="Removed" sublabel="Removed identities" value={`-${compareResult.summary?.removed_count ?? 0}`} detail="" color="text-red-600" />
+              </div>
+
+              {/* Risk distribution comparison */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <RiskDistCard title="From" dist={compareResult.from_risk_distribution} />
+                <RiskDistCard title="To" dist={compareResult.to_risk_distribution} />
+              </div>
+
+              {/* Risk changes */}
+              {compareResult.risk_changes?.length > 0 && (
+                <div className="rounded-lg border overflow-hidden" style={{ borderColor: 'var(--border-default)' }}>
+                  <div className="px-4 py-2 text-sm font-semibold" style={{ backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))', color: 'var(--text-primary)' }}>
+                    Risk Changes ({compareResult.risk_changes.length})
+                  </div>
+                  <div className="divide-y" style={{ borderColor: 'var(--border-default)' }}>
+                    {compareResult.risk_changes.slice(0, 20).map((rc: any, i: number) => (
+                      <div key={i} className="px-4 py-2 flex items-center gap-3 text-sm" style={{ color: 'var(--text-primary)' }}>
+                        <Link to={`/identities/${rc.identity_id}`} className="text-blue-600 hover:underline font-medium">
+                          {rc.display_name}
+                        </Link>
+                        {riskBadge(rc.old_risk_level)}
+                        <span style={{ color: 'var(--text-secondary)' }}>{'\u2192'}</span>
+                        {riskBadge(rc.new_risk_level)}
+                        <span className={`text-xs font-mono ${rc.score_delta > 0 ? 'text-red-500' : 'text-green-500'}`}>
+                          {rc.score_delta > 0 ? '+' : ''}{rc.score_delta}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Added identities (truncated) */}
+              {compareResult.added_identities?.length > 0 && (
+                <div className="rounded-lg border overflow-hidden" style={{ borderColor: 'var(--border-default)' }}>
+                  <div className="px-4 py-2 text-sm font-semibold text-green-700" style={{ backgroundColor: 'rgba(34,197,94,0.08)' }}>
+                    Added Identities ({compareResult.summary?.added_count})
+                  </div>
+                  <div className="divide-y" style={{ borderColor: 'var(--border-default)' }}>
+                    {compareResult.added_identities.slice(0, 15).map((a: any, i: number) => (
+                      <div key={i} className="px-4 py-1.5 flex items-center gap-3 text-sm" style={{ color: 'var(--text-primary)' }}>
+                        <span className="text-green-600 font-mono">+</span>
+                        <span className="font-medium">{a.display_name}</span>
+                        <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>{(a.identity_category || '').replace(/_/g, ' ')}</span>
+                        {riskBadge(a.risk_level)}
+                      </div>
+                    ))}
+                    {compareResult.summary?.added_count > 15 && (
+                      <div className="px-4 py-1.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                        ...and {compareResult.summary.added_count - 15} more
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Removed identities (truncated) */}
+              {compareResult.removed_identities?.length > 0 && (
+                <div className="rounded-lg border overflow-hidden" style={{ borderColor: 'var(--border-default)' }}>
+                  <div className="px-4 py-2 text-sm font-semibold text-red-700" style={{ backgroundColor: 'rgba(239,68,68,0.08)' }}>
+                    Removed Identities ({compareResult.summary?.removed_count})
+                  </div>
+                  <div className="divide-y" style={{ borderColor: 'var(--border-default)' }}>
+                    {compareResult.removed_identities.slice(0, 15).map((r: any, i: number) => (
+                      <div key={i} className="px-4 py-1.5 flex items-center gap-3 text-sm" style={{ color: 'var(--text-primary)' }}>
+                        <span className="text-red-600 font-mono">-</span>
+                        <span className="font-medium">{r.display_name}</span>
+                        <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>{(r.identity_category || '').replace(/_/g, ' ')}</span>
+                      </div>
+                    ))}
+                    {compareResult.summary?.removed_count > 15 && (
+                      <div className="px-4 py-1.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                        ...and {compareResult.summary.removed_count - 15} more
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Empty state */}
       {reports.length === 0 ? (
@@ -448,6 +622,14 @@ function DetailView({
       bgHeader: 'bg-yellow-50',
       icon: '*',
     },
+    {
+      key: 'classification_changes',
+      label: 'Classification Changes',
+      count: detail.changes.classification_changes?.length || 0,
+      color: 'text-cyan-700',
+      bgHeader: 'bg-cyan-50',
+      icon: '\u25C9',
+    },
   ];
 
   const nonEmpty = sections.filter(s => s.count > 0);
@@ -507,6 +689,9 @@ function DetailView({
               )}
               {section.key === 'credential_changes' && (
                 <CredentialChangesSection items={detail.changes.credential_changes} />
+              )}
+              {section.key === 'classification_changes' && (
+                <ClassificationChangesSection items={detail.changes.classification_changes || []} />
               )}
             </div>
           )}
@@ -663,6 +848,92 @@ function CredentialChangesSection({ items }: { items: FullDriftReport['changes']
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function ClassificationChangesSection({ items }: { items: NonNullable<FullDriftReport['changes']['classification_changes']> }) {
+  const CLASS_COLORS: Record<string, string> = {
+    PHI: 'text-red-600 bg-red-50',
+    PCI: 'text-amber-600 bg-amber-50',
+    PII: 'text-blue-600 bg-blue-50',
+  };
+  return (
+    <div className="space-y-2">
+      {items.map((item, i) => (
+        <div key={item.resource_id || i} className="flex items-center gap-3 text-sm">
+          <span className={`font-mono font-bold ${
+            item.change_type === 'classified' ? 'text-cyan-600' :
+            item.change_type === 'declassified' ? 'text-gray-500' : 'text-cyan-700'
+          }`}>
+            {item.change_type === 'classified' ? '+' : item.change_type === 'declassified' ? '-' : '~'}
+          </span>
+          <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{item.resource_name}</span>
+          <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">
+            {(item.resource_type || '').replace(/_/g, ' ')}
+          </span>
+          {item.previous_classification && (
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${CLASS_COLORS[item.previous_classification] || 'text-gray-500 bg-gray-50'}`}>
+              {item.previous_classification}
+            </span>
+          )}
+          {item.previous_classification && item.new_classification && (
+            <span style={{ color: 'var(--text-secondary)' }}>{'\u2192'}</span>
+          )}
+          {item.new_classification && (
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${CLASS_COLORS[item.new_classification] || 'text-gray-500 bg-gray-50'}`}>
+              {item.new_classification}
+            </span>
+          )}
+          {!item.new_classification && item.change_type === 'declassified' && (
+            <span className="text-xs text-gray-400 italic">removed</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Snapshot Compare Helpers ────────────────────────────────
+
+function CompareCard({ label, sublabel, value, detail, color }: {
+  label: string; sublabel: string; value: string; detail: string; color?: string;
+}) {
+  return (
+    <div className="rounded-lg border p-3" style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)' }}>
+      <div className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{label}</div>
+      <div className={`text-xl font-bold mt-0.5 ${color || ''}`} style={color ? {} : { color: 'var(--text-primary)' }}>{value}</div>
+      <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+        {sublabel}{detail ? ` \u00b7 ${detail}` : ''}
+      </div>
+    </div>
+  );
+}
+
+function RiskDistCard({ title, dist }: { title: string; dist: Record<string, number> }) {
+  if (!dist) return null;
+  const total = Object.values(dist).reduce((a, b) => a + b, 0);
+  return (
+    <div className="rounded-lg border p-3" style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)' }}>
+      <div className="text-xs font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>{title} Risk Distribution ({total})</div>
+      <div className="flex gap-2">
+        {(['critical', 'high', 'medium', 'low', 'info'] as const).map(level => {
+          const count = dist[level] || 0;
+          if (!count) return null;
+          const colors: Record<string, string> = {
+            critical: 'bg-red-100 text-red-700',
+            high: 'bg-orange-100 text-orange-700',
+            medium: 'bg-yellow-100 text-yellow-700',
+            low: 'bg-blue-100 text-blue-700',
+            info: 'bg-gray-100 text-gray-600',
+          };
+          return (
+            <span key={level} className={`px-2 py-0.5 rounded text-xs font-medium ${colors[level]}`}>
+              {level} {count}
+            </span>
+          );
+        })}
+      </div>
     </div>
   );
 }

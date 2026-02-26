@@ -350,7 +350,7 @@ const WorkloadIdentities: React.FC = () => {
           ].filter(c => c.show).map(c => (
             <button key={c.label} onClick={c.onClick} className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
               <p className="text-xs text-gray-500 dark:text-slate-400">{c.label}</p>
-              <p className={`text-2xl font-bold mt-1 ${c.color}`}>{c.value}</p>
+              <p className={`text-2xl font-bold mt-1 ${c.color}`} style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{typeof c.value === 'number' ? c.value.toLocaleString() : c.value}</p>
               <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">{c.sub}</p>
             </button>
           ))}
@@ -369,8 +369,8 @@ const WorkloadIdentities: React.FC = () => {
                   <span className={`w-2 h-2 rounded-full ${SEV_COLOR[level] || 'bg-gray-300'}`} />
                   {level}
                 </span>
-                <span className="text-xs font-medium text-gray-700 dark:text-slate-300">
-                  {stats.by_risk[level] || 0}
+                <span className="text-xs font-medium text-gray-700 dark:text-slate-300" style={{ borderBottom: '1px dashed currentColor' }}>
+                  {(stats.by_risk[level] || 0).toLocaleString()}
                 </span>
               </button>
             ))}

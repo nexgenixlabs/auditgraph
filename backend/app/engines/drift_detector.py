@@ -96,6 +96,9 @@ class DriftDetector:
         self._detect_owner_changes(current_identities, previous_identities, events)
         self._detect_microsoft_changes(current_identities, previous_identities, events)
 
+        # Classification changes (Phase 3)
+        classification_changes = self._detect_classification_changes(current_run_id, previous_run_id, events)
+
         # Soft-delete removed identities
         self._soft_delete_removed_identities(removed_identities)
 
@@ -113,6 +116,7 @@ class DriftDetector:
             'permission_changes': permission_changes,
             'risk_changes': risk_changes,
             'credential_changes': credential_changes,
+            'classification_changes': classification_changes,
         }
 
         return {'events': events, 'legacy': legacy}
@@ -627,6 +631,105 @@ class DriftDetector:
                         'is_microsoft_system': True,
                     },
                 ))
+
+    def _detect_classification_changes(self, current_run_id: int, previous_run_id: int,
+                                        events: list) -> list:
+        """Detect changes in data classification between runs (Phase 3)."""
+        classification_changes = []
+        cursor = self.db.conn.cursor()
+        try:
+            def _get_classifications(run_id):
+                """Get classified resources from a run, keyed by resource_id."""
+                result = {}
+                for table, rtype in [('azure_storage_accounts', 'storage_account'),
+                                     ('azure_key_vaults', 'key_vault')]:
+                    cursor.execute(f"""
+                        SELECT resource_id, name, data_classification, classification_source
+                        FROM {table}
+                        WHERE discovery_run_id = %s AND data_classification IS NOT NULL
+                    """, (run_id,))
+                    for row in cursor.fetchall():
+                        result[row[0]] = {
+                            'resource_id': row[0],
+                            'name': row[1],
+                            'classification': row[2],
+                            'source': row[3],
+                            'resource_type': rtype,
+                        }
+                return result
+
+            curr_class = _get_classifications(current_run_id)
+            prev_class = _get_classifications(previous_run_id)
+
+            curr_keys = set(curr_class.keys())
+            prev_keys = set(prev_class.keys())
+
+            # Newly classified
+            for rid in curr_keys - prev_keys:
+                r = curr_class[rid]
+                classification_changes.append({
+                    'change_type': 'classified',
+                    'resource_id': rid,
+                    'resource_name': r['name'],
+                    'resource_type': r['resource_type'],
+                    'new_classification': r['classification'],
+                    'previous_classification': None,
+                })
+                events.append(build_event(
+                    DriftEventType.CLASSIFICATION_ADDED,
+                    rid,
+                    r['name'],
+                    f"Resource '{r['name']}' classified as {r['classification']}",
+                    details={'classification': r['classification'], 'resource_type': r['resource_type']},
+                ))
+
+            # Declassified
+            for rid in prev_keys - curr_keys:
+                r = prev_class[rid]
+                classification_changes.append({
+                    'change_type': 'declassified',
+                    'resource_id': rid,
+                    'resource_name': r['name'],
+                    'resource_type': r['resource_type'],
+                    'new_classification': None,
+                    'previous_classification': r['classification'],
+                })
+                events.append(build_event(
+                    DriftEventType.CLASSIFICATION_REMOVED,
+                    rid,
+                    r['name'],
+                    f"Resource '{r['name']}' declassified (was {r['classification']})",
+                    details={'previous_classification': r['classification'], 'resource_type': r['resource_type']},
+                ))
+
+            # Changed classification
+            for rid in curr_keys & prev_keys:
+                if curr_class[rid]['classification'] != prev_class[rid]['classification']:
+                    classification_changes.append({
+                        'change_type': 'reclassified',
+                        'resource_id': rid,
+                        'resource_name': curr_class[rid]['name'],
+                        'resource_type': curr_class[rid]['resource_type'],
+                        'new_classification': curr_class[rid]['classification'],
+                        'previous_classification': prev_class[rid]['classification'],
+                    })
+                    events.append(build_event(
+                        DriftEventType.CLASSIFICATION_CHANGED,
+                        rid,
+                        curr_class[rid]['name'],
+                        f"Resource '{curr_class[rid]['name']}' reclassified: {prev_class[rid]['classification']} -> {curr_class[rid]['classification']}",
+                        details={
+                            'previous_classification': prev_class[rid]['classification'],
+                            'new_classification': curr_class[rid]['classification'],
+                            'resource_type': curr_class[rid]['resource_type'],
+                        },
+                    ))
+        except Exception as e:
+            print(f"  ⚠️  Classification change detection error: {e}")
+        finally:
+            cursor.close()
+
+        return classification_changes
 
     # ── Helpers ─────────────────────────────────────────────────────
 

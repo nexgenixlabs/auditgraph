@@ -77,7 +77,8 @@ const StatsCard: React.FC<StatsCardProps> = ({
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium opacity-75">{title}</p>
-          <p className="text-3xl font-bold mt-2">{value}</p>
+          <p className={`text-3xl font-bold mt-2${onClick ? ' border-b border-dashed border-current' : ''}`}
+             style={{ width: 'fit-content' }}>{typeof value === 'number' ? value.toLocaleString() : value}</p>
         </div>
         {icon && (
           <div className="text-4xl opacity-50">

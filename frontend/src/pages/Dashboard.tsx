@@ -22,6 +22,7 @@ import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
 import AudienceBadge from '../components/AudienceBadge';
 import { useToast } from '../components/ToastProvider';
+import DrillableNumber from '../components/DrillableNumber';
 import { useDashboardPreferences } from '../hooks/useDashboardPreferences';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -545,32 +546,32 @@ export default function Dashboard() {
                 <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
                   onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} title="View dormant identities">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Dormant Identities</div>
-                  <div className="text-2xl font-extrabold" style={{ color: (posture?.dormant_count ?? 0) > 0 ? '#F97316' : '#22C55E' }}>{posture?.dormant_count ?? 0}</div>
+                  <div className="text-2xl font-extrabold"><DrillableNumber value={posture?.dormant_count ?? 0} to="/workload-identities?lifecycle=likely_dormant" color={(posture?.dormant_count ?? 0) > 0 ? '#F97316' : '#22C55E'} className="text-2xl font-extrabold" /></div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Stale &gt;90 days</div>
                 </div>
                 <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
                   onClick={() => navigate('/workload-identities?owner=orphaned')} title="View unowned SPNs">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Unowned SPNs</div>
-                  <div className="text-2xl font-extrabold" style={{ color: (posture?.no_owner_count ?? 0) > 0 ? '#F97316' : '#22C55E' }}>{posture?.no_owner_count ?? 0}</div>
+                  <div className="text-2xl font-extrabold"><DrillableNumber value={posture?.no_owner_count ?? 0} to="/workload-identities?owner=orphaned" color={(posture?.no_owner_count ?? 0) > 0 ? '#F97316' : '#22C55E'} className="text-2xl font-extrabold" /></div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>No assigned owner</div>
                 </div>
                 <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-red-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
                   onClick={() => navigate('/workload-identities?exposure=critical')} title="View expiring credentials">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Expiring Credentials</div>
-                  <div className="text-2xl font-extrabold" style={{ color: (posture?.expiring_credentials_count ?? 0) > 0 ? '#EF4444' : '#22C55E' }}>{posture?.expiring_credentials_count ?? 0}</div>
+                  <div className="text-2xl font-extrabold"><DrillableNumber value={posture?.expiring_credentials_count ?? 0} to="/workload-identities?exposure=critical" color={(posture?.expiring_credentials_count ?? 0) > 0 ? '#EF4444' : '#22C55E'} className="text-2xl font-extrabold" /></div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Within 30 days</div>
                 </div>
                 <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
                   onClick={() => navigate('/identities')} title="View active identities">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Active Identities</div>
-                  <div className="text-2xl font-extrabold" style={{ color: COLORS.brandLight }}>{Math.max((latest?.total_identities ?? 0) - (posture?.dormant_count ?? 0), 0)}</div>
+                  <div className="text-2xl font-extrabold"><DrillableNumber value={Math.max((latest?.total_identities ?? 0) - (posture?.dormant_count ?? 0), 0)} to="/identities" color={COLORS.brandLight} className="text-2xl font-extrabold" /></div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Used within 90 days</div>
                 </div>
                 <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
                   onClick={() => navigate('/workload-identities')} title="View workload identities">
                   <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Avg Exposure</div>
-                  <div className="text-2xl font-extrabold" style={{ color: (stats?.workload_exposure?.avg_exposure_score ?? 0) >= 50 ? '#EF4444' : '#22C55E' }}>
-                    {stats?.workload_exposure?.avg_exposure_score ?? '—'}
+                  <div className="text-2xl font-extrabold">
+                    <DrillableNumber value={stats?.workload_exposure?.avg_exposure_score ?? '—'} to="/workload-identities" color={(stats?.workload_exposure?.avg_exposure_score ?? 0) >= 50 ? '#EF4444' : '#22C55E'} className="text-2xl font-extrabold" format={false} />
                   </div>
                   <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Workload identities</div>
                 </div>

@@ -306,14 +306,14 @@ export default function RoleMining() {
 
       {/* Summary Cards — 6 cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-        <SummaryCard label="Total Roles" value={summary.total_roles} bg="bg-white" text="text-gray-900" />
+        <SummaryCard label="Total Roles" value={summary.total_roles} bg="bg-white" text="text-gray-900" onClick={() => setActiveTab('bundles')} />
         <SummaryCard label="Toxic Combos" value={summary.toxic_combos} bg="bg-red-50" text="text-red-700" border="border-red-200"
-          sub={summary.toxic_combos > 0 ? 'Requires immediate review' : undefined} />
-        <SummaryCard label="Unused" value={summary.unused} bg="bg-orange-50" text="text-orange-700" border="border-orange-200" />
-        <SummaryCard label="Redundant" value={summary.redundant} bg="bg-yellow-50" text="text-yellow-700" border="border-yellow-200" />
-        <SummaryCard label="Orphaned" value={summary.orphaned} bg="bg-purple-50" text="text-purple-700" border="border-purple-200" />
+          sub={summary.toxic_combos > 0 ? 'Requires immediate review' : undefined} onClick={() => setActiveTab('toxic')} />
+        <SummaryCard label="Unused" value={summary.unused} bg="bg-orange-50" text="text-orange-700" border="border-orange-200" onClick={() => setActiveTab('findings')} />
+        <SummaryCard label="Redundant" value={summary.redundant} bg="bg-yellow-50" text="text-yellow-700" border="border-yellow-200" onClick={() => setActiveTab('findings')} />
+        <SummaryCard label="Orphaned" value={summary.orphaned} bg="bg-purple-50" text="text-purple-700" border="border-purple-200" onClick={() => setActiveTab('findings')} />
         <SummaryCard label="Optimization" value={`${summary.optimization_pct}%`} bg="bg-blue-50" text="text-blue-700" border="border-blue-200"
-          sub="of roles actionable" />
+          sub="of roles actionable" onClick={() => setActiveTab('findings')} />
       </div>
 
       {/* Tab Bar */}
@@ -803,14 +803,17 @@ export default function RoleMining() {
 
 // ── Summary Card ──────────────────────────────────────────────
 
-function SummaryCard({ label, value, bg, text, border, sub }: {
-  label: string; value: string | number; bg: string; text: string; border?: string; sub?: string;
+function SummaryCard({ label, value, bg, text, border, sub, onClick }: {
+  label: string; value: string | number; bg: string; text: string; border?: string; sub?: string; onClick?: () => void;
 }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div className={`${bg} border ${border || 'border-gray-200'} rounded-xl p-4`}>
+    <Tag onClick={onClick} className={`${bg} border ${border || 'border-gray-200'} rounded-xl p-4 text-left ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''}`}>
       <div className={`text-xs font-medium ${text}`}>{label}</div>
-      <div className={`text-2xl font-bold ${text} mt-1`}>{value}</div>
+      <div className={`text-2xl font-bold ${text} mt-1`} style={onClick ? { width: 'fit-content', borderBottom: '1px dashed currentColor' } : undefined}>
+        {typeof value === 'number' ? value.toLocaleString() : value}
+      </div>
       {sub && <div className={`text-[10px] text-gray-500 mt-0.5`}>{sub}</div>}
-    </div>
+    </Tag>
   );
 }

@@ -10,7 +10,7 @@ interface ExportCard {
   key: string;
   title: string;
   description: string;
-  formats: ('csv' | 'json')[];
+  formats: ('csv' | 'json' | 'zip')[];
   icon: React.ReactNode;
 }
 
@@ -81,6 +81,17 @@ const EXPORT_CARDS: ExportCard[] = [
       </svg>
     ),
   },
+  {
+    key: 'evidence-zip',
+    title: 'Evidence ZIP Package',
+    description: 'Complete audit evidence bundle: 8 CSV files (identities, privileged access, Entra roles, credentials, compliance, classifications, drift, activity) + MANIFEST.md — ready for auditor handoff.',
+    formats: ['zip'],
+    icon: (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+      </svg>
+    ),
+  },
 ];
 
 const CSV_COLUMNS_MAP: Record<string, typeof IDENTITY_CSV_COLUMNS> = {
@@ -94,55 +105,76 @@ export default function Exports() {
   const { withConnection } = useConnection();
   const [downloading, setDownloading] = useState<string | null>(null);
   const [lastExported, setLastExported] = useState<Record<string, string>>({});
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
 
-  async function handleExport(exportType: string, format: 'csv' | 'json') {
+  async function handleExport(exportType: string, format: 'csv' | 'json' | 'zip') {
     const dlKey = `${exportType}-${format}`;
     setDownloading(dlKey);
     try {
-      const res = await fetch(withConnection(`/api/export/${exportType}`));
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null);
-        throw new Error(errData?.error || `Export failed (${res.status})`);
-      }
-      const data = await res.json();
+      const dateParams = (dateFrom && dateTo) ? `&from=${dateFrom}&to=${dateTo}` : '';
 
-      if (format === 'json') {
-        downloadJSON(data, exportFilename(exportType, 'json'));
-      } else {
-        // CSV: flatten appropriately
-        const columns = CSV_COLUMNS_MAP[exportType];
-        let rows: Record<string, unknown>[] = [];
-
-        if (exportType === 'identities') {
-          rows = data.identities || [];
-        } else if (exportType === 'compliance') {
-          rows = (data.gap_analysis || []).map((g: any) => ({
-            framework: g.framework,
-            control_id: g.control_id,
-            control_name: g.control_name,
-            status: g.status,
-            current_value: g.current_value,
-            threshold: g.threshold,
-            detail: g.detail,
-          }));
-          // If no gaps, export all controls
-          if (rows.length === 0 && data.all_controls) {
-            rows = data.all_controls.map((c: any) => ({
-              framework: c.framework,
-              control_id: c.control_id,
-              control_name: c.control_name,
-              status: c.status,
-              current_value: c.current_value,
-              threshold: c.threshold,
-              detail: c.detail,
-            }));
-          }
-        } else if (exportType === 'drift') {
-          rows = data.changes || [];
+      if (format === 'zip') {
+        // Binary download — ZIP file
+        const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `Export failed (${res.status})`);
         }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `auditgraph_evidence_${new Date().toISOString().slice(0, 10)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `Export failed (${res.status})`);
+        }
+        const data = await res.json();
 
-        if (columns) {
-          downloadCSV(rows, columns, exportFilename(exportType, 'csv'));
+        if (format === 'json') {
+          downloadJSON(data, exportFilename(exportType, 'json'));
+        } else {
+          // CSV: flatten appropriately
+          const columns = CSV_COLUMNS_MAP[exportType];
+          let rows: Record<string, unknown>[] = [];
+
+          if (exportType === 'identities') {
+            rows = data.identities || [];
+          } else if (exportType === 'compliance') {
+            rows = (data.gap_analysis || []).map((g: any) => ({
+              framework: g.framework,
+              control_id: g.control_id,
+              control_name: g.control_name,
+              status: g.status,
+              current_value: g.current_value,
+              threshold: g.threshold,
+              detail: g.detail,
+            }));
+            if (rows.length === 0 && data.all_controls) {
+              rows = data.all_controls.map((c: any) => ({
+                framework: c.framework,
+                control_id: c.control_id,
+                control_name: c.control_name,
+                status: c.status,
+                current_value: c.current_value,
+                threshold: c.threshold,
+                detail: c.detail,
+              }));
+            }
+          } else if (exportType === 'drift') {
+            rows = data.changes || [];
+          }
+
+          if (columns) {
+            downloadCSV(rows, columns, exportFilename(exportType, 'csv'));
+          }
         }
       }
 
@@ -163,6 +195,44 @@ export default function Exports() {
         <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
           Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
         </p>
+      </div>
+
+      {/* Date range filter */}
+      <div className="flex items-end gap-4 rounded-xl border px-5 py-3" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+        <div className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Date Range (optional)</div>
+        <div>
+          <label className="block text-[10px] font-medium mb-0.5" style={{ color: 'var(--text-secondary)' }}>From</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={e => setDateFrom(e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border text-xs"
+            style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-medium mb-0.5" style={{ color: 'var(--text-secondary)' }}>To</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={e => setDateTo(e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border text-xs"
+            style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          />
+        </div>
+        {(dateFrom || dateTo) && (
+          <button
+            onClick={() => { setDateFrom(''); setDateTo(''); }}
+            className="text-xs text-blue-600 hover:underline"
+          >
+            Clear
+          </button>
+        )}
+        {dateFrom && dateTo && (
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+            Exports will use data from {dateFrom} to {dateTo}
+          </span>
+        )}
       </div>
 
       {/* Export cards */}
@@ -190,7 +260,9 @@ export default function Exports() {
                     onClick={() => handleExport(card.key, fmt)}
                     disabled={!!downloading}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition disabled:opacity-50 ${
-                      fmt === 'json'
+                      fmt === 'zip'
+                        ? 'text-blue-700 bg-blue-50 border-blue-200 hover:bg-blue-100'
+                        : fmt === 'json'
                         ? 'text-purple-700 bg-purple-50 border-purple-200 hover:bg-purple-100'
                         : 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
                     }`}

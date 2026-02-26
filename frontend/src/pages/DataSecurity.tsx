@@ -225,7 +225,7 @@ function StatCard({ label, value, color, subtitle, onClick }: { label: string; v
       padding: '16px 20px', minWidth: 140, flex: 1, textAlign: 'left' as const,
       cursor: onClick ? 'pointer' : undefined, transition: 'opacity 0.15s',
     }} className={onClick ? 'hover:opacity-70' : ''}>
-      <div style={{ fontSize: 28, fontWeight: 700, color, fontFamily: G.mono, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color, fontFamily: G.mono, lineHeight: 1.1, ...(onClick ? { width: 'fit-content', borderBottom: '1px dashed currentColor' } : {}) }}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
       <div style={{ fontSize: 11, color: G.textSecondary, marginTop: 4 }}>{label}</div>
       {subtitle && <div style={{ fontSize: 10, color: G.textMuted, marginTop: 2 }}>{subtitle}</div>}
     </Tag>
@@ -409,8 +409,8 @@ export default function DataSecurity() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
             <div style={{ background: CLASS_COLORS.PHI.bg, border: `1px solid ${CLASS_COLORS.PHI.border}`, borderRadius: 8, padding: '12px 16px', cursor: 'pointer' }}
               onClick={() => setClassFilter(classFilter === 'PHI' ? '' : 'PHI')}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: CLASS_COLORS.PHI.fg, fontFamily: G.mono }}>
-                {classStats.by_classification.PHI || 0}
+              <div style={{ fontSize: 22, fontWeight: 700, color: CLASS_COLORS.PHI.fg, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }}>
+                {(classStats.by_classification.PHI || 0).toLocaleString()}
               </div>
               <div style={{ fontSize: 11, color: G.textSecondary }}>PHI Resources</div>
               {blastRadius && <div style={{ fontSize: 10, color: G.textMuted, marginTop: 2 }}>
@@ -419,8 +419,8 @@ export default function DataSecurity() {
             </div>
             <div style={{ background: CLASS_COLORS.PCI.bg, border: `1px solid ${CLASS_COLORS.PCI.border}`, borderRadius: 8, padding: '12px 16px', cursor: 'pointer' }}
               onClick={() => setClassFilter(classFilter === 'PCI' ? '' : 'PCI')}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: CLASS_COLORS.PCI.fg, fontFamily: G.mono }}>
-                {classStats.by_classification.PCI || 0}
+              <div style={{ fontSize: 22, fontWeight: 700, color: CLASS_COLORS.PCI.fg, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }}>
+                {(classStats.by_classification.PCI || 0).toLocaleString()}
               </div>
               <div style={{ fontSize: 11, color: G.textSecondary }}>PCI Resources</div>
               {blastRadius && <div style={{ fontSize: 10, color: G.textMuted, marginTop: 2 }}>
@@ -429,8 +429,8 @@ export default function DataSecurity() {
             </div>
             <div style={{ background: CLASS_COLORS.PII.bg, border: `1px solid ${CLASS_COLORS.PII.border}`, borderRadius: 8, padding: '12px 16px', cursor: 'pointer' }}
               onClick={() => setClassFilter(classFilter === 'PII' ? '' : 'PII')}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: CLASS_COLORS.PII.fg, fontFamily: G.mono }}>
-                {classStats.by_classification.PII || 0}
+              <div style={{ fontSize: 22, fontWeight: 700, color: CLASS_COLORS.PII.fg, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }}>
+                {(classStats.by_classification.PII || 0).toLocaleString()}
               </div>
               <div style={{ fontSize: 11, color: G.textSecondary }}>PII Resources</div>
               {blastRadius && <div style={{ fontSize: 10, color: G.textMuted, marginTop: 2 }}>
@@ -439,8 +439,8 @@ export default function DataSecurity() {
             </div>
             <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${G.surfaceBorder}`, borderRadius: 8, padding: '12px 16px', cursor: 'pointer' }}
               onClick={() => setClassFilter(classFilter === 'unclassified' ? '' : 'unclassified')}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: G.textMuted, fontFamily: G.mono }}>
-                {classStats.unclassified_count}
+              <div style={{ fontSize: 22, fontWeight: 700, color: G.textMuted, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }}>
+                {classStats.unclassified_count.toLocaleString()}
               </div>
               <div style={{ fontSize: 11, color: G.textSecondary }}>Unclassified</div>
               <div style={{ fontSize: 10, color: G.textMuted, marginTop: 2 }}>

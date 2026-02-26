@@ -25,6 +25,9 @@ class DriftEventType:
     MFA_DISABLED = 'mfa_disabled'
     OWNER_CHANGED = 'owner_changed'
     MICROSOFT_SPN_MODIFIED = 'microsoft_spn_modified'
+    CLASSIFICATION_ADDED = 'classification_added'
+    CLASSIFICATION_REMOVED = 'classification_removed'
+    CLASSIFICATION_CHANGED = 'classification_changed'
 
 
 EVENT_SEVERITY: Dict[str, str] = {
@@ -43,6 +46,9 @@ EVENT_SEVERITY: Dict[str, str] = {
     DriftEventType.MFA_DISABLED: 'critical',
     DriftEventType.OWNER_CHANGED: 'medium',
     DriftEventType.MICROSOFT_SPN_MODIFIED: 'low',
+    DriftEventType.CLASSIFICATION_ADDED: 'medium',
+    DriftEventType.CLASSIFICATION_REMOVED: 'high',
+    DriftEventType.CLASSIFICATION_CHANGED: 'medium',
 }
 
 # Maps typed events to legacy 5-bucket keys for backward compatibility
@@ -62,6 +68,9 @@ EVENT_TO_LEGACY_BUCKET: Dict[str, str] = {
     DriftEventType.MFA_DISABLED: 'risk_changes',
     DriftEventType.OWNER_CHANGED: 'permission_changes',
     DriftEventType.MICROSOFT_SPN_MODIFIED: 'risk_changes',
+    DriftEventType.CLASSIFICATION_ADDED: 'classification_changes',
+    DriftEventType.CLASSIFICATION_REMOVED: 'classification_changes',
+    DriftEventType.CLASSIFICATION_CHANGED: 'classification_changes',
 }
 
 

@@ -320,12 +320,12 @@ export default function ServiceAccountGovernance() {
             <div>
               <div style={{ color: G.textMuted }} className="text-[10px] uppercase tracking-wider font-medium">Total NHIs</div>
               <button onClick={() => { setActiveBand('All'); setPage(0); }} className="cursor-pointer hover:opacity-70 transition">
-                <div style={{ color: G.text, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{stats.total}</div>
+                <div style={{ color: G.text, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{stats.total.toLocaleString()}</div>
               </button>
               <div className="flex gap-1 mt-3">
                 {['Critical', 'High', 'Medium', 'Low'].map(b => (
                   <button key={b} className="flex-1 text-center cursor-pointer hover:opacity-70 transition" onClick={() => { setActiveBand(b); setPage(0); }}>
-                    <div style={{ color: G.band[b], fontFamily: G.mono }} className="text-sm font-bold">{rd[b] || 0}</div>
+                    <div style={{ color: G.band[b], fontFamily: G.mono, borderBottom: '1px dashed currentColor', width: 'fit-content', margin: '0 auto' }} className="text-sm font-bold">{(rd[b] || 0).toLocaleString()}</div>
                     <div style={{ color: G.textMuted }} className="text-[9px]">{b}</div>
                   </button>
                 ))}
@@ -338,7 +338,7 @@ export default function ServiceAccountGovernance() {
                className="gov-card gov-card-2 rounded-xl p-4 cursor-pointer transition hover:scale-[1.01]"
                onClick={() => { setActiveBand('Critical'); setPage(0); }}>
             <div style={{ color: G.band.Critical }} className="text-[10px] uppercase tracking-wider font-medium">Critical Risk</div>
-            <div style={{ color: G.band.Critical, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{rd.Critical || 0}</div>
+            <div style={{ color: G.band.Critical, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.Critical || 0).toLocaleString()}</div>
             <div style={{ color: G.textMuted }} className="text-[10px] mt-2">Immediate action required</div>
           </div>
 
@@ -347,7 +347,7 @@ export default function ServiceAccountGovernance() {
                className="gov-card gov-card-3 rounded-xl p-4 cursor-pointer transition hover:scale-[1.01]"
                onClick={() => { setActiveBand('High'); setPage(0); }}>
             <div style={{ color: G.band.High }} className="text-[10px] uppercase tracking-wider font-medium">High Risk</div>
-            <div style={{ color: G.band.High, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{rd.High || 0}</div>
+            <div style={{ color: G.band.High, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.High || 0).toLocaleString()}</div>
             <div style={{ color: G.textMuted }} className="text-[10px] mt-2">Review within 7 days</div>
           </div>
 
@@ -367,7 +367,7 @@ export default function ServiceAccountGovernance() {
                   <button key={g.key} className="w-full text-left cursor-pointer hover:opacity-70 transition" onClick={() => { setSearch(g.key); setPage(0); }}>
                     <div className="flex justify-between text-[10px]">
                       <span style={{ color: G.govStatus[g.key] }}>{g.label}</span>
-                      <span style={{ color: G.textSecondary, fontFamily: G.mono }}>{count}</span>
+                      <span style={{ color: G.textSecondary, fontFamily: G.mono, borderBottom: '1px dashed currentColor' }}>{count}</span>
                     </div>
                     <div style={{ background: 'rgba(255,255,255,0.06)' }} className="h-1 rounded-full mt-0.5">
                       <div style={{ width: `${pct}%`, background: G.govStatus[g.key], transition: 'width 0.6s ease-out' }}

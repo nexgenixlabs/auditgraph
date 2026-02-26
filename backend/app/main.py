@@ -26,6 +26,9 @@ from app.api.handlers import (
     get_exposure_graph,
     get_dashboard_ca_summary,
     get_discovery_runs,
+    get_snapshots,
+    get_snapshot_state,
+    get_snapshot_compare,
     get_drift_report,
     trigger_discovery,
     get_scheduler_status,
@@ -75,6 +78,7 @@ from app.api.handlers import (
     get_compliance_trends_handler,
     get_compliance_intelligence,
     export_data,
+    export_evidence_zip,
     get_saved_views_list,
     create_saved_view_handler,
     update_saved_view_handler,
@@ -175,6 +179,7 @@ from app.api.handlers import (
     get_spn_list,
     get_spn_detail,
     get_storage_stats,
+    validate_tenant_isolation,
     run_manual_cleanup,
     execute_remediation,
     get_remediation_queue_handler,
@@ -1034,6 +1039,21 @@ def create_app():
         return get_drift_report(run_id)
 
     # -----------------------
+    # Snapshots (point-in-time state)
+    # -----------------------
+    @app.get("/api/snapshots")
+    def snapshots_list():
+        return get_snapshots()
+
+    @app.get("/api/snapshots/state")
+    def snapshots_state():
+        return get_snapshot_state()
+
+    @app.get("/api/snapshots/compare")
+    def snapshots_compare():
+        return get_snapshot_compare()
+
+    # -----------------------
     # Scheduler status
     # -----------------------
     @app.get("/api/scheduler")
@@ -1249,6 +1269,10 @@ def create_app():
     # -----------------------
     # Export Pipeline (Phase 33)
     # -----------------------
+    @app.get("/api/export/evidence-zip")
+    def export_evidence_zip_route():
+        return export_evidence_zip()
+
     @app.get("/api/export/<export_type>")
     def export(export_type):
         return export_data(export_type)
@@ -1541,6 +1565,11 @@ def create_app():
     @app.post("/api/system/cleanup")
     def system_cleanup():
         return run_manual_cleanup()
+
+    @app.get("/api/system/tenant-isolation")
+    @require_role('admin')
+    def system_tenant_isolation():
+        return validate_tenant_isolation()
 
     # Phase 58: Compliance Auto-Remediation
     @app.post("/api/identities/<path:identity_id>/remediation-execute")

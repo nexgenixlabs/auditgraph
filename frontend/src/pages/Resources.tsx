@@ -472,7 +472,7 @@ function StatCard({ label, value, color, subtitle, onClick, active }: {
       onClick={onClick}
       className={`border rounded-lg p-3 ${colorMap[color] || colorMap.blue} ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''} ${active ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}
     >
-      <div className="text-2xl font-bold">{value}</div>
+      <div className="text-2xl font-bold" style={onClick ? { width: 'fit-content', borderBottom: '1px dashed currentColor' } : undefined}>{value.toLocaleString()}</div>
       <div className="text-xs font-medium text-gray-600">{label}</div>
       {subtitle && <div className="text-[10px] text-gray-500 mt-0.5">{subtitle}</div>}
     </div>
