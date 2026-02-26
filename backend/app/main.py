@@ -6,6 +6,7 @@ import re
 import time
 
 from app.metrics import MetricsCollector
+from app.security import rate_limit, add_security_headers
 
 from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access, require_portal_role
 from app.api.handlers import (
@@ -275,6 +276,8 @@ from app.api.handlers import (
     get_sensitive_access_for_identity,
     get_resource_access_map,
     get_blast_radius_summary,
+    # Phase 5: Launch Readiness
+    validate_launch_readiness,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -300,6 +303,9 @@ def create_app():
             MetricsCollector.get().record_request(
                 request.method, path, response.status_code, duration_ms)
         return response
+
+    # Phase 5: Security headers on all responses
+    app.after_request(add_security_headers)
 
     # Ensure tables exist at startup (run as admin user for DDL privileges)
     try:
@@ -349,10 +355,12 @@ def create_app():
     # Authentication (Phase 31)
     # -----------------------
     @app.post("/api/auth/login")
+    @rate_limit(max_requests=5, window_seconds=60)   # 5 attempts/min per IP
     def login():
         return auth_login()
 
     @app.post("/api/auth/refresh")
+    @rate_limit(max_requests=10, window_seconds=60)   # 10 refreshes/min per IP
     def refresh():
         return auth_refresh()
 
@@ -370,6 +378,7 @@ def create_app():
 
     # Phase 84: Password reset & account lockout
     @app.post("/api/auth/forgot-password")
+    @rate_limit(max_requests=3, window_seconds=300)   # 3 per 5 min per IP
     def forgot_password():
         return forgot_password_handler()
 
@@ -378,6 +387,7 @@ def create_app():
         return validate_reset_token_handler()
 
     @app.post("/api/auth/reset-password")
+    @rate_limit(max_requests=5, window_seconds=300)   # 5 per 5 min per IP
     def reset_password():
         return reset_password_handler()
 
@@ -1598,6 +1608,11 @@ def create_app():
     @require_role('admin')
     def system_tenant_isolation():
         return validate_tenant_isolation()
+
+    @app.get("/api/system/launch-readiness")
+    @require_portal_access()
+    def system_launch_readiness():
+        return validate_launch_readiness()
 
     # Phase 58: Compliance Auto-Remediation
     @app.post("/api/identities/<path:identity_id>/remediation-execute")

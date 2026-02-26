@@ -58,6 +58,9 @@ import Invoices from './pages/Invoices';
 import CISODashboard from './pages/CISODashboard';
 import RemediationCenter from './pages/RemediationCenter';
 import CloudIntegrationGuide from './pages/CloudIntegrationGuide';
+import PrivacyPolicy from './pages/PrivacyPolicy';
+import TermsOfService from './pages/TermsOfService';
+import Documentation from './pages/Documentation';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
@@ -199,6 +202,11 @@ function AppContent() {
 
         {/* Phase 54: SSO callback - no nav bar, no auth required */}
         <Route path="/sso-callback" element={<SsoCallback />} />
+
+        {/* Phase 5: Public legal & documentation pages */}
+        <Route path="/privacy" element={<PrivacyPolicy />} />
+        <Route path="/terms" element={<TermsOfService />} />
+        <Route path="/docs" element={<Documentation />} />
 
         {/* Onboarding route - no nav bar, protected */}
         <Route path="/onboarding" element={
