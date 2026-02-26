@@ -29,6 +29,11 @@ interface AuthContextValue {
   canSeePricing: boolean;
   canManageConnections: boolean;
   canManageUsers: boolean;
+  canManageSettings: boolean;
+  canExportData: boolean;
+  canManageRemediation: boolean;
+  canViewCompliance: boolean;
+  canTriggerScans: boolean;
   activeTenantId: number | null;
   activeTenantName: string | null;
   switchTenant: (tenantId: number | null, tenantName?: string) => void;
@@ -294,6 +299,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     canSeePricing: role === 'admin',
     canManageConnections: role === 'admin' || role === 'security_admin',
     canManageUsers: role === 'admin',
+    canManageSettings: role === 'admin',
+    canExportData: role === 'admin' || role === 'security_admin' || role === 'compliance',
+    canManageRemediation: role === 'admin' || role === 'security_admin',
+    canTriggerScans: role === 'admin' || role === 'security_admin',
+    canViewCompliance: role === 'admin' || role === 'security_admin' || role === 'compliance',
     activeTenantId,
     activeTenantName,
     switchTenant,

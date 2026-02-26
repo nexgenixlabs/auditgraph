@@ -3391,6 +3391,34 @@ export default function Settings() {
               </div>
             )}
 
+            {/* Quick Setup Presets */}
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+              <div className="text-xs font-semibold text-blue-700 mb-2">Quick Setup</div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const tid = prompt('Enter your Azure AD Tenant ID (GUID):');
+                    if (tid) setSsoMetadataUrl(`https://login.microsoftonline.com/${tid}/federationmetadata/2007-06/federationmetadata.xml`);
+                  }}
+                  className="px-3 py-1.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-lg hover:bg-blue-200 transition"
+                >
+                  Azure AD / Entra ID
+                </button>
+                <button
+                  onClick={() => setSsoMetadataUrl('')}
+                  className="px-3 py-1.5 bg-gray-100 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-200 transition"
+                >
+                  Okta
+                </button>
+                <button
+                  onClick={() => setSsoMetadataUrl('')}
+                  className="px-3 py-1.5 bg-gray-100 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-200 transition"
+                >
+                  Other SAML 2.0
+                </button>
+              </div>
+            </div>
+
             {/* IdP Metadata URL shortcut */}
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">IdP Metadata URL</label>

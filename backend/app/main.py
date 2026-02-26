@@ -173,6 +173,7 @@ from app.api.handlers import (
     health_check,
     prometheus_metrics,
     get_system_health,
+    get_sla_metrics,
     check_resource_integrity,
     get_portal_users_list,
     get_spn_stats,
@@ -188,6 +189,7 @@ from app.api.handlers import (
     get_app_reg_list,
     get_app_reg_detail,
     get_tenant_config,
+    get_tenant_entitlements,
     get_tenant_branding,
     get_tenant_stage,
     update_tenant_stage,
@@ -222,6 +224,7 @@ from app.api.handlers import (
     get_admin_billing_summary,
     get_admin_billing_events,
     get_client_billing_summary,
+    get_client_usage_metering,
     get_platform_settings,
     update_platform_settings_handler,
     generate_invoice,
@@ -331,6 +334,11 @@ def create_app():
     @app.get("/api/system/health")
     def system_health():
         return get_system_health()
+
+    @app.get("/api/system/sla")
+    @require_portal_access()
+    def system_sla():
+        return get_sla_metrics()
 
     @app.get("/api/system/resource-integrity")
     @require_role('admin')
@@ -568,6 +576,10 @@ def create_app():
     def client_billing_summary():
         return get_client_billing_summary()
 
+    @app.get("/api/client/billing/usage")
+    def client_billing_usage():
+        return get_client_usage_metering()
+
     # Admin Billing Client Aliases
     @app.get("/api/admin/clients/<int:tenant_id>/billing")
     @require_portal_access()
@@ -650,6 +662,10 @@ def create_app():
     @app.get("/api/tenant/config")
     def tenant_config():
         return get_tenant_config()
+
+    @app.get("/api/tenant/entitlements")
+    def tenant_entitlements():
+        return get_tenant_entitlements()
 
     # Phase 85: Tenant branding (public) + onboarding stage
     @app.get("/api/auth/tenant-branding")
@@ -1039,7 +1055,7 @@ def create_app():
         return get_drift_report(run_id)
 
     # -----------------------
-    # Snapshots (point-in-time state)
+    # Snapshots (point-in-time state) — IMMUTABLE, read-only
     # -----------------------
     @app.get("/api/snapshots")
     def snapshots_list():
@@ -1052,6 +1068,16 @@ def create_app():
     @app.get("/api/snapshots/compare")
     def snapshots_compare():
         return get_snapshot_compare()
+
+    # Gate 29: Snapshot immutability — reject all mutation attempts
+    @app.route("/api/snapshots", methods=["DELETE", "PUT", "PATCH"])
+    @app.route("/api/snapshots/<path:subpath>", methods=["DELETE", "PUT", "PATCH", "POST"])
+    def snapshots_immutable(subpath=None):
+        return jsonify({"error": "Snapshots are immutable. Point-in-time audit data cannot be modified or deleted."}), 405
+
+    @app.route("/api/runs/<int:run_id>", methods=["DELETE", "PUT", "PATCH"])
+    def runs_immutable(run_id):
+        return jsonify({"error": "Discovery runs are immutable audit records. Cannot modify or delete."}), 405
 
     # -----------------------
     # Scheduler status
@@ -1270,10 +1296,12 @@ def create_app():
     # Export Pipeline (Phase 33)
     # -----------------------
     @app.get("/api/export/evidence-zip")
+    @require_role('admin', 'security_admin', 'compliance')
     def export_evidence_zip_route():
         return export_evidence_zip()
 
     @app.get("/api/export/<export_type>")
+    @require_role('admin', 'security_admin', 'compliance')
     def export(export_type):
         return export_data(export_type)
 

@@ -57,6 +57,7 @@ import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
 import CISODashboard from './pages/CISODashboard';
 import RemediationCenter from './pages/RemediationCenter';
+import CloudIntegrationGuide from './pages/CloudIntegrationGuide';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
@@ -248,6 +249,7 @@ function AppContent() {
                       : <ErrorBoundary><Dashboard /></ErrorBoundary>
                   } />
                   <Route path="/remediation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationCenter /></ErrorBoundary>} />
+                  <Route path="/integration-guide" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><CloudIntegrationGuide /></ErrorBoundary>} />
                   <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />

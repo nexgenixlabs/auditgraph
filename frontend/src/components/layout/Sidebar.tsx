@@ -136,6 +136,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         items: [
           { to: '/settings/general', label: 'Organization', icon: settingsIcon },
           { to: '/settings/connections', label: 'Identity Sources', icon: sourcesIcon },
+          { to: '/integration-guide', label: 'Integration Guide', icon: sourcesIcon },
           { to: '/settings/scoring', label: 'Risk Scoring', icon: scoringIcon },
           { to: '/settings/governance', label: 'Governance Policies', icon: policyIcon },
           { to: '/settings/integrations', label: 'Integrations', icon: integrationIcon },

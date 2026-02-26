@@ -563,6 +563,59 @@ class EmailService:
         finally:
             loop.close()
 
+    def send_welcome_email(self, to_email: str, org_name: str, portal_url: str, username: str) -> bool:
+        """Send welcome email to newly onboarded tenant admin."""
+        if not self.credentials_configured:
+            logger.warning("Email credentials not configured - cannot send welcome email")
+            return False
+
+        subject = f"Welcome to AuditGraph - {org_name}"
+        html_body = f"""
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: linear-gradient(135deg, #0B1220, #1E3A5F); padding: 40px 30px; border-radius: 12px 12px 0 0; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 28px;">Welcome to AuditGraph</h1>
+                <p style="color: #94A3B8; margin: 8px 0 0; font-size: 14px;">Identity Risk Operating System</p>
+            </div>
+            <div style="background: #ffffff; padding: 30px; border: 1px solid #E2E8F0; border-top: none;">
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">Hello,</p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">
+                    Your organization <strong>{org_name}</strong> has been set up on AuditGraph.
+                    You can access your portal and begin configuring your identity security audit.
+                </p>
+                <div style="background: #F1F5F9; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                    <p style="margin: 0 0 8px; font-size: 13px; color: #64748B;"><strong>Portal URL:</strong> <a href="{portal_url}" style="color: #3B82F6;">{portal_url}</a></p>
+                    <p style="margin: 0; font-size: 13px; color: #64748B;"><strong>Username:</strong> {username}</p>
+                </div>
+                <p style="color: #64748B; font-size: 13px;">You will be prompted to change your password on first login.</p>
+                <h3 style="color: #1E293B; font-size: 16px; margin-top: 24px;">Getting Started</h3>
+                <ol style="color: #334155; font-size: 14px; line-height: 1.8; padding-left: 20px;">
+                    <li>Log in and change your password</li>
+                    <li>Connect your Azure AD environment</li>
+                    <li>Run your first discovery scan</li>
+                    <li>Review your identity risk posture</li>
+                </ol>
+                <div style="text-align: center; margin-top: 24px;">
+                    <a href="{portal_url}" style="display: inline-block; padding: 12px 32px; background: #3B82F6; color: #ffffff; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600;">
+                        Go to Portal
+                    </a>
+                </div>
+            </div>
+            <div style="text-align: center; padding: 16px; color: #94A3B8; font-size: 11px;">
+                AuditGraph Identity Risk Platform &mdash; <a href="https://auditgraph.ai" style="color: #94A3B8;">auditgraph.ai</a>
+            </div>
+        </div>
+        """
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        except Exception as e:
+            logger.error(f"Failed to send welcome email: {e}")
+            return False
+        finally:
+            loop.close()
+
     def _generate_executive_summary_html(
         self, stats: Dict, credential_health: Dict, conditional_access: Dict,
         remediation_summary: Dict, previous_run, org_name: str, collected_at: str

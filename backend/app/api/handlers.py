@@ -7155,7 +7155,7 @@ def export_data(export_type):
     Returns structured JSON for client-side CSV/JSON file generation.
     Supported types: identities, compliance, drift, risk-summary
     """
-    VALID_TYPES = {'identities', 'compliance', 'drift', 'risk-summary', 'evidence-package', 'sensitive-data'}
+    VALID_TYPES = {'identities', 'compliance', 'drift', 'risk-summary', 'evidence-package', 'sensitive-data', 'evidence-json'}
     if export_type not in VALID_TYPES:
         return jsonify({'error': f'Invalid export type. Valid: {", ".join(sorted(VALID_TYPES))}'}), 400
 
@@ -7171,6 +7171,8 @@ def export_data(export_type):
         return _export_evidence_package()
     elif export_type == 'sensitive-data':
         return _export_sensitive_data()
+    elif export_type == 'evidence-json':
+        return _export_evidence_json()
 
 
 def _export_identities():
@@ -7754,6 +7756,193 @@ def _export_sensitive_data():
             },
             'classified_resources': classified,
             'access_map': access_map,
+        })
+    finally:
+        db.close()
+
+
+# ─── GRC Evidence JSON (Gate 32) ──────────────────────────────────────────
+
+def _export_evidence_json():
+    """
+    GET /api/export/evidence-json
+    Comprehensive JSON evidence package for GRC/SIEM integration.
+    Bundles identity inventory, compliance posture, risk summary,
+    drift changes, remediation status, and sensitive data into a
+    single structured document with OSCAL-aligned metadata.
+    """
+    db = _db()
+    try:
+        tid = _tenant_id()
+        conn_id = _connection_id()
+        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, tid, conn_id)
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        now = datetime.utcnow().isoformat()
+
+        # --- 1. Run metadata ---
+        cursor.execute("""
+            SELECT id, started_at, completed_at, status,
+                   total_identities, critical_count, high_count, medium_count, low_count, info_count,
+                   cloud_connection_id
+            FROM discovery_runs WHERE id = ANY(%s) ORDER BY completed_at DESC
+        """, (run_ids,))
+        runs = []
+        for r in cursor.fetchall():
+            rd = dict(r)
+            for k in ('started_at', 'completed_at'):
+                if rd.get(k):
+                    rd[k] = rd[k].isoformat()
+            runs.append(rd)
+
+        # --- 2. Identity inventory summary ---
+        cursor.execute("""
+            SELECT risk_level, COUNT(*) as cnt
+            FROM identities WHERE discovery_run_id = ANY(%s)
+              AND NOT COALESCE(is_microsoft_system, false)
+            GROUP BY risk_level
+        """, (run_ids,))
+        risk_dist = {row['risk_level']: row['cnt'] for row in cursor.fetchall()}
+        total_identities = sum(risk_dist.values())
+
+        cursor.execute("""
+            SELECT identity_category, COUNT(*) as cnt
+            FROM identities WHERE discovery_run_id = ANY(%s)
+              AND NOT COALESCE(is_microsoft_system, false)
+            GROUP BY identity_category
+        """, (run_ids,))
+        category_dist = {row['identity_category']: row['cnt'] for row in cursor.fetchall()}
+
+        # Top 25 critical/high risk identities
+        cursor.execute("""
+            SELECT identity_id, display_name, identity_category, risk_level, risk_score,
+                   status, credential_count, has_expired_credentials
+            FROM identities WHERE discovery_run_id = ANY(%s)
+              AND risk_level IN ('critical','high')
+              AND NOT COALESCE(is_microsoft_system, false)
+            ORDER BY risk_score DESC LIMIT 25
+        """, (run_ids,))
+        top_risks = [dict(row) for row in cursor.fetchall()]
+
+        # --- 3. Compliance posture ---
+        compliance_section = []
+        try:
+            from app.engines.compliance import COMPLIANCE_FRAMEWORKS, evaluate_framework
+            for fw in COMPLIANCE_FRAMEWORKS:
+                result = evaluate_framework(cursor, fw, run_ids, tid)
+                if result:
+                    compliance_section.append(result)
+        except Exception:
+            pass
+
+        # --- 4. Drift summary (latest) ---
+        drift_section = None
+        try:
+            cursor.execute("""
+                SELECT id, run_id, created_at, summary
+                FROM drift_reports
+                WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1
+            """, (tid,))
+            drift_row = cursor.fetchone()
+            if drift_row:
+                drift_section = {
+                    'report_id': drift_row['id'],
+                    'run_id': drift_row['run_id'],
+                    'created_at': drift_row['created_at'].isoformat() if drift_row.get('created_at') else None,
+                    'summary': drift_row.get('summary') or {},
+                }
+        except Exception:
+            pass
+
+        # --- 5. Remediation status ---
+        remediation_section = {}
+        try:
+            cursor.execute("""
+                SELECT status, COUNT(*) as cnt
+                FROM remediation_actions
+                WHERE tenant_id = %s
+                GROUP BY status
+            """, (tid,))
+            remediation_section = {row['status']: row['cnt'] for row in cursor.fetchall()}
+        except Exception:
+            pass
+
+        # --- 6. Credential health ---
+        cred_section = {}
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE credential_count > 0) as with_credentials,
+                    COUNT(*) FILTER (WHERE has_expired_credentials = true) as expired,
+                    COUNT(*) FILTER (WHERE credential_count = 0) as no_credentials,
+                    COUNT(*) as total
+                FROM identities WHERE discovery_run_id = ANY(%s)
+                  AND NOT COALESCE(is_microsoft_system, false)
+            """, (run_ids,))
+            cred_row = cursor.fetchone()
+            if cred_row:
+                cred_section = dict(cred_row)
+        except Exception:
+            pass
+
+        # --- 7. Sensitive data classifications ---
+        sensitive_section = {}
+        try:
+            _ensure_resource_tables(db)
+            classified_counts = {}
+            for table in ['azure_storage_accounts', 'azure_key_vaults']:
+                cursor.execute(f"""
+                    SELECT data_classification, COUNT(*) as cnt
+                    FROM {table}
+                    WHERE discovery_run_id = ANY(%s) AND data_classification IS NOT NULL
+                    GROUP BY data_classification
+                """, (run_ids,))
+                for row in cursor.fetchall():
+                    c = row['data_classification']
+                    classified_counts[c] = classified_counts.get(c, 0) + row['cnt']
+            sensitive_section = {
+                'total_classified': sum(classified_counts.values()),
+                'by_classification': classified_counts,
+            }
+        except Exception:
+            pass
+
+        cursor.close()
+
+        try:
+            _log(db, 'export', 'GRC evidence JSON export generated',
+                 {'export_type': 'evidence-json'})
+        except Exception:
+            pass
+
+        return jsonify({
+            'schema': 'auditgraph-grc-evidence-v1',
+            'export_type': 'evidence-json',
+            'metadata': {
+                'organization': org_name or 'Organization',
+                'generated_at': now,
+                'generator': 'AuditGraph Identity Risk Platform',
+                'version': '3.4.0',
+                'tenant_id': tid,
+                'connection_id': conn_id,
+                'discovery_runs': len(runs),
+            },
+            'discovery_runs': runs,
+            'identity_inventory': {
+                'total': total_identities,
+                'risk_distribution': risk_dist,
+                'category_distribution': category_dist,
+                'top_risks': top_risks,
+            },
+            'compliance_posture': compliance_section,
+            'drift_summary': drift_section,
+            'remediation_status': remediation_section,
+            'credential_health': cred_section,
+            'sensitive_data': sensitive_section,
         })
     finally:
         db.close()
@@ -9769,6 +9958,16 @@ def create_tenant_handler():
             except Exception:
                 pass
 
+        # Send welcome email to root user
+        if root_user and root_email:
+            try:
+                from app.services.email_service import EmailService
+                email_svc = EmailService()
+                portal_url = f"https://{slug}.auditgraph.ai"
+                email_svc.send_welcome_email(root_email, name, portal_url, root_username)
+            except Exception as e:
+                logger.warning(f"Failed to send welcome email: {e}")
+
         result = {'tenant': tenant, 'message': 'Tenant created'}
         if root_user:
             result['root_user'] = {k: v for k, v in root_user.items() if k != 'password_hash'}
@@ -9914,6 +10113,46 @@ def get_tenant_config():
         if not cfg:
             return jsonify({'error': 'Tenant not found'}), 404
         return jsonify(cfg)
+    finally:
+        db.close()
+
+
+def get_tenant_entitlements():
+    """GET /api/tenant/entitlements — plan limits and feature gates for the current tenant."""
+    tid = _tenant_id()
+    from app.pricing import PLAN_LIMITS
+    db = _db()
+    try:
+        admin_db = Database()
+        try:
+            tenant = admin_db.get_tenant_by_id(tid) if tid else None
+        finally:
+            admin_db.close()
+
+        plan = (tenant or {}).get('plan', 'free')
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get('free', {}))
+
+        # Get current usage
+        stats = db.get_subscription_stats(tid) if tid else {}
+        active_subs = stats.get('active', 0)
+
+        # Feature gate list
+        blocked = []
+        if plan == 'free':
+            blocked = ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot',
+                        'scheduled_reports', 'compliance_export', 'sso']
+        elif plan == 'trial':
+            blocked = []
+
+        return jsonify({
+            'plan': plan,
+            'limits': limits,
+            'usage': {
+                'active_subscriptions': active_subs,
+            },
+            'blocked_features': blocked,
+            'subscription_term': (tenant or {}).get('subscription_term', 0),
+        })
     finally:
         db.close()
 
@@ -10250,22 +10489,76 @@ def get_login_sessions():
 # ── Phase 48: Onboarding Wizard ─────────────────────────────────
 
 def get_onboarding_status():
-    """Check if the current tenant has completed onboarding."""
+    """Check if the current tenant has completed onboarding. Returns checklist progress."""
     db = _db()
     try:
         tid = _tenant_id()
         settings = db.get_settings(tenant_id=tid)
         completed = settings.get('onboarding_completed', 'false') == 'true'
-        # Only check tenant's own DB settings — env vars are system credentials.
         azure_configured = all([
             settings.get('azure_tenant_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
         ])
+
+        # Build onboarding checklist
+        checklist = [
+            {
+                'key': 'org_name',
+                'label': 'Set organization name',
+                'done': bool(settings.get('org_name')),
+            },
+            {
+                'key': 'cloud_connected',
+                'label': 'Connect a cloud provider',
+                'done': azure_configured,
+            },
+            {
+                'key': 'first_scan',
+                'label': 'Run first discovery scan',
+                'done': False,
+            },
+            {
+                'key': 'review_identities',
+                'label': 'Review discovered identities',
+                'done': False,
+            },
+            {
+                'key': 'notifications',
+                'label': 'Configure notifications',
+                'done': settings.get('email_enabled') == 'true' or settings.get('slack_webhook_url') or settings.get('teams_webhook_url'),
+            },
+        ]
+
+        # Check if first scan completed
+        cursor = db.conn.cursor()
+        try:
+            run_ids = _latest_run_ids(cursor, tid, None)
+            if run_ids:
+                checklist[2]['done'] = True
+                # Check if any identity was viewed (proxy for "reviewed")
+                cursor.execute("""
+                    SELECT COUNT(*) FROM activity_log
+                    WHERE tenant_id = %s AND action = 'identity_viewed'
+                    LIMIT 1
+                """, (tid,))
+                row = cursor.fetchone()
+                if row and row[0] > 0:
+                    checklist[3]['done'] = True
+        except Exception:
+            pass
+        finally:
+            cursor.close()
+
+        done_count = sum(1 for c in checklist if c['done'])
+
         return jsonify({
             'onboarding_completed': completed,
             'azure_configured': azure_configured,
             'has_settings': bool(settings),
+            'checklist': checklist,
+            'checklist_progress': done_count,
+            'checklist_total': len(checklist),
         })
     finally:
         db.close()
@@ -14282,6 +14575,68 @@ def get_system_health():
         db.close()
 
 
+def get_sla_metrics():
+    """GET /api/system/sla — SLA monitoring metrics."""
+    from app.metrics import MetricsCollector
+    db = _db()
+    try:
+        metrics = MetricsCollector.get()
+        summary = metrics.get_summary()
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Calculate uptime from request data
+        total_requests = summary.get('total_requests', 0)
+        error_count = summary.get('total_errors', 0)
+        uptime_pct = round((1 - (error_count / max(total_requests, 1))) * 100, 3)
+
+        # Discovery latency (avg duration of last 20 runs)
+        cursor.execute("""
+            SELECT AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) as avg_sec,
+                   MAX(EXTRACT(EPOCH FROM (completed_at - started_at))) as max_sec,
+                   MIN(EXTRACT(EPOCH FROM (completed_at - started_at))) as min_sec,
+                   COUNT(*) as total_runs,
+                   COUNT(*) FILTER (WHERE status = 'completed') as completed_runs,
+                   COUNT(*) FILTER (WHERE status = 'failed') as failed_runs
+            FROM discovery_runs
+            WHERE started_at > NOW() - INTERVAL '30 days'
+        """)
+        scan_stats = dict(cursor.fetchone() or {})
+        for k in ('avg_sec', 'max_sec', 'min_sec'):
+            if scan_stats.get(k) is not None:
+                scan_stats[k] = round(float(scan_stats[k]), 1)
+
+        scan_success_rate = 0
+        total_scans = (scan_stats.get('completed_runs', 0) or 0) + (scan_stats.get('failed_runs', 0) or 0)
+        if total_scans > 0:
+            scan_success_rate = round(((scan_stats.get('completed_runs', 0) or 0) / total_scans) * 100, 1)
+
+        # API response time percentiles
+        avg_latency = summary.get('avg_latency_ms', 0)
+        p95_latency = summary.get('p95_latency_ms', 0)
+
+        # SLA targets and compliance
+        sla_targets = {
+            'availability': {'target': 99.9, 'actual': uptime_pct, 'met': uptime_pct >= 99.9},
+            'api_latency_p95': {'target': 500, 'actual': p95_latency, 'unit': 'ms', 'met': p95_latency <= 500},
+            'scan_success_rate': {'target': 95.0, 'actual': scan_success_rate, 'met': scan_success_rate >= 95.0},
+        }
+
+        cursor.close()
+        return jsonify({
+            'uptime_pct': uptime_pct,
+            'total_requests': total_requests,
+            'error_count': error_count,
+            'avg_latency_ms': avg_latency,
+            'p95_latency_ms': p95_latency,
+            'scan_stats': scan_stats,
+            'scan_success_rate': scan_success_rate,
+            'sla_targets': sla_targets,
+        })
+    finally:
+        db.close()
+
+
 # ═══════════════════════════════════════════════════════════════════
 # SPN Dashboard (Phase 71)
 # ═══════════════════════════════════════════════════════════════════
@@ -17197,6 +17552,55 @@ def get_client_billing_summary():
         return jsonify({
             'plan': tenant.get('plan'),
             'billing': billing,
+        })
+    finally:
+        db.close()
+
+
+def get_client_usage_metering():
+    """GET /api/client/billing/usage — current usage vs plan limits."""
+    from app.pricing import PLAN_LIMITS
+    tid = _tenant_id()
+    admin_db = Database()
+    try:
+        tenant = admin_db.get_tenant_by_id(tid)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+    finally:
+        admin_db.close()
+
+    plan = tenant.get('plan', 'free')
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get('free', {}))
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        # Get identity count
+        run_ids = _latest_run_ids(cursor, tid, None)
+        identity_count = 0
+        if run_ids:
+            cursor.execute("""
+                SELECT COUNT(*) FROM identities
+                WHERE discovery_run_id = ANY(%s) AND NOT COALESCE(is_microsoft_system, false)
+            """, (run_ids,))
+            identity_count = cursor.fetchone()[0]
+
+        # Get subscription count
+        stats = db.get_subscription_stats(tid)
+        active_subs = stats.get('active', 0)
+        cursor.close()
+
+        max_ids = limits.get('max_identities')
+        max_subs = limits.get('max_active_subs')
+
+        return jsonify({
+            'plan': plan,
+            'identity_count': identity_count,
+            'identity_limit': max_ids,
+            'identity_pct': round(identity_count / max_ids * 100, 1) if max_ids else None,
+            'subscription_count': active_subs,
+            'subscription_limit': max_subs,
+            'subscription_pct': round(active_subs / max_subs * 100, 1) if max_subs else None,
+            'discovery_runs_last_30d': stats.get('total', 0),
         })
     finally:
         db.close()
