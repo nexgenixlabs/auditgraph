@@ -400,7 +400,7 @@ export default function AdminTenants() {
         <div className="bg-white border border-red-200 rounded-lg p-6 shadow-sm">
           <h3 className="text-sm font-semibold text-red-700 mb-2">Delete Organization</h3>
           <p className="text-xs text-gray-600 mb-3">
-            This will permanently delete <span className="font-semibold">{showDeleteConfirm.name}</span> and all associated data including users, discovery runs, and settings. This action cannot be undone.
+            This will permanently delete <span className="font-semibold">{showDeleteConfirm.name}</span> and all associated data including users, snapshots, and settings. This action cannot be undone.
           </p>
           <div className="mb-3">
             <label className="block text-xs font-medium text-gray-600 mb-1">
@@ -872,7 +872,7 @@ export default function AdminTenants() {
           </div>
 
           {/* Dark Billing Summary Card */}
-          <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
+          <div className="bg-gray-900 px-6 py-5">
             {/* Line items from billing API */}
             <div className="space-y-1.5 mb-3">
               {tenantBilling ? (
@@ -954,7 +954,7 @@ export default function AdminTenants() {
             <button
               onClick={handleSaveConfig}
               disabled={configSaving}
-              className="w-full mt-4 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-bold rounded-lg hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition"
+              className="w-full mt-4 py-2.5 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
             >
               {configSaving ? 'Saving...' : 'Save & Apply Changes'}
             </button>

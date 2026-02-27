@@ -272,14 +272,14 @@ export default function Dashboard() {
     navigate(`/identities?risk_level=${level}`);
   };
 
-  // ── Discovery Run Trigger ──────────────────────────────────────
+  // ── Snapshot Trigger ──────────────────────────────────────
 
   const triggerDiscovery = useCallback(async () => {
     setDiscoveryRunning(true);
     try {
       const res = await fetch('/api/runs/trigger', { method: 'POST' });
       if (!res.ok) throw new Error('Trigger failed');
-      addToast('Discovery run started', 'success');
+      addToast('Snapshot capture started', 'success');
       const poll = setInterval(async () => {
         const runsRes = await fetch('/api/runs');
         if (runsRes.ok) {
@@ -288,14 +288,14 @@ export default function Dashboard() {
           if (latest?.status === 'completed') {
             clearInterval(poll);
             setDiscoveryRunning(false);
-            addToast('Discovery completed! Refreshing...', 'success');
+            addToast('Snapshot complete! Refreshing...', 'success');
             window.location.reload();
           }
         }
       }, 5000);
-      setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Discovery timed out. Check runs panel for status.', 'error'); }, 600000);
+      setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Snapshot timed out. Check snapshot history for status.', 'error'); }, 600000);
     } catch (e: any) {
-      addToast(e?.message || 'Failed to trigger discovery run', 'error');
+      addToast(e?.message || 'Failed to trigger snapshot', 'error');
       setDiscoveryRunning(false);
     }
   }, [addToast]);
@@ -315,9 +315,21 @@ export default function Dashboard() {
             Operational identity risk monitoring — What happened?
           </p>
           {latest?.completed_at && (
-            <p className="text-xs mt-0.5" style={{ color: COLORS.textMuted }}>
-              Data as of {formatDate(latest.completed_at, 'No data')} · Run #{stats?.latest_run?.id}
-            </p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-xs" style={{ color: COLORS.textMuted }}>
+                Data as of {formatDate(latest.completed_at, 'No data')} · Snapshot #{stats?.latest_run?.id}
+              </p>
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-semibold uppercase tracking-wide" title="Snapshot data is immutable — it reflects the state at capture time">
+                <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                Immutable
+              </span>
+              <button
+                onClick={() => navigate('/drift')}
+                className="text-[10px] text-blue-500 hover:text-blue-700 font-medium"
+              >
+                Compare Snapshots →
+              </button>
+            </div>
           )}
         </div>
         <div className="flex items-center gap-3">
@@ -339,7 +351,7 @@ export default function Dashboard() {
             ) : (
               <>
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                Run Discovery
+                Capture Snapshot
               </>
             )}
           </button>
@@ -418,7 +430,7 @@ export default function Dashboard() {
               {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('high')} color="#f97316" width={200} height={28} /></div>}
             </div>
             <div>
-              <StatsCard title="Discovery Runs" value={stats?.total_discovery_runs ?? 0} icon="🔄" color="gray"
+              <StatsCard title="Snapshots" value={stats?.total_discovery_runs ?? 0} icon="🔄" color="gray"
                 onClick={() => setShowRuns(!showRuns)} />
               {trends.length >= 2 && (
                 <div className="mt-1 px-3">
@@ -455,7 +467,7 @@ export default function Dashboard() {
 
           {/* Tab 1: Exposure & Risk */}
           {activeTab === 'exposure' && (
-            <div className="space-y-6">
+            <div className="space-y-4">
               {/* Row 1: Anomaly Alerts (full width — promoted to top) */}
               <div id="anomaly-alerts">
                 <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
@@ -509,7 +521,7 @@ export default function Dashboard() {
 
           {/* Tab 2: Credential Intelligence */}
           {activeTab === 'credential' && (
-            <div className="space-y-6">
+            <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {posture && (
                   <CredentialHealth expired={posture.credential_health.expired} expiringSoon={posture.credential_health.expiring_soon}
@@ -528,11 +540,11 @@ export default function Dashboard() {
               {!loading && !stats?.latest_run && (
                 <div className="bg-white rounded-xl p-8 text-center" style={{ border: `1px solid ${COLORS.border}` }}>
                   <div className="text-sm font-medium mb-2" style={{ color: COLORS.textSecondary }}>No trust & access data available</div>
-                  <p className="text-xs mb-4" style={{ color: COLORS.textMuted }}>Run a discovery scan to populate trust and access relationships.</p>
+                  <p className="text-xs mb-4" style={{ color: COLORS.textMuted }}>Capture a snapshot to populate trust and access relationships.</p>
                   <button onClick={triggerDiscovery} disabled={discoveryRunning}
                     className="px-4 py-2 text-sm font-medium text-white rounded-lg transition hover:opacity-90"
                     style={{ backgroundColor: COLORS.brand }}>
-                    Run Discovery
+                    Capture Snapshot
                   </button>
                 </div>
               )}
@@ -541,7 +553,7 @@ export default function Dashboard() {
 
           {/* Tab 4: Usage & Optimization */}
           {activeTab === 'usage' && (
-            <div className="space-y-6">
+            <div className="space-y-4">
               {/* Usage summary cards */}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
@@ -586,7 +598,7 @@ export default function Dashboard() {
 
           {/* Tab 5: Governance & Compliance */}
           {activeTab === 'governance' && (
-            <div className="space-y-6">
+            <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <ComplianceScorecard data={compliance} loading={loading} />
                 <ConditionalAccessCard data={caData} loading={loading} />
@@ -600,7 +612,7 @@ export default function Dashboard() {
 
           {/* Tab 6: Platform & Discovery */}
           {activeTab === 'platform' && (
-            <div className="space-y-6">
+            <div className="space-y-4">
               {summary?.monitored_resources && (
                 <CloudContextBanner monitoredResources={summary.monitored_resources} />
               )}
@@ -615,22 +627,22 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Discovery Runs Panel (toggled, not part of tab system) */}
+          {/* Snapshot History Panel (toggled, not part of tab system) */}
           {showRuns && (
             <div className="bg-white rounded-xl overflow-hidden mt-6" style={{ border: `1px solid ${COLORS.border}` }}>
               <div className="px-5 py-3 border-b flex items-center justify-between" style={{ backgroundColor: COLORS.borderLight, borderColor: COLORS.border }}>
-                <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>Discovery Run History</h3>
+                <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>Snapshot History</h3>
                 <button onClick={() => setShowRuns(false)} className="text-xs hover:opacity-70 transition" style={{ color: COLORS.textMuted }}>Close</button>
               </div>
               {runs.length === 0 ? (
-                <div className="p-6 text-sm text-center" style={{ color: COLORS.textMuted }}>No discovery runs found</div>
+                <div className="p-6 text-sm text-center" style={{ color: COLORS.textMuted }}>No snapshots found</div>
               ) : (
                 <div className="divide-y max-h-64 overflow-y-auto">
                   {runs.slice(0, 10).map((run: any, idx: number) => (
                     <div key={run.id || idx} className="px-5 py-3 flex items-center justify-between text-sm">
                       <div className="flex items-center gap-3">
                         <span className={`w-2 h-2 rounded-full ${run.status === 'completed' ? 'bg-green-500' : run.status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
-                        <span className="font-medium" style={{ color: COLORS.textPrimary }}>Run #{run.id}</span>
+                        <span className="font-medium" style={{ color: COLORS.textPrimary }}>Snapshot #{run.id}</span>
                         <span className="text-xs" style={{ color: COLORS.textSecondary }}>
                           {formatDate(run.completed_at, '') || formatDate(run.started_at, '') || '—'}
                         </span>

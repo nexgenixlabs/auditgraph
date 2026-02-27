@@ -109,7 +109,7 @@ export default function AdminOnboarding() {
   // Success state
   if (success) {
     return (
-      <div className="max-w-2xl mx-auto space-y-6">
+      <div className="max-w-2xl mx-auto space-y-4">
         <div className="bg-gray-900 border border-green-700 rounded-xl p-8 text-center">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-900/50 text-green-400 text-2xl mb-4">{'\u2713'}</div>
           <h3 className="text-lg font-bold text-white mb-2">Organization Created!</h3>
@@ -135,7 +135,7 @@ export default function AdminOnboarding() {
 
           <button
             onClick={handleCopyCredentials}
-            className="px-5 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-medium rounded-lg hover:from-blue-600 hover:to-cyan-600 transition"
+            className="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
           >
             {copied ? 'Copied!' : 'Copy Credentials'}
           </button>
@@ -154,7 +154,7 @@ export default function AdminOnboarding() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-2xl mx-auto space-y-4">
       <div>
         <h2 className="text-xl font-bold text-white">Client Onboarding</h2>
         <p className="text-sm text-gray-400 mt-0.5">Create a new organization with a single form</p>
@@ -419,7 +419,7 @@ export default function AdminOnboarding() {
           <button
             type="submit"
             disabled={!canSubmit || processing}
-            className="px-8 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-medium rounded-lg hover:from-blue-600 hover:to-cyan-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            className="px-8 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
             {processing ? 'Creating Organization...' : 'Create Organization'}
           </button>

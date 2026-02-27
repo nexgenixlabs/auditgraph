@@ -52,7 +52,7 @@ export default function AdminSLA() {
   const allMet = Object.values(targets).every(t => t.met);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold text-white">SLA Monitoring</h2>
@@ -117,7 +117,7 @@ export default function AdminSLA() {
         </div>
 
         <div className="bg-gray-900 border border-gray-700 rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-gray-300 mb-4">Discovery Scans (Last 30 Days)</h3>
+          <h3 className="text-sm font-semibold text-gray-300 mb-4">Snapshots (Last 30 Days)</h3>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <div className="text-2xl font-bold text-white">{data.scan_stats.total_runs}</div>

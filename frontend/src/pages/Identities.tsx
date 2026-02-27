@@ -9,7 +9,7 @@ import { queryIdentities, getQueryFields } from '../services/api';
 import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS } from '../utils/exportUtils';
+import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 import { maskCredential } from '../utils/maskCredential';
 import { STATUS_BADGE, type IdentityStatus } from '../utils/resolveStatus';
 import IdentityDrawer from '../components/IdentityDrawer';
@@ -96,7 +96,8 @@ type SortField =
   | 'dormant'
   | 'effective_scope'
   | 'credential_health'
-  | 'status';
+  | 'status'
+  | 'owner_display_name';
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -292,8 +293,8 @@ export default function IdentitiesPage() {
   const [showDeleted, setShowDeleted] = useState(false);
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
-  const [sortField, setSortField] = useState<SortField>('risk_level');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [sortField, setSortField] = useState<SortField>('display_name');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const [bulkLoading, setBulkLoading] = useState(false);
@@ -324,8 +325,11 @@ export default function IdentitiesPage() {
   const [drawerIdentityId, setDrawerIdentityId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'graph'>('table');
 
+  // Phase 7: Snapshot selector state
+  const [discoveryRuns, setDiscoveryRuns] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
+
   const { addToast } = useToast();
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, activeTenantId, activeTenantName } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -595,6 +599,14 @@ export default function IdentitiesPage() {
     fetch('/api/groups')
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => setAllGroups(d.groups || []))
+      .catch(() => {});
+  }, []);
+
+  // Phase 7: Load snapshots for selector
+  useEffect(() => {
+    fetch('/api/runs')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setDiscoveryRuns((d.runs || []).filter((r: any) => r.status === 'completed').slice(0, 10)))
       .catch(() => {});
   }, []);
 
@@ -983,6 +995,7 @@ export default function IdentitiesPage() {
           aVal = dormOrder[getDormantStatus(a)] || 0;
           bVal = dormOrder[getDormantStatus(b)] || 0;
           break;
+        case 'owner_display_name': aVal = safeLower(a.owner_display_name) || '\uffff'; bVal = safeLower(b.owner_display_name) || '\uffff'; break;
         case 'status': {
           const stOrd: Record<string, number> = { deleted: 4, disabled: 3, unknown: 2, active: 1 };
           aVal = stOrd[a.status || 'active'] || 0; bVal = stOrd[b.status || 'active'] || 0; break;
@@ -1114,16 +1127,18 @@ export default function IdentitiesPage() {
       privilege_tier: `T${getPrivilegeTier(i)}`,
       activity_status: getDormantStatus(i),
     }));
-    downloadCSV(data as Record<string, unknown>[], IDENTITY_CSV_COLUMNS, exportFilename('identities', 'csv'));
+    const meta = buildExportMeta(discoveryRuns[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    downloadCSV(data as Record<string, unknown>[], IDENTITY_CSV_COLUMNS, exportFilename('identities', 'csv'), meta);
     addToast(`Exported ${data.length} identities as CSV`, 'success');
   }
 
   function exportAllJSON() {
-    downloadJSON(filtered, exportFilename('identities', 'json'));
+    const meta = buildExportMeta(discoveryRuns[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    downloadJSON(filtered, exportFilename('identities', 'json'), meta);
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 11; // checkbox + 10 primary columns (added Status)
+  const colSpan = 10; // checkbox + 9 primary columns (Phase 4 inventory)
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1138,10 +1153,32 @@ export default function IdentitiesPage() {
           <p className="text-sm text-gray-500">
             {new URLSearchParams(location.search).get('identity_category') === 'guest'
               ? 'External users, guests, and B2B collaborators'
-              : 'Full identity inventory — click any row for deep-dive'}
+              : 'Canonical identity listing — click any row for deep-dive'}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Snapshot selector */}
+          {discoveryRuns.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-gray-500 uppercase font-semibold tracking-wide">Snapshot:</span>
+              <select
+                className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white text-gray-700 font-medium"
+                value={discoveryRuns[0]?.id ?? ''}
+                onChange={() => {/* display-only — API always returns latest snapshot */}}
+              >
+                {discoveryRuns.map((run, idx) => (
+                  <option key={run.id} value={run.id}>
+                    #{run.id} · {run.completed_at ? formatDate(run.completed_at) : 'In progress'} · {run.total_identities} identities{idx === 0 ? ' (latest)' : ''}
+                  </option>
+                ))}
+              </select>
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-semibold uppercase tracking-wide" title="Snapshot data is immutable — it reflects the state at capture time">
+                <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                Immutable
+              </span>
+            </div>
+          )}
+          <span className="w-px h-5 bg-gray-300" />
           {/* View toggle */}
           <div className="flex border rounded-lg overflow-hidden">
             <button
@@ -1233,6 +1270,17 @@ export default function IdentitiesPage() {
         </div>
       </div>
 
+      {/* Export Metadata Strip */}
+      {discoveryRuns.length > 0 && (
+        <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50 mb-1">
+          <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
+          <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{discoveryRuns[0]?.id}</span></span>
+          <span>Captured: <span className="font-mono font-semibold text-gray-700">{discoveryRuns[0]?.completed_at ? new Date(discoveryRuns[0].completed_at).toLocaleString() : 'In progress'}</span></span>
+          <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
+        </div>
+      )}
+
       {/* Saved Views Bar */}
       {savedViews.length > 0 || !loading ? (
         <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1">
@@ -1307,7 +1355,7 @@ export default function IdentitiesPage() {
       {/* Delete Confirmation */}
       {deleteConfirmId !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4 p-5">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-sm mx-4 p-5">
             <h3 className="text-base font-bold text-gray-900 mb-2">Delete View?</h3>
             <p className="text-sm text-gray-600 mb-4">
               This saved view will be permanently removed.
@@ -1323,7 +1371,7 @@ export default function IdentitiesPage() {
       {/* Save View Modal */}
       {saveModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+          <div className="bg-white rounded-2xl shadow-lg w-full max-w-md mx-4 p-6">
             <h3 className="text-lg font-bold text-gray-900 mb-4">
               {editingView ? 'Edit View' : 'Save Current Filters as View'}
             </h3>
@@ -1568,29 +1616,7 @@ export default function IdentitiesPage() {
         </div>
       )}
 
-      {/* KPI Summary Strip */}
-      {!loading && identities.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 mb-3">
-          {[
-            { label: 'Total', value: identities.length, onClick: () => { setRiskFilter('all'); setCategoryFilter('all'); setActivityFilter('all'); setCredentialFilter('all'); setTierFilter('all'); navigate('/identities', { replace: true }); } },
-            { label: 'Privileged', value: identities.filter(i => i.privileged_level === 'privileged').length, color: 'text-red-700 bg-red-50 border-red-200', onClick: () => { setTierFilter([0]); navigate('/identities?privilege_tier=0', { replace: true }); } },
-            { label: 'NHI', value: identities.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || '')).length, color: 'text-purple-700 bg-purple-50 border-purple-200', onClick: () => { setWorkloadFilter(true); navigate('/identities?workload=true', { replace: true }); } },
-            { label: 'External', value: identities.filter(i => i.identity_category === 'guest').length, color: 'text-pink-700 bg-pink-50 border-pink-200', onClick: () => { setCategoryFilter('guest'); navigate('/identities?identity_category=guest', { replace: true }); } },
-            { label: 'Zombie', value: identities.filter(i => { const d = getDormantStatus(i); return d === 'yes' || d === 'never'; }).length, color: 'text-orange-700 bg-orange-50 border-orange-200', onClick: () => { setActivityFilter('dormant'); navigate('/identities?activity_status=dormant', { replace: true }); } },
-            { label: 'Cred Risk', value: identities.filter(i => i.credential_health === 'expired' || i.credential_health === 'expiring').length, color: 'text-amber-700 bg-amber-50 border-amber-200', onClick: () => { setCredentialFilter('expired'); navigate('/identities?credential_status=expired', { replace: true }); } },
-            { label: 'High/Crit', value: identities.filter(i => i.risk_level === 'critical' || i.risk_level === 'high').length, color: 'text-red-700 bg-red-50 border-red-200', onClick: () => { setRiskFilter('critical'); navigate('/identities?risk_level=critical', { replace: true }); } },
-          ].map(kpi => (
-            <button
-              key={kpi.label}
-              onClick={kpi.onClick}
-              className={`flex flex-col items-center p-2.5 rounded-xl border transition hover:shadow-sm cursor-pointer ${kpi.color || 'text-gray-700 bg-white border-gray-200'}`}
-            >
-              <span className="text-lg font-bold">{kpi.value}</span>
-              <span className="text-[10px] font-medium uppercase tracking-wide">{kpi.label}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      {/* KPI Summary Strip — removed in Phase 4 (enterprise cleanup) */}
 
       {/* Exposure Graph (V2 Phase 5) */}
       {viewMode === 'graph' && (
@@ -1612,24 +1638,23 @@ export default function IdentitiesPage() {
                     className="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer" />
                 </th>
                 <SortHeader label="Identity" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Category" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Privileged" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Scope" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Credentials" field="credential_health" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Created" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Last Used" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Type" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Owner" field="owner_display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Effective Access" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Sensitive Access" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Last Seen" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="First Seen" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-gray-500">Loading…</td></tr>
+                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">Loading…</td></tr>
               ) : error ? (
-                <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-red-600">{error}</td></tr>
+                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-gray-500">No identities match filters.</td></tr>
+                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">No identities match filters.</td></tr>
               ) : filtered.map(i => (
                   <tr key={i.identity_id}
                     className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''} ${drawerIdentityId === i.identity_id ? 'bg-blue-100' : ''}`}
@@ -1652,54 +1677,18 @@ export default function IdentitiesPage() {
                       </div>
                     </td>
 
-                    {/* Category */}
+                    {/* Type (Category) */}
                     <td className="px-2 py-2"><CategoryBadge category={i.identity_category} cloud={i.cloud} /></td>
 
-                    {/* Privileged */}
-                    <td className="px-2 py-2">
-                      <div className="flex items-center gap-1">
-                        <PrivilegedBadge level={i.privileged_level} />
-                        {(i.pim_eligible_count ?? 0) > 0 && (
-                          <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700" title={`${i.pim_eligible_count} PIM eligible`}>PIM</span>
-                        )}
-                      </div>
-                    </td>
+                    {/* Cloud */}
+                    <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
 
-                    {/* Effective Scope */}
-                    <td className="px-2 py-2"><ScopeBadge scope={i.effective_scope} cloud={i.cloud} /></td>
-
-                    {/* Risk */}
+                    {/* Owner */}
                     <td className="px-2 py-2">
-                      <div className="flex items-center gap-1">
-                        <RiskBadge level={i.risk_level} score={i.risk_score} />
-                        <span title={
-                          i.ca_coverage_status
-                            ? `CA: ${i.ca_coverage_status}${i.ca_mfa_enforced ? ' + MFA' : ''}`
-                            : DATA_EXPLANATIONS.CA_POLICY
-                        }>
-                          <svg className={`w-3 h-3 ${
-                            !i.ca_coverage_status ? 'text-gray-300' :
-                            i.ca_coverage_status === 'covered' && i.ca_mfa_enforced ? 'text-green-500' :
-                            i.ca_coverage_status === 'covered' ? 'text-yellow-500' :
-                            'text-red-400'
-                          }`} fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" />
-                          </svg>
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* Credential Health */}
-                    <td className="px-2 py-2">
-                      {i.identity_category === 'human_user' || i.identity_category === 'guest' ? (
-                        <span className="text-[10px] text-gray-300" title={DATA_EXPLANATIONS.CREDENTIAL_NA}>N/A</span>
+                      {i.owner_display_name ? (
+                        <span className="text-gray-700 text-[11px] truncate block max-w-[140px]" title={i.owner_display_name}>{i.owner_display_name}</span>
                       ) : (
-                        <div className="flex items-center gap-1">
-                          <CredentialHealthBadge health={i.credential_health} />
-                          {i.credential_health !== 'none' && (i.credential_count ?? 0) > 0 && (
-                            <span className="text-[10px] text-gray-400">{i.credential_count}</span>
-                          )}
-                        </div>
+                        <span className="text-[10px] text-gray-400 italic">No owner</span>
                       )}
                     </td>
 
@@ -1708,16 +1697,15 @@ export default function IdentitiesPage() {
                       <StatusBadge status={i.status} />
                     </td>
 
-                    {/* Created */}
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      {i.created_datetime ? (
-                        <span className="text-gray-600">{formatDate(i.created_datetime)}</span>
-                      ) : (
-                        <span className="text-[10px] text-gray-400 italic">—</span>
-                      )}
+                    {/* Effective Access Level (Privilege Tier) */}
+                    <td className="px-2 py-2">
+                      <PrivilegedBadge level={i.privileged_level} />
                     </td>
 
-                    {/* Last Used */}
+                    {/* Sensitive Access (Scope) */}
+                    <td className="px-2 py-2"><ScopeBadge scope={i.effective_scope} cloud={i.cloud} /></td>
+
+                    {/* Last Seen */}
                     <td className="px-2 py-2 whitespace-nowrap">
                       {i.last_seen_auth ? (
                         <span className="text-gray-600">{formatDate(i.last_seen_auth)}</span>
@@ -1726,8 +1714,14 @@ export default function IdentitiesPage() {
                       )}
                     </td>
 
-                    {/* Cloud */}
-                    <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
+                    {/* First Seen */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {i.created_datetime ? (
+                        <span className="text-gray-600">{formatDate(i.created_datetime)}</span>
+                      ) : (
+                        <span className="text-[10px] text-gray-400 italic">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
             </tbody>
@@ -1736,10 +1730,6 @@ export default function IdentitiesPage() {
       </div>
 
       <div className="mt-3 text-[11px] text-gray-400 text-center">
-        Privileged = T0 Global Admin, Priv Role Admin |
-        Elevated = T1 User Admin, Contributor |
-        Standard = T2-T3 scoped/no privileged roles.
-        Scope = broadest level of access (Tenant &gt; Directory &gt; Subscription &gt; RG &gt; Resource).
         Click any row to inspect.
       </div>
       </>)}
@@ -1747,7 +1737,7 @@ export default function IdentitiesPage() {
       {/* Bulk Action Confirmation Modal */}
       {bulkConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+          <div className="bg-white rounded-2xl shadow-lg w-full max-w-md mx-4 p-6">
             <h3 className="text-lg font-bold text-gray-900 mb-2">Confirm Bulk Action</h3>
             <p className="text-sm text-gray-600 mb-4">
               Apply <span className="font-semibold text-gray-900">{bulkConfirm.label}</span> to

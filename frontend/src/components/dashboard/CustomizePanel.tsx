@@ -42,7 +42,7 @@ export default function CustomizePanel({
       <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
 
       {/* Panel */}
-      <div className="fixed inset-y-0 right-0 z-50 w-full max-w-sm bg-white shadow-2xl border-l flex flex-col">
+      <div className="fixed inset-y-0 right-0 z-50 w-full max-w-sm bg-white shadow-lg border-l flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b">
           <div>

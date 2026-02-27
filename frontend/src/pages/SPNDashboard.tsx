@@ -6,9 +6,10 @@ import {
   getExposureLevel, EXPOSURE_LEVEL_CONFIG,
   LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG,
 } from '../constants/metrics';
-import { downloadCSV, exportFilename } from '../utils/exportUtils';
+import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { generateSPNReport } from '../utils/spnPdfGenerator';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -242,10 +243,10 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
 
   return (
     <>
-      <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 bg-black/60" onClick={onClose} />
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
         <div
-          className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+          className="bg-white rounded-xl shadow-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col"
           onClick={e => e.stopPropagation()}
         >
           {/* Header */}
@@ -278,7 +279,7 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
           </div>
 
           {/* Scrollable content */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-6 space-y-4">
             {/* Critical Overrides banner */}
             {exp.critical_overrides.length > 0 && (
               <div className="bg-red-50 border border-red-300 rounded-lg p-3">
@@ -456,10 +457,12 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
 export default function SPNDashboard() {
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
+  const { user, activeTenantId, activeTenantName } = useAuth();
 
   const [stats, setStats] = useState<SPNStats | null>(null);
   const [spns, setSpns] = useState<SPNRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [latestSnapshotId, setLatestSnapshotId] = useState<number | null>(null);
   const [initialized, setInitialized] = useState(false);
 
   // Filters
@@ -487,6 +490,17 @@ export default function SPNDashboard() {
     if (p.get('search')) setSearch(p.get('search') || '');
     setInitialized(true);
   }, [location.search]);
+
+  // Fetch latest snapshot ID for export metadata
+  useEffect(() => {
+    fetch(withConnection('/api/runs'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const runs = data?.runs || data || [];
+        if (Array.isArray(runs) && runs.length > 0) setLatestSnapshotId(runs[0].id);
+      })
+      .catch(() => {});
+  }, [withConnection]);
 
   // Fetch stats
   useEffect(() => {
@@ -604,12 +618,14 @@ export default function SPNDashboard() {
   ], []);
 
   const handleCSVExport = useCallback(() => {
+    const meta = buildExportMeta(latestSnapshotId, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
     downloadCSV(
       exportData as unknown as Record<string, unknown>[],
       SPN_CSV_COLS,
-      exportFilename('spn-exposure-audit', 'csv')
+      exportFilename('spn-exposure-audit', 'csv'),
+      meta
     );
-  }, [exportData, SPN_CSV_COLS]);
+  }, [exportData, SPN_CSV_COLS, latestSnapshotId, activeTenantId, activeTenantName, user]);
 
   const [pdfGenerating, setPdfGenerating] = useState(false);
 
@@ -681,6 +697,16 @@ export default function SPNDashboard() {
           </label>
         </div>
       </div>
+
+      {/* Export Metadata Strip */}
+      {latestSnapshotId && (
+        <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50">
+          <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
+          <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{latestSnapshotId}</span></span>
+          <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
+        </div>
+      )}
 
       {/* Critical Exposure Banner */}
       {!bannerDismissed && criticalExposureCount > 0 && (
@@ -817,7 +843,7 @@ export default function SPNDashboard() {
               {loading ? (
                 <tr><td colSpan={8} className="px-3 py-8 text-center text-gray-400">Loading workload identities...</td></tr>
               ) : sorted.length === 0 ? (
-                <tr><td colSpan={8} className="px-3 py-8 text-center text-gray-400">No workload identities found. Run a discovery to populate.</td></tr>
+                <tr><td colSpan={8} className="px-3 py-8 text-center text-gray-400">No workload identities found. Capture a snapshot to populate.</td></tr>
               ) : sorted.map(spn => {
                 const lcCfg = LIFECYCLE_STATE_CONFIG[spn.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
                 const owCfg = OWNER_STATUS_CONFIG[spn.owner_status] || OWNER_STATUS_CONFIG.unknown;

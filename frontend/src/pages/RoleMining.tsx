@@ -153,7 +153,7 @@ const RISK_COLORS: Record<string, string> = {
   critical: 'text-red-600 bg-red-50 border-red-200',
   high: 'text-orange-600 bg-orange-50 border-orange-200',
   medium: 'text-yellow-700 bg-yellow-50 border-yellow-200',
-  low: 'text-blue-600 bg-blue-50 border-blue-200',
+  low: 'text-green-600 bg-green-50 border-green-200',
   unknown: 'text-gray-500 bg-gray-50 border-gray-200',
 };
 
@@ -256,7 +256,7 @@ export default function RoleMining() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-72" />
           <div className="grid grid-cols-6 gap-4">
             {[...Array(6)].map((_, i) => <div key={i} className="h-20 bg-gray-100 rounded-xl" />)}
@@ -282,7 +282,7 @@ export default function RoleMining() {
   const { summary, role_frequency, role_bundles, toxic_combos, unused_findings } = data;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

@@ -236,7 +236,7 @@ export default function DriftHistory() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-64" />
           <div className="h-16 bg-gray-100 rounded-xl" />
           <div className="h-96 bg-gray-100 rounded-xl" />
@@ -258,14 +258,27 @@ export default function DriftHistory() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Drift History</h2>
-          <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
-            Timeline of identity changes across discovery runs
-          </p>
+          <div className="flex items-center gap-2 mt-1">
+            <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+              Timeline of identity changes across snapshots
+            </p>
+            {reports.length > 0 && (
+              <>
+                <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border-default)' }}>
+                  {reports.length} snapshots
+                </span>
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-semibold uppercase tracking-wide" title="Snapshot data is immutable — it reflects the state at capture time">
+                  <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                  Immutable
+                </span>
+              </>
+            )}
+          </div>
         </div>
         <button
           onClick={() => setShowCompare(!showCompare)}
@@ -317,8 +330,8 @@ export default function DriftHistory() {
             <div className="space-y-4">
               {/* Summary cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <CompareCard label="From" sublabel={compareResult.from_run?.completed_at ? new Date(compareResult.from_run.completed_at).toLocaleDateString() : compareResult.from_date} value={String(compareResult.from_run?.total_identities ?? 0)} detail={`Run #${compareResult.from_run?.run_id}`} />
-                <CompareCard label="To" sublabel={compareResult.to_run?.completed_at ? new Date(compareResult.to_run.completed_at).toLocaleDateString() : compareResult.to_date} value={String(compareResult.to_run?.total_identities ?? 0)} detail={`Run #${compareResult.to_run?.run_id}`} />
+                <CompareCard label="From" sublabel={compareResult.from_run?.completed_at ? new Date(compareResult.from_run.completed_at).toLocaleDateString() : compareResult.from_date} value={String(compareResult.from_run?.total_identities ?? 0)} detail={`Snapshot #${compareResult.from_run?.run_id}`} />
+                <CompareCard label="To" sublabel={compareResult.to_run?.completed_at ? new Date(compareResult.to_run.completed_at).toLocaleDateString() : compareResult.to_date} value={String(compareResult.to_run?.total_identities ?? 0)} detail={`Snapshot #${compareResult.to_run?.run_id}`} />
                 <CompareCard label="Added" sublabel="New identities" value={`+${compareResult.summary?.added_count ?? 0}`} detail="" color="text-green-600" />
                 <CompareCard label="Removed" sublabel="Removed identities" value={`-${compareResult.summary?.removed_count ?? 0}`} detail="" color="text-red-600" />
               </div>
@@ -412,7 +425,7 @@ export default function DriftHistory() {
           </svg>
           <div className="text-gray-500 font-medium">No drift reports yet</div>
           <div className="text-sm text-gray-400 mt-1">
-            Drift data becomes available after 2+ discovery runs
+            Drift data becomes available after 2+ snapshots
           </div>
         </div>
       ) : (
@@ -447,18 +460,18 @@ export default function DriftHistory() {
 
           {/* Timeline table */}
           <div className="bg-white border rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
+            <table className="w-full text-xs">
               <thead>
                 <tr className="bg-gray-50 border-b text-left">
-                  <th className="px-4 py-3 font-medium text-gray-600 w-8" />
-                  <th className="px-4 py-3 font-medium text-gray-600">Run Comparison</th>
-                  <th className="px-4 py-3 font-medium text-gray-600">Date</th>
-                  <th className="px-4 py-3 font-medium text-gray-600 text-center">Total</th>
-                  <th className="px-4 py-3 font-medium text-green-700 text-center">New</th>
-                  <th className="px-4 py-3 font-medium text-red-700 text-center">Removed</th>
-                  <th className="px-4 py-3 font-medium text-orange-700 text-center">Perms</th>
-                  <th className="px-4 py-3 font-medium text-purple-700 text-center">Risk</th>
-                  <th className="px-4 py-3 font-medium text-yellow-700 text-center">Creds</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-8" />
+                  <th className="px-3 py-2.5 font-medium uppercase text-gray-600">Snapshot Comparison</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-gray-600">Date</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-gray-600 text-center">Total</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-green-700 text-center">New</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-red-700 text-center">Removed</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-orange-700 text-center">Perms</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-purple-700 text-center">Risk</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-yellow-700 text-center">Creds</th>
                 </tr>
               </thead>
               <tbody>
@@ -470,7 +483,7 @@ export default function DriftHistory() {
                         expandedRunId === report.current_run_id ? 'bg-blue-50' : ''
                       }`}
                     >
-                      <td className="px-4 py-3 text-gray-400">
+                      <td className="px-3 py-2 text-gray-400">
                         <svg
                           className={`w-4 h-4 transition-transform ${
                             expandedRunId === report.current_run_id ? 'rotate-90' : ''
@@ -482,17 +495,17 @@ export default function DriftHistory() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-3 py-2">
                         <span className="font-mono text-xs text-gray-700">
-                          Run #{report.current_run_id} vs #{report.previous_run_id}
+                          Snapshot #{report.current_run_id} vs #{report.previous_run_id}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-600">
+                      <td className="px-3 py-2 text-gray-600">
                         {report.run_completed_at
                           ? new Date(report.run_completed_at).toLocaleString()
                           : new Date(report.created_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 text-center">
+                      <td className="px-3 py-2 text-center">
                         {report.total_changes === 0 ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-50 text-green-700 rounded-full text-xs font-medium">
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -514,7 +527,7 @@ export default function DriftHistory() {
                     {/* Expanded detail row */}
                     {expandedRunId === report.current_run_id && (
                       <tr>
-                        <td colSpan={9} className="bg-gray-50 px-6 py-4">
+                        <td colSpan={9} className="bg-gray-50 px-3 py-2">
                           {detailLoading && (
                             <div className="flex items-center gap-2 text-sm text-gray-500">
                               <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
@@ -552,7 +565,7 @@ export default function DriftHistory() {
 
 function CountCell({ count, color }: { count: number; color: string }) {
   return (
-    <td className="px-4 py-3 text-center">
+    <td className="px-3 py-2 text-center">
       {count > 0 ? (
         <span className={`font-semibold ${color}`}>{count}</span>
       ) : (

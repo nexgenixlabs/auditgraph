@@ -87,7 +87,7 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose }) => {
 
       {/* Modal */}
       <div className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-lg z-50">
-        <div className="bg-white rounded-xl shadow-2xl border overflow-hidden">
+        <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
           {/* Search input */}
           <div className="flex items-center gap-3 px-4 py-3 border-b">
             <svg className="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">

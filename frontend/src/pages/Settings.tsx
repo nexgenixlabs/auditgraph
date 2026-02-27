@@ -479,12 +479,12 @@ export default function Settings() {
         body: JSON.stringify({ connection_id: connId }),
       });
       if (res.ok) {
-        setSuccess('Discovery scan started for this connection. Check Runs for progress.');
+        setSuccess('Snapshot capture started for this connection.');
       } else {
-        setError('Failed to trigger discovery scan');
+        setError('Failed to trigger snapshot');
       }
     } catch {
-      setError('Failed to trigger discovery scan');
+      setError('Failed to trigger snapshot');
     } finally {
       setScanningConnId(null);
     }
@@ -529,7 +529,7 @@ export default function Settings() {
       try {
         await fetch('/api/subscriptions/activate-all', { method: 'POST' });
       } catch { /* ignore */ }
-      // 5. Trigger first discovery
+      // 5. Trigger first snapshot
       try {
         await fetch('/api/runs/trigger', { method: 'POST' });
       } catch { /* ignore */ }
@@ -1723,7 +1723,7 @@ export default function Settings() {
   if (loading) {
     return (
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-48" />
           <div className="h-48 bg-gray-100 rounded-xl" />
           <div className="h-48 bg-gray-100 rounded-xl" />
@@ -1734,7 +1734,7 @@ export default function Settings() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Settings</h2>
@@ -2033,7 +2033,7 @@ export default function Settings() {
                             disabled={scanningConnId === conn.id}
                             className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
                           >
-                            {scanningConnId === conn.id ? 'Starting...' : 'Run Scan'}
+                            {scanningConnId === conn.id ? 'Starting...' : 'Capture Snapshot'}
                           </button>
                         )}
                         {isAdmin && (
@@ -2063,8 +2063,8 @@ export default function Settings() {
 
             {/* Add Connection Wizard Modal */}
             {showAddWizard && (
-              <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddWizard(false)}>
-                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+              <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowAddWizard(false)}>
+                <div className="bg-white rounded-2xl shadow-lg w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
                   {/* Wizard Header */}
                   <div className="bg-slate-900 px-6 py-4 flex items-center justify-between">
                     <div>
@@ -2594,13 +2594,13 @@ export default function Settings() {
                 onClick={async () => {
                   try {
                     const res = await fetch('/api/runs/trigger', { method: 'POST' });
-                    if (res.ok) setSuccess('Scan triggered successfully');
-                    else setError('Failed to trigger scan');
-                  } catch { setError('Failed to trigger scan'); }
+                    if (res.ok) setSuccess('Snapshot capture triggered');
+                    else setError('Failed to trigger snapshot');
+                  } catch { setError('Failed to trigger snapshot'); }
                 }}
                 className="ml-auto px-3 py-1.5 text-xs font-medium text-blue-600 border border-blue-300 rounded-lg hover:bg-blue-50 transition"
               >
-                Scan Now
+                Capture Now
               </button>
             </div>
 
@@ -2717,8 +2717,8 @@ export default function Settings() {
                       { key: 'notify_credential_changes' as const, label: 'Secret / credential expiry', description: 'Alert when secrets or certificates are expiring or expired' },
                       { key: 'notify_permission_changes' as const, label: 'Drift detection', description: 'Notify when permission or role changes are detected' },
                       { key: 'notify_risk_changes' as const, label: 'Critical risk alerts', description: 'Immediate alerts for critical and high risk escalations' },
-                      { key: 'notify_new_identities' as const, label: 'Scan failure alerts', description: 'Alert when a discovery scan fails or encounters errors' },
-                      { key: 'notify_removed_identities' as const, label: 'Discovery completion', description: 'Summary notification after each successful scan' },
+                      { key: 'notify_new_identities' as const, label: 'Snapshot failure alerts', description: 'Alert when a snapshot capture fails or encounters errors' },
+                      { key: 'notify_removed_identities' as const, label: 'Snapshot completion', description: 'Summary notification after each successful snapshot' },
                       { key: 'notify_weekly_digest' as const, label: 'Weekly risk digest', description: 'Weekly summary of risk posture and key changes' },
                     ]).map(item => (
                       <div key={item.key} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0">
@@ -3082,7 +3082,7 @@ export default function Settings() {
             )}
 
             <p className="text-xs text-gray-400">
-              Maximum 50 rules. Rules run after default scoring on every discovery run, ordered by priority (lower runs first).
+              Maximum 50 rules. Rules run after default scoring on every snapshot, ordered by priority (lower runs first).
             </p>
           </div>
           </>)}
@@ -3809,7 +3809,7 @@ export default function Settings() {
             )}
 
             <p className="text-xs text-gray-400">
-              Maximum 20 playbooks. Playbooks are evaluated automatically after discovery runs detect anomalies, drift, or risk changes.
+              Maximum 20 playbooks. Playbooks are evaluated automatically after snapshots detect anomalies, drift, or risk changes.
               Cooldown prevents duplicate actions.
             </p>
           </div>
@@ -3937,14 +3937,14 @@ export default function Settings() {
             {/* Retention periods */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Discovery Runs (days)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Snapshots (days)</label>
                 <input
                   type="number" min={7} max={3650}
                   value={retention.retention_discovery_days}
                   onChange={e => setRetention(prev => ({ ...prev, retention_discovery_days: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
-                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.discovery_runs ?? 0} runs stored</p>}
+                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.discovery_runs ?? 0} snapshots stored</p>}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Drift Reports (days)</label>
@@ -4123,7 +4123,7 @@ export default function Settings() {
             <div className="rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 p-3">
               <p className="text-xs text-blue-700 dark:text-blue-300">
                 Requires Entra ID P2 license and <code className="px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-[10px]">AuditLog.Read.All</code> permission on the registered app.
-                When enabled, sign-in logs are ingested during each discovery run and behavioral anomalies are detected automatically.
+                When enabled, sign-in logs are ingested during each snapshot and behavioral anomalies are detected automatically.
               </p>
             </div>
 
@@ -4207,7 +4207,7 @@ export default function Settings() {
       {ruleModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setRuleModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-2xl mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-2xl mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="text-lg font-semibold text-gray-900">
               {editingRule ? 'Edit Risk Rule' : 'Add Risk Rule'}
             </div>
@@ -4480,7 +4480,7 @@ export default function Settings() {
       {webhookModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setWebhookModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4">
             <div className="text-lg font-semibold text-gray-900">
               {editingWebhook ? 'Edit Webhook' : 'Add Webhook'}
             </div>
@@ -4575,7 +4575,7 @@ export default function Settings() {
       {userModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setUserModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4">
             <div className="text-lg font-semibold text-gray-900">
               {editingUser ? 'Edit User' : 'Add User'}
             </div>
@@ -4643,8 +4643,8 @@ export default function Settings() {
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-1">
-                {userForm.role === 'admin' ? 'Full access: settings, users, billing, discovery, rules'
-                  : userForm.role === 'security_admin' ? 'Activate subscriptions, manage cloud connections, run scans'
+                {userForm.role === 'admin' ? 'Full access: settings, users, billing, snapshots, rules'
+                  : userForm.role === 'security_admin' ? 'Activate subscriptions, manage cloud connections, capture snapshots'
                   : userForm.role === 'compliance' ? 'Read-only + compliance reports and access reviews'
                   : 'Read-only: view dashboards, identities, reports'}
               </p>
@@ -4705,7 +4705,7 @@ export default function Settings() {
       {apiKeyModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => { setApiKeyModal(false); setNewKeyValue(null); }} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4">
             {newKeyValue ? (
               <>
                 <div className="text-lg font-semibold text-gray-900">API Key Created</div>
@@ -4820,7 +4820,7 @@ export default function Settings() {
       {soarModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setSoarModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="text-lg font-semibold text-gray-900">
               {editingSoar ? 'Edit SOAR Playbook' : 'Add SOAR Playbook'}
             </div>

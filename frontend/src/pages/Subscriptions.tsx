@@ -110,7 +110,7 @@ export default function Subscriptions() {
   const netMonthlyCents = billing?.net_monthly_cents ?? 0;
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
+    <div className="p-6 max-w-6xl mx-auto space-y-4">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Subscriptions</h1>
         <p className="text-sm text-gray-500 mt-1">Manage monitored cloud accounts across your organization</p>
@@ -232,7 +232,7 @@ export default function Subscriptions() {
               {loading ? (
                 <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
               ) : subs.length === 0 ? (
-                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Run a discovery scan to detect cloud accounts.</td></tr>
+                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Capture a snapshot to detect cloud accounts.</td></tr>
               ) : subs.map(sub => {
                 const badge = CLOUD_BADGE[sub.cloud] || CLOUD_BADGE.azure;
                 const rateCents = sub.rate_cents ?? SUB_RATES_CENTS[sub.cloud] ?? SUB_RATES_CENTS.azure;

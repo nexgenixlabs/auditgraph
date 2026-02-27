@@ -444,7 +444,7 @@ export default function IdentityCorrelation() {
     }`;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-gray-900">Identity Correlation</h1>
@@ -906,7 +906,7 @@ export default function IdentityCorrelation() {
       {/* ─── Manual Link Modal ─── */}
       {showLinkModal && (
         <>
-          <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" onClick={() => setShowLinkModal(false)} />
+          <div className="fixed inset-0 z-50 bg-black/60" onClick={() => setShowLinkModal(false)} />
           <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
             <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-[420px] p-6 pointer-events-auto">
               <h3 className="text-sm font-bold text-gray-900 mb-4">Manual Account Link</h3>

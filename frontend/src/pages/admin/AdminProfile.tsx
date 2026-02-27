@@ -94,7 +94,7 @@ export default function AdminProfile() {
   const badgeColor = ROLE_BADGE_COLORS[portalRole] || ROLE_BADGE_COLORS.reader;
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-2xl mx-auto space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">My Profile</h2>
         <p className="text-sm text-gray-500 mt-1">Manage your account details and security</p>

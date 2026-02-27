@@ -114,7 +114,7 @@ export default function OnboardingWizard() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to save settings');
       }
-      // Trigger first discovery
+      // Trigger first snapshot
       await fetch('/api/runs/trigger', { method: 'POST' });
       navigate('/');
     } catch (e: any) {
@@ -136,7 +136,7 @@ export default function OnboardingWizard() {
 
           {/* Progress bar */}
           <div className="w-full h-2 bg-gray-700 rounded-full mb-6 overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+            <div className="h-full bg-blue-600 rounded-full transition-all" style={{ width: `${pct}%` }} />
           </div>
 
           <div className="space-y-3">
@@ -212,12 +212,12 @@ export default function OnboardingWizard() {
 
         {/* Step 0: Welcome */}
         {step === 0 && (
-          <div className="space-y-6">
+          <div className="space-y-4">
             <div>
               <h2 className="text-xl font-bold text-white">Welcome to AuditGraph</h2>
               <p className="text-sm text-gray-400 mt-2">
                 Let's get your identity security audit configured. We'll walk you through
-                connecting to your cloud environment, testing the connection, and running your first discovery scan.
+                connecting to your cloud environment, testing the connection, and capturing your first snapshot.
               </p>
             </div>
             <div>
@@ -455,7 +455,7 @@ export default function OnboardingWizard() {
             <div>
               <h2 className="text-xl font-bold text-white">Review &amp; Launch</h2>
               <p className="text-sm text-gray-400 mt-2">
-                Review your configuration and start the first discovery scan.
+                Review your configuration and capture your first snapshot.
               </p>
             </div>
 

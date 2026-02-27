@@ -32,7 +32,7 @@ export default function Invoices() {
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
+    <div className="p-6 max-w-6xl mx-auto space-y-4">
       <div>
         <h1 className="text-xl font-bold text-gray-900 dark:text-white">Invoices</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">View and download your billing invoices</p>

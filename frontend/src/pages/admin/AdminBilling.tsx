@@ -236,7 +236,7 @@ export default function AdminBilling() {
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading billing data...</div>;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Billing & Revenue</h2>
         <p className="text-sm text-gray-500 mt-0.5">Per-subscription billing model &mdash; platform fee + per-sub rates</p>

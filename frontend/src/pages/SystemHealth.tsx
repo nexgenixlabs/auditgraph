@@ -101,7 +101,7 @@ export default function SystemHealth() {
   const checks = health?.checks;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-6 py-8 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -273,10 +273,10 @@ export default function SystemHealth() {
         </div>
       )}
 
-      {/* Discovery Runs */}
+      {/* Snapshots */}
       {detail?.discovery_runs && detail.discovery_runs.length > 0 && (
         <div className="bg-white border rounded-xl p-5">
-          <h2 className="text-sm font-semibold text-gray-900 mb-4">Recent Discovery Runs</h2>
+          <h2 className="text-sm font-semibold text-gray-900 mb-4">Recent Snapshots</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>

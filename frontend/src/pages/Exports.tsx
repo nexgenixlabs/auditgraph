@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 import {
   downloadCSV, downloadJSON, exportFilename,
   IDENTITY_CSV_COLUMNS, COMPLIANCE_CSV_COLUMNS, DRIFT_CSV_COLUMNS,
+  EXPORT_SCHEMA_VERSION, buildExportMeta,
 } from '../utils/exportUtils';
 
 interface ExportCard {
@@ -100,22 +102,49 @@ const CSV_COLUMNS_MAP: Record<string, typeof IDENTITY_CSV_COLUMNS> = {
   drift: DRIFT_CSV_COLUMNS,
 };
 
+interface SnapshotInfo {
+  id: number;
+  completed_at: string | null;
+  total_identities: number;
+}
+
 export default function Exports() {
   const { addToast } = useToast();
   const { withConnection } = useConnection();
+  const { user, activeTenantId, activeTenantName } = useAuth();
   const [downloading, setDownloading] = useState<string | null>(null);
   const [lastExported, setLastExported] = useState<Record<string, string>>({});
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [latestSnapshot, setLatestSnapshot] = useState<SnapshotInfo | null>(null);
+
+  const tenantId = activeTenantId ?? user?.tenant_id ?? null;
+  const tenantName = activeTenantName ?? user?.tenant_name ?? null;
+
+  useEffect(() => {
+    fetch(withConnection('/api/runs'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const runs = data?.runs || data || [];
+        if (Array.isArray(runs) && runs.length > 0) {
+          setLatestSnapshot({ id: runs[0].id, completed_at: runs[0].completed_at, total_identities: runs[0].total_identities });
+        }
+      })
+      .catch(() => {});
+  }, [withConnection]);
+
+  function getMeta() {
+    return buildExportMeta(latestSnapshot?.id ?? null, tenantId, tenantName);
+  }
 
   async function handleExport(exportType: string, format: 'csv' | 'json' | 'zip') {
     const dlKey = `${exportType}-${format}`;
     setDownloading(dlKey);
     try {
       const dateParams = (dateFrom && dateTo) ? `&from=${dateFrom}&to=${dateTo}` : '';
+      const meta = getMeta();
 
       if (format === 'zip') {
-        // Binary download — ZIP file
         const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
         if (!res.ok) {
           const errData = await res.json().catch(() => null);
@@ -139,9 +168,8 @@ export default function Exports() {
         const data = await res.json();
 
         if (format === 'json') {
-          downloadJSON(data, exportFilename(exportType, 'json'));
+          downloadJSON(data, exportFilename(exportType, 'json'), meta);
         } else {
-          // CSV: flatten appropriately
           const columns = CSV_COLUMNS_MAP[exportType];
           let rows: Record<string, unknown>[] = [];
 
@@ -173,7 +201,7 @@ export default function Exports() {
           }
 
           if (columns) {
-            downloadCSV(rows, columns, exportFilename(exportType, 'csv'));
+            downloadCSV(rows, columns, exportFilename(exportType, 'csv'), meta);
           }
         }
       }
@@ -188,13 +216,53 @@ export default function Exports() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Export Center</h2>
         <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
           Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
         </p>
+      </div>
+
+      {/* Export Metadata Strip */}
+      <div className="rounded-xl border px-5 py-4" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+        <div className="flex items-center gap-2 mb-3">
+          <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>Export Metadata</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200 font-medium">Included in all exports</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Snapshot ID</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              {latestSnapshot ? `#${latestSnapshot.id}` : 'Loading...'}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Timestamp</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              {latestSnapshot?.completed_at
+                ? new Date(latestSnapshot.completed_at).toLocaleString()
+                : new Date().toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Tenant ID</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              {tenantId ?? 'N/A'}
+              {tenantName && <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-secondary)' }}>({tenantName})</span>}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Schema Version</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              v{EXPORT_SCHEMA_VERSION}
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Date range filter */}
@@ -291,9 +359,9 @@ export default function Exports() {
 
       {/* Info */}
       <div className="border rounded-xl p-4 text-xs space-y-1" style={{ backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))', color: 'var(--text-secondary)', borderColor: 'var(--border-default)' }}>
-        <p><strong>CSV</strong> format is optimized for spreadsheet import (Excel, Google Sheets). Compliance CSV exports gap analysis controls.</p>
-        <p><strong>JSON</strong> format includes full structured data suitable for SIEM, GRC platforms, or programmatic consumption.</p>
-        <p>All exports reflect the latest discovery run data. Export events are recorded in the activity log.</p>
+        <p><strong>CSV</strong> format is optimized for spreadsheet import (Excel, Google Sheets). Metadata is prepended as comment rows (# prefix).</p>
+        <p><strong>JSON</strong> format includes an <code>_export_metadata</code> envelope with Snapshot ID, Timestamp, Tenant ID, and Schema version.</p>
+        <p><strong>ZIP</strong> evidence packages include metadata in the MANIFEST. All exports reflect the latest snapshot data.</p>
       </div>
     </div>
   );

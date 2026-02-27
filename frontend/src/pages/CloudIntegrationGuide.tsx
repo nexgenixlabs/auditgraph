@@ -36,8 +36,8 @@ const AZURE_STEPS: StepItem[] = [
     description: 'Navigate to Settings > Connections and enter: Directory (Tenant) ID, Application (Client) ID, Client Secret Value.',
   },
   {
-    title: 'Test & Run First Scan',
-    description: 'Click "Test Connection" to verify connectivity. Once confirmed, trigger your first discovery scan.',
+    title: 'Test & Capture First Snapshot',
+    description: 'Click "Test Connection" to verify connectivity. Once confirmed, capture your first snapshot.',
   },
 ];
 
@@ -89,7 +89,7 @@ export default function CloudIntegrationGuide() {
   const config = CLOUD_CONFIGS[activeCloud];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-bold text-white">Cloud Integration Guide</h1>
         <p className="text-sm text-gray-400 mt-1">Step-by-step instructions for connecting your cloud environment</p>

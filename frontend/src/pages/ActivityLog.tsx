@@ -18,8 +18,8 @@ interface ActivityEntry {
 // ── Action type display config ─────────────────────────────────
 
 const ACTION_CONFIG: Record<string, { label: string; shortLabel: string; color: string; bg: string; icon: string }> = {
-  discovery_triggered: { label: 'Discovery Triggered', shortLabel: 'Triggered', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
-  discovery_completed: { label: 'Discovery Completed', shortLabel: 'Completed', color: 'text-green-700', bg: 'bg-green-50', icon: 'V' },
+  discovery_triggered: { label: 'Snapshot Triggered', shortLabel: 'Triggered', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
+  discovery_completed: { label: 'Snapshot Completed', shortLabel: 'Completed', color: 'text-green-700', bg: 'bg-green-50', icon: 'V' },
   settings_updated: { label: 'Settings Updated', shortLabel: 'Settings', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
   report_generated: { label: 'Report Generated', shortLabel: 'Report', color: 'text-orange-700', bg: 'bg-orange-50', icon: 'D' },
   drift_reviewed: { label: 'Drift Reviewed', shortLabel: 'Drift', color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '~' },
@@ -126,7 +126,7 @@ export default function ActivityLog() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-48" />
           <div className="h-12 bg-gray-100 rounded-xl" />
           <div className="h-96 bg-gray-100 rounded-xl" />
@@ -169,7 +169,7 @@ export default function ActivityLog() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Activity Log</h2>
@@ -265,19 +265,19 @@ export default function ActivityLog() {
           </svg>
           <div className="text-gray-500 font-medium">No activity recorded yet</div>
           <div className="text-sm text-gray-400 mt-1">
-            Actions like discovery runs, settings changes, and report generation will appear here
+            Actions like snapshots, settings changes, and report generation will appear here
           </div>
         </div>
       ) : (
         /* Activity table */
         <div className="bg-white border rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+          <table className="w-full text-xs">
             <thead>
               <tr className="bg-gray-50 border-b text-left">
-                <th className="px-4 py-3 font-medium text-gray-600 w-48">Action</th>
-                <th className="px-4 py-3 font-medium text-gray-600 w-36">User</th>
-                <th className="px-4 py-3 font-medium text-gray-600">Description</th>
-                <th className="px-4 py-3 font-medium text-gray-600 w-44 text-right">Time</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-48">Action</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-36">User</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600">Description</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-44 text-right">Time</th>
               </tr>
             </thead>
             <tbody>
@@ -285,13 +285,13 @@ export default function ActivityLog() {
                 const cfg = getActionConfig(entry.action_type);
                 return (
                   <tr key={entry.id} className="border-b hover:bg-gray-50 transition">
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-2">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.bg} ${cfg.color}`}>
                         <span className="font-mono">{cfg.icon}</span>
                         {cfg.label}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-2">
                       {entry.user_display_name ? (
                         <div>
                           <div className="text-xs font-medium text-gray-700">{entry.user_display_name}</div>
@@ -301,7 +301,7 @@ export default function ActivityLog() {
                         <span className="text-xs text-gray-400 italic">System</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-gray-700">
+                    <td className="px-3 py-2 text-gray-700">
                       {entry.description}
                       {entry.metadata && Object.keys(entry.metadata).length > 0 && (
                         <span className="ml-2 text-[10px] text-gray-400 font-mono">
@@ -313,7 +313,7 @@ export default function ActivityLog() {
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-3 py-2 text-right">
                       <div className="text-xs text-gray-500">{timeAgo(entry.created_at)}</div>
                       <div className="text-[10px] text-gray-400">
                         {new Date(entry.created_at).toLocaleString()}

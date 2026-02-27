@@ -99,8 +99,8 @@ function SeverityBadge({ level, count, onClick }: { level: string; count: number
   const styles: Record<string, string> = {
     critical: 'bg-red-100 text-red-700 border-red-200 hover:bg-red-200',
     high: 'bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-200',
-    medium: 'bg-indigo-100 text-indigo-700 border-indigo-200 hover:bg-indigo-200',
-    low: 'bg-blue-100 text-blue-700 border-blue-200 hover:bg-blue-200',
+    medium: 'bg-yellow-100 text-yellow-700 border-yellow-200 hover:bg-yellow-200',
+    low: 'bg-green-100 text-green-700 border-green-200 hover:bg-green-200',
   };
 
   return (
@@ -296,8 +296,8 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
       {/* Add Cloud Provider Modal */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowAddModal(false)} />
-          <div className="relative bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 p-6">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setShowAddModal(false)} />
+          <div className="relative bg-white rounded-2xl shadow-lg max-w-lg w-full mx-4 p-6">
             <div className="flex items-center justify-between mb-1">
               <h3 className="text-lg font-bold text-gray-900">Cloud Providers</h3>
               <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>

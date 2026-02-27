@@ -83,7 +83,7 @@ export default function AdminMonitoring() {
   const activeSessions = sessions.filter(s => s.status === 'active').length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Platform Monitoring</h2>
         <p className="text-sm text-gray-500 mt-0.5">Infrastructure health, discovery status, and login activity</p>

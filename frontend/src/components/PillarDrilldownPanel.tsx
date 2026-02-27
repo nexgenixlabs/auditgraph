@@ -106,7 +106,7 @@ export default function PillarDrilldownPanel({ open, onClose, pillarKey, pillarD
         {/* Header */}
         <div style={{
           padding: '20px 24px', borderBottom: `1px solid ${C.border}`,
-          background: `linear-gradient(135deg, ${C.card} 0%, ${C.bg} 100%)`,
+          background: 'var(--bg-raised)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -227,7 +227,7 @@ export default function PillarDrilldownPanel({ open, onClose, pillarKey, pillarD
           {/* Empty state */}
           {topRiskiest.length === 0 && Object.keys(details).length === 0 && (
             <div style={{ textAlign: 'center', padding: '40px 20px', color: C.textTer, fontSize: 12, fontFamily: F.body }}>
-              No detail data available. Run a discovery scan to populate pillar metrics.
+              No detail data available. Capture a snapshot to populate pillar metrics.
             </div>
           )}
         </div>

@@ -189,7 +189,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
   const dormantStatus = detail ? getDormantStatusFromActivity(detail.activity_status) : 'unknown';
 
   return (
-    <div className="fixed inset-y-0 right-0 w-[560px] max-w-full bg-white shadow-2xl z-50 flex flex-col border-l">
+    <div className="fixed inset-y-0 right-0 w-[560px] max-w-full bg-white shadow-lg z-50 flex flex-col border-l">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b bg-gray-50 flex-shrink-0">
         <div className="min-w-0 flex-1">

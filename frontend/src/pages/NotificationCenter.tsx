@@ -171,7 +171,7 @@ export default function NotificationCenter() {
   const categoryButtons = Object.keys(CATEGORY_CONFIG);
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -273,7 +273,7 @@ export default function NotificationCenter() {
           </svg>
           <h3 className="text-lg font-semibold text-gray-500">No notifications</h3>
           <p className="text-sm text-gray-400 mt-1">
-            Alerts will appear here after discovery runs detect changes.
+            Alerts will appear here after snapshots detect changes.
           </p>
         </div>
       ) : (

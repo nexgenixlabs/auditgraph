@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
-import { downloadCSV, exportFilename } from '../utils/exportUtils';
+import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
   const highRiskPerms = (app.high_risk_permissions as string[]) || [];
 
   return (
-    <div className="fixed inset-y-0 right-0 w-[480px] shadow-2xl border-l z-50 flex flex-col overflow-hidden" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+    <div className="fixed inset-y-0 right-0 w-[480px] shadow-lg border-l z-50 flex flex-col overflow-hidden" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
       {/* Header */}
       <div className="px-5 py-4 border-b flex items-center justify-between shrink-0" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-elevated, var(--bg-primary))' }}>
         <div>
@@ -384,11 +385,13 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 export default function AppRegistrations() {
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
+  const { user, activeTenantId, activeTenantName } = useAuth();
 
   const [stats, setStats] = useState<AppRegStats | null>(null);
   const [items, setItems] = useState<AppRegRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [latestSnapshotId, setLatestSnapshotId] = useState<number | null>(null);
   const [initialized, setInitialized] = useState(false);
 
   // Filters
@@ -419,6 +422,17 @@ export default function AppRegistrations() {
     if (p.get('search')) setSearch(p.get('search') || '');
     setInitialized(true);
   }, [location.search]);
+
+  // Fetch latest snapshot ID for export metadata
+  useEffect(() => {
+    fetch(withConnection('/api/runs'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const runs = data?.runs || data || [];
+        if (Array.isArray(runs) && runs.length > 0) setLatestSnapshotId(runs[0].id);
+      })
+      .catch(() => {});
+  }, [withConnection]);
 
   // Fetch stats
   useEffect(() => {
@@ -537,12 +551,14 @@ export default function AppRegistrations() {
   );
 
   const handleCSVExport = useCallback(() => {
+    const meta = buildExportMeta(latestSnapshotId, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
     downloadCSV(
       exportData as unknown as Record<string, unknown>[],
       CSV_COLS,
-      exportFilename('app-registrations-audit', 'csv')
+      exportFilename('app-registrations-audit', 'csv'),
+      meta
     );
-  }, [exportData, CSV_COLS]);
+  }, [exportData, CSV_COLS, latestSnapshotId, activeTenantId, activeTenantName, user]);
 
   return (
     <div className="space-y-4">
@@ -565,6 +581,16 @@ export default function AppRegistrations() {
           </button>
         </div>
       </div>
+
+      {/* Export Metadata Strip */}
+      {latestSnapshotId && (
+        <div className="flex items-center gap-4 text-[10px] border rounded-lg px-3 py-1.5" style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))' }}>
+          <span className="font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Export Metadata</span>
+          <span>Snapshot: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>#{latestSnapshotId}</span></span>
+          <span>Tenant: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Schema: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>v1.0</span></span>
+        </div>
+      )}
 
       {/* Summary Cards */}
       {stats && (
@@ -778,7 +804,7 @@ export default function AppRegistrations() {
         <AppRegDrillDown detail={detail} onClose={() => setSelectedAppId(null)} />
       )}
       {selectedAppId && detailLoading && (
-        <div className="fixed inset-y-0 right-0 w-[480px] shadow-2xl border-l z-50 flex items-center justify-center" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+        <div className="fixed inset-y-0 right-0 w-[480px] shadow-lg border-l z-50 flex items-center justify-center" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
           <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>Loading...</div>
         </div>
       )}

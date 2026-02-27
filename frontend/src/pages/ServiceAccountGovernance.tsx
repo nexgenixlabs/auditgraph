@@ -920,7 +920,7 @@ export default function ServiceAccountGovernance() {
       {decisionTarget && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setDecisionTarget(null)}>
           <div style={{ background: '#141820', border: `1px solid ${G.surfaceBorder}` }}
-               className="rounded-xl shadow-2xl w-full max-w-lg mx-4 p-6 space-y-4"
+               className="rounded-xl shadow-lg w-full max-w-lg mx-4 p-6 space-y-4"
                onClick={e => e.stopPropagation()}>
             <div>
               <h3 style={{ color: G.text }} className="text-sm font-bold">Governance Decision</h3>

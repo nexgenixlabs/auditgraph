@@ -123,10 +123,9 @@
   --shadow-sm:  0 1px 3px rgba(0, 0, 0, 0.6);
   --shadow-md:  0 4px 6px rgba(0, 0, 0, 0.5);
   --shadow-lg:  0 10px 25px rgba(0, 0, 0, 0.6);
-  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.8);
+  --shadow-2xl: 0 10px 25px rgba(0, 0, 0, 0.6);
 
-  /* Hero gradient */
-  --gradient-hero: linear-gradient(135deg, #06090f 0%, #0c1220 50%, #111a2e 100%);
+  /* Hero (flat — no gradient) */
 
   /* Form elements */
   --input-bg:           #0c1220;
@@ -148,7 +147,7 @@
   --glow-accent:   0 0 12px rgba(37, 99, 235, 0.12);
 
   /* CISO / Command Center surfaces */
-  --ciso-bg-page:          linear-gradient(145deg, #06090f 0%, #0c1220 30%, #111a2e 60%, #0c1220 100%);
+  --ciso-bg-page:          #0c1220;
   --ciso-bg-card:          rgba(12, 18, 32, 0.7);
   --ciso-bg-card-muted:    rgba(12, 18, 32, 0.5);
   --ciso-border-card:      rgba(255, 255, 255, 0.06);
@@ -159,10 +158,9 @@
   --ciso-divider:          rgba(255, 255, 255, 0.06);
   --ciso-overlay:          rgba(0, 0, 0, 0.4);
   --ciso-overlay-strong:   rgba(0, 0, 0, 0.5);
-  --ciso-backdrop:         blur(12px);
   --ciso-glow:             0 0 20px rgba(37, 99, 235, 0.08);
-  --ciso-panel-bg:         linear-gradient(180deg, #0c1220 0%, #111a2e 100%);
-  --ciso-btn-gradient:     linear-gradient(135deg, #6366f1, #4f46e5);
+  --ciso-panel-bg:         var(--bg-raised);
+  --ciso-btn-gradient:     var(--accent-primary);
 
   /* CISO text shades */
   --ciso-text-bright: #e8ecf4;
@@ -410,12 +408,10 @@ code, pre, .font-mono {
 
 /* ── Obsidian Command Design Enhancements ─────────────────────────── */
 
-/* TopBar glass effect */
+/* TopBar — solid background (no glassmorphism) */
 [data-theme] header,
 [data-theme] .topbar-glass {
-  background-color: rgba(6, 9, 15, 0.85);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background-color: var(--bg-deep);
   border-bottom: 1px solid var(--border-subtle);
 }
 
