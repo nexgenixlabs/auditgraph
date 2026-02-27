@@ -37,7 +37,7 @@ function CustomTooltip({ active, payload, label }: any) {
     <div className="bg-white border rounded-lg shadow-lg px-4 py-3 text-sm">
       <div className="font-semibold text-gray-900 mb-1">
         {formatDate(label)}
-        {!!point?.run_id && <span className="ml-2 text-xs text-gray-400">Run #{point.run_id}</span>}
+        {!!point?.run_id && <span className="ml-2 text-xs text-gray-400">Snapshot #{point.run_id}</span>}
       </div>
       <div className="space-y-0.5">
         <div className="flex items-center gap-2">
@@ -94,9 +94,9 @@ export default function RiskTrendChart({ data }: RiskTrendChartProps) {
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold text-gray-900">Risk Trend</h3>
-          <p className="text-xs text-gray-500">Identity risk levels across discovery runs</p>
+          <p className="text-xs text-gray-500">Identity risk levels across snapshots</p>
         </div>
-        <span className="text-xs text-gray-400">{data.length} runs</span>
+        <span className="text-xs text-gray-400">{data.length} snapshots</span>
       </div>
       <ResponsiveContainer width="100%" height={240}>
         <AreaChart data={chartData} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>

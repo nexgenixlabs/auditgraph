@@ -79,7 +79,7 @@ export default function PrivacyPolicy() {
             <h2 className="text-lg font-semibold text-white mb-3">5. Data Retention</h2>
             <p>
               We retain your data for as long as your account is active. Configurable retention policies
-              allow you to set retention periods for discovery runs, drift reports, activity logs,
+              allow you to set retention periods for snapshots, drift reports, activity logs,
               anomalies, and SOAR actions (default: 90 days). Upon account termination, all tenant data
               is permanently deleted within 30 days.
             </p>
@@ -89,7 +89,7 @@ export default function PrivacyPolicy() {
             <h2 className="text-lg font-semibold text-white mb-3">6. Data Sharing</h2>
             <p>We do not sell your data. We may share information only in these circumstances:</p>
             <ul className="list-disc pl-6 space-y-1 mt-2">
-              <li>With cloud providers (Azure, AWS, GCP) as necessary to perform discovery scans using credentials you provide</li>
+              <li>With cloud providers (Azure, AWS, GCP) as necessary to capture snapshots using credentials you provide</li>
               <li>With third-party integrations you configure (Slack, Teams, SOAR, ticketing systems)</li>
               <li>As required by law, regulation, or legal process</li>
               <li>To protect the rights, property, or safety of our users or the public</li>

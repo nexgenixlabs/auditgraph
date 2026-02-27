@@ -89,7 +89,7 @@ export default function TermsOfService() {
             <ul className="list-disc pl-6 space-y-1">
               <li><strong>Availability:</strong> 99.9% uptime target (excluding scheduled maintenance)</li>
               <li><strong>API Latency:</strong> P95 response time under 500ms</li>
-              <li><strong>Scan Success Rate:</strong> 95% target for discovery scans</li>
+              <li><strong>Snapshot Success Rate:</strong> 95% target for snapshot captures</li>
               <li><strong>Support:</strong> Email support for all plans; priority support for Enterprise</li>
             </ul>
           </section>

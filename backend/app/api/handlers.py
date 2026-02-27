@@ -9287,8 +9287,8 @@ def query_identities():
 
         try:
             adv_where, adv_params = _build_advanced_query_where(groups)
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
+        except ValueError:
+            return jsonify({'error': 'Invalid query parameters'}), 400
 
         hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
         query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"

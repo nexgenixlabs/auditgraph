@@ -57,6 +57,9 @@ import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import RbacHygiene from './pages/RbacHygiene';
 import Invoices from './pages/Invoices';
+import AccessGraph from './pages/AccessGraph';
+import EffectiveAccessExplorer from './pages/EffectiveAccessExplorer';
+import SensitiveDataAccess from './pages/SensitiveDataAccess';
 import CISODashboard from './pages/CISODashboard';
 import RemediationCenter from './pages/RemediationCenter';
 import CloudIntegrationGuide from './pages/CloudIntegrationGuide';
@@ -276,12 +279,17 @@ function AppContent() {
                   <Route path="/workload-identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentityDetail /></ErrorBoundary>} />
                   <Route path="/spns" element={<Navigate to="/workload-identities?type=spn" replace />} />
                   <Route path="/app-registrations" element={<Navigate to="/workload-identities?type=app_reg" replace />} />
-                  <Route path="/rbac-hygiene" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RbacHygiene /></ErrorBoundary>} />
+                  {/* Phase 6: Access Explainability consolidated routes */}
+                  <Route path="/access-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AccessGraph /></ErrorBoundary>} />
+                  <Route path="/effective-access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><EffectiveAccessExplorer /></ErrorBoundary>} />
+                  <Route path="/sensitive-access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SensitiveDataAccess /></ErrorBoundary>} />
+                  {/* Legacy redirects for consolidated routes */}
+                  <Route path="/rbac-hygiene" element={<Navigate to="/effective-access" replace />} />
+                  <Route path="/data-security" element={<Navigate to="/sensitive-access" replace />} />
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
                   <Route path="/key-vaults" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><KeyVaultSecurity /></ErrorBoundary>} />
                   <Route path="/storage-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><StorageSecurity /></ErrorBoundary>} />
-                  <Route path="/data-security" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DataSecurity /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
                   <Route path="/invoices" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Invoices /></ErrorBoundary>} />
                   <Route path="/settings" element={

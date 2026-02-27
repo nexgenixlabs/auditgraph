@@ -9,7 +9,7 @@
  *   - Identity: Cloud identity (Azure, AWS, GCP)
  *   - RoleAssignment: Azure RBAC role assignment
  *   - GraphPermission: Microsoft Graph API permission
- *   - DiscoveryRun: Discovery execution record
+ *   - DiscoveryRun: Snapshot execution record
  *   - Stats: Dashboard statistics summary
  *
  * API Response Types:

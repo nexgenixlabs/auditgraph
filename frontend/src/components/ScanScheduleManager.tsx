@@ -63,7 +63,7 @@ export default function ScanScheduleManager() {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-gray-200">Scan Schedules</h3>
-          <p className="text-xs text-gray-500 mt-0.5">Configure automated discovery scan intervals</p>
+          <p className="text-xs text-gray-500 mt-0.5">Configure automated snapshot intervals</p>
         </div>
         <button
           onClick={() => setShowCreate(!showCreate)}

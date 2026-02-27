@@ -138,8 +138,8 @@ const WorkloadIdentities: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  const [sortCol, setSortCol] = useState('exposure_score');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [sortCol, setSortCol] = useState('display_name');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [debouncedSearch, setDebouncedSearch] = useState(search);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -247,9 +247,9 @@ const WorkloadIdentities: React.FC = () => {
       {/* Header */}
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Workload Identity Exposure</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Non-Human Identity Inventory</h1>
           <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
-            Unified view of service principals, app registrations, and managed identities
+            Service principals, app registrations, and managed identities — audit-ready view
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -302,109 +302,33 @@ const WorkloadIdentities: React.FC = () => {
         </div>
       )}
 
-      {/* Alert Banner — P2 active vs visibility gap */}
-      {stats && !!stats.p2_enabled && !!stats.telemetry && (
-        <div className="mb-5 rounded-lg bg-gradient-to-r from-emerald-50 to-green-50 dark:from-emerald-900/20 dark:to-green-900/20 border border-emerald-200 dark:border-emerald-800/40 p-3">
-          <div className="flex items-center gap-2">
-            <svg className="w-4 h-4 text-emerald-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-            </svg>
-            <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
-              P2 Telemetry Active &mdash; {stats.telemetry.active_identities} active, {stats.telemetry.dormant_confirmed} confirmed dormant
-            </span>
-            <span className="text-xs text-gray-500 dark:text-slate-400 ml-2">
-              {stats.telemetry.risky_sign_ins} risky sign-ins &middot; {stats.telemetry.unresolved_anomalies} unresolved anomalies
-            </span>
-          </div>
-        </div>
-      )}
-      {stats && !stats.p2_enabled && stats.blind_count > 0 && (
-        <div className="mb-5 rounded-lg bg-gradient-to-r from-red-50 to-amber-50 dark:from-red-900/20 dark:to-amber-900/20 border border-red-200 dark:border-red-800/40 p-3">
-          <div className="flex items-center gap-2">
-            <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-            </svg>
-            <span className="text-sm font-medium text-red-700 dark:text-red-300">
-              {stats.blind_count} Workload {stats.blind_count === 1 ? 'Identity Lacks' : 'Identities Lack'} Activity Telemetry
-            </span>
-            {stats.orphaned_count > 0 && (
-              <span className="text-xs text-gray-500 dark:text-slate-400 ml-2">
-                {stats.orphaned_count} orphaned &middot; {stats.stale_credentials} stale credentials
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Exposure Summary Cards */}
+      {/* Top 4 Audit Metrics */}
       {stats && (
-        <div className={`grid gap-3 mb-5 ${stats.p2_enabled && stats.telemetry ? 'grid-cols-7' : 'grid-cols-5'}`}>
-          {[
-            { label: 'Critical Exposure', value: stats.exposure_critical, color: 'text-red-600 dark:text-red-400', sub: 'Score ≥ 80', show: true, onClick: () => { setExposureLevel('critical'); updateParams('exposure', 'critical'); } },
-            { label: 'Orphaned', value: stats.orphaned_count, color: 'text-orange-600 dark:text-orange-400', sub: 'No owner', show: true, onClick: () => { setOwnerFilter('orphaned'); updateParams('owner', 'orphaned'); } },
-            { label: 'Stale Credentials', value: stats.stale_credentials, color: 'text-yellow-600 dark:text-yellow-400', sub: '> 365 days', show: true, onClick: () => { setLifecycleFilter('stale'); updateParams('lifecycle', 'stale'); } },
-            { label: 'Can Escalate', value: stats.can_escalate_count, color: 'text-purple-600 dark:text-purple-400', sub: 'Priv escalation', show: true, onClick: () => { setCanEscalate(true); updateParams('escalate', 'true'); } },
-            { label: 'Zombie', value: stats.zombie_count, color: 'text-gray-600 dark:text-gray-400', sub: 'Dormant + risky', show: true, onClick: () => { setLifecycleFilter('likely_dormant'); updateParams('lifecycle', 'likely_dormant'); } },
-            { label: 'Risky Sign-Ins', value: stats.telemetry?.risky_sign_ins ?? 0, color: 'text-red-500 dark:text-red-400', sub: 'P2 risk detection', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/workload-identities?risk_level=critical') },
-            { label: 'Anomalies', value: stats.telemetry?.unresolved_anomalies ?? 0, color: 'text-violet-600 dark:text-violet-400', sub: 'Unresolved', show: !!stats.p2_enabled && !!stats.telemetry, onClick: () => navigate('/workload-identities?anomaly=unresolved') },
-          ].filter(c => c.show).map(c => (
-            <button key={c.label} onClick={c.onClick} className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
-              <p className="text-xs text-gray-500 dark:text-slate-400">{c.label}</p>
-              <p className={`text-2xl font-bold mt-1 ${c.color}`} style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{typeof c.value === 'number' ? c.value.toLocaleString() : c.value}</p>
-              <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">{c.sub}</p>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Risk Distribution + Top Findings */}
-      {stats && (
-        <div className="grid grid-cols-[220px_1fr] gap-3 mb-5">
-          {/* Risk Distribution */}
-          <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3">
-            <h3 className="text-xs font-semibold text-gray-700 dark:text-slate-300 mb-2">Risk Distribution</h3>
-            {['critical', 'high', 'medium', 'low', 'info'].map(level => (
-              <button key={level} className="flex items-center justify-between py-0.5 w-full cursor-pointer hover:opacity-70 transition" onClick={() => { setRiskLevel(level); updateParams('risk_level', level); }}>
-                <span className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-slate-400 capitalize">
-                  <span className={`w-2 h-2 rounded-full ${SEV_COLOR[level] || 'bg-gray-300'}`} />
-                  {level}
-                </span>
-                <span className="text-xs font-medium text-gray-700 dark:text-slate-300" style={{ borderBottom: '1px dashed currentColor' }}>
-                  {(stats.by_risk[level] || 0).toLocaleString()}
-                </span>
-              </button>
-            ))}
-            <div className="mt-2 pt-2 border-t border-gray-100 dark:border-slate-700">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-gray-400 dark:text-slate-500">Avg Score</span>
-                <span className={`text-sm font-bold ${exposureColor(stats.avg_exposure_score)}`}>
-                  {stats.avg_exposure_score}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Top Findings */}
-          <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3">
-            <h3 className="text-xs font-semibold text-gray-700 dark:text-slate-300 mb-2">Top Findings</h3>
-            {stats.top_findings.length === 0 && (
-              <p className="text-xs text-gray-400 dark:text-slate-500">No findings detected</p>
-            )}
-            <div className="space-y-1.5">
-              {stats.top_findings.slice(0, 7).map((f, i) => (
-                <div key={i} className="flex items-start gap-2">
-                  <span className={`mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${SEV_BADGE[f.severity] || 'bg-gray-100 text-gray-500'}`}>
-                    {f.severity.toUpperCase()}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <span className="text-xs text-gray-700 dark:text-slate-300">{f.title}</span>
-                    <span className="text-[10px] text-gray-400 dark:text-slate-500 ml-1.5">— {f.display_name}</span>
-                  </div>
-                  <span className="text-[10px] text-gray-400 dark:text-slate-500 flex-shrink-0">+{f.score_impact}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+        <div className="grid grid-cols-4 gap-3 mb-5">
+          <button onClick={() => { setOwnerFilter('orphaned'); updateParams('owner', 'orphaned'); }}
+            className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
+            <p className="text-xs text-gray-500 dark:text-slate-400">Orphaned</p>
+            <p className="text-2xl font-bold mt-1 text-red-600 dark:text-red-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.orphaned_count}</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">No owner assigned</p>
+          </button>
+          <button onClick={() => { setLifecycleFilter('likely_dormant'); updateParams('lifecycle', 'likely_dormant'); }}
+            className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
+            <p className="text-xs text-gray-500 dark:text-slate-400">Dormant &gt; 30 Days</p>
+            <p className="text-2xl font-bold mt-1 text-orange-600 dark:text-orange-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.zombie_count}</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Inactive or never used</p>
+          </button>
+          <button onClick={() => { setCanEscalate(true); updateParams('escalate', 'true'); }}
+            className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
+            <p className="text-xs text-gray-500 dark:text-slate-400">Admin Scope</p>
+            <p className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.can_escalate_count}</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Can escalate privileges</p>
+          </button>
+          <button onClick={() => { setExposureLevel('critical'); updateParams('exposure', 'critical'); }}
+            className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
+            <p className="text-xs text-gray-500 dark:text-slate-400">Sensitive Access</p>
+            <p className="text-2xl font-bold mt-1 text-yellow-600 dark:text-yellow-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.exposure_critical}</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Critical exposure (score &ge; 80)</p>
+          </button>
         </div>
       )}
 
@@ -460,119 +384,77 @@ const WorkloadIdentities: React.FC = () => {
           <thead>
             <tr className="bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700">
               <th className="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer" onClick={() => handleSort('display_name')}>
-                Name <SortIcon col="display_name" />
+                Identity <SortIcon col="display_name" />
               </th>
-              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-16" onClick={() => handleSort('exposure_score')}>
-                Exp <SortIcon col="exposure_score" />
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-32">Owner</th>
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-28">Purpose</th>
+              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-28" onClick={() => handleSort('privilege_score')}>
+                Effective Privilege <SortIcon col="privilege_score" />
               </th>
-              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-14" onClick={() => handleSort('privilege_score')}>
-                Priv <SortIcon col="privilege_score" />
-              </th>
-              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-16" onClick={() => handleSort('credential_risk_score')}>
-                Cred <SortIcon col="credential_risk_score" />
-              </th>
-              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Lifecycle</th>
-              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Owner</th>
-              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-20">Scope</th>
-              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-24" onClick={() => handleSort('created_datetime')}>
-                Created <SortIcon col="created_datetime" />
-              </th>
+              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-24">Sensitive Scope</th>
               <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-28" onClick={() => handleSort('last_sign_in')}>
-                Last Sign-In <SortIcon col="last_sign_in" />
+                Last Used <SortIcon col="last_sign_in" />
               </th>
-              {!!stats?.p2_enabled && (
-                <>
-                  <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-[72px]">Sign-Ins</th>
-                  <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-14">Anom</th>
-                </>
-              )}
-              <th className="w-8" />
+              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-28">Ownership Confidence</th>
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={stats?.p2_enabled ? 12 : 10} className="text-center py-8">
+              <tr><td colSpan={7} className="text-center py-8">
                 <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
               </td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={stats?.p2_enabled ? 12 : 10} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No workload identities found</td></tr>
+              <tr><td colSpan={7} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No non-human identities found</td></tr>
             )}
             {!loading && items.map(row => {
-              const lcCfg = LIFECYCLE_STATE_CONFIG[row.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
               const owCfg = OWNER_STATUS_CONFIG[row.owner_status] || OWNER_STATUS_CONFIG.unknown;
               const scCfg = SCOPE_FLAG_CONFIG[row.effective_scope_flag] || SCOPE_FLAG_CONFIG.resource;
-              const isMI = row.identity_type === 'managed_identity';
+              const typeCfg = WORKLOAD_TYPE_CONFIG[row.identity_type] || WORKLOAD_TYPE_CONFIG.spn;
               return (
                 <tr key={`${row.source_table}-${row.workload_id}`}
                   className="border-b border-gray-100 dark:border-slate-800 hover:bg-gray-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors"
                   onClick={() => openDetail(row)}>
+                  {/* Identity */}
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       <TypeBadge type={row.identity_type} />
                       <span className="font-medium text-gray-800 dark:text-slate-200 truncate max-w-[260px]" title={row.display_name}>{row.display_name}</span>
-                      {row.can_escalate && (
-                        <span className="px-1 py-0.5 rounded text-[9px] font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">ESC</span>
-                      )}
                     </div>
                   </td>
-                  <td className="text-center px-2 py-2">
-                    <ExposureRing score={row.exposure_score} size={32} />
-                  </td>
-                  <td className="text-center px-2 py-2">
-                    <span className={`text-xs font-medium ${exposureColor(row.privilege_score * 2.5)}`}>{row.privilege_score}/40</span>
-                  </td>
-                  <td className="text-center px-2 py-2">
-                    {isMI ? (
-                      <span className="text-[10px] text-teal-600 dark:text-teal-400 font-medium">Managed</span>
+                  {/* Owner */}
+                  <td className="px-2 py-2">
+                    {row.owner_display_name ? (
+                      <span className="text-xs text-gray-700 dark:text-slate-300 truncate block max-w-[140px]" title={row.owner_display_name}>{row.owner_display_name}</span>
                     ) : (
-                      <span className={`text-xs font-medium ${exposureColor(row.credential_risk_score * 4)}`}>{row.credential_risk_score}/25</span>
+                      <span className="text-[10px] text-gray-400 dark:text-slate-500 italic">No owner</span>
                     )}
                   </td>
-                  <td className="text-center px-2 py-2">
-                    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${lcCfg.badgeClass}`}>{lcCfg.label}</span>
-                  </td>
+                  {/* Purpose */}
                   <td className="px-2 py-2">
-                    <div className="flex flex-col items-center gap-0.5">
-                      <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${owCfg.badgeClass}`}>{owCfg.label}</span>
-                      {row.owner_display_name && (
-                        <span className="text-[10px] text-gray-500 dark:text-slate-400 truncate max-w-[120px]" title={row.owner_display_name}>{row.owner_display_name}</span>
-                      )}
-                    </div>
+                    <span className="text-xs text-gray-600 dark:text-slate-300">{typeCfg.label}</span>
                   </td>
+                  {/* Effective Privilege */}
+                  <td className="text-center px-2 py-2">
+                    <span className={`text-xs font-medium ${row.privilege_score >= 30 ? 'text-red-600 dark:text-red-400' : row.privilege_score >= 15 ? 'text-orange-500 dark:text-orange-400' : 'text-gray-600 dark:text-slate-300'}`}>
+                      {row.privilege_score}/40
+                    </span>
+                  </td>
+                  {/* Sensitive Scope */}
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scCfg.badgeClass}`}>{scCfg.label}</span>
                   </td>
-                  <td className="px-2 py-2 whitespace-nowrap">
-                    <span className="text-xs text-gray-600 dark:text-slate-300">{formatDate(row.created_datetime)}</span>
-                  </td>
+                  {/* Last Used */}
                   <td className="px-2 py-2 whitespace-nowrap">
                     {row.last_sign_in ? (
-                      <span className="text-xs text-gray-600 dark:text-slate-300">{formatDateTime(row.last_sign_in)}</span>
+                      <span className="text-xs text-gray-600 dark:text-slate-300">{formatDate(row.last_sign_in)}</span>
                     ) : (
                       <span className="text-[10px] text-gray-400 dark:text-slate-500 italic">Unknown</span>
                     )}
                   </td>
-                  {!!stats?.p2_enabled && (
-                    <>
-                      <td className="text-center px-2 py-2">
-                        <span className="text-xs text-gray-600 dark:text-slate-300">
-                          {row.sign_ins_30d != null ? row.sign_ins_30d.toLocaleString() : '—'}
-                        </span>
-                      </td>
-                      <td className="text-center px-2 py-2">
-                        {(row.anomaly_count ?? 0) > 0 ? (
-                          <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
-                            {row.anomaly_count}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-gray-400 dark:text-slate-500">0</span>
-                        )}
-                      </td>
-                    </>
-                  )}
-                  <td className="px-2 py-2 text-gray-400">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                  {/* Ownership Confidence */}
+                  <td className="text-center px-2 py-2">
+                    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${owCfg.badgeClass}`}>{owCfg.label}</span>
                   </td>
                 </tr>
               );
@@ -600,9 +482,8 @@ const WorkloadIdentities: React.FC = () => {
         )}
       </div>
 
-      {/* Footer Legend */}
-      <div className="mt-4 text-[10px] text-gray-400 dark:text-slate-500">
-        Exposure = Privilege (40) + Credential Risk (25) + Exposure (20) + Lifecycle (10) + Visibility (5). Score ≥ 80 = Critical. Override conditions force score to 100.
+      <div className="mt-3 text-[11px] text-gray-400 dark:text-slate-500 text-center">
+        Click any row to inspect.
       </div>
     </div>
   );

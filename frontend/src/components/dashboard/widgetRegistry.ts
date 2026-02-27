@@ -8,10 +8,10 @@ export interface WidgetMeta {
 }
 
 export const WIDGET_REGISTRY: WidgetMeta[] = [
-  { id: 'stats_cards',          label: 'Stats Cards',          description: 'Total identities, critical, high, discovery runs',     group: 'stats',      defaultVisible: true,  colSpan: 3 },
-  { id: 'risk_trend_chart',     label: 'Risk Trend Chart',     description: 'Historical risk level trends across runs',             group: 'charts',     defaultVisible: true,  colSpan: 2 },
+  { id: 'stats_cards',          label: 'Stats Cards',          description: 'Total identities, critical, high, snapshots',         group: 'stats',      defaultVisible: true,  colSpan: 3 },
+  { id: 'risk_trend_chart',     label: 'Risk Trend Chart',     description: 'Historical risk level trends across snapshots',        group: 'charts',     defaultVisible: true,  colSpan: 2 },
   { id: 'role_usage_chart',     label: 'Role Usage Chart',     description: 'Active vs inactive role assignments',                  group: 'charts',     defaultVisible: true,  colSpan: 1 },
-  { id: 'risk_velocity_chart',  label: 'Risk Escalation Tracker', description: 'Risk level transitions between runs',               group: 'charts',     defaultVisible: true,  colSpan: 3 },
+  { id: 'risk_velocity_chart',  label: 'Risk Escalation Tracker', description: 'Risk level transitions between snapshots',           group: 'charts',     defaultVisible: true,  colSpan: 3 },
   { id: 'cloud_context_banner', label: 'Cloud Context',        description: 'Monitored cloud accounts and subscriptions',           group: 'monitoring', defaultVisible: true,  colSpan: 3 },
   { id: 'posture_score',        label: 'Posture Score',        description: 'Overall security posture grade',                       group: 'monitoring', defaultVisible: true,  colSpan: 1 },
   { id: 'credential_health',    label: 'Credential Health',    description: 'Expired, expiring, and healthy credentials',           group: 'monitoring', defaultVisible: true,  colSpan: 1 },

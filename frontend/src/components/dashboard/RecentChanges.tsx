@@ -38,7 +38,7 @@ export default function RecentChanges({
           <div className="text-sm font-semibold text-gray-900">Recent Changes</div>
         </div>
         <div className="text-sm text-gray-400 italic">
-          Change tracking available after 2+ discovery runs
+          Change tracking available after 2+ snapshots
         </div>
       </div>
     );
@@ -62,7 +62,7 @@ export default function RecentChanges({
           <div className="text-sm font-semibold text-gray-900">Recent Changes</div>
         </div>
         <span className="text-[10px] text-gray-400">
-          Run #{currentRunId} vs #{previousRunId}
+          Snapshot #{currentRunId} vs #{previousRunId}
         </span>
       </div>
 

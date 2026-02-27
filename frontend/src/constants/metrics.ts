@@ -190,7 +190,7 @@ export const DATA_EXPLANATIONS = {
   CA_POLICY:      'CA analysis requires Policy.Read.All permission',
   AUDIT_LOG:      'Audit logs require AuditLog.Read.All permission',
   CREDENTIAL_NA:  'Human users authenticate via Entra ID (password/MFA), not app secrets',
-  NO_DATA:        'Not yet collected — run a discovery scan',
+  NO_DATA:        'Not yet collected — capture a snapshot',
 } as const;
 
 // ── Identity Dashboard V2 ────────────────────────────────────────────

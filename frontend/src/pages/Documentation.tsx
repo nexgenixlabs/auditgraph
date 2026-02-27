@@ -14,7 +14,7 @@ const DOCS: DocSection[] = [
     items: [
       {
         title: 'Quick Start Guide',
-        content: `1. **Create your organization** — Log in to the portal and complete the onboarding wizard.\n2. **Connect a cloud provider** — Go to Settings > Identity Sources and add your Azure AD credentials (Client ID, Client Secret, Tenant ID).\n3. **Required Azure Permissions** — The app registration needs:\n   - \`Directory.Read.All\` (Application) — Read identities and groups\n   - \`RoleManagement.Read.Directory\` (Application) — Read PIM eligible assignments\n   - \`Policy.Read.All\` (Application) — Read Conditional Access policies\n   - \`AuditLog.Read.All\` (Application) — Read sign-in and audit logs\n   - Azure RBAC \`Reader\` on target subscriptions\n4. **Run your first scan** — Click "Trigger Scan" in the Dashboard or wait for the scheduled scan.\n5. **Review results** — Check the Risk Posture dashboard for critical findings.`,
+        content: `1. **Create your organization** — Log in to the portal and complete the onboarding wizard.\n2. **Connect a cloud provider** — Go to Settings > Identity Sources and add your Azure AD credentials (Client ID, Client Secret, Tenant ID).\n3. **Required Azure Permissions** — The app registration needs:\n   - \`Directory.Read.All\` (Application) — Read identities and groups\n   - \`RoleManagement.Read.Directory\` (Application) — Read PIM eligible assignments\n   - \`Policy.Read.All\` (Application) — Read Conditional Access policies\n   - \`AuditLog.Read.All\` (Application) — Read sign-in and audit logs\n   - Azure RBAC \`Reader\` on target subscriptions\n4. **Capture your first snapshot** — Click "Capture Snapshot" in the Dashboard or wait for the scheduled snapshot.\n5. **Review results** — Check the Risk Posture dashboard for critical findings.`,
       },
       {
         title: 'Understanding Risk Scores',
@@ -66,7 +66,7 @@ const DOCS: DocSection[] = [
       },
       {
         title: 'Data Retention',
-        content: `Configure retention periods in **Settings > Data Retention**:\n\n| Data Type | Default | Configurable |\n|-----------|---------|-------------|\n| Discovery Runs | 90 days | Yes |\n| Drift Reports | 90 days | Yes |\n| Activity Logs | 365 days | Yes |\n| Anomalies | 180 days | Yes |\n| SOAR Actions | 90 days | Yes |\n| Notifications | 30 days | Yes |\n\nCleanup runs automatically at 03:00 UTC daily. Manual cleanup is available in Settings.`,
+        content: `Configure retention periods in **Settings > Data Retention**:\n\n| Data Type | Default | Configurable |\n|-----------|---------|-------------|\n| Snapshots | 90 days | Yes |\n| Drift Reports | 90 days | Yes |\n| Activity Logs | 365 days | Yes |\n| Anomalies | 180 days | Yes |\n| SOAR Actions | 90 days | Yes |\n| Notifications | 30 days | Yes |\n\nCleanup runs automatically at 03:00 UTC daily. Manual cleanup is available in Settings.`,
       },
     ],
   },
@@ -80,7 +80,7 @@ const DOCS: DocSection[] = [
       },
       {
         title: 'Core Endpoints',
-        content: `**Identity Endpoints:**\n- \`GET /api/identities\` — List identities (paginated, filterable)\n- \`GET /api/identities/:id\` — Full identity detail\n- \`POST /api/identities/query\` — Advanced query builder\n- \`GET /api/identities/:id/graph-data\` — Access graph visualization\n\n**Risk & Compliance:**\n- \`GET /api/stats\` — Latest run summary\n- \`GET /api/dashboard/posture\` — Posture score and credential health\n- \`GET /api/dashboard/compliance\` — Compliance scorecard\n- \`GET /api/compliance/frameworks\` — Framework details\n\n**Discovery & Drift:**\n- \`GET /api/runs\` — Discovery run history\n- \`POST /api/runs/trigger\` — Trigger manual scan\n- \`GET /api/drift/latest\` — Latest drift report\n- \`GET /api/drift/history\` — Drift timeline`,
+        content: `**Identity Endpoints:**\n- \`GET /api/identities\` — List identities (paginated, filterable)\n- \`GET /api/identities/:id\` — Full identity detail\n- \`POST /api/identities/query\` — Advanced query builder\n- \`GET /api/identities/:id/graph-data\` — Access graph visualization\n\n**Risk & Compliance:**\n- \`GET /api/stats\` — Latest run summary\n- \`GET /api/dashboard/posture\` — Posture score and credential health\n- \`GET /api/dashboard/compliance\` — Compliance scorecard\n- \`GET /api/compliance/frameworks\` — Framework details\n\n**Snapshots & Drift:**\n- \`GET /api/runs\` — Snapshot history\n- \`POST /api/runs/trigger\` — Trigger snapshot capture\n- \`GET /api/drift/latest\` — Latest drift report\n- \`GET /api/drift/history\` — Drift timeline`,
       },
       {
         title: 'Export Endpoints',

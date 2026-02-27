@@ -564,9 +564,9 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
     });
   }
 
-  // System actions — always present; "Run Discovery Scan" is a system action, never a ranked remediation
+  // System actions — always present; "Capture Snapshot" is a system action, never a ranked remediation
   const systemActions: SystemAction[] = [
-    { id: 'run-scan', label: 'Run Discovery Scan', status: lr.completed_at ? 'completed' : 'pending', description: lr.completed_at ? `Last scan: ${getTimeAgo(lr.completed_at)}` : 'No scan completed yet' },
+    { id: 'run-scan', label: 'Capture Snapshot', status: lr.completed_at ? 'completed' : 'pending', description: lr.completed_at ? `Last snapshot: ${getTimeAgo(lr.completed_at)}` : 'No snapshot captured yet' },
   ];
 
   const compFrameworks: Record<string, Framework[]> = {};
@@ -595,7 +595,7 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
     });
   }
   if (!Object.keys(compFrameworks).length) {
-    compFrameworks['Core Governance'] = [{ name: 'No data', passed: 0, total: 1, pct: 0, failingIdentities: 0, controlMappingSource: 'Run a discovery scan', coverageTrend30d: null, controls: [], key: 'none', category: 'Core Governance' }];
+    compFrameworks['Core Governance'] = [{ name: 'No data', passed: 0, total: 1, pct: 0, failingIdentities: 0, controlMappingSource: 'Capture a snapshot', coverageTrend30d: null, controls: [], key: 'none', category: 'Core Governance' }];
   }
 
   const govMetrics: GovMetric[] = [
@@ -1285,7 +1285,7 @@ function ComplianceDetailPanel({ state, onClose, openDrill, setDrillPanel }: {
 
           {/* Controls list */}
           {sorted.length === 0 ? (
-            <div style={{ fontFamily: F.ui, fontSize: 13, color: P.textDim, padding: 20, textAlign: 'center' }}>No controls data available. Run a discovery scan to populate compliance controls.</div>
+            <div style={{ fontFamily: F.ui, fontSize: 13, color: P.textDim, padding: 20, textAlign: 'center' }}>No controls data available. Capture a snapshot to populate compliance controls.</div>
           ) : sorted.map((ctrl, i) => {
             const statusColor = ctrl.status === 'pass' ? '#22c55e' : ctrl.status === 'warn' ? '#eab308' : '#ff4444';
             return (
@@ -1506,7 +1506,7 @@ function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openComplianceDe
             if (!identityRemediations.length) return (
               <div style={{ padding: 16, background: P.bgHover, borderRadius: 8, textAlign: 'center' }}>
                 <div style={{ fontFamily: F.ui, fontSize: 13, color: P.textMuted, marginBottom: 8 }}>No identity remediation actions available</div>
-                <div style={{ fontFamily: F.data, fontSize: 11, color: P.textDim }}>Run a discovery scan to generate recommendations</div>
+                <div style={{ fontFamily: F.data, fontSize: 11, color: P.textDim }}>Capture a snapshot to generate recommendations</div>
               </div>
             );
             return identityRemediations.slice(0, 3).map(r => (
@@ -1871,7 +1871,7 @@ function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
           <div style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }}>{'\uD83D\uDD0D'}</div>
           <div style={{ fontFamily: F.ui, fontSize: 15, color: P.textMuted, marginBottom: 8 }}>No identity remediation actions available</div>
           <div style={{ fontFamily: F.data, fontSize: 12, color: P.textDim, maxWidth: 400, margin: '0 auto', marginBottom: 16 }}>
-            Run a discovery scan to analyze your identity estate and generate prioritized remediation recommendations.
+            Capture a snapshot to analyze your identity estate and generate prioritized remediation recommendations.
           </div>
           <button
             onClick={triggerScan}
@@ -1880,7 +1880,7 @@ function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
               fontFamily: F.data, fontSize: 12, fontWeight: 700, padding: '8px 24px', borderRadius: 8, border: 'none', cursor: scanTriggered ? 'default' : 'pointer',
               background: scanTriggered ? P.accentIndigoBg : P.btnGradient, color: 'white', opacity: scanTriggered ? 0.6 : 1,
             }}
-          >{scanTriggered ? 'Scan Triggered...' : 'Run Discovery Scan'}</button>
+          >{scanTriggered ? 'Capturing...' : 'Capture Snapshot'}</button>
         </Card>
       )}
 

@@ -100,7 +100,7 @@ export default function RiskVelocityChart({ transitions, retention }: RiskVeloci
                 if (!d) return null;
                 return (
                   <div className="bg-white border rounded-lg shadow-lg px-3 py-2 text-xs">
-                    <div className="font-semibold mb-1">{label} (Run #{d.run_id})</div>
+                    <div className="font-semibold mb-1">{label} (Snapshot #{d.run_id})</div>
                     {(['critical', 'high', 'medium'] as const).map(l => {
                       const inKey = `${l}_in` as keyof typeof d;
                       const outKey = `${l}_out` as keyof typeof d;

@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
-import { downloadCSV, exportFilename, RESOURCE_CSV_COLUMNS } from '../utils/exportUtils';
+import { downloadCSV, exportFilename, RESOURCE_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -133,10 +134,12 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
   const navigate = useNavigate();
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
+  const { user, activeTenantId, activeTenantName } = useAuth();
 
   const [resources, setResources] = useState<ResourceRow[]>([]);
   const [stats, setStats] = useState<ResourceStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [latestSnapshotId, setLatestSnapshotId] = useState<number | null>(null);
   const [initialized, setInitialized] = useState(false);
 
   const [typeFilter, setTypeFilter] = useState('');
@@ -158,6 +161,17 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
     setSearch(p.get('search') || '');
     setInitialized(true);
   }, [location.search, lockedType]);
+
+  // Fetch latest snapshot ID for export metadata
+  useEffect(() => {
+    fetch(withConnection('/api/runs'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const runs = data?.runs || data || [];
+        if (Array.isArray(runs) && runs.length > 0) setLatestSnapshotId(runs[0].id);
+      })
+      .catch(() => {});
+  }, [withConnection]);
 
   // Fetch stats (re-fetch when type filter changes for type-specific trending)
   useEffect(() => {
@@ -231,12 +245,14 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
   }, [typeFilter, riskFilter, search, initialized, lockedType]);
 
   const handleCSVExport = useCallback(() => {
+    const meta = buildExportMeta(latestSnapshotId, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
     downloadCSV(
       resources as unknown as Record<string, unknown>[],
       RESOURCE_CSV_COLUMNS,
-      exportFilename('resources', 'csv')
+      exportFilename('resources', 'csv'),
+      meta
     );
-  }, [resources]);
+  }, [resources, latestSnapshotId, activeTenantId, activeTenantName, user]);
 
   return (
     <div className="space-y-4">
@@ -254,6 +270,16 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
           Export CSV
         </button>
       </div>
+
+      {/* Export Metadata Strip */}
+      {latestSnapshotId && (
+        <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50">
+          <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
+          <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{latestSnapshotId}</span></span>
+          <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
+        </div>
+      )}
 
       {/* Summary Cards — context-aware based on type filter */}
       {stats && (
@@ -443,7 +469,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
               {loading ? (
                 <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">Loading resources...</td></tr>
               ) : sorted.length === 0 ? (
-                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">No resources found. Run a discovery to populate.</td></tr>
+                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">No resources found. Capture a snapshot to populate.</td></tr>
               ) : sorted.map(r => (
                 <tr
                   key={`${r.resource_type}-${r.id}`}

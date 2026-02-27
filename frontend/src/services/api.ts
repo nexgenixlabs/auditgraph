@@ -5,9 +5,9 @@
  * REST API. All functions return Promises and handle error logging.
  *
  * API Functions:
- *   - getStats(): Fetch dashboard statistics from latest discovery run
+ *   - getStats(): Fetch dashboard statistics from latest snapshot
  *   - getRisks(): Fetch high-risk identities requiring attention
- *   - getIdentities(): Fetch all identities from latest discovery run
+ *   - getIdentities(): Fetch all identities from latest snapshot
  *   - getIdentity(id): Fetch detailed info for a single identity
  *
  * Configuration:

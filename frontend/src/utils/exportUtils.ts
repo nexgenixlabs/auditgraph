@@ -1,8 +1,29 @@
 /**
- * AuditGraph Export Utilities (Phase 33)
+ * AuditGraph Export Utilities (Phase 33, Phase 9 hardening)
  *
  * Shared functions for CSV/JSON file generation and download.
+ * All exports include standardized metadata: Snapshot ID, Timestamp, Tenant ID, Schema version.
  */
+
+export const EXPORT_SCHEMA_VERSION = '1.0';
+
+export interface ExportMetadata {
+  snapshot_id: number | null;
+  timestamp: string;
+  tenant_id: number | null;
+  tenant_name: string | null;
+  schema_version: string;
+}
+
+export function buildExportMeta(snapshotId: number | null, tenantId: number | null, tenantName: string | null): ExportMetadata {
+  return {
+    snapshot_id: snapshotId,
+    timestamp: new Date().toISOString(),
+    tenant_id: tenantId,
+    tenant_name: tenantName,
+    schema_version: EXPORT_SCHEMA_VERSION,
+  };
+}
 
 export interface CsvColumn {
   key: string;
@@ -31,13 +52,29 @@ export function downloadBlob(content: string, filename: string, mimeType: string
   URL.revokeObjectURL(url);
 }
 
-export function downloadCSV(data: Record<string, unknown>[], columns: CsvColumn[], filename: string): void {
+export function downloadCSV(data: Record<string, unknown>[], columns: CsvColumn[], filename: string, meta?: ExportMetadata): void {
   const csv = objectsToCSV(data, columns);
-  downloadBlob(csv, filename, 'text/csv;charset=utf-8;');
+  if (meta) {
+    const metaLines = [
+      `# AuditGraph Export`,
+      `# Snapshot ID: ${meta.snapshot_id ?? 'N/A'}`,
+      `# Timestamp: ${meta.timestamp}`,
+      `# Tenant ID: ${meta.tenant_id ?? 'N/A'}`,
+      `# Tenant: ${meta.tenant_name ?? 'N/A'}`,
+      `# Schema Version: ${meta.schema_version}`,
+      `#`,
+    ];
+    downloadBlob(metaLines.join('\n') + '\n' + csv, filename, 'text/csv;charset=utf-8;');
+  } else {
+    downloadBlob(csv, filename, 'text/csv;charset=utf-8;');
+  }
 }
 
-export function downloadJSON(data: unknown, filename: string): void {
-  const json = JSON.stringify(data, null, 2);
+export function downloadJSON(data: unknown, filename: string, meta?: ExportMetadata): void {
+  const payload = meta
+    ? { _export_metadata: meta, data }
+    : data;
+  const json = JSON.stringify(payload, null, 2);
   downloadBlob(json, filename, 'application/json;charset=utf-8;');
 }
 

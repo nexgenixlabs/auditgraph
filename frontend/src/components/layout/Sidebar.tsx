@@ -54,6 +54,11 @@ const nonHumanIcon = icon('M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.7
 const guestIcon = icon('M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z');
 const attackIcon = icon('M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z');
 
+// Access Explainability
+const accessGraphIcon = icon('M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1');
+const effectiveAccessIcon = icon('M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z');
+const sensitiveDataIcon = icon('M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4');
+
 // Governance
 const governanceIcon = icon('M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z');
 const roleOptIcon = icon('M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7');
@@ -100,7 +105,15 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#8b5cf6',
         items: [
           { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/data-security', label: 'Data & Resource Exposure', icon: attackIcon },
+        ],
+      },
+      {
+        label: 'Access Explainability',
+        color: '#0891b2',
+        items: [
+          { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
+          { to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon },
+          { to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon },
         ],
       },
       {

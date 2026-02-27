@@ -59,7 +59,7 @@ export default function ResourceOverview() {
     return (
       <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-4">
         <h3 className="text-sm font-semibold text-gray-800 dark:text-slate-200 mb-2">Azure Resources</h3>
-        <p className="text-xs text-gray-500">No resources discovered yet. Run a discovery to populate.</p>
+        <p className="text-xs text-gray-500">No resources discovered yet. Capture a snapshot to populate.</p>
       </div>
     );
   }

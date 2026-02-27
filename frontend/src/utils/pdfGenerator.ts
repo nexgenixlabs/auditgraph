@@ -144,7 +144,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
     year: 'numeric', month: 'long', day: 'numeric'
   });
   doc.text(`Generated: ${reportDate}`, margin, 115);
-  doc.text(`Discovery Run: #${data.run_id}`, margin, 122);
+  doc.text(`Snapshot: #${data.run_id}`, margin, 122);
   if (data.collected_at) {
     doc.text(`Data Collected: ${new Date(data.collected_at).toLocaleString()}`, margin, 129);
   }

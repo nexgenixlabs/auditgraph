@@ -10,7 +10,7 @@ export default function LockedDashboard() {
       <div className="filter blur-sm pointer-events-none select-none">
         <h2 className="text-2xl font-bold text-gray-900 mb-6">Identity Risk Overview</h2>
         <div className="grid grid-cols-4 gap-4 mb-6">
-          {['Total Identities', 'Critical', 'High', 'Discovery Runs'].map(label => (
+          {['Total Identities', 'Critical', 'High', 'Snapshots'].map(label => (
             <div key={label} className="bg-white rounded-xl border border-gray-200 p-5">
               <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</div>
               <div className="text-2xl font-bold text-gray-300 mt-1">&mdash;</div>
@@ -34,7 +34,7 @@ export default function LockedDashboard() {
           <h3 className="text-lg font-bold text-gray-900 mb-2">Cloud Authentication Required</h3>
           <p className="text-sm text-gray-600 mb-5">
             Before you can start monitoring identities, you need to connect your cloud provider credentials.
-            Go to Settings to configure your cloud connection and run your first discovery scan.
+            Go to Settings to configure your cloud connection and capture your first snapshot.
           </p>
           <button
             onClick={() => navigate('/settings/connections')}

@@ -918,7 +918,7 @@ function AccessTab({ rbacAccess, policyAccess, blastRadius, ghostCount, loading,
     return (
       <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6 text-center">
         <p className="text-yellow-700 dark:text-yellow-300 text-sm font-medium">Unable to load access data.</p>
-        <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">Identity-resource cross-reference requires a completed discovery run.</p>
+        <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">Identity-resource cross-reference requires a completed snapshot.</p>
       </div>
     );
   }
@@ -1304,7 +1304,7 @@ function IntelligenceTab({ resource, anomalies }: { resource: ResourceData; anom
         <h3 className="text-sm font-semibold text-gray-700 mb-4">Risk Score Trajectory</h3>
         {trend.length < 2 ? (
           <div className="text-center py-8 text-gray-400 text-sm">
-            Insufficient history — at least 2 discovery runs required for trend analysis
+            Insufficient history — at least 2 snapshots required for trend analysis
           </div>
         ) : (
           <div className="flex items-end gap-1.5" style={{ height: 160 }}>

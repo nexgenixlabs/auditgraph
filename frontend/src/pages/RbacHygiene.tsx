@@ -278,7 +278,7 @@ export default function RbacHygiene() {
               background: G.accent, color: '#fff', fontSize: 13, fontWeight: 600,
               opacity: scanning ? 0.6 : 1, transition: 'opacity 0.2s',
             }}>
-            {scanning ? 'Scanning...' : 'Run Scan'}
+            {scanning ? 'Capturing...' : 'Capture Snapshot'}
           </button>
         )}
       </div>
@@ -494,7 +494,7 @@ export default function RbacHygiene() {
           </svg>
           <div style={{ fontSize: 16, fontWeight: 600, color: G.text, marginBottom: 8 }}>No RBAC Hygiene Data</div>
           <div style={{ fontSize: 13, color: G.textSecondary, marginBottom: 16 }}>
-            Run a scan to analyze your RBAC assignments for hygiene issues
+            Capture a snapshot to analyze your RBAC assignments for hygiene issues
           </div>
           {isAdmin && (
             <button onClick={handleScan} disabled={scanning}
