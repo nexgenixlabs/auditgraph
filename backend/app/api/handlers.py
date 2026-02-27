@@ -9,10 +9,13 @@ import time
 import bcrypt
 import secrets
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from flask import jsonify, request, g, Response
 from dotenv import load_dotenv
 import json
+
+logger = logging.getLogger(__name__)
 
 from psycopg2.extras import RealDictCursor
 from app.database import Database
@@ -2045,7 +2048,8 @@ def get_activity():
             "entries": entries,
         })
     except Exception as e:
-        return jsonify({"error": str(e), "entries": []}), 500
+        logger.error(f"Activity log load failed: {e}", exc_info=True)
+        return jsonify({"error": "Failed to load activity log", "entries": []}), 500
     finally:
         db.close()
 
@@ -6760,7 +6764,7 @@ def forgot_password_handler():
     if not email:
         return jsonify({'error': 'Email is required'}), 400
 
-    db = _db()
+    db = Database()  # Bypass RLS — pre-auth public endpoint
     try:
         # Resolve tenant_id from slug if provided
         tenant_id = None
@@ -6785,14 +6789,14 @@ def forgot_password_handler():
 
         db.set_password_reset_token(user['id'], token_hash, expires)
 
-        # Build reset URL (log it — email delivery uses existing EmailService if configured)
+        # Build reset URL (email delivery uses existing EmailService if configured)
         reset_url = f"/reset-password?token={raw_token}"
-        print(f"[Password Reset] User: {email}, Token: {raw_token}, URL: {reset_url}")
+        logger.info(f"[Password Reset] Token generated for user: {email}")
 
         try:
             _log(db, 'password_reset_requested',
                  f'Password reset requested for "{email}"',
-                 {'user_id': user['id'], 'reset_url': reset_url, 'ip': request.remote_addr})
+                 {'user_id': user['id'], 'ip': request.remote_addr})
         except Exception:
             pass
 
@@ -6808,7 +6812,7 @@ def validate_reset_token_handler():
         return jsonify({'valid': False}), 400
 
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    db = _db()
+    db = Database()  # Bypass RLS — pre-auth public endpoint
     try:
         user = db.get_user_by_reset_token(token_hash)
         if not user:
@@ -6842,7 +6846,7 @@ def reset_password_handler():
         return jsonify({'error': err}), 400
 
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    db = _db()
+    db = Database()  # Bypass RLS — pre-auth public endpoint
     try:
         user = db.get_user_by_reset_token(token_hash)
         if not user:
@@ -7052,8 +7056,9 @@ def update_user_handler(user_id):
 
         if 'password' in data and data['password']:
             pwd = str(data['password'])
-            if len(pwd) < 8:
-                errors.append('password must be at least 8 characters')
+            valid, err = validate_password(pwd)
+            if not valid:
+                errors.append(err)
             else:
                 updates['password_hash'] = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
@@ -8318,7 +8323,8 @@ def export_evidence_zip():
     except Exception as e:
         cursor.close()
         db.close()
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Export failed: {e}", exc_info=True)
+        return jsonify({'error': 'Export failed'}), 500
 
 
 # ─── Saved Views (Phase 34) ─────────────────────────────────────────
@@ -9797,7 +9803,8 @@ def execute_soar_action_handler():
             status = 'success'
         except Exception as e:
             status = 'failed'
-            return jsonify({'error': f'Action failed: {str(e)}', 'status': 'failed'}), 500
+            logger.error(f"SOAR action failed: {e}", exc_info=True)
+            return jsonify({'error': 'Action failed', 'status': 'failed'}), 500
 
         try:
             _log(db,'soar_action_manual',
@@ -10110,9 +10117,8 @@ def delete_tenant_handler(tenant_id):
         try:
             db.delete_tenant(tenant_id)
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to delete tenant {tenant_id}: {e}")
-            return jsonify({'error': f'Failed to delete tenant: {str(e)}'}), 500
+            logger.error(f"Failed to delete tenant {tenant_id}: {e}", exc_info=True)
+            return jsonify({'error': 'Failed to delete tenant'}), 500
 
         try:
             _log(db,'tenant_deleted',
@@ -10669,9 +10675,10 @@ def test_azure_connection():
             'message': f'Connected successfully. Found {len(subs)} subscription(s).',
         })
     except Exception as e:
+        logger.error(f"Azure connection test failed: {e}", exc_info=True)
         return jsonify({
             'status': 'error',
-            'error': str(e),
+            'error': 'Connection test failed',
             'message': 'Failed to connect. Check your credentials.',
         }), 400
 
@@ -10929,9 +10936,10 @@ def test_client_connection():
                                                last_test_status='failed')
                 finally:
                     db.close()
+            logger.error(f"Cloud connection test failed: {e}", exc_info=True)
             return jsonify({
                 'status': 'error',
-                'error': str(e),
+                'error': 'Connection test failed',
                 'message': 'Failed to connect. Check your credentials.',
             }), 400
     else:
@@ -13420,7 +13428,8 @@ def parse_sso_metadata():
         parsed = parse_idp_metadata_url(metadata_url)
         return jsonify(parsed)
     except ValueError as e:
-        return jsonify({'error': str(e)}), 400
+        logger.error(f"IdP metadata parse failed: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to parse IdP metadata'}), 400
 
 
 # ------------------------------------------------------------------
@@ -14522,7 +14531,8 @@ def health_check():
         db.close()
         checks['database'] = {'status': 'healthy', 'latency_ms': db_latency}
     except Exception as e:
-        checks['database'] = {'status': 'unhealthy', 'error': str(e)}
+        logger.error(f"Health check DB probe failed: {e}", exc_info=True)
+        checks['database'] = {'status': 'unhealthy', 'error': 'Database connection failed'}
         overall = 'degraded'
 
     # Scheduler check
@@ -15661,7 +15671,8 @@ def get_app_reg_stats():
             'by_audience': by_audience,
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"App registration stats failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -15755,7 +15766,8 @@ def get_app_reg_list():
         cursor.close()
         return jsonify({'items': items, 'total': total})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"App registration list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -15865,7 +15877,8 @@ def get_app_reg_detail(app_id):
             'recommendations': recommendations,
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"App registration detail failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -16109,7 +16122,8 @@ def copilot_chat():
         try:
             response_text = service.ask(message, messages_history, db)
         except Exception as e:
-            return jsonify({'error': f'AI service error: {str(e)}'}), 502
+            logger.error(f"AI copilot service error: {e}", exc_info=True)
+            return jsonify({'error': 'AI service temporarily unavailable'}), 502
 
         # Save conversation
         messages_history.append({'role': 'user', 'content': message})
@@ -17337,7 +17351,8 @@ def get_identity_subscriptions(identity_id):
         result = sorted(by_sub.values(), key=lambda x: x['subscription_name'] or '')
         return jsonify({'subscriptions': result, 'count': len(result)})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Subscription data load failed: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to load data'}), 500
     finally:
         db.close()
 
@@ -17864,7 +17879,8 @@ def send_invoice_email(invoice_id):
         try:
             email_svc.send_email(to_email, subject, body)
         except Exception as e:
-            return jsonify({'error': f'Failed to send email: {str(e)}'}), 500
+            logger.error(f"Invoice email send failed: {e}", exc_info=True)
+            return jsonify({'error': 'Failed to send email'}), 500
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
@@ -18022,7 +18038,8 @@ def run_rbac_hygiene_scan():
             'tier_distribution': result.get('tier_distribution', {}),
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"RBAC hygiene data load failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -19425,7 +19442,8 @@ def get_correlation_accounts():
         })
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Identity correlation failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         cursor.close()
         db.close()
@@ -19506,7 +19524,8 @@ def get_identity_risk_summary():
 
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Posture snapshot failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -19574,7 +19593,8 @@ def get_dangerous_identities():
         cursor.close()
         return jsonify({'identities': identities})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Dangerous identities query failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -20017,8 +20037,19 @@ def stripe_webhook_handler():
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature', '')
 
-    # In production, verify webhook signature with stripe library
-    # For now, parse the event directly
+    # Verify webhook signature when secret is configured
+    if webhook_secret and sig_header:
+        import hmac as _hmac
+        parts = dict(p.split('=', 1) for p in sig_header.split(',') if '=' in p)
+        timestamp = parts.get('t', '')
+        signature = parts.get('v1', '')
+        signed_payload = f"{timestamp}.{payload}"
+        expected = _hmac.new(webhook_secret.encode(), signed_payload.encode(), hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(expected, signature):
+            return jsonify({'error': 'Invalid signature'}), 401
+    elif webhook_secret:
+        return jsonify({'error': 'Missing Stripe-Signature header'}), 401
+
     try:
         event = json_mod.loads(payload)
     except Exception:
@@ -20130,7 +20161,8 @@ def create_stripe_customer_handler(tenant_id):
         except ImportError:
             return jsonify({'error': 'stripe Python package not installed. Run: pip install stripe'}), 503
         except Exception as e:
-            return jsonify({'error': f'Stripe API error: {str(e)}'}), 502
+            logger.error(f"Stripe API error: {e}", exc_info=True)
+            return jsonify({'error': 'Billing service temporarily unavailable'}), 502
     finally:
         db.close()
 
@@ -20228,7 +20260,8 @@ def create_pilot_tenant():
         }), 201
     except Exception as e:
         db.conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Pilot tenant creation failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 

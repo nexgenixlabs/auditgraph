@@ -2,6 +2,7 @@ from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 from datetime import datetime
 import atexit
+import os
 import re
 import time
 
@@ -293,7 +294,8 @@ from app.scheduler import start_scheduler, stop_scheduler
 
 def create_app():
     app = Flask(__name__)
-    CORS(app, resources={r"/*": {"origins": "*"}})
+    cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
+    CORS(app, resources={r"/*": {"origins": [o.strip() for o in cors_origins]}})
 
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
@@ -1634,6 +1636,7 @@ def create_app():
         return get_storage_stats()
 
     @app.post("/api/system/cleanup")
+    @require_role('admin')
     def system_cleanup():
         return run_manual_cleanup()
 
@@ -1649,6 +1652,7 @@ def create_app():
 
     # Phase 58: Compliance Auto-Remediation
     @app.post("/api/identities/<path:identity_id>/remediation-execute")
+    @require_role('admin')
     def remediation_execute(identity_id):
         return execute_remediation(identity_id)
 
@@ -1657,6 +1661,7 @@ def create_app():
         return get_remediation_queue_handler()
 
     @app.post("/api/remediation/auto-execute")
+    @require_role('admin')
     def remediation_auto_execute():
         return batch_auto_remediate()
 
