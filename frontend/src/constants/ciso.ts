@@ -114,10 +114,10 @@ export interface TenantMeta {
 export interface RiskScore {
   current: number;
   previous: number;
-  delta: number;
+  delta: number | null;
   tier: string;
   grade: string;
-  industry: number;
+  industry: number | null;
   target: number;
   potentialGain: number;
   trend: number[];
@@ -125,10 +125,10 @@ export interface RiskScore {
 
 export interface Projection {
   noAction: {
-    score: number;
-    tier: string;
+    score: number | null;
+    tier: string | null;
     consequences: string[];
-    breachImpact: string;
+    breachImpact: string | null;
   };
   remediated: {
     score: number;
@@ -198,13 +198,13 @@ export interface Remediation {
   risk: string;
   color: string;
   affected: string;
-  effort: string;
-  rollback: string;
-  rollbackRisk: string;
-  compliance: string;
-  confidence: number;
+  effort: string | null;
+  rollback: string | null;
+  rollbackRisk: string | null;
+  compliance: string | null;
+  confidence: number | null;
   productionImpact: boolean;
-  riskPerDay: number;
+  riskPerDay: number | null;
 }
 
 export interface GovernanceMetric {

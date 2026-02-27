@@ -94,7 +94,7 @@ export default function ConditionalAccessCard({ data, loading }: ConditionalAcce
           <div className="text-lg font-bold text-gray-900">{data.enabled_policies}<span className="text-sm font-normal text-gray-400">/{data.total_policies}</span></div>
         </button>
         <button
-          onClick={() => navigate('/identities?mfa_enforced=true')}
+          onClick={() => navigate('/identities?ca_coverage=covered')}
           className="bg-gray-50 rounded-lg p-3 text-left hover:bg-blue-50 transition"
         >
           <div className="text-xs text-gray-500">MFA Enforcing</div>
@@ -124,8 +124,8 @@ export default function ConditionalAccessCard({ data, loading }: ConditionalAcce
             {data.weak_policy_flags.map((flag, idx) => {
               const cfg = severityConfig[flag.severity] || severityConfig.medium;
               const flagNav: Record<string, string> = {
-                no_mfa_for_all_users: '/identities?mfa_enforced=false',
-                no_mfa_for_admins: '/identities?mfa_enforced=false&privilege_tier=0',
+                no_mfa_for_all_users: '/identities?ca_coverage=not_covered',
+                no_mfa_for_admins: '/identities?ca_coverage=not_covered&privilege_tier=0',
                 ca_policy_disabled: '/settings#conditional-access',
                 legacy_auth_enabled: '/identities?ca_coverage=not_covered',
               };

@@ -269,6 +269,43 @@ def _latest_run_ids(cursor, tenant_id=None, connection_id=None):
     return [_extract_id(r) for r in rows]
 
 
+def _previous_run_ids(cursor, tenant_id=None, connection_id=None):
+    """Get PREVIOUS completed discovery run IDs — second-most-recent per connection."""
+    latest_ids = _latest_run_ids(cursor, tenant_id, connection_id)
+    if not latest_ids:
+        return []
+
+    def _extract_id(row):
+        if isinstance(row, dict):
+            return row.get('id') or row.get('max')
+        return row[0]
+
+    if connection_id:
+        cursor.execute("""
+            SELECT MAX(id) AS id FROM discovery_runs
+            WHERE status = 'completed' AND tenant_id = %s AND cloud_connection_id = %s
+              AND id != ALL(%s)
+        """, (tenant_id, connection_id, latest_ids))
+        row = cursor.fetchone()
+        run_id = _extract_id(row) if row else None
+        return [run_id] if run_id else []
+
+    if tenant_id is not None:
+        cursor.execute("""
+            SELECT DISTINCT ON (dr.cloud_connection_id) dr.id
+            FROM discovery_runs dr
+            JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
+            WHERE dr.status = 'completed' AND dr.tenant_id = %s
+              AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
+              AND dr.id != ALL(%s)
+            ORDER BY dr.cloud_connection_id, dr.id DESC
+        """, (tenant_id, latest_ids))
+        rows = cursor.fetchall()
+        return [_extract_id(r) for r in rows]
+
+    return []
+
+
 def _latest_run_query(cursor, tenant_id=None, connection_id=None):
     """Backward-compat wrapper — returns single run_id or None."""
     ids = _latest_run_ids(cursor, tenant_id, connection_id)
@@ -348,9 +385,34 @@ def get_stats():
             "medium_count": filt[3] if filt else 0,
         }
 
-        # Previous run comparison is less meaningful with multi-connection,
-        # but keep for backwards compat — use None for now
+        # Previous run comparison — query second-most-recent completed runs
+        prev_ids = _previous_run_ids(cursor, tid, _connection_id())
         previous_run = None
+        if prev_ids:
+            cursor.execute("""
+                SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)
+            """, (prev_ids,))
+            prev_completed = cursor.fetchone()[0]
+            cursor.execute(f"""
+                SELECT COUNT(*),
+                       SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN i.risk_level = 'high' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN i.risk_level = 'medium' THEN 1 ELSE 0 END),
+                       ROUND(COALESCE(AVG(i.risk_score), 0), 1)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                {HIDE_MICROSOFT_SQL}
+            """, (prev_ids,))
+            pf = cursor.fetchone()
+            previous_run = {
+                "id": prev_ids[0],
+                "completed_at": prev_completed.isoformat() if prev_completed else None,
+                "total_identities": pf[0] if pf else 0,
+                "critical_count": pf[1] if pf else 0,
+                "high_count": pf[2] if pf else 0,
+                "medium_count": pf[3] if pf else 0,
+                "avg_risk_score": float(pf[4]) if pf and pf[4] else 0,
+            }
 
         # Workload exposure summary
         workload_exposure = None
@@ -4974,7 +5036,32 @@ def get_dashboard_posture():
             "medium_count": filt[3] if filt else 0,
         }
 
+        # Previous run comparison — query second-most-recent completed runs
+        prev_ids = _previous_run_ids(cursor, _tenant_id(), _connection_id())
         previous_run = None
+        if prev_ids:
+            cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (prev_ids,))
+            prev_completed = cursor.fetchone()[0]
+            cursor.execute(f"""
+                SELECT COUNT(*),
+                       SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN i.risk_level = 'high' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN i.risk_level = 'medium' THEN 1 ELSE 0 END),
+                       ROUND(COALESCE(AVG(i.risk_score), 0), 1)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                {HIDE_MICROSOFT_SQL}
+            """, (prev_ids,))
+            ppf = cursor.fetchone()
+            previous_run = {
+                "id": prev_ids[0],
+                "completed_at": prev_completed.isoformat() if prev_completed else None,
+                "total_identities": ppf[0] if ppf else 0,
+                "critical_count": ppf[1] if ppf else 0,
+                "high_count": ppf[2] if ppf else 0,
+                "medium_count": ppf[3] if ppf else 0,
+                "avg_risk_score": float(ppf[4]) if ppf and ppf[4] else 0,
+            }
 
         # Credential health breakdown
         cursor.execute(
@@ -17154,7 +17241,8 @@ def test_integration_webhook():
         else:
             return jsonify({'success': False, 'message': f'Failed to send to {platform}. Check the webhook URL.'}), 400
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+        logger.error("Notification test failed: %s", str(e), exc_info=True)
+        return jsonify({'success': False, 'message': 'An internal error occurred while sending the test notification'}), 500
 
 
 def check_feature_gate(feature_name):
@@ -20034,21 +20122,27 @@ def stripe_webhook_handler():
     if not stripe_key:
         return jsonify({'error': 'Stripe not configured'}), 503
 
+    if not webhook_secret:
+        logger.error("STRIPE_WEBHOOK_SECRET not configured — rejecting webhook")
+        return jsonify({'error': 'Webhook verification not configured'}), 503
+
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature', '')
 
-    # Verify webhook signature when secret is configured
-    if webhook_secret and sig_header:
-        import hmac as _hmac
-        parts = dict(p.split('=', 1) for p in sig_header.split(',') if '=' in p)
-        timestamp = parts.get('t', '')
-        signature = parts.get('v1', '')
-        signed_payload = f"{timestamp}.{payload}"
-        expected = _hmac.new(webhook_secret.encode(), signed_payload.encode(), hashlib.sha256).hexdigest()
-        if not _hmac.compare_digest(expected, signature):
-            return jsonify({'error': 'Invalid signature'}), 401
-    elif webhook_secret:
+    if not sig_header:
         return jsonify({'error': 'Missing Stripe-Signature header'}), 401
+
+    # Verify webhook signature (always required)
+    import hmac as _hmac
+    parts = dict(p.split('=', 1) for p in sig_header.split(',') if '=' in p)
+    timestamp = parts.get('t', '')
+    signature = parts.get('v1', '')
+    if not timestamp or not signature:
+        return jsonify({'error': 'Invalid signature format'}), 401
+    signed_payload = f"{timestamp}.{payload}"
+    expected = _hmac.new(webhook_secret.encode(), signed_payload.encode(), hashlib.sha256).hexdigest()
+    if not _hmac.compare_digest(expected, signature):
+        return jsonify({'error': 'Invalid signature'}), 401
 
     try:
         event = json_mod.loads(payload)

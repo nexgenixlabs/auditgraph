@@ -3863,7 +3863,12 @@ class Database:
             except Exception:
                 pass
             username = os.getenv('ADMIN_USERNAME', 'techadmin')
-            password = os.getenv('ADMIN_PASSWORD', 'changeme')
+            password = os.getenv('ADMIN_PASSWORD')
+            if not password:
+                import secrets as _secrets
+                password = _secrets.token_urlsafe(16)
+                print(f"[FIRST RUN] Generated admin password for '{username}': {password}")
+                print("[FIRST RUN] Set ADMIN_PASSWORD env var to persist this.")
             hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
             self.create_user(username, hashed, 'Administrator', 'admin', tenant_id=default_tenant_id)
             # Promote to superadmin

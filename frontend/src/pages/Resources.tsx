@@ -119,9 +119,17 @@ function KeyIssuesBadges({ row }: { row: ResourceRow }) {
   );
 }
 
+// ─── Props ────────────────────────────────────────────────────────
+
+interface ResourcesProps {
+  lockedType?: 'storage_account' | 'key_vault';
+  pageTitle?: string;
+  pageSubtitle?: string;
+}
+
 // ─── Main Component ───────────────────────────────────────────────
 
-export default function Resources() {
+export default function Resources({ lockedType, pageTitle, pageSubtitle }: ResourcesProps = {}) {
   const navigate = useNavigate();
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
@@ -139,12 +147,17 @@ export default function Resources() {
 
   // Sync state from URL params on mount and on URL changes (e.g. client-side link clicks)
   useEffect(() => {
+    if (lockedType) {
+      setTypeFilter(lockedType);
+    } else {
+      const p = new URLSearchParams(location.search);
+      setTypeFilter(p.get('resource_type') || p.get('type') || 'storage_account');
+    }
     const p = new URLSearchParams(location.search);
-    setTypeFilter(p.get('resource_type') || p.get('type') || 'storage_account');
     setRiskFilter(p.get('risk') || '');
     setSearch(p.get('search') || '');
     setInitialized(true);
-  }, [location.search]);
+  }, [location.search, lockedType]);
 
   // Fetch stats (re-fetch when type filter changes for type-specific trending)
   useEffect(() => {
@@ -206,15 +219,16 @@ export default function Resources() {
   }, [sortField]);
 
   // Update URL params (use replaceState to avoid react-router re-render loop)
+  // Skip URL sync when locked — the type is fixed by props, not URL
   useEffect(() => {
-    if (!initialized) return;
+    if (!initialized || lockedType) return;
     const p = new URLSearchParams();
     if (typeFilter) p.set('resource_type', typeFilter);
     if (riskFilter) p.set('risk', riskFilter);
     if (search) p.set('search', search);
     const qs = p.toString();
     window.history.replaceState(null, '', qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
-  }, [typeFilter, riskFilter, search, initialized]);
+  }, [typeFilter, riskFilter, search, initialized, lockedType]);
 
   const handleCSVExport = useCallback(() => {
     downloadCSV(
@@ -229,8 +243,8 @@ export default function Resources() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Azure Resources</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Storage Accounts & Key Vaults — security configuration audit</p>
+          <h1 className="text-2xl font-bold text-gray-900">{pageTitle || 'Azure Resources'}</h1>
+          <p className="text-sm text-gray-500 mt-0.5">{pageSubtitle || 'Storage Accounts & Key Vaults — security configuration audit'}</p>
         </div>
         <button
           onClick={handleCSVExport}
@@ -244,27 +258,34 @@ export default function Resources() {
       {/* Summary Cards — context-aware based on type filter */}
       {stats && (
         <>
-          <div className="grid grid-cols-4 gap-3">
-            <StatCard
-              label="Storage Accounts"
-              value={stats.storage_accounts}
-              color="sky"
-              onClick={() => setTypeFilter('storage_account')}
-              active={typeFilter === 'storage_account'}
-            />
-            <StatCard
-              label="Key Vaults"
-              value={stats.key_vaults}
-              color="purple"
-              onClick={() => setTypeFilter('key_vault')}
-              active={typeFilter === 'key_vault'}
-            />
-            <StatCard label="Total Resources" value={stats.total} color="blue" onClick={() => { setTypeFilter(''); setRiskFilter(''); }} />
+          {/* Top-level KPI cards: show only relevant cards when locked */}
+          <div className={`grid ${lockedType ? 'grid-cols-3' : 'grid-cols-4'} gap-3`}>
+            {(!lockedType || lockedType === 'storage_account') && (
+              <StatCard
+                label="Storage Accounts"
+                value={stats.storage_accounts}
+                color="sky"
+                onClick={lockedType ? undefined : () => setTypeFilter('storage_account')}
+                active={!lockedType && typeFilter === 'storage_account'}
+              />
+            )}
+            {(!lockedType || lockedType === 'key_vault') && (
+              <StatCard
+                label="Key Vaults"
+                value={stats.key_vaults}
+                color="purple"
+                onClick={lockedType ? undefined : () => setTypeFilter('key_vault')}
+                active={!lockedType && typeFilter === 'key_vault'}
+              />
+            )}
+            {!lockedType && (
+              <StatCard label="Total Resources" value={stats.total} color="blue" onClick={() => { setTypeFilter(''); setRiskFilter(''); }} />
+            )}
             <StatCard label="At Risk" value={stats.at_risk} color="red" subtitle={`${stats.by_risk.critical || 0} critical, ${stats.by_risk.high || 0} high`} onClick={() => setRiskFilter('critical')} />
           </div>
 
-          {/* Storage-specific stats (shown when All or Storage filter) */}
-          {stats.rotation_compliance && (
+          {/* Storage-specific stats (shown when All or Storage filter, not when locked to key_vault) */}
+          {stats.rotation_compliance && lockedType !== 'key_vault' && (
             <div className="grid grid-cols-4 gap-3">
               <StatCard
                 label="Keys Stale (>90d)"
@@ -278,15 +299,15 @@ export default function Resources() {
                 value={stats.rotation_compliance.avg_key_age_days}
                 color={stats.rotation_compliance.avg_key_age_days > 90 ? 'red' : 'green'}
                 subtitle="days"
-                onClick={() => setTypeFilter('storage_account')}
+                onClick={lockedType ? undefined : () => setTypeFilter('storage_account')}
               />
               <div />
               <div />
             </div>
           )}
 
-          {/* Audit Posture (storage-only) */}
-          {stats.audit_posture && stats.audit_posture.total > 0 && (
+          {/* Audit Posture (storage-only, not when locked to key_vault) */}
+          {stats.audit_posture && stats.audit_posture.total > 0 && lockedType !== 'key_vault' && (
             <div className="bg-white border border-gray-200 rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-2">Access Auditability</div>
               <div className="flex items-center gap-2">
@@ -315,8 +336,8 @@ export default function Resources() {
             </div>
           )}
 
-          {/* Key Vault-specific stats (shown when All or Key Vault filter) */}
-          {stats.expiry_summary && (
+          {/* Key Vault-specific stats (shown when All or Key Vault filter, not when locked to storage_account) */}
+          {stats.expiry_summary && lockedType !== 'storage_account' && (
             <div className="grid grid-cols-4 gap-3">
               <StatCard
                 label="Expired Items"
@@ -337,7 +358,7 @@ export default function Resources() {
                 value={(stats.expiry_summary.secrets.total || 0) + (stats.expiry_summary.keys.total || 0) + (stats.expiry_summary.certs.total || 0)}
                 color="blue"
                 subtitle={`${stats.expiry_summary.secrets.total}s ${stats.expiry_summary.keys.total}k ${stats.expiry_summary.certs.total}c`}
-                onClick={() => setTypeFilter('key_vault')}
+                onClick={lockedType ? undefined : () => setTypeFilter('key_vault')}
               />
               <div />
             </div>
@@ -347,21 +368,23 @@ export default function Resources() {
 
       {/* Filters */}
       <div className="flex items-center gap-3 flex-wrap">
-        {/* Type tabs */}
-        <div className="flex rounded-md border border-gray-300 overflow-hidden text-xs">
-          {[
-            { key: 'storage_account', label: 'Storage Accounts' },
-            { key: 'key_vault', label: 'Key Vaults' },
-          ].map(t => (
-            <button
-              key={t.key}
-              onClick={() => setTypeFilter(t.key)}
-              className={`px-3 py-1.5 ${typeFilter === t.key ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        {/* Type tabs (hidden when locked to a single type) */}
+        {!lockedType && (
+          <div className="flex rounded-md border border-gray-300 overflow-hidden text-xs">
+            {[
+              { key: 'storage_account', label: 'Storage Accounts' },
+              { key: 'key_vault', label: 'Key Vaults' },
+            ].map(t => (
+              <button
+                key={t.key}
+                onClick={() => setTypeFilter(t.key)}
+                className={`px-3 py-1.5 ${typeFilter === t.key ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Risk filter */}
         <select

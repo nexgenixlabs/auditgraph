@@ -52,10 +52,10 @@ export default function RemediationProgress({
 
       {/* Status breakdown */}
       <div className="grid grid-cols-2 gap-2">
-        <StatusItem label="Open" count={open} color="text-gray-600" bg="bg-gray-50" onClick={() => navigate('/identities?remediation_status=open')} />
-        <StatusItem label="Acknowledged" count={acknowledged} color="text-blue-600" bg="bg-blue-50" onClick={() => navigate('/identities?remediation_status=acknowledged')} />
-        <StatusItem label="Completed" count={completed} color="text-green-600" bg="bg-green-50" onClick={() => navigate('/identities?remediation_status=completed')} />
-        <StatusItem label="Skipped" count={skipped} color="text-yellow-700" bg="bg-yellow-50" onClick={() => navigate('/identities?remediation_status=skipped')} />
+        <StatusItem label="Open" count={open} color="text-gray-600" bg="bg-gray-50" onClick={() => navigate('/identities?risk_level=critical,high')} />
+        <StatusItem label="Acknowledged" count={acknowledged} color="text-blue-600" bg="bg-blue-50" onClick={() => navigate('/remediation')} />
+        <StatusItem label="Completed" count={completed} color="text-green-600" bg="bg-green-50" onClick={() => navigate('/remediation')} />
+        <StatusItem label="Skipped" count={skipped} color="text-yellow-700" bg="bg-yellow-50" onClick={() => navigate('/remediation')} />
       </div>
     </div>
   );

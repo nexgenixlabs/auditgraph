@@ -89,7 +89,7 @@ export default function ResourceOverview() {
       {/* Resource type split */}
       <div className="grid grid-cols-2 gap-2 mb-3">
         <button
-          onClick={() => navigate('/resources?resource_type=storage_account')}
+          onClick={() => navigate('/storage-accounts')}
           className="text-left p-2 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 hover:shadow-sm transition"
         >
           <div className="text-lg font-bold text-blue-700 dark:text-blue-300">{stats.storage_accounts}</div>
@@ -99,7 +99,7 @@ export default function ResourceOverview() {
           )}
         </button>
         <button
-          onClick={() => navigate('/resources?resource_type=key_vault')}
+          onClick={() => navigate('/key-vaults')}
           className="text-left p-2 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 hover:shadow-sm transition"
         >
           <div className="text-lg font-bold text-purple-700 dark:text-purple-300">{stats.key_vaults}</div>
@@ -140,7 +140,7 @@ export default function ResourceOverview() {
           <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">Compliance Score</div>
           <div className="flex gap-3">
             {compliance.storage?.total_resources > 0 && (
-              <button onClick={() => navigate('/resources?resource_type=storage_account')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
+              <button onClick={() => navigate('/storage-accounts')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
                 <div className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border-2" style={{
                   borderColor: compliance.storage.score >= 80 ? '#22c55e' : compliance.storage.score >= 50 ? '#eab308' : '#ef4444',
                   color: compliance.storage.score >= 80 ? '#16a34a' : compliance.storage.score >= 50 ? '#ca8a04' : '#dc2626',
@@ -151,7 +151,7 @@ export default function ResourceOverview() {
               </button>
             )}
             {compliance.key_vault?.total_resources > 0 && (
-              <button onClick={() => navigate('/resources?resource_type=key_vault')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
+              <button onClick={() => navigate('/key-vaults')} className="flex items-center gap-1.5 cursor-pointer hover:opacity-70 transition">
                 <div className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border-2" style={{
                   borderColor: compliance.key_vault.score >= 80 ? '#22c55e' : compliance.key_vault.score >= 50 ? '#eab308' : '#ef4444',
                   color: compliance.key_vault.score >= 80 ? '#16a34a' : compliance.key_vault.score >= 50 ? '#ca8a04' : '#dc2626',

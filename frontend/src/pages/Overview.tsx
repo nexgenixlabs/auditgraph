@@ -15,7 +15,7 @@ interface RiskDriver { label: string; impact: 'critical' | 'high' | 'medium' | '
 interface BlastRadius { identities: number; subscriptions: number; workloads: number }
 interface Remediation {
   rank: number; action: string; description: string; gain: number;
-  complexity: 'LOW' | 'MEDIUM' | 'HIGH'; affectedIds: number; confidence: number;
+  complexity: 'LOW' | 'MEDIUM' | 'HIGH'; affectedIds: number; confidence?: number | null;
   estimatedDays: number; automation: 'full' | 'partial' | 'manual';
   blastRadius: BlastRadius; rollbackSafety: 'safe' | 'requires-validation' | 'irreversible';
   impactsProduction: boolean;
@@ -125,6 +125,7 @@ const FILTER_NAV: Record<string, string> = {
 };
 
 interface TenantData {
+  insufficientData: boolean;
   tenant: {
     id: string; name: string; cloud: string; subscriptions: number;
     lastScan: string; scanDuration: number; scanCompleteness: number;
@@ -146,9 +147,9 @@ interface TenantData {
     movement: { previousTotal: number; newIdentities: number; removedIdentities: number };
   };
   riskScore: {
-    current: number; grade: string; tier: string; previous30d: number; delta30d: number;
-    industryAvg: number; target: number; potentialGain: number;
-    projectedNoAction: number; projectedRemediated: number;
+    current: number; grade: string; tier: string; previous30d: number | null; delta30d: number | null;
+    industryAvg: number | null; target: number; potentialGain: number;
+    projectedNoAction: number | null; projectedRemediated: number;
     history: { day: number; score: number }[];
   };
   pillars: PillarData[];
@@ -420,14 +421,15 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
     // Cap at 75 to avoid showing "Resilient" when attack surface data is missing.
     const fallback = posture?.posture_score;
     if (fallback != null) return Math.min(fallback, 75);
-    return 50; // Unknown state
+    return 50; // No attack surface data — display as "Awaiting Data" tier
   })();
+  const insufficientData = as?.score == null && posture?.posture_score == null;
   const tier = getTier(postureScore);
   const grade = getGrade(postureScore);
-  const prevPosture = posture?.previous_posture_score != null
+  const prevPosture: number | null = posture?.previous_posture_score != null
     ? Math.min(posture.previous_posture_score, as?.score != null ? 100 : 75)
-    : (postureScore - 2);
-  const delta30d = Math.round((postureScore - prevPosture) * 10) / 10;
+    : (stats?.previous_run ? (100 - (stats.previous_run.avg_risk_score || 0)) : null);
+  const delta30d = prevPosture != null ? Math.round((postureScore - prevPosture) * 10) / 10 : null;
 
   const pillars: PillarData[] = PILLAR_ORDER.map(k => {
     const p = as?.pillars?.[k] || { score: 0, weight: 10, detail: {} };
@@ -448,10 +450,8 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
       history.push({ day: i + 1, score: t.posture_score ?? (100 - (t.avg_risk_score || 50)) });
     });
   }
-  if (!history.length) {
-    for (let i = 1; i <= 7; i++) history.push({ day: i * 5 - 4, score: postureScore - (7 - i) * 1.2 });
-    history.push({ day: 30, score: postureScore });
-  }
+  // No fabricated trend data — history stays empty if no real data exists.
+  // The chart component renders an empty state when history.length === 0.
 
   const topDrivers: RiskDriver[] = [];
   const sortedPillars = [...pillars].sort((a, b) => b.score - a.score);
@@ -554,7 +554,7 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
     pillarRemediations.forEach((pr, i) => {
       remedList.push({
         rank: i + 1, action: pr.action, description: pr.description, gain: pr.gain,
-        complexity: pr.complexity, affectedIds: pr.affectedIds, confidence: 90,
+        complexity: pr.complexity, affectedIds: pr.affectedIds,
         estimatedDays: pr.complexity === 'LOW' ? 3 : pr.complexity === 'MEDIUM' ? 7 : 14,
         automation: pr.complexity === 'LOW' ? 'full' : pr.complexity === 'MEDIUM' ? 'partial' : 'manual',
         blastRadius: { identities: pr.affectedIds, subscriptions: 1, workloads: 0 },
@@ -624,6 +624,7 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
   const subs = azureSubs + awsAccounts + gcpProjects || 0;
 
   return {
+    insufficientData,
     tenant: {
       id: di.tenant_id || 'unknown', name: di.tenant_name || 'Tenant',
       cloud: [azureSubs > 0 && 'Azure', awsAccounts > 0 && 'AWS', gcpProjects > 0 && 'GCP'].filter(Boolean).join(' + ') || 'Azure',
@@ -686,10 +687,12 @@ async function fetchTenantData(wc: (u: string) => string = u => u): Promise<Tena
       const maxProjected = hasOpenRemediations ? 95 : 100;
       return {
         current: postureScore, grade, tier, previous30d: prevPosture, delta30d,
-        industryAvg: as?.industry_avg ?? Math.round(100 - (as?.score ?? 50)),
+        industryAvg: as?.industry_avg ?? null,
         target: as?.posture_target ?? (Number(settings?.settings?.posture_target) || Math.min(90, Math.round(postureScore + finalGain))),
         potentialGain: finalGain,
-        projectedNoAction: Math.max(0, postureScore - (delta30d < 0 ? Math.abs(delta30d) : (critCount + highCount > 0 ? 3 : 1))),
+        projectedNoAction: delta30d != null
+          ? Math.max(0, postureScore - (delta30d < 0 ? Math.abs(delta30d) : (critCount + highCount > 0 ? 3 : 1)))
+          : null,
         projectedRemediated: Math.min(maxProjected, postureScore + finalGain),
         history,
       };
@@ -1448,15 +1451,24 @@ function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openComplianceDe
             <ScoreRing score={d.riskScore.current} grade={d.riskScore.grade} />
             <div>
               <RiskTierBadge tier={tier} />
+              {d.insufficientData && (
+                <div style={{ marginTop: 4, padding: '2px 8px', borderRadius: 4, background: 'rgba(255,180,0,0.12)', border: '1px solid rgba(255,180,0,0.25)', display: 'inline-block' }}>
+                  <span style={{ fontFamily: F.ui, fontSize: 9, color: '#ffb400', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Insufficient data</span>
+                </div>
+              )}
               <div style={{ marginTop: 12 }}>
                 <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, marginBottom: 4 }}>vs 30 days</div>
-                <span style={{ fontFamily: F.data, fontSize: 13, color: d.riskScore.delta30d >= 0 ? '#22c55e' : '#ff4444' }}>
-                  {formatDelta(d.riskScore.delta30d)} pts
-                </span>
+                {d.riskScore.delta30d != null ? (
+                  <span style={{ fontFamily: F.data, fontSize: 13, color: d.riskScore.delta30d >= 0 ? '#22c55e' : '#ff4444' }}>
+                    {formatDelta(d.riskScore.delta30d)} pts
+                  </span>
+                ) : (
+                  <span style={{ fontFamily: F.data, fontSize: 13, color: P.textDim }}>No previous scan</span>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, flexWrap: 'wrap' }}>
                 {[
-                  { l: 'Industry', v: d.riskScore.industryAvg, url: '/identities' },
+                  { l: 'Industry', v: d.riskScore.industryAvg != null ? d.riskScore.industryAvg : 'N/A', url: '/identities' },
                   { l: 'Target', v: d.riskScore.target, url: '/settings' },
                   { l: 'Potential', v: `+${d.riskScore.potentialGain}`, url: '/identities?risk_level=critical' },
                 ].map(b => (
@@ -1628,8 +1640,9 @@ function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openComplianceDe
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <div style={{ padding: 12, background: 'rgba(255,68,68,0.05)', borderRadius: 8, borderLeft: '3px solid #ff4444' }}>
               <div style={{ fontFamily: F.data, fontSize: 9, color: '#ff4444', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>No Action</div>
-              <div style={{ fontFamily: F.data, fontSize: 28, fontWeight: 800, color: P.textBright }}>{d.riskScore.projectedNoAction.toFixed(1)}</div>
-              <RiskTierBadge tier={getTier(d.riskScore.projectedNoAction)} />
+              <div style={{ fontFamily: F.data, fontSize: 28, fontWeight: 800, color: P.textBright }}>{d.riskScore.projectedNoAction != null ? d.riskScore.projectedNoAction.toFixed(1) : '\u2014'}</div>
+              {d.riskScore.projectedNoAction != null && <RiskTierBadge tier={getTier(d.riskScore.projectedNoAction)} />}
+              {d.riskScore.projectedNoAction == null && <div style={{ fontFamily: F.ui, fontSize: 10, color: P.textDim, marginTop: 4 }}>Insufficient trend data</div>}
               <div style={{ marginTop: 12 }}>
                 {d.trends.noActionImpact.map((c, i) => (
                   <div key={i} style={{ fontFamily: F.ui, fontSize: 11, color: P.textMuted, marginBottom: 4, paddingLeft: 12, position: 'relative' }}>
@@ -1897,7 +1910,7 @@ function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
             {[
-              { l: 'Confidence', v: `${r.confidence}%`, drillUrl: null as string | null },
+              { l: 'Confidence', v: r.confidence != null ? `${r.confidence}%` : '\u2014', drillUrl: null as string | null },
               { l: 'Est. Days', v: `~${r.estimatedDays}`, drillUrl: null as string | null },
               { l: 'Automation', v: null as string | null, comp: <AutomationBadge level={r.automation} />, drillUrl: null as string | null },
               { l: 'Blast Radius', v: null as string | null, drillUrl: '/identities', comp: <span><DrillableNumber value={r.blastRadius.identities} label="Affected identities" onClick={() => nav('/identities')} /> ids &middot; <DrillableNumber value={r.blastRadius.subscriptions} label="Affected subscriptions" onClick={() => nav('/subscriptions')} /> subs &middot; <DrillableNumber value={r.blastRadius.workloads} label="Affected workloads" onClick={() => nav('/workload-identities')} /> wklds</span> },
@@ -2140,8 +2153,8 @@ function RiskMovementTab({ d, nav }: { d: TenantData; nav: Nav }) {
           <SparklineChart data={d.riskScore.history} width={500} height={60} color={color} />
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontFamily: F.data, fontSize: 9, color: P.textDim, textTransform: 'uppercase' }}>Projected</div>
-            <div style={{ fontFamily: F.data, fontSize: 24, fontWeight: 800, color: P.textBright }}>{d.riskScore.projectedNoAction.toFixed(1)}</div>
-            <RiskTierBadge tier={getTier(d.riskScore.projectedNoAction)} />
+            <div style={{ fontFamily: F.data, fontSize: 24, fontWeight: 800, color: P.textBright }}>{d.riskScore.projectedNoAction != null ? d.riskScore.projectedNoAction.toFixed(1) : '\u2014'}</div>
+            {d.riskScore.projectedNoAction != null ? <RiskTierBadge tier={getTier(d.riskScore.projectedNoAction)} /> : <div style={{ fontFamily: F.ui, fontSize: 10, color: P.textDim }}>Insufficient data</div>}
           </div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
@@ -2348,11 +2361,15 @@ export default function Overview() {
           </div>
           <div style={{ display: 'flex', gap: 12, marginTop: 6, alignItems: 'center' }}>
             <RiskTierBadge tier={tier} />
-            <span style={{ fontFamily: F.data, fontSize: 10, color: d.riskScore.delta30d >= 0 ? '#22c55e' : '#ff4444' }}>
-              {formatDelta(d.riskScore.delta30d)} vs 30d
-            </span>
+            {d.riskScore.delta30d != null ? (
+              <span style={{ fontFamily: F.data, fontSize: 10, color: d.riskScore.delta30d >= 0 ? '#22c55e' : '#ff4444' }}>
+                {formatDelta(d.riskScore.delta30d)} vs 30d
+              </span>
+            ) : (
+              <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>No previous scan</span>
+            )}
             <span style={{ fontFamily: F.data, fontSize: 10, color: P.textFaint }}>|</span>
-            <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Industry: <DrillableNumber value={d.riskScore.industryAvg} label="Industry average posture" onClick={() => navigate('/identities')} /></span>
+            <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Industry: {d.riskScore.industryAvg != null ? <DrillableNumber value={d.riskScore.industryAvg} label="Industry average posture" onClick={() => navigate('/identities')} /> : 'N/A'}</span>
             <span style={{ fontFamily: F.data, fontSize: 10, color: P.textDim }}>Target: <DrillableNumber value={d.riskScore.target} label="Posture target (configurable in Settings)" onClick={() => navigate('/settings')} /></span>
             <span style={{ fontFamily: F.data, fontSize: 10, color: '#22c55e' }}>Potential: <DrillableNumber value={`+${d.riskScore.potentialGain}`} label="Potential gain from remediations" onClick={() => setActiveTab('action')} /></span>
           </div>

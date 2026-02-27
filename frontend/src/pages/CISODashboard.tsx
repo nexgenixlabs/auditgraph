@@ -357,21 +357,23 @@ function PreviewChangesPanel({ rem, data, onClose }: { rem: Remediation; data: T
                 </div>
                 <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
                   <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Est. Effort</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.effort}</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.effort ?? '\u2014'}</div>
                 </div>
                 <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
                   <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Rollback</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: rem.rollbackRisk === 'safe' ? COLORS.success : COLORS.danger, fontFamily: FONT.mono, marginTop: 4 }}>{rem.rollback}</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: rem.rollbackRisk === 'safe' ? COLORS.success : rem.rollback != null ? COLORS.danger : COLORS.textMuted, fontFamily: FONT.mono, marginTop: 4 }}>{rem.rollback ?? '\u2014'}</div>
                 </div>
                 <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
                   <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Confidence</div>
-                  <DN navigateTo="/remediation"><div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.confidence}%</div></DN>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{rem.confidence != null ? `${rem.confidence}%` : '\u2014'}</div>
                 </div>
               </div>
-              <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
-                <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Compliance</div>
-                <div style={{ fontSize: 12, color: COLORS.text, fontFamily: FONT.ui, marginTop: 4 }}>{rem.compliance}</div>
-              </div>
+              {rem.compliance != null && (
+                <div style={{ background: COLORS.surfaceAlt, borderRadius: 8, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Compliance</div>
+                  <div style={{ fontSize: 12, color: COLORS.text, fontFamily: FONT.ui, marginTop: 4 }}>{rem.compliance}</div>
+                </div>
+              )}
               {/* Navigate to filtered identities matching this remediation */}
               <button onClick={() => { navigate(remediationNav(rem.id)); onClose(); }} style={{
                 width: '100%', padding: '10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
@@ -569,10 +571,12 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
         </div>
         <CISOBadge label={item.risk} color={item.risk === 'HIGH' ? COLORS.danger : COLORS.success} />
         <CISOBadge label={item.automation} color={item.automation === 'Auto' ? COLORS.accent : COLORS.textMuted} />
-        <CISOBadge
-          label={item.rollbackRisk === 'safe' ? 'Safe' : item.rollbackRisk === 'controlled' ? 'Controlled' : 'Risky'}
-          color={item.rollbackRisk === 'safe' ? COLORS.success : item.rollbackRisk === 'controlled' ? COLORS.warning : COLORS.danger}
-        />
+        {item.rollbackRisk != null && (
+          <CISOBadge
+            label={item.rollbackRisk === 'safe' ? 'Safe' : item.rollbackRisk === 'controlled' ? 'Controlled' : 'Risky'}
+            color={item.rollbackRisk === 'safe' ? COLORS.success : item.rollbackRisk === 'controlled' ? COLORS.warning : COLORS.danger}
+          />
+        )}
         <span style={{ fontSize: 12, color: COLORS.textMuted, marginLeft: 4, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▾</span>
       </div>
       {expanded && (
@@ -586,19 +590,19 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
             </div>
             <div>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Est. Effort</div>
-              <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.effort}</div>
+              <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.effort ?? '\u2014'}</div>
             </div>
             <div>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Rollback</div>
-              <div style={{ fontSize: 11, color: item.rollbackRisk === 'safe' ? COLORS.success : COLORS.danger, fontFamily: FONT.mono, marginTop: 4 }}>{item.rollback}</div>
+              <div style={{ fontSize: 11, color: item.rollbackRisk === 'safe' ? COLORS.success : item.rollback != null ? COLORS.danger : COLORS.textMuted, fontFamily: FONT.mono, marginTop: 4 }}>{item.rollback ?? '\u2014'}</div>
             </div>
             <div>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Compliance</div>
-              <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.compliance}</div>
+              <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.compliance ?? '\u2014'}</div>
             </div>
             <div>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Confidence</div>
-              <DN navigateTo="/remediation"><div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.confidence}%</div></DN>
+              <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.confidence != null ? `${item.confidence}%` : '\u2014'}</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
@@ -757,14 +761,14 @@ function useCISOData(): { data: TenantData; loading: boolean } {
           const posture = Math.round((100 - (attack.score || 0)) * 10) / 10;
           const prevPosture = stats?.previous_run
             ? Math.round((100 - (stats.previous_run.avg_risk_score || 0)) * 10) / 10
-            : posture;
+            : null;
           d.riskScore.current = posture;
-          d.riskScore.previous = prevPosture;
-          d.riskScore.delta = Math.round((posture - prevPosture) * 10) / 10;
+          d.riskScore.previous = prevPosture ?? posture;
+          d.riskScore.delta = prevPosture != null ? Math.round((posture - prevPosture) * 10) / 10 : null;
           d.riskScore.tier = getTier(posture);
           const gradeMap: Record<string, string> = { A: 'A', B: 'B', C: 'C', D: 'D', F: 'F' };
           d.riskScore.grade = attack.grade ? (gradeMap[attack.grade as string] || getGrade(posture)) : getGrade(posture);
-          d.riskScore.industry = attack.industry_avg != null ? Math.max(0, Math.min(100, attack.industry_avg)) : 69;
+          d.riskScore.industry = attack.industry_avg != null ? Math.max(0, Math.min(100, attack.industry_avg)) : null;
           d.riskScore.target = attack.posture_target != null ? attack.posture_target : 90;
           d.riskScore.potentialGain = Math.max(0, d.riskScore.target - posture);
         }
@@ -1037,8 +1041,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
               gain, projectedScore: `~${Math.round(current + gain)}`,
               status: 'new', automation: 'Manual', risk: 'HIGH', color: 'danger',
               affected: `${ep.t0t1} ids \u00B7 ${subCount} subs`,
-              effort: '~14 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
-              compliance: 'SOC 2, HIPAA, NIST', confidence: 92, productionImpact: true, riskPerDay: 0.3,
+              effort: null, rollback: null, rollbackRisk: null,
+              compliance: null, confidence: null, productionImpact: true, riskPerDay: null,
             });
           }
           if ((ao.dormant_privileged_count || 0) > 0) {
@@ -1050,8 +1054,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
               gain, projectedScore: `~${Math.round(current + gain)}`,
               status: 'new', automation: 'Auto', risk: 'LOW', color: 'warning',
               affected: `${ao.dormant_privileged_count} ids`,
-              effort: '~2 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
-              compliance: 'HIPAA, SOC 2', confidence: 98, productionImpact: false, riskPerDay: 0.1,
+              effort: null, rollback: null, rollbackRisk: null,
+              compliance: null, confidence: null, productionImpact: false, riskPerDay: null,
             });
           }
           if (ghostTotal > 0) {
@@ -1063,8 +1067,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
               gain, projectedScore: `~${Math.round(current + gain)}`,
               status: 'new', automation: 'Auto', risk: 'HIGH', color: 'danger',
               affected: `${ghostTotal} ids`,
-              effort: '~1 day', rollback: 'Safe to rollback', rollbackRisk: 'safe',
-              compliance: 'SOC2 CC6.1, HIPAA, NIST AC-2, SOX', confidence: 99, productionImpact: false, riskPerDay: 0.5,
+              effort: null, rollback: null, rollbackRisk: null,
+              compliance: null, confidence: null, productionImpact: false, riskPerDay: null,
             });
           }
           if ((og.unowned_spns || 0) > 0) {
@@ -1076,8 +1080,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
               gain, projectedScore: `~${Math.round(current + gain)}`,
               status: 'new', automation: 'Manual', risk: 'LOW', color: 'elevated',
               affected: `${og.unowned_spns} ids`,
-              effort: '~7 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
-              compliance: 'SOC 2, ISO 27001', confidence: 95, productionImpact: false, riskPerDay: 0.05,
+              effort: null, rollback: null, rollbackRisk: null,
+              compliance: null, confidence: null, productionImpact: false, riskPerDay: null,
             });
           }
           if ((cr.expired || 0) > 0) {
@@ -1089,8 +1093,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
               gain, projectedScore: `~${Math.round(current + gain)}`,
               status: 'new', automation: 'Manual', risk: 'MEDIUM', color: 'warning',
               affected: `${cr.expired} ids`,
-              effort: '~3 days', rollback: 'Safe to rollback', rollbackRisk: 'safe',
-              compliance: 'SOC 2, PCI DSS', confidence: 90, productionImpact: false, riskPerDay: 0.2,
+              effort: null, rollback: null, rollbackRisk: null,
+              compliance: null, confidence: null, productionImpact: false, riskPerDay: null,
             });
           }
         }
@@ -1098,13 +1102,16 @@ function useCISOData(): { data: TenantData; loading: boolean } {
 
         // ── Projection ──
         const totalGain = remCards.reduce((s, r) => s + r.gain, 0);
-        const noActionScore = Math.max(0, d.riskScore.current - 3);
+        const noActionDelta = d.riskScore.delta;
+        const noActionScore = noActionDelta != null && noActionDelta !== 0
+          ? Math.max(0, d.riskScore.current - Math.abs(noActionDelta))
+          : null;
         const remediatedScore = Math.min(100, d.riskScore.current + totalGain);
         d.projection.noAction = {
-          score: Math.round(noActionScore * 10) / 10,
-          tier: getTier(noActionScore),
+          score: noActionScore != null ? Math.round(noActionScore * 10) / 10 : null,
+          tier: noActionScore != null ? getTier(noActionScore) : null,
           consequences: d.pillars.filter(p => p.score > 50).map(p => `${p.detail} (${p.name}: ${p.score}%)`),
-          breachImpact: noActionScore < 40 ? 'High' : noActionScore < 60 ? 'Moderate-High' : 'Moderate',
+          breachImpact: noActionScore != null ? (noActionScore < 40 ? 'High' : noActionScore < 60 ? 'Moderate-High' : 'Moderate') : null,
         };
         d.projection.remediated = {
           score: Math.round(remediatedScore * 10) / 10,
@@ -1545,9 +1552,13 @@ function HeroPanel({ d, execView }: { d: TenantData; execView: boolean }) {
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                 <CISOBadge label={tier} color={getTierColor(tier)} />
-                <span style={{ fontSize: 12, fontWeight: 700, fontFamily: FONT.mono, color: delta >= 0 ? COLORS.success : COLORS.danger }}>
-                  {delta >= 0 ? '↑' : '↓'} {delta >= 0 ? '+' : ''}{delta.toFixed(1)} since last scan
-                </span>
+                {delta != null ? (
+                  <span style={{ fontSize: 12, fontWeight: 700, fontFamily: FONT.mono, color: delta >= 0 ? COLORS.success : COLORS.danger }}>
+                    {delta >= 0 ? '↑' : '↓'} {delta >= 0 ? '+' : ''}{delta.toFixed(1)} since last scan
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, fontFamily: FONT.ui, color: COLORS.textMuted }}>No previous scan</span>
+                )}
               </div>
             </div>
           </div>
@@ -1585,9 +1596,11 @@ function HeroPanel({ d, execView }: { d: TenantData; execView: boolean }) {
               <div style={{ width: 14, height: 14, borderRadius: '50%', background: getScoreColor(score), border: '2px solid #fff', boxShadow: `0 0 6px ${getScoreColor(score)}80`, margin: '0 auto' }} />
             </div>
             {/* Industry Median */}
-            <div style={{ position: 'absolute', left: `${Math.min(95, Math.max(5, d.riskScore.industry))}%`, top: 2, transform: 'translateX(-50%)' }}>
-              <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'transparent', border: `2px solid ${COLORS.textDim}`, margin: '0 auto' }} />
-            </div>
+            {d.riskScore.industry != null && (
+              <div style={{ position: 'absolute', left: `${Math.min(95, Math.max(5, d.riskScore.industry))}%`, top: 2, transform: 'translateX(-50%)' }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'transparent', border: `2px solid ${COLORS.textDim}`, margin: '0 auto' }} />
+              </div>
+            )}
             {/* Target */}
             <div style={{ position: 'absolute', left: `${Math.min(95, Math.max(5, d.riskScore.target))}%`, top: 2, transform: 'translateX(-50%)' }}>
               <div style={{ width: 10, height: 10, borderRadius: 2, background: 'transparent', border: `2px solid ${COLORS.success}`, margin: '0 auto' }} />
@@ -1598,9 +1611,13 @@ function HeroPanel({ d, execView }: { d: TenantData; execView: boolean }) {
             <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: getScoreColor(score), display: 'inline-block' }} /> You ({score.toFixed(0)})
             </span>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
-              <span style={{ width: 8, height: 8, borderRadius: '50%', border: `2px solid ${COLORS.textDim}`, display: 'inline-block', boxSizing: 'border-box' }} /> Industry ({d.riskScore.industry})
-            </span>
+            {d.riskScore.industry != null ? (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', border: `2px solid ${COLORS.textDim}`, display: 'inline-block', boxSizing: 'border-box' }} /> Industry ({d.riskScore.industry})
+              </span>
+            ) : (
+              <span style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>Industry: N/A</span>
+            )}
             <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
               <span style={{ width: 8, height: 8, borderRadius: 2, border: `2px solid ${COLORS.success}`, display: 'inline-block', boxSizing: 'border-box' }} /> Target ({d.riskScore.target})
             </span>
@@ -1680,7 +1697,7 @@ function ActionQueueItem({ item, index, onPreview, onTicket, onAutoFix, isLast }
       {/* Detail row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 6, paddingLeft: 2 }}>
         <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Affected: <DN navigateTo="/identities"><span style={{ fontFamily: FONT.mono, color: COLORS.text }}>{item.affected}</span></DN></span>
-        <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Effort: <span style={{ fontFamily: FONT.mono, color: COLORS.text }}>{item.effort}</span></span>
+        {item.effort != null && <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Effort: <span style={{ fontFamily: FONT.mono, color: COLORS.text }}>{item.effort}</span></span>}
         {item.rollbackRisk === 'safe' && (
           <span style={{ fontSize: 10, color: COLORS.success, fontFamily: FONT.ui }}>Safe Rollback Available</span>
         )}
@@ -1714,7 +1731,7 @@ function GovernanceRow({ metric, isLast }: { metric: GovernanceMetric; isLast: b
   const statusColor = metric.status === 'good' ? COLORS.success : metric.status === 'warning' ? COLORS.warning : metric.status === 'critical' ? COLORS.danger : COLORS.textDim;
   const govRowNav = metric.label.toLowerCase().includes('access review') ? '/access-reviews' :
     metric.label.toLowerCase().includes('owner') ? '/service-accounts' :
-    metric.label.toLowerCase().includes('rotation') || metric.label.toLowerCase().includes('credential') ? '/resources?resource_type=key_vault' :
+    metric.label.toLowerCase().includes('rotation') || metric.label.toLowerCase().includes('credential') ? '/key-vaults' :
     metric.label.toLowerCase().includes('pim') || metric.label.toLowerCase().includes('jit') ? '/identities?pillar=effective-privilege' :
     '/service-accounts';
   const navTarget = metric.status !== 'not-configured' ? govRowNav : '/settings/governance';
@@ -1995,7 +2012,7 @@ function ExecSummaryTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: 
           {/* Projection footer — hidden in exec view */}
           {!execView && (
             <div style={{ marginTop: 10, display: 'flex', gap: 16, fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
-              <span>No action: <DN navigateTo="/dashboard"><span style={{ fontFamily: FONT.mono, color: COLORS.danger, fontWeight: 600 }}>{d.projection.noAction.score.toFixed(1)}</span></DN> in 10d</span>
+              <span>No action: <DN navigateTo="/dashboard"><span style={{ fontFamily: FONT.mono, color: COLORS.danger, fontWeight: 600 }}>{d.projection.noAction.score != null ? d.projection.noAction.score.toFixed(1) : '\u2014'}</span></DN> in 10d</span>
               <span>If remediated: <DN navigateTo="/remediation"><span style={{ fontFamily: FONT.mono, color: COLORS.success, fontWeight: 600 }}>{d.projection.remediated.score.toFixed(1)}</span></DN></span>
             </div>
           )}
@@ -2273,7 +2290,7 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
           const trendColor = trendArrow === '↑' ? COLORS.success : trendArrow === '→' ? COLORS.warning : COLORS.danger;
           const govNav = m.label.toLowerCase().includes('access review') ? '/access-reviews' :
             m.label.toLowerCase().includes('owner') ? '/service-accounts' :
-            m.label.toLowerCase().includes('rotation') || m.label.toLowerCase().includes('credential') ? '/resources?resource_type=key_vault' :
+            m.label.toLowerCase().includes('rotation') || m.label.toLowerCase().includes('credential') ? '/key-vaults' :
             m.label.toLowerCase().includes('pim') || m.label.toLowerCase().includes('jit') ? '/identities?pillar=effective-privilege' :
             '/service-accounts';
           const navTarget = m.status !== 'not-configured' ? govNav : '/settings/governance';
@@ -2618,11 +2635,11 @@ function RiskMovementTab({ d }: { d: TenantData }) {
         {/* Consequence Panel */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {/* Most Changed */}
-          <CISOCard style={{ background: COLORS.dangerSoft, borderColor: `${COLORS.danger}30` }}>
+          <CISOCard style={{ background: d.riskMovement.mostChanged.score === 0 ? COLORS.surfaceAlt : COLORS.dangerSoft, borderColor: d.riskMovement.mostChanged.score === 0 ? COLORS.border : `${COLORS.danger}30` }}>
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>Most Changed Risk</div>
             <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui, marginTop: 4 }}>{d.riskMovement.mostChanged.name}</div>
             <DN navigateTo="/drift">
-              <div style={{ fontSize: 12, fontFamily: FONT.mono, color: COLORS.danger, marginTop: 2 }}>Score {d.riskMovement.mostChanged.score}/100</div>
+              <div style={{ fontSize: 12, fontFamily: FONT.mono, color: d.riskMovement.mostChanged.score === 0 ? COLORS.textMuted : COLORS.danger, marginTop: 2 }}>Score {d.riskMovement.mostChanged.score}/100</div>
             </DN>
           </CISOCard>
 
@@ -2640,7 +2657,7 @@ function RiskMovementTab({ d }: { d: TenantData }) {
               background: COLORS.dangerSoft, border: `1px solid ${COLORS.danger}2e`,
               fontSize: 10, color: COLORS.danger, fontFamily: FONT.ui,
             }}>
-              Estimated Breach Impact: {d.projection.noAction.breachImpact}
+              Estimated Breach Impact: {d.projection.noAction.breachImpact ?? 'Insufficient data'}
             </div>
           </CISOCard>
         </div>
@@ -2657,9 +2674,13 @@ function RiskMovementTab({ d }: { d: TenantData }) {
             <div key={key} style={{ textAlign: 'center' as const }}>
               <div style={{ fontSize: 9, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>{key}</div>
               <div style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.text, marginTop: 2 }}>
-                {key === 'lastRun' ? formatDate(String(val), 'No data') : isNum && metaNav ? (
+                {key === 'lastRun' ? formatDate(String(val), 'No data') :
+                 key === 'frequency' && (val === 'Unknown' || !val) ? 'Not configured' :
+                 key === 'duration' && (val === 'Unknown' || !val) ? '—' :
+                 key === 'completeness' && val === '0%' ? 'No scan completed' :
+                 isNum && metaNav ? (
                   <DN navigateTo={metaNav}>{val}</DN>
-                ) : val}
+                ) : String(val)}
               </div>
             </div>
             );

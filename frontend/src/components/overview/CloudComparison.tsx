@@ -253,7 +253,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
                       </div>
                       <div className="col-span-6">
                         <div className="flex items-center gap-6">
-                          <a href="/resources?resource_type=storage_account" onClick={e => e.stopPropagation()} className="flex items-center gap-2 hover:opacity-70 transition">
+                          <a href="/storage-accounts" onClick={e => e.stopPropagation()} className="flex items-center gap-2 hover:opacity-70 transition">
                             <span className="inline-flex items-center justify-center w-6 h-6 rounded bg-sky-100">
                               <svg className="w-3.5 h-3.5 text-sky-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
@@ -264,7 +264,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
                               <span className="text-[10px] text-gray-500 ml-1">Storage Accounts</span>
                             </div>
                           </a>
-                          <a href="/resources?resource_type=key_vault" onClick={e => e.stopPropagation()} className="flex items-center gap-2 hover:opacity-70 transition">
+                          <a href="/key-vaults" onClick={e => e.stopPropagation()} className="flex items-center gap-2 hover:opacity-70 transition">
                             <span className="inline-flex items-center justify-center w-6 h-6 rounded bg-purple-100">
                               <svg className="w-3.5 h-3.5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
@@ -311,7 +311,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
                 </svg>
                 <div className="text-sm font-semibold text-gray-700">All cloud providers are enabled!</div>
                 <button
-                  onClick={() => { setShowAddModal(false); navigate('/settings#cloud-connections'); }}
+                  onClick={() => { setShowAddModal(false); navigate('/settings/connections'); }}
                   className="mt-3 text-sm text-blue-600 hover:text-blue-800 font-medium"
                 >
                   Go to Settings &rarr; Cloud Connections
@@ -338,7 +338,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
                             </span>
                           </div>
                           <button
-                            onClick={() => { setShowAddModal(false); navigate('/settings#cloud-connections'); }}
+                            onClick={() => { setShowAddModal(false); navigate('/settings/connections'); }}
                             className="text-xs text-blue-600 hover:text-blue-800 font-medium"
                           >
                             Configure

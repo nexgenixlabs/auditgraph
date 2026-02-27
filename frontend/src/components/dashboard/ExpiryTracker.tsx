@@ -62,7 +62,7 @@ export default function ExpiryTracker() {
         </div>
         {(totalExpired > 0 || totalExpiring > 0) && (
           <button
-            onClick={() => navigate('/resources?resource_type=key_vault')}
+            onClick={() => navigate('/key-vaults')}
             className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer hover:opacity-70 transition ${
               totalExpired > 0 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'
             }`}
@@ -73,9 +73,9 @@ export default function ExpiryTracker() {
       </div>
 
       <div className="grid grid-cols-3 gap-2 mb-3">
-        <MiniCard label="Secrets" total={data.secrets?.total || 0} expired={data.secrets?.expired || 0} expiringSoon={(data.secrets?.expiring_7d || 0) + (data.secrets?.expiring_30d || 0)} onClick={() => navigate('/resources?resource_type=key_vault')} />
-        <MiniCard label="Keys" total={data.keys?.total || 0} expired={data.keys?.expired || 0} expiringSoon={(data.keys?.expiring_7d || 0) + (data.keys?.expiring_30d || 0)} onClick={() => navigate('/resources?resource_type=key_vault')} />
-        <MiniCard label="Certificates" total={data.certs?.total || 0} expired={data.certs?.expired || 0} expiringSoon={(data.certs?.expiring_7d || 0) + (data.certs?.expiring_30d || 0)} onClick={() => navigate('/resources?resource_type=key_vault')} />
+        <MiniCard label="Secrets" total={data.secrets?.total || 0} expired={data.secrets?.expired || 0} expiringSoon={(data.secrets?.expiring_7d || 0) + (data.secrets?.expiring_30d || 0)} onClick={() => navigate('/key-vaults')} />
+        <MiniCard label="Keys" total={data.keys?.total || 0} expired={data.keys?.expired || 0} expiringSoon={(data.keys?.expiring_7d || 0) + (data.keys?.expiring_30d || 0)} onClick={() => navigate('/key-vaults')} />
+        <MiniCard label="Certificates" total={data.certs?.total || 0} expired={data.certs?.expired || 0} expiringSoon={(data.certs?.expiring_7d || 0) + (data.certs?.expiring_30d || 0)} onClick={() => navigate('/key-vaults')} />
       </div>
 
       {/* Upcoming expirations timeline (top 5) */}
@@ -102,7 +102,7 @@ export default function ExpiryTracker() {
       )}
 
       <button
-        onClick={() => navigate('/resources?resource_type=key_vault')}
+        onClick={() => navigate('/key-vaults')}
         className="mt-3 text-[10px] text-blue-600 hover:underline"
       >
         View all Key Vaults →

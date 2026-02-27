@@ -157,7 +157,7 @@ export default function Login() {
           body: JSON.stringify({ stage: 'locked' }),
         });
       } catch { /* ignore */ }
-      navigate('/settings#cloud-connections');
+      navigate('/settings/connections');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to change password');
     } finally {

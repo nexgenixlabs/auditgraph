@@ -100,7 +100,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#8b5cf6',
         items: [
           { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/data-security', label: 'Attack Surface', icon: attackIcon },
+          { to: '/data-security', label: 'Data & Resource Exposure', icon: attackIcon },
         ],
       },
       {
@@ -123,8 +123,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Data Security',
         color: '#ea580c',
         items: [
-          { to: '/resources?resource_type=key_vault', label: 'Secrets & Keys', icon: secretsIcon },
-          { to: '/resources?resource_type=storage_account', label: 'Storage Exposure', icon: storageIcon },
+          { to: '/key-vaults', label: 'Secrets & Keys', icon: secretsIcon },
+          { to: '/storage-accounts', label: 'Storage Exposure', icon: storageIcon },
         ],
       },
       {

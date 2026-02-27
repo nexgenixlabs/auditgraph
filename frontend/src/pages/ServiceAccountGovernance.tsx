@@ -325,7 +325,7 @@ export default function ServiceAccountGovernance() {
               <div className="flex gap-1 mt-3">
                 {['Critical', 'High', 'Medium', 'Low'].map(b => (
                   <button key={b} className="flex-1 text-center cursor-pointer hover:opacity-70 transition" onClick={() => { setActiveBand(b); setPage(0); }}>
-                    <div style={{ color: G.band[b], fontFamily: G.mono, borderBottom: '1px dashed currentColor', width: 'fit-content', margin: '0 auto' }} className="text-sm font-bold">{(rd[b] || 0).toLocaleString()}</div>
+                    <div style={{ color: (rd[b] || 0) === 0 ? G.textMuted : G.band[b], fontFamily: G.mono, borderBottom: '1px dashed currentColor', width: 'fit-content', margin: '0 auto' }} className="text-sm font-bold">{(rd[b] || 0).toLocaleString()}</div>
                     <div style={{ color: G.textMuted }} className="text-[9px]">{b}</div>
                   </button>
                 ))}
@@ -334,20 +334,20 @@ export default function ServiceAccountGovernance() {
           </div>
 
           {/* Critical */}
-          <div style={{ background: G.bandBg.Critical, border: `1px solid rgba(255,23,68,0.2)` }}
+          <div style={{ background: (rd.Critical || 0) === 0 ? G.surface : G.bandBg.Critical, border: `1px solid ${(rd.Critical || 0) === 0 ? G.surfaceBorder : 'rgba(255,23,68,0.2)'}` }}
                className="gov-card gov-card-2 rounded-xl p-4 cursor-pointer transition hover:scale-[1.01]"
                onClick={() => { setActiveBand('Critical'); setPage(0); }}>
-            <div style={{ color: G.band.Critical }} className="text-[10px] uppercase tracking-wider font-medium">Critical Risk</div>
-            <div style={{ color: G.band.Critical, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.Critical || 0).toLocaleString()}</div>
+            <div style={{ color: (rd.Critical || 0) === 0 ? G.textMuted : G.band.Critical }} className="text-[10px] uppercase tracking-wider font-medium">Critical Risk</div>
+            <div style={{ color: (rd.Critical || 0) === 0 ? G.textMuted : G.band.Critical, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.Critical || 0).toLocaleString()}</div>
             <div style={{ color: G.textMuted }} className="text-[10px] mt-2">Immediate action required</div>
           </div>
 
           {/* High */}
-          <div style={{ background: G.bandBg.High, border: `1px solid rgba(255,109,0,0.2)` }}
+          <div style={{ background: (rd.High || 0) === 0 ? G.surface : G.bandBg.High, border: `1px solid ${(rd.High || 0) === 0 ? G.surfaceBorder : 'rgba(255,109,0,0.2)'}` }}
                className="gov-card gov-card-3 rounded-xl p-4 cursor-pointer transition hover:scale-[1.01]"
                onClick={() => { setActiveBand('High'); setPage(0); }}>
-            <div style={{ color: G.band.High }} className="text-[10px] uppercase tracking-wider font-medium">High Risk</div>
-            <div style={{ color: G.band.High, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.High || 0).toLocaleString()}</div>
+            <div style={{ color: (rd.High || 0) === 0 ? G.textMuted : G.band.High }} className="text-[10px] uppercase tracking-wider font-medium">High Risk</div>
+            <div style={{ color: (rd.High || 0) === 0 ? G.textMuted : G.band.High, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.High || 0).toLocaleString()}</div>
             <div style={{ color: G.textMuted }} className="text-[10px] mt-2">Review within 7 days</div>
           </div>
 

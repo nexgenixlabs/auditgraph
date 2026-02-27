@@ -157,7 +157,7 @@ BLOCKED_PASSWORDS = {
 }
 
 
-def validate_password(password: str) -> tuple[bool, str | None]:
+def validate_password(password: str) -> tuple:
     """Validate password meets HIPAA-grade security policy.
 
     Requirements:

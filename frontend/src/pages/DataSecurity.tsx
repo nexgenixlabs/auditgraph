@@ -376,10 +376,10 @@ export default function DataSecurity() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>
-            Data Security Attack Surface
+            Data &amp; Resource Exposure
           </h1>
           <p style={{ fontSize: 12, color: G.textMuted, margin: '4px 0 0' }}>
-            Component-based risk intelligence for Storage Accounts &amp; Key Vaults
+            Component-based risk intelligence for data resources
           </p>
         </div>
         <button onClick={handleAutoClassify} disabled={autoClassifying} style={{
@@ -455,8 +455,8 @@ export default function DataSecurity() {
       {summary && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 24 }}>
           <StatCard label="Total Resources" value={summary.total} color={G.accent} onClick={() => navigate('/resources')} />
-          <StatCard label="Storage Accounts" value={summary.storage_accounts} color="#60A5FA" onClick={() => navigate('/resources?resource_type=storage_account')} />
-          <StatCard label="Key Vaults" value={summary.key_vaults} color="#A78BFA" onClick={() => navigate('/resources?resource_type=key_vault')} />
+          <StatCard label="Storage Accounts" value={summary.storage_accounts} color="#60A5FA" onClick={() => navigate('/storage-accounts')} />
+          <StatCard label="Key Vaults" value={summary.key_vaults} color="#A78BFA" onClick={() => navigate('/key-vaults')} />
           <StatCard label="At Risk" value={summary.at_risk} color={G.severity.critical}
             subtitle={`${summary.by_risk.critical || 0} critical, ${summary.by_risk.high || 0} high`} onClick={() => navigate('/resources?risk=critical')} />
           <StatCard label="Avg Risk Score" value={summary.avg_score} color={

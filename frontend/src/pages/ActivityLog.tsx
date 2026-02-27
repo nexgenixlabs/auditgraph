@@ -65,25 +65,54 @@ function timeAgo(dateStr: string): string {
 
 // ── Component ──────────────────────────────────────────────────
 
+// ── Filter categories (2-tier) ──────────────────────────────────
+
+const FILTER_CATEGORIES: Record<string, { label: string; types: string[] }> = {
+  security: {
+    label: 'Security',
+    types: ['auth_login', 'auth_logout', 'remediation_updated'],
+  },
+  operations: {
+    label: 'Operations',
+    types: ['discovery_triggered', 'discovery_completed', 'drift_reviewed', 'report_generated', 'report_emailed', 'report_email_failed', 'export'],
+  },
+  integrations: {
+    label: 'Integrations',
+    types: ['soar_action_executed', 'soar_action_failed', 'soar_playbook_created', 'soar_playbook_updated', 'soar_playbook_deleted', 'soar_playbook_tested', 'soar_action_manual', 'test_email_sent', 'test_email_failed', 'connection_deleted'],
+  },
+  system: {
+    label: 'System',
+    types: ['settings_updated', 'settings', 'user_created', 'user_deleted', 'user_updated', 'correlation_config', 'governance_decision'],
+  },
+};
+
 export default function ActivityLog() {
   const { addToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [filter, setFilter] = useState<string>('');
+  const [activeCategory, setActiveCategory] = useState<string>('');
 
   useEffect(() => {
     async function load() {
       setLoading(true);
       setError(null);
       try {
+        // If a specific sub-type is selected, use API filter
         const url = filter
           ? `/api/activity?limit=100&type=${encodeURIComponent(filter)}`
           : '/api/activity?limit=100';
         const res = await fetch(url);
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const data = await res.json();
-        setEntries(data.entries || []);
+        let result: ActivityEntry[] = data.entries || [];
+        // If category is active but no specific sub-type, filter client-side
+        if (!filter && activeCategory && FILTER_CATEGORIES[activeCategory]) {
+          const catTypes = FILTER_CATEGORIES[activeCategory].types;
+          result = result.filter(e => catTypes.includes(e.action_type));
+        }
+        setEntries(result);
       } catch (e: any) {
         setError(e?.message || 'Failed to load activity log');
       } finally {
@@ -91,7 +120,7 @@ export default function ActivityLog() {
       }
     }
     load();
-  }, [filter]);
+  }, [filter, activeCategory]);
 
   // ── Loading ────────────────────────────────────────────────
   if (loading) {
@@ -117,8 +146,6 @@ export default function ActivityLog() {
       </div>
     );
   }
-
-  const actionTypes = Object.keys(ACTION_CONFIG);
 
   function exportCsv() {
     const header = ['ID', 'Action Type', 'User', 'Description', 'Metadata', 'Timestamp'];
@@ -152,45 +179,82 @@ export default function ActivityLog() {
       </div>
 
       {/* Summary + Filter bar */}
-      <div className="flex items-center justify-between bg-white border rounded-xl px-6 py-4">
-        <div>
-          <div className="text-2xl font-bold text-gray-900">{entries.length}</div>
-          <div className="text-xs text-gray-500">
-            {filter ? `Filtered entries` : 'Recent entries'}
+      <div className="bg-white border rounded-xl px-6 py-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-2xl font-bold text-gray-900">{entries.length}</div>
+            <div className="text-xs text-gray-500">
+              {filter ? `Filtered entries` : 'Recent entries'}
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
           <button
             onClick={exportCsv}
             disabled={entries.length === 0}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition disabled:opacity-40 disabled:cursor-not-allowed mr-2"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Export CSV
           </button>
+        </div>
+
+        {/* Row 1: Category buttons */}
+        <div className="flex items-center gap-2">
           <span className="text-xs text-gray-500 mr-1">Filter:</span>
           <button
-            onClick={() => setFilter('')}
+            onClick={() => { setFilter(''); setActiveCategory(''); }}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-              !filter ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              !filter && !activeCategory ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
             All
           </button>
-          {actionTypes.map(type => {
-            const cfg = getActionConfig(type);
-            return (
-              <button
-                key={type}
-                onClick={() => setFilter(type)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                  filter === type ? 'bg-blue-600 text-white' : `${cfg.bg} ${cfg.color} hover:opacity-80`
-                }`}
-              >
-                {cfg.shortLabel}
-              </button>
-            );
-          })}
+          {Object.entries(FILTER_CATEGORIES).map(([key, cat]) => (
+            <button
+              key={key}
+              onClick={() => {
+                if (activeCategory === key) {
+                  setActiveCategory('');
+                  setFilter('');
+                } else {
+                  setActiveCategory(key);
+                  setFilter('');
+                }
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                activeCategory === key ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
         </div>
+
+        {/* Row 2: Sub-type buttons (shown when a category is selected) */}
+        {activeCategory && FILTER_CATEGORIES[activeCategory] && (
+          <div className="flex items-center gap-1.5 flex-wrap pl-[52px]">
+            <button
+              onClick={() => setFilter('')}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
+                !filter ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+              }`}
+            >
+              All {FILTER_CATEGORIES[activeCategory].label}
+            </button>
+            {FILTER_CATEGORIES[activeCategory].types.map(type => {
+              const cfg = getActionConfig(type);
+              return (
+                <button
+                  key={type}
+                  onClick={() => setFilter(type)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
+                    filter === type ? 'bg-blue-100 text-blue-700' : `${cfg.bg} ${cfg.color} hover:opacity-80`
+                  }`}
+                >
+                  {cfg.shortLabel}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Empty state */}

@@ -128,7 +128,7 @@ export default function CredentialIntelligence() {
             </div>
           </div>
           <div className="space-y-1">
-            <Stat label="Rotation Overdue" value={rot.overdue} color={rot.overdue > 0 ? RISK_COLORS.critical.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_rotation=overdue')} />
+            <Stat label="Rotation Overdue" value={rot.overdue} color={rot.overdue > 0 ? RISK_COLORS.critical.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_status=expired')} />
             <Stat label="Due Within 30d" value={rot.due_soon} color={rot.due_soon > 0 ? RISK_COLORS.high.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_status=expiring_soon')} />
             <Stat label="Stale Passwords" value={rot.stale_passwords} color={rot.stale_passwords > 0 ? RISK_COLORS.high.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_status=expired')} />
             <Stat label="Multi-Active Secrets" value={rot.multi_active_secrets} color={rot.multi_active_secrets > 0 ? RISK_COLORS.medium.color : COLORS.textMuted} onClick={() => navigate('/spns?credential_filter=multi_active')} />

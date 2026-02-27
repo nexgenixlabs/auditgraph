@@ -44,6 +44,8 @@ import OnboardingWizard from './pages/OnboardingWizard';
 import Resources from './pages/Resources';
 import ResourceDetail from './pages/ResourceDetail';
 import DataSecurity from './pages/DataSecurity';
+import KeyVaultSecurity from './pages/KeyVaultSecurity';
+import StorageSecurity from './pages/StorageSecurity';
 import AdminConsole from './pages/AdminConsole';
 import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
@@ -277,6 +279,8 @@ function AppContent() {
                   <Route path="/rbac-hygiene" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RbacHygiene /></ErrorBoundary>} />
                   <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
                   <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
+                  <Route path="/key-vaults" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><KeyVaultSecurity /></ErrorBoundary>} />
+                  <Route path="/storage-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><StorageSecurity /></ErrorBoundary>} />
                   <Route path="/data-security" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DataSecurity /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
                   <Route path="/invoices" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Invoices /></ErrorBoundary>} />

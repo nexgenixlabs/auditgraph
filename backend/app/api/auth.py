@@ -13,11 +13,9 @@ from app.database import Database
 
 logger = logging.getLogger(__name__)
 
-JWT_SECRET = os.getenv('JWT_SECRET', '')
+JWT_SECRET = os.getenv('JWT_SECRET')
 if not JWT_SECRET:
-    import warnings
-    warnings.warn("JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production!", stacklevel=2)
-    JWT_SECRET = 'auditgraph-dev-secret-change-in-production'
+    raise RuntimeError("FATAL: JWT_SECRET environment variable is required. Set it before starting the application.")
 JWT_ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRY = timedelta(hours=24)
 REFRESH_TOKEN_EXPIRY = timedelta(days=7)

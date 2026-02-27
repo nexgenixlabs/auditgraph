@@ -1080,6 +1080,7 @@ def create_app():
         return get_anomaly_detail(anomaly_id)
 
     @app.patch("/api/anomalies/<int:anomaly_id>")
+    @require_role('admin', 'auditor')
     def anomaly_resolve(anomaly_id):
         return resolve_anomaly_handler(anomaly_id)
 

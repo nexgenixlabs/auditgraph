@@ -37,7 +37,7 @@ export default function LockedDashboard() {
             Go to Settings to configure your cloud connection and run your first discovery scan.
           </p>
           <button
-            onClick={() => navigate('/settings#cloud-connections')}
+            onClick={() => navigate('/settings/connections')}
             className="px-6 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
           >
             Go to Settings

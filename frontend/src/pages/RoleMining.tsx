@@ -807,10 +807,14 @@ function SummaryCard({ label, value, bg, text, border, sub, onClick }: {
   label: string; value: string | number; bg: string; text: string; border?: string; sub?: string; onClick?: () => void;
 }) {
   const Tag = onClick ? 'button' : 'div';
+  const isZero = value === 0 || value === '0' || value === '0%';
+  const effectiveBg = isZero ? 'bg-white' : bg;
+  const effectiveText = isZero ? 'text-gray-400' : text;
+  const effectiveBorder = isZero ? 'border-gray-200' : (border || 'border-gray-200');
   return (
-    <Tag onClick={onClick} className={`${bg} border ${border || 'border-gray-200'} rounded-xl p-4 text-left ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''}`}>
-      <div className={`text-xs font-medium ${text}`}>{label}</div>
-      <div className={`text-2xl font-bold ${text} mt-1`} style={onClick ? { width: 'fit-content', borderBottom: '1px dashed currentColor' } : undefined}>
+    <Tag onClick={onClick} className={`${effectiveBg} border ${effectiveBorder} rounded-xl p-4 text-left ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''}`}>
+      <div className={`text-xs font-medium ${effectiveText}`}>{label}</div>
+      <div className={`text-2xl font-bold ${effectiveText} mt-1`} style={onClick ? { width: 'fit-content', borderBottom: '1px dashed currentColor' } : undefined}>
         {typeof value === 'number' ? value.toLocaleString() : value}
       </div>
       {sub && <div className={`text-[10px] text-gray-500 mt-0.5`}>{sub}</div>}

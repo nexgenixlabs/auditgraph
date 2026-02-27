@@ -1516,6 +1516,58 @@ export default function IdentitiesPage() {
         )}
       </div>
 
+      {/* Category Filter Tabs */}
+      {!loading && identities.length > 0 && (
+        <div className="flex items-center gap-1.5 mb-3">
+          {[
+            { key: 'all' as const, label: 'All Identities' },
+            { key: 'human_user' as const, label: 'Human Users' },
+            { key: 'service_principal' as const, label: 'Service Principals' },
+            { key: 'managed_identity_system' as const, label: 'Managed IDs' },
+            { key: 'guest' as const, label: 'Guest' },
+          ].map(tab => {
+            const isActive = !workloadFilter && categoryFilter === tab.key;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => {
+                  setWorkloadFilter(false);
+                  setCategoryFilter(tab.key as any);
+                  clearActiveView();
+                  if (tab.key === 'all') {
+                    navigate('/identities', { replace: true });
+                  } else {
+                    navigate(`/identities?identity_category=${tab.key}`, { replace: true });
+                  }
+                }}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                  isActive
+                    ? 'bg-violet-600 text-white shadow-sm'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+          <button
+            onClick={() => {
+              setWorkloadFilter(true);
+              setCategoryFilter('all');
+              clearActiveView();
+              navigate('/identities?workload=true', { replace: true });
+            }}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+              workloadFilter
+                ? 'bg-violet-600 text-white shadow-sm'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            NHI (All Non-Human)
+          </button>
+        </div>
+      )}
+
       {/* KPI Summary Strip */}
       {!loading && identities.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 mb-3">
