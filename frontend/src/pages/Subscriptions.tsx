@@ -210,7 +210,7 @@ export default function Subscriptions() {
       {/* Info box */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
         No additional permissions needed &mdash; Graph API credentials operate at the Entra ID tenant level.
-        All subscriptions discovered during scans appear here automatically.
+        All subscriptions discovered during snapshots appear here automatically.
       </div>
 
       {/* Table */}

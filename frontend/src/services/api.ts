@@ -144,4 +144,43 @@ export const getQueryFields = async () => {
   }
 };
 
+// ── Snapshot API wrappers (frontend-only terminology layer) ──────
+// Backend routes are /api/runs — these wrappers provide snapshot-aligned naming.
+
+/** Fetch all snapshots. Wraps GET /api/runs */
+export const getSnapshots = async () => {
+  try {
+    const res = await api.get('/runs');
+    return res.data;
+  } catch (error) {
+    console.error('Failed to fetch snapshots:', error);
+    throw error;
+  }
+};
+
+/** Trigger a new snapshot capture. Wraps POST /api/runs/trigger */
+export const triggerSnapshot = async () => {
+  try {
+    const res = await api.post('/runs/trigger');
+    return res.data;
+  } catch (error) {
+    console.error('Failed to trigger snapshot:', error);
+    throw error;
+  }
+};
+
+/** Fetch a single snapshot's drift report. Wraps GET /api/runs/:id/drift */
+export const getSnapshotById = async (snapshotId: number) => {
+  try {
+    const res = await api.get(`/runs/${snapshotId}/drift`);
+    return res.data;
+  } catch (error) {
+    console.error('Failed to fetch snapshot:', error);
+    throw error;
+  }
+};
+
+/** @deprecated Use getSnapshots() instead */
+export const getRuns = getSnapshots;
+
 export default api;

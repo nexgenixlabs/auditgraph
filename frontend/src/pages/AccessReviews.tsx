@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -475,6 +476,7 @@ export default function AccessReviews() {
           <p style={{ color: AR.textMuted, fontSize: 13 }}>
             Risk-aware access certification with AI-powered recommendations
           </p>
+          <SnapshotContextHeader />
         </div>
         {isAdmin && (
           <button

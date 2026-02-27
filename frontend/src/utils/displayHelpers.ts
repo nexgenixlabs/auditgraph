@@ -162,7 +162,7 @@ export function formatCompleteness(pct: number | null | undefined): {
   color: string;
 } {
   if (pct === null || pct === undefined || pct === 0) {
-    return { text: 'No scan completed', color: 'var(--text-muted)' };
+    return { text: 'No snapshot captured', color: 'var(--text-muted)' };
   }
   if (pct < 30) return { text: `${pct}%`, color: 'var(--accent-warning, #f59e0b)' };
   if (pct < 70) return { text: `${pct}%`, color: '#ca8a04' };

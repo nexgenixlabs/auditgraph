@@ -1008,7 +1008,7 @@ function DataFreshnessBar({ tenant, scoring }: { tenant: TenantData['tenant']; s
       fontFamily: F.data, fontSize: 10, color: P.textDim, marginBottom: 16,
     }}>
       <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span>Scan coverage: <span style={{ color: P.textMuted, fontWeight: 600 }}>{tenant.scanCoverage}%</span> subs</span>
+        <span>Snapshot coverage: <span style={{ color: P.textMuted, fontWeight: 600 }}>{tenant.scanCoverage}%</span> subs</span>
         <span style={{ color: P.textFaint }}>&middot;</span>
         <span>Data completeness: <span style={{ color: getCompletenessColor(tenant.dataCompleteness), fontWeight: 600 }}>{tenant.dataCompleteness}%</span></span>
         <span style={{ color: P.textFaint }}>&middot;</span>
@@ -2210,7 +2210,7 @@ function RiskMovementTab({ d, nav }: { d: TenantData; nav: Nav }) {
         <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
           {[
             { l: 'Confidence', v: d.tenant.scanConfidence || 'No data' },
-            { l: 'Last Scan', v: formatDate(d.tenant.lastScan, 'No scan data') },
+            { l: 'Last Snapshot', v: formatDate(d.tenant.lastScan, 'No snapshot data') },
             { l: 'Sources', v: d.tenant.sources?.length ? d.tenant.sources.join(', ') : 'No data' },
             { l: 'Duration', v: d.tenant.scanDuration ? `${d.tenant.scanDuration.toFixed(1)}s` : '—' },
             { l: 'Completeness', v: formatCompleteness(d.tenant.scanCompleteness).text },
@@ -2374,7 +2374,7 @@ export default function Overview() {
             <span style={{ fontFamily: F.data, fontSize: 10, color: '#22c55e' }}>Potential: <DrillableNumber value={`+${d.riskScore.potentialGain}`} label="Potential gain from remediations" onClick={() => setActiveTab('action')} /></span>
           </div>
           <div style={{ marginTop: 4, fontFamily: F.data, fontSize: 10, color: P.textFaint }}>
-            {'\u2022'} {d.tenant.cloud} {'\u2022'} <DrillableNumber value={d.tenant.subscriptions} label="View subscriptions" onClick={() => navigate('/subscriptions')} /> subs {'\u2022'} {formatDate(d.tenant.lastScan, 'No scan data')}
+            {'\u2022'} {d.tenant.cloud} {'\u2022'} <DrillableNumber value={d.tenant.subscriptions} label="View subscriptions" onClick={() => navigate('/subscriptions')} /> subs {'\u2022'} {formatDate(d.tenant.lastScan, 'No snapshot data')}
           </div>
         </div>
 

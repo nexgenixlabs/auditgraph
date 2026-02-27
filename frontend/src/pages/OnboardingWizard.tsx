@@ -396,14 +396,14 @@ export default function OnboardingWizard() {
         {step === 4 && (
           <div className="space-y-5">
             <div>
-              <h2 className="text-xl font-bold text-white">Configure Discovery</h2>
+              <h2 className="text-xl font-bold text-white">Configure Snapshots</h2>
               <p className="text-sm text-gray-400 mt-2">
-                Set how often AuditGraph scans your environment and whether to send email alerts.
+                Set how often AuditGraph captures snapshots and whether to send email alerts.
               </p>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Discovery Frequency</label>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Snapshot Frequency</label>
               <div className="flex gap-3">
                 {['6', '12', '24'].map(val => (
                   <button
@@ -477,7 +477,7 @@ export default function OnboardingWizard() {
                 <span className="font-medium text-green-400">{testResult?.subscriptions?.length || 0}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Discovery Frequency</span>
+                <span className="text-gray-400">Snapshot Frequency</span>
                 <span className="font-medium text-white">Every {discoveryInterval} hours</span>
               </div>
               <div className="flex justify-between">
@@ -496,10 +496,10 @@ export default function OnboardingWizard() {
               {saving ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Saving &amp; Starting Discovery...
+                  Saving &amp; Capturing First Snapshot...
                 </>
               ) : (
-                'Complete Setup & Start Discovery'
+                'Complete Setup & Start Snapshot'
               )}
             </button>
           </div>

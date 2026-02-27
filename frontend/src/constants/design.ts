@@ -95,7 +95,7 @@ export const DASHBOARD_TABS: { id: DashboardTab; label: string; description: str
   { id: 'trust',      label: 'Trust & Access',            description: 'Trust relationships and effective access' },
   { id: 'usage',      label: 'Usage & Optimization',      description: 'Role usage, dormancy, and quick actions' },
   { id: 'governance', label: 'Governance & Compliance',    description: 'Compliance frameworks, remediation, conditional access' },
-  { id: 'platform',   label: 'Platform & Discovery',      description: 'Cloud coverage, SOAR, platform health' },
+  { id: 'platform',   label: 'Platform & Snapshots',       description: 'Cloud coverage, SOAR, platform health' },
 ];
 
 // Widget-to-tab mapping

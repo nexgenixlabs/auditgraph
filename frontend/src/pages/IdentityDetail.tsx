@@ -823,12 +823,12 @@ export default function IdentityDetail() {
                     </span>
                   )}
                   {data?.trend?.risk_direction === 'worsened' && (
-                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200" title={`Was ${data.trend.previous_risk_level || 'lower'} in previous run`}>
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200" title={`Was ${data.trend.previous_risk_level || 'lower'} in previous snapshot`}>
                       ↑ WORSENED
                     </span>
                   )}
                   {data?.trend?.risk_direction === 'improved' && (
-                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200" title={`Was ${data.trend.previous_risk_level || 'higher'} in previous run`}>
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200" title={`Was ${data.trend.previous_risk_level || 'higher'} in previous snapshot`}>
                       ↓ IMPROVED
                     </span>
                   )}
@@ -2259,7 +2259,7 @@ export default function IdentityDetail() {
                       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
                         <div className="bg-gray-50 rounded-xl p-3 text-center">
                           <div className="text-xl font-bold text-gray-900">{lifecycleData.summary.total_runs_observed}</div>
-                          <div className="text-[10px] text-gray-500 mt-0.5">Runs Observed</div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">Snapshots Observed</div>
                         </div>
                         <div className="bg-gray-50 rounded-xl p-3 text-center">
                           <div className="text-xl font-bold text-gray-900">{lifecycleData.total_events}</div>

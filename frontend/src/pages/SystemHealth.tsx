@@ -176,7 +176,7 @@ export default function SystemHealth() {
             <div className="text-xs text-gray-500 capitalize">Status: {checks?.scheduler?.status || 'unknown'}</div>
             {!!checks?.scheduler?.next_run && (
               <div className="text-xs text-gray-500 mt-1">
-                Next run: {new Date(checks.scheduler.next_run).toLocaleString()}
+                Next snapshot: {new Date(checks.scheduler.next_run).toLocaleString()}
               </div>
             )}
           </div>

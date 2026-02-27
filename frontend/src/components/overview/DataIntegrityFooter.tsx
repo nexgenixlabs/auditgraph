@@ -35,10 +35,10 @@ export default function DataIntegrityFooter({ dataIntegrity }: DataIntegrityFoot
       style={{ backgroundColor: 'var(--bg-secondary)', border: `1px solid ${COLORS.border}` }}
     >
       <div className="flex items-center gap-6 flex-wrap">
-        <Stat label="Last Scan" value={formatTime(dataIntegrity.last_scan)} />
-        <Stat label="Total Scanned" value={String(dataIntegrity.total_scanned)} />
+        <Stat label="Last Snapshot" value={formatTime(dataIntegrity.last_scan)} />
+        <Stat label="Total Captured" value={String(dataIntegrity.total_scanned)} />
         <Stat label="Data Completeness" value={`${Math.round(dataIntegrity.data_completeness_pct)}%`} />
-        <Stat label="Scan Duration" value={formatDuration(dataIntegrity.scan_duration_seconds)} />
+        <Stat label="Snapshot Duration" value={formatDuration(dataIntegrity.scan_duration_seconds)} />
       </div>
       <Link
         to="/activity"

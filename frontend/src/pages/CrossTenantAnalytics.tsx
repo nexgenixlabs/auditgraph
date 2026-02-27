@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../services/apiClient';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -191,6 +192,7 @@ export default function CrossTenantAnalytics() {
         <p className="text-sm text-gray-600 mt-1">
           Aggregated risk posture across all clients
         </p>
+        <SnapshotContextHeader />
       </div>
 
       {/* Global Stats Cards */}
@@ -244,7 +246,7 @@ export default function CrossTenantAnalytics() {
                 <SortHeader label="Critical" field="critical_count" className="w-20 text-right" />
                 <SortHeader label="High" field="high_count" className="w-20 text-right" />
                 <SortHeader label="Score" field="risk_score" className="w-20 text-center" />
-                <SortHeader label="Last Discovery" field="last_discovery" className="w-36 text-right" />
+                <SortHeader label="Last Snapshot" field="last_discovery" className="w-36 text-right" />
                 <th className="px-4 py-3 font-medium text-gray-600 w-20 text-right">Trend</th>
               </tr>
             </thead>

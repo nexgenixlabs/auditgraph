@@ -154,7 +154,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
   doc.setFontSize(11);
   doc.setFont('helvetica', 'bold');
   txt(doc, DARK);
-  doc.text('Discovery Summary', margin, statsY);
+  doc.text('Snapshot Summary', margin, statsY);
 
   const statsData = [
     ['Total Identities', String(data.stats.total_identities)],
@@ -183,7 +183,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
     txt(doc, GRAY);
     const critDelta = data.stats.critical - data.previous_run.critical;
     const highDelta = data.stats.high - data.previous_run.high;
-    const trendText = `Trend vs previous run: Critical ${critDelta >= 0 ? '+' : ''}${critDelta}, High ${highDelta >= 0 ? '+' : ''}${highDelta}`;
+    const trendText = `Trend vs previous snapshot: Critical ${critDelta >= 0 ? '+' : ''}${critDelta}, High ${highDelta >= 0 ? '+' : ''}${highDelta}`;
     doc.text(trendText, margin, trendY);
   }
 
@@ -474,7 +474,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
   doc.text('Methodology:', margin, y);
   y += 5;
   const methodLines = [
-    '1. Identity Discovery: Enumerate all identities (service principals, managed identities, users) via Microsoft Graph API.',
+    '1. Identity Enumeration: Enumerate all identities (service principals, managed identities, users) via Microsoft Graph API.',
     '2. Role Analysis: Map Azure RBAC and Entra ID directory role assignments with privilege tier classification (T0-T3).',
     '3. Risk Scoring: Points-based risk calculation considering role criticality, credential health, activity status, and ownership.',
     '4. Remediation Matching: Pattern-match risk factors against the AuditGraph playbook library for actionable fix steps.',
@@ -555,8 +555,8 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
   const credTotal = (data.credential_health.expired + data.credential_health.expiring_soon + data.credential_health.healthy + data.credential_health.unknown) || 1;
   const credHealthPct = Math.round((data.credential_health.healthy / credTotal) * 100);
 
-  // Days since last scan
-  const daysSinceScan = data.collected_at
+  // Days since last snapshot
+  const daysSinceSnapshot = data.collected_at
     ? Math.max(0, Math.floor((Date.now() - new Date(data.collected_at).getTime()) / 86400000))
     : -1;
 
@@ -619,7 +619,7 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
     if (delta !== 0) {
       doc.setFontSize(8);
       txt(doc, delta > 0 ? GREEN : RED);
-      doc.text(`${delta > 0 ? '+' : ''}${delta} from previous scan`, circleCx, circleCy + 33, { align: 'center' });
+      doc.text(`${delta > 0 ? '+' : ''}${delta} from previous snapshot`, circleCx, circleCy + 33, { align: 'center' });
     }
   }
 
@@ -637,7 +637,7 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
     { label: 'Credential Health', value: `${credHealthPct}%`, color: credHealthPct >= 80 ? GREEN : credHealthPct >= 60 ? [202, 138, 4] : RED },
     { label: 'CA Coverage', value: data.conditional_access ? `${Math.round((data.conditional_access.covered / (data.conditional_access.total || 1)) * 100)}%` : 'N/A', color: BLUE },
     { label: 'Ghost Access', value: `${ghostCount}`, color: ghostCount > 0 ? RED : GREEN },
-    { label: 'Days Since Scan', value: daysSinceScan >= 0 ? `${daysSinceScan}` : 'N/A', color: daysSinceScan <= 1 ? GREEN : daysSinceScan <= 7 ? [202, 138, 4] : RED },
+    { label: 'Days Since Snapshot', value: daysSinceSnapshot >= 0 ? `${daysSinceSnapshot}` : 'N/A', color: daysSinceSnapshot <= 1 ? GREEN : daysSinceSnapshot <= 7 ? [202, 138, 4] : RED },
   ];
 
   metrics.forEach((m, idx) => {

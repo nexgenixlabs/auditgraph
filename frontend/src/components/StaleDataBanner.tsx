@@ -25,7 +25,7 @@ const StaleDataBanner: React.FC<StaleDataBannerProps> = ({ completedAt }) => {
       </svg>
       <div className="text-sm text-yellow-800">
         <span className="font-medium">Stale data:</span>{' '}
-        Discovery data is {displayTime} old. Run a new discovery to refresh.
+        Snapshot data is {displayTime} old. Capture a new snapshot to refresh.
       </div>
     </div>
   );

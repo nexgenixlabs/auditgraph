@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -381,6 +382,7 @@ export default function DataSecurity() {
           <p style={{ fontSize: 12, color: G.textMuted, margin: '4px 0 0' }}>
             Component-based risk intelligence for data resources
           </p>
+          <SnapshotContextHeader />
         </div>
         <button onClick={handleAutoClassify} disabled={autoClassifying} style={{
           background: autoClassifying ? 'rgba(255,255,255,0.04)' : G.accent,
@@ -388,7 +390,7 @@ export default function DataSecurity() {
           fontSize: 12, fontWeight: 600, cursor: autoClassifying ? 'default' : 'pointer',
           opacity: autoClassifying ? 0.6 : 1,
         }}>
-          {autoClassifying ? 'Scanning...' : 'Auto-Classify Resources'}
+          {autoClassifying ? 'Classifying...' : 'Auto-Classify Resources'}
         </button>
       </div>
 

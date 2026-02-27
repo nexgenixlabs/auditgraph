@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { toPermissionPlane, PERMISSION_PLANE_CONFIG } from '../constants/metrics';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -288,6 +289,7 @@ export default function RoleMining() {
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Role Mining & Optimization</h2>
           <p className="text-sm text-gray-600 mt-1">Toxic combinations, unused roles, redundancy, and access optimization</p>
+          <SnapshotContextHeader />
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-500">Window:</label>

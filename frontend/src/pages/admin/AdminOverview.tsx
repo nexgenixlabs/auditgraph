@@ -219,7 +219,7 @@ export default function AdminOverview() {
               </div>
               <div className="text-center">
                 <div className="text-lg font-bold text-gray-900">{tenants.filter(t => !t.last_discovery).length}</div>
-                <div className="text-[10px] text-gray-500">Never Scanned</div>
+                <div className="text-[10px] text-gray-500">No Snapshot</div>
               </div>
             </div>
           </div>

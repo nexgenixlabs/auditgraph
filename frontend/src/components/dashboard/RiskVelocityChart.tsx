@@ -62,7 +62,7 @@ export default function RiskVelocityChart({ transitions, retention }: RiskVeloci
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold text-gray-900">Risk Escalation Tracker</h3>
-          <p className="text-[11px] text-gray-500">Identity flow between risk levels per run</p>
+          <p className="text-[11px] text-gray-500">Identity flow between risk levels per snapshot</p>
         </div>
         {Object.keys(retention).length > 0 && (
           <div className="flex gap-2">

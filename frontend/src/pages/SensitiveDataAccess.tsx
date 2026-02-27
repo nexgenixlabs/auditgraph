@@ -11,6 +11,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -135,6 +136,7 @@ export default function SensitiveDataAccess() {
         <p style={{ fontSize: 14, color: G.textSecondary, marginTop: 4 }}>
           Resource security posture, identity access patterns, and data protection analysis
         </p>
+        <SnapshotContextHeader />
       </div>
 
       {/* Score + Components Grid */}

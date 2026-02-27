@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme-aware constants (page-scoped) ───
 const G = {
@@ -301,6 +302,7 @@ export default function ServiceAccountGovernance() {
           <p style={{ color: G.textMuted }} className="text-sm mt-1">
             Risk-aware governance decisions for service principals and managed identities
           </p>
+          <SnapshotContextHeader />
         </div>
         {stats && stats.recent_decisions > 0 && (
           <div style={{ background: G.surface, border: `1px solid ${G.surfaceBorder}` }}

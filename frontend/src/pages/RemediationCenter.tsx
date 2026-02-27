@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { shouldShowRemediation } from '../utils/displayHelpers';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme constants ───
 const R = {
@@ -148,6 +149,7 @@ export default function RemediationCenter() {
         <p className="text-sm mt-1" style={{ color: R.textSecondary }}>
           Prioritized remediation actions with risk reduction scoring and automation readiness
         </p>
+        <SnapshotContextHeader />
       </div>
 
       {/* Summary Cards */}

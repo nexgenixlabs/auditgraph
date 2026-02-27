@@ -9,14 +9,14 @@
  *   - Identity: Cloud identity (Azure, AWS, GCP)
  *   - RoleAssignment: Azure RBAC role assignment
  *   - GraphPermission: Microsoft Graph API permission
- *   - DiscoveryRun: Snapshot execution record
+ *   - Snapshot (alias: DiscoveryRun): Snapshot execution record
  *   - Stats: Dashboard statistics summary
  *
  * API Response Types:
  *   - StatsResponse: Response from /api/stats
  *   - IdentitiesResponse: Response from /api/identities
  *   - RisksResponse: Response from /api/risks
- *   - RunsResponse: Response from /api/runs
+ *   - SnapshotsResponse (alias: RunsResponse): Response from /api/runs
  *   - DriftReport: Response from /api/drift/:run_id
  *
  * These types mirror the backend data models and ensure consistent
@@ -134,6 +134,9 @@ export interface DiscoveryRun {
   medium_count: number;
 }
 
+/** Frontend-only alias — UI should use Snapshot, not DiscoveryRun */
+export type Snapshot = DiscoveryRun;
+
 export interface Stats {
   total_identities: number;
   actionable_identities: number;
@@ -174,6 +177,9 @@ export interface RunsResponse {
   count: number;
   runs: DiscoveryRun[];
 }
+
+/** Frontend-only alias — UI should use SnapshotsResponse, not RunsResponse */
+export type SnapshotsResponse = RunsResponse;
 
 export interface DriftChange {
   change_type: string;

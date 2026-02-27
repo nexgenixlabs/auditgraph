@@ -54,7 +54,7 @@ const DOCS: DocSection[] = [
     items: [
       {
         title: 'User Management',
-        content: `AuditGraph supports four client roles:\n\n| Role | Access |\n|------|--------|\n| **Admin** | Full access: settings, users, scans, exports, remediation |\n| **Security Admin** | Scans, remediation, exports — no user/org management |\n| **Compliance** | Read access + compliance reports and exports |\n| **Reader** | Read-only access to all dashboards and reports |\n\nManage users in **Settings > User Management**. Admins can create, edit, and disable user accounts.`,
+        content: `AuditGraph supports four client roles:\n\n| Role | Access |\n|------|--------|\n| **Admin** | Full access: settings, users, snapshots, exports, remediation |\n| **Security Admin** | Snapshots, remediation, exports — no user/org management |\n| **Compliance** | Read access + compliance reports and exports |\n| **Reader** | Read-only access to all dashboards and reports |\n\nManage users in **Settings > User Management**. Admins can create, edit, and disable user accounts.`,
       },
       {
         title: 'SSO / SAML Configuration',

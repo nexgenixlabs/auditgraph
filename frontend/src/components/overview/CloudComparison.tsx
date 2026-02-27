@@ -283,7 +283,7 @@ export default function CloudComparison({ data, monitoredResources, resourceStat
                   {/* Pending scan label for enabled clouds with 0 identities */}
                   {row.total === 0 && (
                     <div className={`px-5 py-2 text-xs text-gray-500 italic ${cloudBgColors[row.cloud]}/50`}>
-                      Pending initial scan
+                      Pending initial snapshot
                     </div>
                   )}
                 </div>

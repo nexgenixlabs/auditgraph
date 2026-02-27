@@ -76,7 +76,7 @@ export default function PostureScore({ score, previousScore }: PostureScoreProps
           </div>
         </div>
 
-        {/* Delta vs previous run */}
+        {/* Delta vs previous snapshot */}
         {scoreDelta !== null && scoreDelta !== 0 ? (
           <div className={`mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg ${isImproved ? 'bg-green-50' : 'bg-red-50'}`}>
             <svg className={`w-4 h-4 ${isImproved ? 'text-green-600' : 'text-red-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -85,11 +85,11 @@ export default function PostureScore({ score, previousScore }: PostureScoreProps
             <span className={`text-sm font-semibold ${isImproved ? 'text-green-700' : 'text-red-700'}`}>
               {Math.abs(scoreDelta)}%
             </span>
-            <span className="text-xs text-gray-500">vs previous run</span>
+            <span className="text-xs text-gray-500">vs previous snapshot</span>
           </div>
         ) : scoreDelta === 0 ? (
           <div className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50">
-            <span className="text-xs text-gray-500">No change vs previous run</span>
+            <span className="text-xs text-gray-500">No change vs previous snapshot</span>
           </div>
         ) : (
           <div className="mt-3 text-xs text-gray-400 italic">

@@ -151,7 +151,7 @@ export default function ExecutiveRiskHeader({
           <div className="flex items-center gap-3 flex-shrink-0">
             {lastScan && (
               <span className="text-[10px] text-slate-500">
-                Last scan: {new Date(lastScan).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                Last snapshot: {new Date(lastScan).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </span>
             )}
           </div>

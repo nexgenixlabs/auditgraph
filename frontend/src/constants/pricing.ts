@@ -21,7 +21,7 @@ export const BASE_FEATURES: Record<string, { label: string; description: string 
   secret_monitoring:     { label: 'Secret Expiry Monitoring',       description: 'Continuous secret & credential expiry monitoring & notifications' },
   audit_reports:         { label: 'Audit-Ready PDF Reports',        description: 'SOC2, HIPAA, and PCI compliance audit reports' },
   ai_copilot:            { label: 'AI Security Copilot',            description: 'AI-powered security assistant using live AuditGraph data' },
-  drift_detection:       { label: 'Drift Detection & Alerts',       description: 'Detect configuration drift and identity changes between scans' },
+  drift_detection:       { label: 'Drift Detection & Alerts',       description: 'Detect configuration drift and identity changes between snapshots' },
   soar_integration:      { label: 'SOAR Playbooks',                 description: 'Automated response playbooks with condition-based triggers' },
   compliance_frameworks: { label: 'Compliance Frameworks',           description: 'SOC2, HIPAA, PCI, CIS benchmark compliance tracking' },
   identity_governance:   { label: 'Identity Governance',             description: 'Service account attestation and lifecycle management' },

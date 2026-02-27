@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -270,6 +271,7 @@ export default function RbacHygiene() {
           <p style={{ fontSize: 13, color: G.textSecondary, margin: '4px 0 0' }}>
             Assignment-level analysis with 4-tier role sensitivity scoring
           </p>
+          <SnapshotContextHeader />
         </div>
         {isAdmin && (
           <button onClick={handleScan} disabled={scanning}
@@ -411,7 +413,7 @@ export default function RbacHygiene() {
               <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
               <polyline points="17 6 23 6 23 12"/>
             </svg>
-            <span style={{ fontSize: 13, fontWeight: 600, color: G.text }}>Drift Since Last Scan</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: G.text }}>Drift Since Last Snapshot</span>
           </div>
           <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
             <DriftStat label="New Findings" value={drift.new_findings} color="#FF6D00" />

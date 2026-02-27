@@ -47,7 +47,7 @@ interface WebhookFormData {
 }
 
 const WEBHOOK_EVENT_LABELS: Record<string, string> = {
-  discovery_completed: 'Discovery Completed',
+  discovery_completed: 'Snapshot Completed',
   risk_escalation: 'Risk Escalation',
   new_identities: 'New Identities',
   removed_identities: 'Removed Identities',
@@ -1771,7 +1771,7 @@ export default function Settings() {
           <div>
             <div className="text-sm font-semibold text-amber-800">Complete Cloud Setup</div>
             <p className="text-xs text-amber-700">
-              Enter your cloud provider credentials below, test the connection, then click "Save &amp; Run First Discovery" to unlock your dashboard.
+              Enter your cloud provider credentials below, test the connection, then click "Save &amp; Capture First Snapshot" to unlock your dashboard.
             </p>
           </div>
         </div>
@@ -1955,7 +1955,7 @@ export default function Settings() {
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-lg font-semibold text-gray-900">Cloud Connections</div>
-                <p className="text-xs text-gray-500">Configure cloud provider credentials for identity discovery.</p>
+                <p className="text-xs text-gray-500">Configure cloud provider credentials for identity snapshots.</p>
               </div>
               {isAdmin && (
                 <button
@@ -2009,7 +2009,7 @@ export default function Settings() {
                           )}
                           <div className="text-[10px] text-gray-500 mt-0.5">
                             {conn.sub_count || 0} active subs
-                            {conn.last_discovery_at ? ` · Last scan: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No scan yet'}
+                            {conn.last_discovery_at ? ` · Last snapshot: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No snapshot yet'}
                           </div>
                         </div>
                       </div>
@@ -2388,7 +2388,7 @@ export default function Settings() {
                         {unlocking ? (
                           <>
                             <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                            Saving & Running First Discovery...
+                            Saving & Capturing First Snapshot...
                           </>
                         ) : (
                           <>
@@ -2396,7 +2396,7 @@ export default function Settings() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
-                            Save &amp; Run First Discovery
+                            Save &amp; Capture First Snapshot
                           </>
                         )}
                       </button>
@@ -2419,7 +2419,7 @@ export default function Settings() {
                       <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200">Primary</span>
                       <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-50 text-amber-600 border border-amber-200">Not Connected</span>
                     </div>
-                    <p className="text-xs text-gray-500 mb-4">No cloud credentials configured. Connect your Azure environment to start identity discovery.</p>
+                    <p className="text-xs text-gray-500 mb-4">No cloud credentials configured. Connect your Azure environment to start capturing snapshots.</p>
                     <button
                       onClick={() => setAddingCloud(true)}
                       className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
@@ -2564,9 +2564,9 @@ export default function Settings() {
             )}
           </div>
 
-          {/* Section 3: Discovery Schedule */}
+          {/* Section 3: Snapshot Schedule */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="text-lg font-semibold text-gray-900">Discovery Schedule</div>
+            <div className="text-lg font-semibold text-gray-900">Snapshot Schedule</div>
 
             {/* Status indicators */}
             <div className="flex items-center gap-6 text-sm">
@@ -2587,7 +2587,7 @@ export default function Settings() {
               </div>
               {status?.next_run && (
                 <span className="text-gray-400 text-xs">
-                  Next run: {new Date(status.next_run).toLocaleString()}
+                  Next snapshot: {new Date(status.next_run).toLocaleString()}
                 </span>
               )}
               <button
@@ -2607,7 +2607,7 @@ export default function Settings() {
             {/* Interval selector */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Discovery Interval
+                Snapshot Interval
               </label>
               <div className="flex gap-3">
                 {['6', '12', '24'].map(val => (
@@ -2625,7 +2625,7 @@ export default function Settings() {
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-2">
-                How often the discovery engine scans your Azure environment. Takes effect on next scheduler restart.
+                How often a snapshot is captured from your Azure environment. Takes effect on next scheduler restart.
               </p>
             </div>
           </div>
@@ -4954,8 +4954,8 @@ const INTEGRATION_EVENTS = [
   { key: 'critical_risk', label: 'Critical Risk Detected' },
   { key: 'anomaly_detected', label: 'Anomaly Detected' },
   { key: 'drift_detected', label: 'Drift Detected' },
-  { key: 'scan_complete', label: 'Scan Complete' },
-  { key: 'scan_failed', label: 'Scan Failed' },
+  { key: 'scan_complete', label: 'Snapshot Complete' },
+  { key: 'scan_failed', label: 'Snapshot Failed' },
   { key: 'credential_expiring', label: 'Credential Expiring' },
 ];
 

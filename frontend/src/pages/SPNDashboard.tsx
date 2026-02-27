@@ -10,6 +10,7 @@ import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUti
 import { generateSPNReport } from '../utils/spnPdfGenerator';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -670,6 +671,7 @@ export default function SPNDashboard() {
           <p className="text-sm text-gray-500 mt-0.5">
             SPNs, managed identities, workload credentials — attack-based exposure scoring
           </p>
+          <SnapshotContextHeader snapshotId={latestSnapshotId} />
         </div>
         <div className="flex items-center gap-3">
           <button

@@ -69,7 +69,7 @@ export default function AdminSLA() {
           <div key={key} className={`rounded-xl border p-5 ${target.met ? 'bg-gray-900 border-green-800' : 'bg-gray-900 border-red-700'}`}>
             <div className="flex items-center justify-between mb-3">
               <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">
-                {key === 'availability' ? 'Availability' : key === 'api_latency_p95' ? 'API Latency (P95)' : 'Scan Success Rate'}
+                {key === 'availability' ? 'Availability' : key === 'api_latency_p95' ? 'API Latency (P95)' : 'Snapshot Success Rate'}
               </span>
               <StatusDot met={target.met} />
             </div>

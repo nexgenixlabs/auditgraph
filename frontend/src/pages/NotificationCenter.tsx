@@ -47,7 +47,7 @@ const CATEGORY_CONFIG: Record<string, { label: string; color: string; icon: stri
   permission_change:  { label: 'Permission Change', color: 'text-orange-600', icon: '~' },
   credential_expiring:{ label: 'Credential', color: 'text-yellow-600', icon: 'K' },
   drift_detected:     { label: 'Drift', color: 'text-purple-600', icon: 'D' },
-  discovery_completed:{ label: 'Discovery', color: 'text-blue-600', icon: 'S' },
+  discovery_completed:{ label: 'Snapshot', color: 'text-blue-600', icon: 'S' },
 };
 
 function getSeverityConfig(severity: string) {

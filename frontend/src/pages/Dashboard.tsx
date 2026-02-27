@@ -124,7 +124,7 @@ export default function Dashboard() {
   const [compliance, setCompliance] = useState<any>(null);
   const [caData, setCaData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
-  const [discoveryRunning, setDiscoveryRunning] = useState(false);
+  const [snapshotRunning, setDiscoveryRunning] = useState(false);
   const [schedulerInfo, setSchedulerInfo] = useState<{ scheduler: string; next_run: string | null; interval_hours: number } | null>(null);
   const [showRuns, setShowRuns] = useState(false);
   const [runs, setRuns] = useState<any[]>([]);
@@ -274,7 +274,7 @@ export default function Dashboard() {
 
   // ── Snapshot Trigger ──────────────────────────────────────
 
-  const triggerDiscovery = useCallback(async () => {
+  const triggerSnapshot = useCallback(async () => {
     setDiscoveryRunning(true);
     try {
       const res = await fetch('/api/runs/trigger', { method: 'POST' });
@@ -334,16 +334,16 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-3">
           <button
-            disabled={discoveryRunning}
-            onClick={triggerDiscovery}
+            disabled={snapshotRunning}
+            onClick={triggerSnapshot}
             className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border transition ${
-              discoveryRunning
+              snapshotRunning
                 ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200'
                 : 'text-white hover:opacity-90 border-transparent'
             }`}
-            style={discoveryRunning ? {} : { backgroundColor: COLORS.brand }}
+            style={snapshotRunning ? {} : { backgroundColor: COLORS.brand }}
           >
-            {discoveryRunning ? (
+            {snapshotRunning ? (
               <>
                 <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
                 Running...
@@ -541,7 +541,7 @@ export default function Dashboard() {
                 <div className="bg-white rounded-xl p-8 text-center" style={{ border: `1px solid ${COLORS.border}` }}>
                   <div className="text-sm font-medium mb-2" style={{ color: COLORS.textSecondary }}>No trust & access data available</div>
                   <p className="text-xs mb-4" style={{ color: COLORS.textMuted }}>Capture a snapshot to populate trust and access relationships.</p>
-                  <button onClick={triggerDiscovery} disabled={discoveryRunning}
+                  <button onClick={triggerSnapshot} disabled={snapshotRunning}
                     className="px-4 py-2 text-sm font-medium text-white rounded-lg transition hover:opacity-90"
                     style={{ backgroundColor: COLORS.brand }}>
                     Capture Snapshot

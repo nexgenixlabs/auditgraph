@@ -1,7 +1,7 @@
 import React from 'react';
 
 interface DataQualityRibbonProps {
-  /** Last scan timestamp (ISO string or null) */
+  /** Last snapshot timestamp (ISO string or null) */
   lastScan?: string | null;
   /** Number of data sources connected */
   sourcesConnected?: number;
@@ -31,7 +31,7 @@ export default function DataQualityRibbon({
 
   // Freshness indicator
   const freshness = (() => {
-    if (!lastScan) return { label: 'No data', dot: 'dqr-dot--unknown' };
+    if (!lastScan) return { label: 'No data captured', dot: 'dqr-dot--unknown' };
     if (ageMinutes < 60) return { label: `${ageMinutes}m ago`, dot: 'dqr-dot--live' };
     if (ageMinutes < 1440) return { label: `${Math.floor(ageMinutes / 60)}h ago`, dot: 'dqr-dot--live' };
     return { label: `${Math.floor(ageMinutes / 1440)}d ago`, dot: 'dqr-dot--stale' };
@@ -42,7 +42,7 @@ export default function DataQualityRibbon({
       {/* Freshness */}
       <div className="flex items-center gap-1.5">
         <span className={`dqr-dot ${freshness.dot}`} />
-        <span>Last scan: {freshness.label}</span>
+        <span>Last snapshot: {freshness.label}</span>
       </div>
 
       {/* Separator */}

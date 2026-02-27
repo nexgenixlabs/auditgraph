@@ -4,6 +4,7 @@ import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -569,6 +570,7 @@ export default function AppRegistrations() {
           <p className="text-sm mt-0.5" style={{ color: 'var(--text-secondary)' }}>
             Entra ID application definitions — permissions, credentials, ownership audit
           </p>
+          <SnapshotContextHeader snapshotId={latestSnapshotId} />
         </div>
         <div className="flex items-center gap-3">
           <button

@@ -4,6 +4,7 @@ import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename, RESOURCE_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -261,6 +262,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
         <div>
           <h1 className="text-2xl font-bold text-gray-900">{pageTitle || 'Azure Resources'}</h1>
           <p className="text-sm text-gray-500 mt-0.5">{pageSubtitle || 'Storage Accounts & Key Vaults — security configuration audit'}</p>
+          <SnapshotContextHeader snapshotId={latestSnapshotId} />
         </div>
         <button
           onClick={handleCSVExport}

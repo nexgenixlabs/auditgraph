@@ -326,7 +326,7 @@ export default function IdentitiesPage() {
   const [viewMode, setViewMode] = useState<'table' | 'graph'>('table');
 
   // Phase 7: Snapshot selector state
-  const [discoveryRuns, setDiscoveryRuns] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
+  const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
 
   const { addToast } = useToast();
   const { user, isAdmin, activeTenantId, activeTenantName } = useAuth();
@@ -606,7 +606,7 @@ export default function IdentitiesPage() {
   useEffect(() => {
     fetch('/api/runs')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => setDiscoveryRuns((d.runs || []).filter((r: any) => r.status === 'completed').slice(0, 10)))
+      .then(d => setSnapshots((d.runs || []).filter((r: any) => r.status === 'completed').slice(0, 10)))
       .catch(() => {});
   }, []);
 
@@ -1127,13 +1127,13 @@ export default function IdentitiesPage() {
       privilege_tier: `T${getPrivilegeTier(i)}`,
       activity_status: getDormantStatus(i),
     }));
-    const meta = buildExportMeta(discoveryRuns[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(snapshots[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
     downloadCSV(data as Record<string, unknown>[], IDENTITY_CSV_COLUMNS, exportFilename('identities', 'csv'), meta);
     addToast(`Exported ${data.length} identities as CSV`, 'success');
   }
 
   function exportAllJSON() {
-    const meta = buildExportMeta(discoveryRuns[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(snapshots[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
     downloadJSON(filtered, exportFilename('identities', 'json'), meta);
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
@@ -1158,15 +1158,15 @@ export default function IdentitiesPage() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Snapshot selector */}
-          {discoveryRuns.length > 0 && (
+          {snapshots.length > 0 && (
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] text-gray-500 uppercase font-semibold tracking-wide">Snapshot:</span>
               <select
                 className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white text-gray-700 font-medium"
-                value={discoveryRuns[0]?.id ?? ''}
+                value={snapshots[0]?.id ?? ''}
                 onChange={() => {/* display-only — API always returns latest snapshot */}}
               >
-                {discoveryRuns.map((run, idx) => (
+                {snapshots.map((run, idx) => (
                   <option key={run.id} value={run.id}>
                     #{run.id} · {run.completed_at ? formatDate(run.completed_at) : 'In progress'} · {run.total_identities} identities{idx === 0 ? ' (latest)' : ''}
                   </option>
@@ -1271,11 +1271,11 @@ export default function IdentitiesPage() {
       </div>
 
       {/* Export Metadata Strip */}
-      {discoveryRuns.length > 0 && (
+      {snapshots.length > 0 && (
         <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50 mb-1">
           <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
-          <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{discoveryRuns[0]?.id}</span></span>
-          <span>Captured: <span className="font-mono font-semibold text-gray-700">{discoveryRuns[0]?.completed_at ? new Date(discoveryRuns[0].completed_at).toLocaleString() : 'In progress'}</span></span>
+          <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{snapshots[0]?.id}</span></span>
+          <span>Captured: <span className="font-mono font-semibold text-gray-700">{snapshots[0]?.completed_at ? new Date(snapshots[0].completed_at).toLocaleString() : 'In progress'}</span></span>
           <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
         </div>

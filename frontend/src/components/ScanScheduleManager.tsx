@@ -50,19 +50,19 @@ export default function ScanScheduleManager() {
   };
 
   const deleteSchedule = (id: number) => {
-    if (!window.confirm('Delete this scan schedule?')) return;
+    if (!window.confirm('Delete this snapshot schedule?')) return;
     api.del(`/scan-schedules/${id}`)
       .then(() => fetchSchedules())
       .catch(() => {});
   };
 
-  if (loading) return <div className="text-gray-500 text-sm py-4">Loading scan schedules...</div>;
+  if (loading) return <div className="text-gray-500 text-sm py-4">Loading snapshot schedules...</div>;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-gray-200">Scan Schedules</h3>
+          <h3 className="text-sm font-semibold text-gray-200">Snapshot Schedules</h3>
           <p className="text-xs text-gray-500 mt-0.5">Configure automated snapshot intervals</p>
         </div>
         <button
@@ -108,7 +108,7 @@ export default function ScanScheduleManager() {
 
       {schedules.length === 0 ? (
         <div className="text-center py-8 text-gray-500 text-sm">
-          No scan schedules configured. Add one to automate discovery.
+          No snapshot schedules configured. Add one to automate snapshots.
         </div>
       ) : (
         <div className="space-y-2">

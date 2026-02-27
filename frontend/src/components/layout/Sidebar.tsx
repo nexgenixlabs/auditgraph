@@ -83,6 +83,9 @@ const reportsIcon = icon('M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012
 // Settings
 const settingsIcon = icon('M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4');
 
+// Connectors
+const connectorsIcon = icon('M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01');
+
 // ── Sidebar Component ─────────────────────────────────────────────
 
 const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
@@ -96,15 +99,19 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Command Center',
         color: '#2563eb',
         items: [
-          { to: '/', label: 'Risk Dashboard', matchExact: true, icon: dashboardIcon },
+          { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
+          { to: '/drift', label: 'Drift History', icon: driftIcon },
+          { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
         ],
       },
       {
-        label: 'Identity',
+        label: 'Identity Truth',
         color: '#8b5cf6',
         items: [
           { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
+          { to: '/workload-identities', label: 'Non-Human Identities', icon: nonHumanIcon },
+          { to: '/service-accounts', label: 'Privileged Access', icon: governanceIcon },
         ],
       },
       {
@@ -114,52 +121,33 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
           { to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon },
           { to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon },
-        ],
-      },
-      {
-        label: 'Governance',
-        color: '#0891b2',
-        items: [
-          { to: '/service-accounts', label: 'Governance Coverage', icon: governanceIcon },
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
-          { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
-        ],
-      },
-      {
-        label: 'Remediation',
-        color: '#16a34a',
-        items: [
-          { to: '/remediation', label: 'Action Plan', icon: remediationIcon },
-        ],
-      },
-      {
-        label: 'Data Security',
-        color: '#ea580c',
-        items: [
           { to: '/key-vaults', label: 'Secrets & Keys', icon: secretsIcon },
           { to: '/storage-accounts', label: 'Storage Exposure', icon: storageIcon },
         ],
       },
       {
-        label: 'Compliance',
+        label: 'Evidence',
         color: '#ca8a04',
         items: [
-          { to: '/compliance', label: 'Frameworks & Controls', icon: complianceIcon },
-          { to: '/exports', label: 'Evidence Center', icon: evidenceIcon },
+          { to: '/compliance', label: 'Compliance Evidence', icon: complianceIcon },
+          { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
+          { to: '/reports', label: 'Snapshots', icon: reportsIcon },
+          { to: '/exports', label: 'Export Center', icon: evidenceIcon },
         ],
       },
       {
-        label: 'Operations',
+        label: 'Platform',
         color: '#64748b',
         items: [
-          { to: '/drift', label: 'Drift & Changes', icon: driftIcon },
-          { to: '/activity', label: 'Activity Log', icon: activityIcon },
-          { to: '/reports', label: 'Reports', icon: reportsIcon },
+          ...(isAdmin ? [{ to: '/settings/connections', label: 'Connectors', icon: connectorsIcon }] : []),
+          { to: '/activity', label: 'Audit Log', icon: activityIcon },
+          ...(isAdmin ? [{ to: '/settings/general', label: 'Tenant Settings', icon: settingsIcon }] : []),
         ],
       },
     ];
     return groups;
-  }, []);
+  }, [isAdmin]);
 
   const toggleSubGroup = (key: string) => {
     setOpenSubGroups(prev => ({ ...prev, [key]: !prev[key] }));
@@ -294,30 +282,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         })}
       </nav>
 
-      {/* Bottom section: Settings + Collapse toggle */}
+      {/* Bottom section: Collapse toggle */}
       <div className="border-t px-2 py-2 space-y-1" style={{ borderColor: 'var(--border-subtle)' }}>
-        {/* Settings (admin only) */}
-        {isAdmin && (
-          <Link
-            to="/settings/general"
-            className={`flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] transition-colors hover:bg-[var(--bg-elevated)] ${
-              location.pathname.startsWith('/settings') ? 'font-medium' : ''
-            }`}
-            style={location.pathname.startsWith('/settings') ? {
-              color: 'var(--accent-primary)',
-              backgroundColor: 'var(--nav-item-active-bg)',
-            } : {
-              color: 'var(--nav-item)',
-            }}
-            title={collapsed ? 'Settings' : undefined}
-          >
-            <span style={{ color: location.pathname.startsWith('/settings') ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
-              {settingsIcon}
-            </span>
-            {!collapsed && <span>Settings</span>}
-          </Link>
-        )}
-
         {/* Collapse toggle */}
         <button
           onClick={() => setCollapsed(!collapsed)}

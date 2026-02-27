@@ -113,7 +113,7 @@ export default function DriftHistory() {
   const [reports, setReports] = useState<DriftReport[]>([]);
 
   // Expanded row state
-  const [expandedRunId, setExpandedRunId] = useState<number | null>(null);
+  const [expandedSnapshotId, setExpandedSnapshotId] = useState<number | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detail, setDetail] = useState<FullDriftReport | null>(null);
@@ -154,20 +154,20 @@ export default function DriftHistory() {
     load();
   }, [selectedConnectionId]);
 
-  async function toggleRow(runId: number) {
-    if (expandedRunId === runId) {
-      setExpandedRunId(null);
+  async function toggleSnapshot(snapshotId: number) {
+    if (expandedSnapshotId === snapshotId) {
+      setExpandedSnapshotId(null);
       setDetail(null);
       return;
     }
 
-    setExpandedRunId(runId);
+    setExpandedSnapshotId(snapshotId);
     setDetailLoading(true);
     setDetailError(null);
     setDetail(null);
 
     try {
-      const res = await fetch(withConnection(`/api/runs/${runId}/drift`));
+      const res = await fetch(withConnection(`/api/runs/${snapshotId}/drift`));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
       setDetail(data);
@@ -208,7 +208,7 @@ export default function DriftHistory() {
   const totalChanges = reports.reduce((sum, r) => sum + r.total_changes, 0);
 
   function exportCsv() {
-    const header = ['Report ID', 'Current Run', 'Previous Run', 'Date', 'Total Changes', 'New', 'Removed', 'Permissions', 'Risk', 'Credentials'];
+    const header = ['Report ID', 'Current Snapshot', 'Previous Snapshot', 'Date', 'Total Changes', 'New', 'Removed', 'Permissions', 'Risk', 'Credentials'];
     const rows = reports.map(r => [
       r.id,
       r.current_run_id,
@@ -478,15 +478,15 @@ export default function DriftHistory() {
                 {reports.map(report => (
                   <React.Fragment key={report.id}>
                     <tr
-                      onClick={() => toggleRow(report.current_run_id)}
+                      onClick={() => toggleSnapshot(report.current_run_id)}
                       className={`border-b cursor-pointer transition hover:bg-gray-50 ${
-                        expandedRunId === report.current_run_id ? 'bg-blue-50' : ''
+                        expandedSnapshotId === report.current_run_id ? 'bg-blue-50' : ''
                       }`}
                     >
                       <td className="px-3 py-2 text-gray-400">
                         <svg
                           className={`w-4 h-4 transition-transform ${
-                            expandedRunId === report.current_run_id ? 'rotate-90' : ''
+                            expandedSnapshotId === report.current_run_id ? 'rotate-90' : ''
                           }`}
                           fill="none"
                           stroke="currentColor"
@@ -525,7 +525,7 @@ export default function DriftHistory() {
                     </tr>
 
                     {/* Expanded detail row */}
-                    {expandedRunId === report.current_run_id && (
+                    {expandedSnapshotId === report.current_run_id && (
                       <tr>
                         <td colSpan={9} className="bg-gray-50 px-3 py-2">
                           {detailLoading && (

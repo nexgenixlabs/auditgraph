@@ -94,15 +94,15 @@ const StatsCard: React.FC<StatsCardProps> = ({
         <div className="mt-3 flex items-center text-xs font-medium">
           {trend === 'up' && (
             <span className={trendNeutral ? 'text-gray-500' : 'text-red-600'}>
-              ↑ {trendDelta != null ? `+${Math.abs(trendDelta)} from last run` : 'Increased'}
+              ↑ {trendDelta != null ? `+${Math.abs(trendDelta)} from last snapshot` : 'Increased'}
             </span>
           )}
           {trend === 'down' && (
             <span className={trendNeutral ? 'text-gray-500' : 'text-green-600'}>
-              ↓ {trendDelta != null ? `${Math.abs(trendDelta)} fewer than last run` : 'Decreased'}
+              ↓ {trendDelta != null ? `${Math.abs(trendDelta)} fewer than last snapshot` : 'Decreased'}
             </span>
           )}
-          {trend === 'neutral' && <span className="opacity-50">→ No change from last run</span>}
+          {trend === 'neutral' && <span className="opacity-50">→ No change from last snapshot</span>}
         </div>
       )}
     </Tag>

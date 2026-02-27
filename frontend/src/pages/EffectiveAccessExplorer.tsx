@@ -12,6 +12,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -132,6 +133,7 @@ export default function EffectiveAccessExplorer() {
         <p style={{ fontSize: 14, color: G.textSecondary, marginTop: 4 }}>
           Privilege tier distribution, scope analysis, and RBAC hygiene findings
         </p>
+        <SnapshotContextHeader />
       </div>
 
       {/* Score + Tier Summary */}

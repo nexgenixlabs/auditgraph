@@ -86,7 +86,7 @@ export default function AdminMonitoring() {
     <div className="space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Platform Monitoring</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Infrastructure health, discovery status, and login activity</p>
+        <p className="text-sm text-gray-500 mt-0.5">Infrastructure health, snapshot status, and login activity</p>
       </div>
 
       {/* Platform Health Cards */}
@@ -172,7 +172,7 @@ export default function AdminMonitoring() {
                 </div>
                 <div className="space-y-0.5 text-[11px] text-gray-500">
                   {check.latency_ms !== undefined && <div>Latency: {check.latency_ms}ms</div>}
-                  {check.next_run && <div>Next run: {formatTimeAgo(check.next_run, true)}</div>}
+                  {check.next_run && <div>Next snapshot: {formatTimeAgo(check.next_run, true)}</div>}
                   {check.memory_mb !== undefined && <div>Memory: {check.memory_mb}MB</div>}
                   {check.cpu_percent !== undefined && <div>CPU: {check.cpu_percent}%</div>}
                   {check.error && <div className="text-red-500 truncate">{check.error}</div>}
@@ -214,7 +214,7 @@ export default function AdminMonitoring() {
 
       {/* Discovery Freshness */}
       <div className="bg-white border border-gray-200 rounded-lg p-4">
-        <h3 className="text-sm font-semibold text-gray-800 mb-3">Discovery Freshness</h3>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Snapshot Freshness</h3>
         <div className="space-y-2">
           {metrics.map(t => {
             const hours = t.last_discovery ? (Date.now() - new Date(t.last_discovery).getTime()) / 3600000 : Infinity;
