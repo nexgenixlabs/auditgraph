@@ -1137,6 +1137,43 @@ def mark_overdue_invoices():
         db.close()
 
 
+def run_monthly_billing_snapshots():
+    """Phase 3B: Generate billing snapshots for all active organizations.
+    Runs on the 1st of each month at 04:00 UTC, snapshotting the previous month."""
+    from app.database import Database
+    from app.billing.service import calculate_monthly_snapshot, store_billing_snapshot
+
+    logger.info("=" * 70)
+    logger.info("MONTHLY BILLING SNAPSHOT STARTED")
+    logger.info(f"Time: {datetime.utcnow().isoformat()}")
+    logger.info("=" * 70)
+
+    try:
+        admin_db = Database()
+        cursor = admin_db.conn.cursor()
+        cursor.execute("SELECT id, name FROM organizations WHERE enabled = TRUE ORDER BY id")
+        orgs = cursor.fetchall()
+        cursor.close()
+        admin_db.close()
+
+        success_count = 0
+        for org_id, org_name in orgs:
+            try:
+                db = Database()
+                snapshot = calculate_monthly_snapshot(db, org_id)
+                if snapshot:
+                    store_billing_snapshot(db, snapshot)
+                    success_count += 1
+                    logger.info(f"  Snapshot generated for org {org_id} ({org_name}): ${snapshot['total_cents'] / 100:,.2f}")
+                db.close()
+            except Exception as e:
+                logger.error(f"  Failed to snapshot org {org_id} ({org_name}): {e}")
+
+        logger.info(f"Billing snapshot complete: {success_count}/{len(orgs)} organizations")
+    except Exception as e:
+        logger.error(f"Monthly billing snapshot failed: {e}")
+
+
 def check_scan_schedules():
     """Phase 6: Check for due scan schedules and trigger discovery runs."""
     from app.database import Database
@@ -1290,6 +1327,17 @@ def start_scheduler():
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id='mark_overdue_invoices',
         name='Invoice Auto-Overdue (Daily, 02:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Phase 3B: Monthly billing snapshots — 1st of each month at 04:00 UTC
+    scheduler.add_job(
+        func=run_monthly_billing_snapshots,
+        trigger=CronTrigger(day=1, hour=4, minute=0, timezone="UTC"),
+        id='monthly_billing_snapshots',
+        name='Monthly Billing Snapshots (1st, 04:00 UTC)',
         replace_existing=True,
         max_instances=1,
         coalesce=True

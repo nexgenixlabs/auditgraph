@@ -1589,3 +1589,76 @@ Added to `auth_middleware()` before the trial expiry check:
 - [x] 52/52 tests pass (`test_auth_boundary.py` + `test_org_isolation.py` + `test_entitlements.py`)
 - [x] Python imports work (`from app.entitlements.service import invalidate_entitlement_cache`)
 - [x] auth_middleware checks plan_status before all API requests
+
+---
+
+## Phase 3B — Billing Transparency & Invoice Engine
+
+### Overview
+
+Database-backed billing engine with monthly snapshots, live estimates, invoice document generation, MSP aggregate billing, admin override routes, and a monthly scheduler job.
+
+### Schema (Migration 021)
+
+- **`organization_billing_snapshots`** — monthly billing records per org (plan, platform_fee, subscription_total, gross, discount, net, tax, total, active_subscriptions, JSONB breakdown). UNIQUE(organization_id, period_start). RLS-enabled.
+- **`msp_relationships`** — MSP parent→child org links (msp_organization_id, client_organization_id, margin_pct, status). UNIQUE pair. RLS on msp_organization_id.
+- **`invoice_documents`** — generated invoice files (BYTEA file_data, immutable=true by default). RLS-enabled.
+
+### Billing Package (`backend/app/billing/`)
+
+| Function | Description |
+|----------|-------------|
+| `calculate_monthly_snapshot(db, org_id)` | Compute full billing snapshot (uses `pricing.calculate_invoice`) |
+| `store_billing_snapshot(db, snapshot)` | UPSERT snapshot to DB (idempotent on org_id+period_start) |
+| `get_current_estimated_bill(db, org_id)` | Live estimate for current month (not persisted) |
+| `get_billing_history(db, org_id, limit)` | Fetch historical snapshots |
+| `generate_invoice_pdf(db, org_id, ...)` | Generate text invoice document, store in invoice_documents |
+| `get_msp_aggregate_bill(db, msp_org_id)` | Aggregate billing across MSP clients with margin |
+
+### API Endpoints
+
+| Method | Route | Auth | Description |
+|--------|-------|------|-------------|
+| GET | `/api/billing/current-estimate` | admin/security_admin | Live current-month estimate |
+| GET | `/api/billing/history` | admin/security_admin | Historical billing snapshots |
+| GET | `/api/billing/invoice/<id>/download` | admin/security_admin | Download invoice document |
+| GET | `/api/msp/billing/aggregate` | admin/security_admin | MSP aggregate bill |
+| POST | `/api/admin/organizations/<id>/billing/snapshot` | superadmin/poweradmin/billing | Admin-triggered snapshot |
+| POST | `/api/admin/organizations/<id>/billing/invoice-document` | superadmin/poweradmin/billing | Admin-triggered invoice doc |
+| POST | `/api/admin/msp/relationships` | superadmin/poweradmin | Create/update MSP relationship |
+
+### Scheduler Job
+
+Monthly billing snapshots — runs on the **1st of each month at 04:00 UTC**. Loops all enabled organizations, computes previous month's billing, stores via UPSERT.
+
+### Tests (8 tests in `test_billing.py`)
+
+| # | Test | What it verifies |
+|---|------|-----------------|
+| 1 | `test_snapshot_calculation_correct` | Platform fee + subscription total + gross = correct |
+| 2 | `test_discount_applied` | Discount pct reduces net_cents correctly |
+| 3 | `test_msp_aggregate_correct` | MSP aggregate sums clients with margin |
+| 4 | `test_invoice_immutable_after_generation` | Schema has `immutable BOOLEAN DEFAULT true` |
+| 5 | `test_billing_routes_registered` | All billing routes in main.py |
+| 6 | `test_scheduler_job_registered` | Monthly snapshot job in scheduler.py |
+| 7 | `test_store_billing_snapshot_upsert` | UPSERT with ON CONFLICT |
+| 8 | `test_migration_021_creates_tables` | All 3 tables in migration 021 |
+
+### Files Changed
+
+| File | Action |
+|------|--------|
+| `backend/app/database.py` | Migration 021 (3 tables + RLS + indexes + grants) |
+| `backend/app/billing/__init__.py` | **New** — package exports |
+| `backend/app/billing/service.py` | **New** — core billing logic |
+| `backend/app/api/handlers.py` | 7 new handler functions |
+| `backend/app/main.py` | 7 new routes + imports |
+| `backend/app/scheduler.py` | Monthly snapshot job + `run_monthly_billing_snapshots()` |
+| `backend/tests/test_billing.py` | **New** — 8 tests |
+
+### Verification
+
+- [x] 60/60 tests pass (auth_boundary + org_isolation + entitlements + billing)
+- [x] Python imports work (`from app.billing.service import calculate_monthly_snapshot`)
+- [x] All billing routes registered in main.py
+- [x] Scheduler job registered with `day=1, hour=4`

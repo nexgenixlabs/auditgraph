@@ -20838,3 +20838,181 @@ def get_password_policy():
         'require_special': True,
         'max_length': 128,
     })
+
+
+# ================================================================
+# Phase 3B: Billing Transparency & Invoice Engine
+# ================================================================
+
+def get_billing_current_estimate():
+    """GET /api/billing/current-estimate — live estimate for current month."""
+    from app.billing.service import get_current_estimated_bill
+    db = Database()
+    try:
+        tid = _org_id()
+        if not tid:
+            return jsonify({'error': 'Organization context required'}), 403
+        estimate = get_current_estimated_bill(db, tid)
+        if not estimate:
+            return jsonify({'error': 'Organization not found'}), 404
+        return jsonify(estimate)
+    finally:
+        db.close()
+
+
+def get_billing_history_handler():
+    """GET /api/billing/history — historical billing snapshots."""
+    from app.billing.service import get_billing_history
+    db = Database()
+    try:
+        tid = _org_id()
+        if not tid:
+            return jsonify({'error': 'Organization context required'}), 403
+        limit = request.args.get('limit', 12, type=int)
+        history = get_billing_history(db, tid, limit=limit)
+        return jsonify({'snapshots': history, 'total': len(history)})
+    finally:
+        db.close()
+
+
+def get_billing_invoice_download(doc_id):
+    """GET /api/billing/invoice/<id>/download — download invoice document."""
+    from flask import Response
+    db = Database()
+    try:
+        tid = _org_id()
+        if not tid:
+            return jsonify({'error': 'Organization context required'}), 403
+
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM invoice_documents
+            WHERE id = %s AND organization_id = %s
+        """, (doc_id, tid))
+        doc = cursor.fetchone()
+        cursor.close()
+
+        if not doc:
+            return jsonify({'error': 'Invoice document not found'}), 404
+
+        file_data = bytes(doc['file_data']) if doc.get('file_data') else b''
+        return Response(
+            file_data,
+            mimetype=doc.get('content_type', 'application/octet-stream'),
+            headers={
+                'Content-Disposition': f'attachment; filename="{doc["file_name"]}"',
+                'Content-Length': str(len(file_data)),
+            }
+        )
+    finally:
+        db.close()
+
+
+def get_msp_billing_aggregate():
+    """GET /api/msp/billing/aggregate — MSP aggregate bill across clients."""
+    from app.billing.service import get_msp_aggregate_bill
+    db = Database()
+    try:
+        tid = _org_id()
+        if not tid:
+            return jsonify({'error': 'Organization context required'}), 403
+        result = get_msp_aggregate_bill(db, tid)
+        if not result:
+            return jsonify({'error': 'Organization not found'}), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def admin_generate_billing_snapshot(organization_id):
+    """POST /api/admin/organizations/<id>/billing/snapshot — admin-triggered snapshot."""
+    from app.billing.service import calculate_monthly_snapshot, store_billing_snapshot
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        period_start = data.get('period_start')
+        period_end = data.get('period_end')
+
+        # Parse date strings if provided
+        from datetime import date as date_type
+        if isinstance(period_start, str):
+            period_start = date_type.fromisoformat(period_start)
+        if isinstance(period_end, str):
+            period_end = date_type.fromisoformat(period_end)
+
+        snapshot = calculate_monthly_snapshot(db, organization_id, period_start, period_end)
+        if not snapshot:
+            return jsonify({'error': 'Organization not found'}), 404
+
+        stored = store_billing_snapshot(db, snapshot)
+        _log(db, 'billing_snapshot_generated',
+             f'Admin generated billing snapshot for org {organization_id}',
+             {'organization_id': organization_id, 'snapshot_id': stored.get('id')})
+        return jsonify(stored), 201
+    finally:
+        db.close()
+
+
+def admin_generate_invoice_document(organization_id):
+    """POST /api/admin/organizations/<id>/billing/invoice-document — generate invoice doc."""
+    from app.billing.service import generate_invoice_pdf
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        snapshot_id = data.get('snapshot_id')
+        invoice_id = data.get('invoice_id')
+        user = getattr(g, 'current_user', None)
+        generated_by = user.get('id') if user else None
+
+        doc = generate_invoice_pdf(db, organization_id, snapshot_id=snapshot_id,
+                                    invoice_id=invoice_id, generated_by=generated_by)
+        if not doc:
+            return jsonify({'error': 'Organization not found'}), 404
+
+        _log(db, 'invoice_document_generated',
+             f'Admin generated invoice document for org {organization_id}',
+             {'organization_id': organization_id, 'document_id': doc.get('id')})
+        return jsonify(doc), 201
+    finally:
+        db.close()
+
+
+def admin_update_msp_relationship():
+    """POST /api/admin/msp/relationships — create/update MSP relationship."""
+    db = Database()
+    try:
+        data = request.get_json(silent=True) or {}
+        msp_id = data.get('msp_organization_id')
+        client_id = data.get('client_organization_id')
+        margin_pct = data.get('margin_pct', 0)
+
+        if not msp_id or not client_id:
+            return jsonify({'error': 'msp_organization_id and client_organization_id required'}), 400
+        if msp_id == client_id:
+            return jsonify({'error': 'MSP and client cannot be the same organization'}), 400
+
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO msp_relationships (msp_organization_id, client_organization_id, margin_pct, status)
+            VALUES (%s, %s, %s, 'active')
+            ON CONFLICT (msp_organization_id, client_organization_id)
+            DO UPDATE SET margin_pct = EXCLUDED.margin_pct, status = 'active'
+            RETURNING *
+        """, (msp_id, client_id, margin_pct))
+        row = dict(cursor.fetchone())
+        db.conn.commit()
+        cursor.close()
+
+        if row.get('created_at'):
+            row['created_at'] = row['created_at'].isoformat()
+        if row.get('margin_pct') is not None:
+            row['margin_pct'] = float(row['margin_pct'])
+
+        _log(db, 'msp_relationship_updated',
+             f'MSP relationship: org {msp_id} → client {client_id} (margin {margin_pct}%)',
+             {'msp_organization_id': msp_id, 'client_organization_id': client_id})
+        return jsonify(row), 201
+    finally:
+        db.close()

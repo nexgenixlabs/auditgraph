@@ -7390,6 +7390,7 @@ class Database:
     _migration_018_ensured = False
     _migration_019_ensured = False
     _migration_020_ensured = False
+    _migration_021_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -7786,9 +7787,10 @@ class Database:
         Database._migration_019_ensured = True
 
     def _ensure_entitlements_tables(self):
-        """Ensure entitlements tables exist (calls migrations 019+020). Idempotent."""
+        """Ensure entitlements + billing tables exist (calls migrations 019-021). Idempotent."""
         self._run_migration_019_entitlements()
         self._run_migration_020_entitlement_hardening()
+        self._run_migration_021_billing_transparency()
 
     # ── Migration 020: Entitlement Hardening ───────────────────────────────────
 
@@ -7867,6 +7869,154 @@ class Database:
 
         cursor.close()
         Database._migration_020_ensured = True
+
+    # ── Migration 021: Billing Transparency ────────────────────────────────────
+
+    def _run_migration_021_billing_transparency(self):
+        """Phase 3B: Billing snapshots, MSP relationships, invoice documents.
+        Idempotent — uses IF NOT EXISTS. Runs as admin (BYPASSRLS)."""
+        if Database._migration_021_ensured:
+            return
+        self._ensure_organizations_table()
+        cursor = self.conn.cursor()
+
+        # 1. organization_billing_snapshots — monthly billing records
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS organization_billing_snapshots (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                period_start DATE NOT NULL,
+                period_end DATE NOT NULL,
+                plan VARCHAR(20) NOT NULL,
+                platform_fee_cents INTEGER NOT NULL DEFAULT 0,
+                subscription_total_cents INTEGER NOT NULL DEFAULT 0,
+                gross_cents INTEGER NOT NULL DEFAULT 0,
+                discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0,
+                discount_cents INTEGER NOT NULL DEFAULT 0,
+                net_cents INTEGER NOT NULL DEFAULT 0,
+                tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0,
+                tax_cents INTEGER NOT NULL DEFAULT 0,
+                total_cents INTEGER NOT NULL DEFAULT 0,
+                active_subscriptions INTEGER NOT NULL DEFAULT 0,
+                breakdown JSONB NOT NULL DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(organization_id, period_start)
+            )
+        """)
+        self.conn.commit()
+
+        # 2. msp_relationships — MSP parent-child org links
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS msp_relationships (
+                id SERIAL PRIMARY KEY,
+                msp_organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                client_organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                margin_pct DECIMAL(5,2) NOT NULL DEFAULT 0,
+                status VARCHAR(20) NOT NULL DEFAULT 'active',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(msp_organization_id, client_organization_id)
+            )
+        """)
+        self.conn.commit()
+
+        # 3. invoice_documents — generated PDF/binary invoice storage
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS invoice_documents (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                invoice_id INTEGER REFERENCES invoices(id),
+                snapshot_id INTEGER REFERENCES organization_billing_snapshots(id),
+                document_type VARCHAR(20) NOT NULL DEFAULT 'invoice',
+                file_name VARCHAR(255) NOT NULL,
+                content_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
+                file_data BYTEA,
+                file_size INTEGER,
+                generated_by INTEGER REFERENCES users(id),
+                generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                immutable BOOLEAN NOT NULL DEFAULT true
+            )
+        """)
+        self.conn.commit()
+
+        # 4. RLS + auto-fill triggers for org-scoped tables
+        for tbl in ('organization_billing_snapshots', 'invoice_documents'):
+            cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+            for suffix in ('sel', 'ins', 'upd', 'del'):
+                cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON {tbl}")
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    CREATE POLICY org_strict_sel ON {tbl} FOR SELECT
+                        USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    CREATE POLICY org_strict_ins ON {tbl} FOR INSERT
+                        WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE
+                        USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    CREATE POLICY org_strict_del ON {tbl} FOR DELETE
+                        USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+            cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}")
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
+                    BEGIN
+                        IF NEW.organization_id IS NULL THEN
+                            NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
+                        END IF;
+                        IF NEW.organization_id IS NULL THEN
+                            RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $fn$ LANGUAGE plpgsql;
+
+                    CREATE TRIGGER trg_auto_organization_id
+                        BEFORE INSERT ON {tbl}
+                        FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+            self.conn.commit()
+
+        # msp_relationships: RLS on msp_organization_id (MSP sees their clients)
+        cursor.execute("ALTER TABLE msp_relationships ENABLE ROW LEVEL SECURITY")
+        for suffix in ('sel', 'ins', 'upd', 'del'):
+            cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON msp_relationships")
+        cursor.execute("""
+            DO $$ BEGIN
+                CREATE POLICY org_strict_sel ON msp_relationships FOR SELECT
+                    USING (msp_organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_ins ON msp_relationships FOR INSERT
+                    WITH CHECK (msp_organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_upd ON msp_relationships FOR UPDATE
+                    USING (msp_organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_del ON msp_relationships FOR DELETE
+                    USING (msp_organization_id = current_setting('app.current_organization_id', true)::integer);
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """)
+        self.conn.commit()
+
+        # 5. Indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_snap_org_period ON organization_billing_snapshots(organization_id, period_start DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_msp_rel_msp ON msp_relationships(msp_organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_msp_rel_client ON msp_relationships(client_organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_docs_org ON invoice_documents(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_docs_invoice ON invoice_documents(invoice_id)")
+        self.conn.commit()
+
+        # 6. Grants
+        try:
+            for tbl in ('organization_billing_snapshots', 'msp_relationships', 'invoice_documents'):
+                cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {tbl} TO auditgraph_app")
+                cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE {tbl}_id_seq TO auditgraph_app")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
+        cursor.close()
+        Database._migration_021_ensured = True
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 

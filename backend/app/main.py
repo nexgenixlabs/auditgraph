@@ -295,6 +295,13 @@ from app.api.handlers import (
     create_stripe_customer_handler,
     create_pilot_organization,
     get_password_policy,
+    get_billing_current_estimate,
+    get_billing_history_handler,
+    get_billing_invoice_download,
+    get_msp_billing_aggregate,
+    admin_generate_billing_snapshot,
+    admin_generate_invoice_document,
+    admin_update_msp_relationship,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -1997,6 +2004,45 @@ def create_app():
     @require_portal_role('superadmin', 'poweradmin')
     def admin_create_stripe_customer(organization_id):
         return create_stripe_customer_handler(organization_id)
+
+    # -----------------------
+    # Phase 3B: Billing Transparency & Invoice Engine
+    # -----------------------
+    @app.get("/api/billing/current-estimate")
+    @require_role('admin', 'security_admin')
+    def billing_current_estimate():
+        return get_billing_current_estimate()
+
+    @app.get("/api/billing/history")
+    @require_role('admin', 'security_admin')
+    def billing_history():
+        return get_billing_history_handler()
+
+    @app.get("/api/billing/invoice/<int:doc_id>/download")
+    @require_role('admin', 'security_admin')
+    def billing_invoice_download(doc_id):
+        return get_billing_invoice_download(doc_id)
+
+    @app.get("/api/msp/billing/aggregate")
+    @require_role('admin', 'security_admin')
+    def msp_billing_aggregate():
+        return get_msp_billing_aggregate()
+
+    # Admin billing overrides
+    @app.post("/api/admin/organizations/<int:organization_id>/billing/snapshot")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_billing_snapshot(organization_id):
+        return admin_generate_billing_snapshot(organization_id)
+
+    @app.post("/api/admin/organizations/<int:organization_id>/billing/invoice-document")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_billing_invoice_document(organization_id):
+        return admin_generate_invoice_document(organization_id)
+
+    @app.post("/api/admin/msp/relationships")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_msp_relationships():
+        return admin_update_msp_relationship()
 
     # -----------------------
     # Phase 6: Pilot Setup
