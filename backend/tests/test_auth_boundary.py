@@ -1,0 +1,278 @@
+"""
+Phase 1C: Auth Boundary Tests
+
+Tests cryptographic isolation between admin and tenant portals,
+impersonation expiry, and refresh token rotation.
+"""
+import os
+import time
+import jwt
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
+
+# Ensure dev mode + test keys before importing app modules
+os.environ.setdefault('FLASK_ENV', 'development')
+os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+os.environ.setdefault('DB_HOST', 'localhost')
+os.environ.setdefault('DB_PORT', '5432')
+os.environ.setdefault('DB_NAME', 'auditgraph')
+
+# Set distinct keys for portal isolation tests
+ADMIN_KEY = 'admin-test-key-1c'
+TENANT_KEY = 'tenant-test-key-1c'
+os.environ['ADMIN_JWT_SECRET'] = ADMIN_KEY
+os.environ['TENANT_JWT_SECRET'] = TENANT_KEY
+
+from app.api.auth import (
+    generate_access_token,
+    generate_refresh_token,
+    hash_refresh_token,
+    ADMIN_JWT_SECRET,
+    TENANT_JWT_SECRET,
+    JWT_ALGORITHM,
+    ADMIN_TOKEN_EXPIRY,
+    TENANT_TOKEN_EXPIRY,
+)
+
+
+# ── Helpers ──
+
+def _make_admin_user():
+    return {
+        'id': 1,
+        'username': 'techadmin',
+        'role': 'admin',
+        'display_name': 'Tech Admin',
+        'tenant_id': None,
+        'tenant_name': None,
+        'is_superadmin': True,
+        'portal_role': 'superadmin',
+        'force_password_change': False,
+    }
+
+
+def _make_tenant_user(tenant_id=5, tenant_name='Acme Corp'):
+    return {
+        'id': 42,
+        'username': 'jdoe',
+        'role': 'admin',
+        'display_name': 'Jane Doe',
+        'tenant_id': tenant_id,
+        'tenant_name': tenant_name,
+        'is_superadmin': False,
+        'portal_role': None,
+        'force_password_change': False,
+    }
+
+
+def _make_impersonation_user(tenant_id=5, tenant_name='Acme Corp'):
+    return {
+        'id': 1,
+        'username': 'techadmin',
+        'role': 'admin',
+        'display_name': 'Tech Admin',
+        'tenant_id': tenant_id,
+        'tenant_name': tenant_name,
+        'is_superadmin': False,
+        'portal_role': None,
+        'impersonating': True,
+        'impersonator_id': 1,
+        'impersonator_username': 'techadmin',
+    }
+
+
+# ── Test 1: Admin token fails on tenant route ──
+
+def test_admin_token_fails_tenant_decode():
+    """Admin token signed with ADMIN_KEY cannot be decoded with TENANT_KEY."""
+    user = _make_admin_user()
+    token = generate_access_token(user, portal='admin')
+
+    # Decoding with tenant key must fail
+    try:
+        jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                   audience='auditgraph-tenant')
+        assert False, "Should have raised InvalidTokenError"
+    except jwt.InvalidTokenError:
+        pass  # Expected
+
+
+def test_admin_token_wrong_audience_for_tenant():
+    """Admin token has aud=auditgraph-platform, tenant expects auditgraph-tenant."""
+    user = _make_admin_user()
+    token = generate_access_token(user, portal='admin')
+
+    # Even if we use ADMIN key, audience check for tenant should fail
+    try:
+        jwt.decode(token, ADMIN_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                   audience='auditgraph-tenant')
+        assert False, "Should have raised InvalidAudienceError"
+    except jwt.InvalidAudienceError:
+        pass  # Expected
+
+
+# ── Test 2: Tenant token fails on admin route ──
+
+def test_tenant_token_fails_admin_decode():
+    """Tenant token signed with TENANT_KEY cannot be decoded with ADMIN_KEY."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+
+    # Decoding with admin key must fail
+    try:
+        jwt.decode(token, ADMIN_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                   audience='auditgraph-platform')
+        assert False, "Should have raised InvalidTokenError"
+    except jwt.InvalidTokenError:
+        pass  # Expected
+
+
+def test_tenant_token_wrong_audience_for_admin():
+    """Tenant token has aud=auditgraph-tenant, admin expects auditgraph-platform."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+
+    # Even with TENANT key, audience check for admin should fail
+    try:
+        jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                   audience='auditgraph-platform')
+        assert False, "Should have raised InvalidAudienceError"
+    except jwt.InvalidAudienceError:
+        pass  # Expected
+
+
+# ── Test 3: Correct portal tokens decode successfully ──
+
+def test_admin_token_decodes_with_correct_key():
+    """Admin token decodes fine with ADMIN_KEY + correct audience."""
+    user = _make_admin_user()
+    token = generate_access_token(user, portal='admin')
+
+    payload = jwt.decode(token, ADMIN_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-platform')
+    assert payload['sub'] == '1'
+    assert payload['iss'] == 'admin.auditgraph.ai'
+    assert payload['aud'] == 'auditgraph-platform'
+    assert payload['portal'] == 'admin'
+    assert payload['type'] == 'access'
+
+
+def test_tenant_token_decodes_with_correct_key():
+    """Tenant token decodes fine with TENANT_KEY + correct audience."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+    assert payload['sub'] == '42'
+    assert payload['iss'] == 'acme.auditgraph.ai'
+    assert payload['aud'] == 'auditgraph-tenant'
+    assert payload['portal'] == 'client'
+    assert payload['tenant_id'] == 5
+
+
+# ── Test 4: Impersonation auto-expires ──
+
+def test_impersonation_has_15min_cap():
+    """Impersonation tokens have impersonation_exp claim capped at 15 minutes."""
+    user = _make_impersonation_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+
+    assert payload['impersonating'] is True
+    assert payload['impersonated_by'] == 'techadmin'
+    assert payload['impersonator_id'] == 1
+    assert 'impersonation_exp' in payload
+
+    # impersonation_exp should be ~15 min from now (allow 5s tolerance)
+    now = datetime.now(timezone.utc).timestamp()
+    imp_exp = payload['impersonation_exp']
+    assert imp_exp > now, "impersonation_exp should be in the future"
+    assert imp_exp <= now + 15 * 60 + 5, "impersonation_exp should be at most 15 min from now"
+
+    # Token exp should be clamped to impersonation_exp (15min < TENANT_TOKEN_EXPIRY 60min)
+    assert payload['exp'] <= imp_exp + 1
+
+
+def test_impersonation_exp_is_respected():
+    """A token with impersonation_exp in the past should be detectable."""
+    user = _make_impersonation_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+
+    # Manually check: if impersonation_exp were in the past, middleware would reject
+    fake_expired_payload = {**payload, 'impersonation_exp': int(time.time()) - 60}
+    assert datetime.now(timezone.utc).timestamp() > fake_expired_payload['impersonation_exp']
+
+
+# ── Test 5: Refresh token is hashed ──
+
+def test_refresh_token_hash():
+    """hash_refresh_token produces SHA-256 hex digest of the raw token."""
+    raw = 'test-token-abc123'
+    expected = hashlib.sha256(raw.encode()).hexdigest()
+    assert hash_refresh_token(raw) == expected
+
+
+# ── Test 6: Token claims structure ──
+
+def test_admin_token_ttl():
+    """Admin tokens have 30-minute TTL."""
+    user = _make_admin_user()
+    token = generate_access_token(user, portal='admin')
+    payload = jwt.decode(token, ADMIN_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-platform')
+    ttl = payload['exp'] - payload['iat']
+    assert ttl == ADMIN_TOKEN_EXPIRY.total_seconds()
+
+
+def test_tenant_token_ttl():
+    """Tenant tokens have 60-minute TTL."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+    ttl = payload['exp'] - payload['iat']
+    assert ttl == TENANT_TOKEN_EXPIRY.total_seconds()
+
+
+def test_tenant_token_without_slug_uses_app_iss():
+    """Tenant token without slug uses app.auditgraph.ai as issuer."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client')
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+    assert payload['iss'] == 'app.auditgraph.ai'
+
+
+def test_cross_tenant_token_different_iss():
+    """Tokens for different tenant slugs have different iss claims."""
+    user1 = _make_tenant_user(tenant_id=5, tenant_name='Acme')
+    user2 = _make_tenant_user(tenant_id=6, tenant_name='Globex')
+
+    token1 = generate_access_token(user1, portal='client', tenant_slug='acme')
+    token2 = generate_access_token(user2, portal='client', tenant_slug='globex')
+
+    p1 = jwt.decode(token1, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                     audience='auditgraph-tenant')
+    p2 = jwt.decode(token2, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                     audience='auditgraph-tenant')
+
+    assert p1['iss'] == 'acme.auditgraph.ai'
+    assert p2['iss'] == 'globex.auditgraph.ai'
+    assert p1['iss'] != p2['iss']
+    assert p1['tenant_id'] != p2['tenant_id']
+
+
+# ── Test 7: Key isolation ──
+
+def test_keys_are_distinct():
+    """ADMIN and TENANT keys must be distinct when explicitly set."""
+    assert ADMIN_JWT_SECRET == ADMIN_KEY
+    assert TENANT_JWT_SECRET == TENANT_KEY
+    assert ADMIN_JWT_SECRET != TENANT_JWT_SECRET

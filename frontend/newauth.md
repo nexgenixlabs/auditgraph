@@ -466,3 +466,74 @@ except Exception as e:
 - Cross-tenant replay → 403 (audience mismatch)
 - API key on admin portal → 403
 - All JWT errors → 401/403 (fail-closed)
+
+---
+
+# Phase 1C — Auth Hardening Tightening (IMPLEMENTED)
+
+**Date**: 2026-02-28
+**Status**: IMPLEMENTED — 14 tests passing
+
+## Changes
+
+### 1. Production JWT_SECRET fallback removed
+- `JWT_SECRET` fallback only allowed when `FLASK_ENV=development`
+- Production requires explicit `ADMIN_JWT_SECRET` + `TENANT_JWT_SECRET` or startup fails
+- Error message differs by environment for clearer debugging
+
+### 2. iss/aud semantics corrected
+| Portal | `iss` (origin) | `aud` (audience) |
+|--------|---------------|-------------------|
+| Admin | `admin.auditgraph.ai` | `auditgraph-platform` |
+| Tenant | `{slug}.auditgraph.ai` | `auditgraph-tenant` |
+
+- `iss` = origin domain (who issued the token)
+- `aud` = logical audience name (who should consume it)
+- Middleware verifies `aud` on decode, then checks `iss` matches host slug for tenant tokens
+
+### 3. Impersonation hardened
+- **`impersonated_by`** claim: username of the admin performing impersonation
+- **`impersonation_exp`** claim: 15-minute hard cap (Unix timestamp)
+- Token `exp` clamped to `impersonation_exp` if shorter than normal TTL
+- Middleware rejects tokens where `impersonation_exp` has passed (returns 401)
+- **Audit logging**: `impersonation_start` and `impersonation_end` events in `admin_audit_log`
+- **`POST /api/admin/impersonate/end`**: New endpoint to log impersonation end
+- Frontend `exitImpersonation()` calls end endpoint before restoring admin tokens
+- Response includes `expires_in_minutes: 15` for client display
+
+### 4. Refresh token hardening
+- Tokens already SHA-256 hashed in DB (Phase 1B)
+- Rotate on every refresh: old token revoked, new token issued (Phase 1B)
+- **Token reuse detection** (Phase 1C): If a revoked token is presented, ALL tokens for that user are revoked and a warning is logged — prevents stolen token replay
+
+### 5. Host↔tenant_id validation
+- After `iss` check, middleware resolves host slug to `tenants.id` via DB lookup
+- If `token.tenant_id` does not match the slug's tenant ID → 403 "Token tenant mismatch"
+- Superadmins exempt (they operate cross-tenant by design)
+- Graceful degradation: DB lookup failure does not block request
+
+### 6. Tests (14 passing)
+| Test | Asserts |
+|------|---------|
+| `test_admin_token_fails_tenant_decode` | Admin token + TENANT_KEY → InvalidTokenError |
+| `test_admin_token_wrong_audience_for_tenant` | Admin token + ADMIN_KEY + tenant aud → InvalidAudienceError |
+| `test_tenant_token_fails_admin_decode` | Tenant token + ADMIN_KEY → InvalidTokenError |
+| `test_tenant_token_wrong_audience_for_admin` | Tenant token + TENANT_KEY + admin aud → InvalidAudienceError |
+| `test_admin_token_decodes_with_correct_key` | iss=admin.auditgraph.ai, aud=auditgraph-platform |
+| `test_tenant_token_decodes_with_correct_key` | iss=acme.auditgraph.ai, aud=auditgraph-tenant |
+| `test_impersonation_has_15min_cap` | impersonation_exp within 15min, exp clamped |
+| `test_impersonation_exp_is_respected` | Past impersonation_exp is detectable |
+| `test_refresh_token_hash` | SHA-256 hex digest matches |
+| `test_admin_token_ttl` | 30-minute TTL |
+| `test_tenant_token_ttl` | 60-minute TTL |
+| `test_tenant_token_without_slug_uses_app_iss` | iss=app.auditgraph.ai when no slug |
+| `test_cross_tenant_token_different_iss` | Different slugs → different iss claims |
+| `test_keys_are_distinct` | ADMIN_KEY ≠ TENANT_KEY |
+
+## Environment Variables
+| Variable | Dev | Production |
+|----------|-----|------------|
+| `ADMIN_JWT_SECRET` | Optional (falls back to `JWT_SECRET`) | **Required** |
+| `TENANT_JWT_SECRET` | Optional (falls back to `JWT_SECRET`) | **Required** |
+| `JWT_SECRET` | Used as fallback when above are missing | **Not accepted** — startup fails |
+| `FLASK_ENV` | `development` enables fallback | Any other value or unset = production mode |

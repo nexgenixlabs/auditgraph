@@ -18,11 +18,15 @@ from app.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Phase 1B: Dual JWT keys with legacy fallback for zero-downtime migration
-ADMIN_JWT_SECRET = os.getenv('ADMIN_JWT_SECRET') or os.getenv('JWT_SECRET')
-TENANT_JWT_SECRET = os.getenv('TENANT_JWT_SECRET') or os.getenv('JWT_SECRET')
+# Phase 1B+1C: Dual JWT keys — fallback to JWT_SECRET only in development
+_is_dev = os.getenv('FLASK_ENV') == 'development'
+_jwt_fallback = os.getenv('JWT_SECRET') if _is_dev else None
+ADMIN_JWT_SECRET = os.getenv('ADMIN_JWT_SECRET') or _jwt_fallback
+TENANT_JWT_SECRET = os.getenv('TENANT_JWT_SECRET') or _jwt_fallback
 if not ADMIN_JWT_SECRET or not TENANT_JWT_SECRET:
-    raise RuntimeError("FATAL: ADMIN_JWT_SECRET + TENANT_JWT_SECRET (or JWT_SECRET) required.")
+    if _is_dev:
+        raise RuntimeError("FATAL: ADMIN_JWT_SECRET + TENANT_JWT_SECRET (or JWT_SECRET) required.")
+    raise RuntimeError("FATAL: ADMIN_JWT_SECRET and TENANT_JWT_SECRET are required in production.")
 JWT_ALGORITHM = 'HS256'
 
 # Phase 1B: Portal-specific TTLs
@@ -75,15 +79,16 @@ def _derive_tenant_slug() -> str | None:
 # ── Token generation ──
 
 def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str | None = None) -> str:
-    """Generate a JWT access token with portal-specific key, iss, aud, and TTL."""
+    """Generate a JWT access token with portal-specific key, iss, aud, and TTL.
+    Phase 1C: iss = origin domain, aud = logical audience."""
     if portal == 'admin':
-        iss = 'auditgraph-platform'
-        aud = 'admin.auditgraph.ai'
+        iss = 'admin.auditgraph.ai'
+        aud = 'auditgraph-platform'
         secret = ADMIN_JWT_SECRET
         expiry = ADMIN_TOKEN_EXPIRY
     else:
-        iss = 'auditgraph-tenant'
-        aud = f'{tenant_slug}.auditgraph.ai' if tenant_slug else 'app.auditgraph.ai'
+        iss = f'{tenant_slug}.auditgraph.ai' if tenant_slug else 'app.auditgraph.ai'
+        aud = 'auditgraph-tenant'
         secret = TENANT_JWT_SECRET
         expiry = TENANT_TOKEN_EXPIRY
 
@@ -105,11 +110,17 @@ def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str |
         'type': 'access',
     }
 
-    # Impersonation claims
+    # Phase 1C: Impersonation claims with 15-min hard cap
     if user.get('impersonating'):
         payload['impersonating'] = True
         payload['impersonator_id'] = user['impersonator_id']
         payload['impersonator_username'] = user['impersonator_username']
+        payload['impersonated_by'] = user['impersonator_username']
+        imp_exp = datetime.now(timezone.utc) + timedelta(minutes=15)
+        # Clamp token exp to impersonation_exp if shorter
+        if imp_exp < payload['exp']:
+            payload['exp'] = imp_exp
+        payload['impersonation_exp'] = int(imp_exp.timestamp())
 
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
@@ -221,17 +232,33 @@ def auth_middleware():
         secret = ADMIN_JWT_SECRET if portal == 'admin' else TENANT_JWT_SECRET
 
         try:
+            # Phase 1C: aud = logical audience name (not domain)
             if portal == 'admin':
                 payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM],
-                                     audience='admin.auditgraph.ai')
+                                     audience='auditgraph-platform')
             else:
                 payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM],
-                                     options={'verify_aud': False})
-                # Verify aud matches host slug if present
-                token_aud = payload.get('aud', '')
+                                     audience='auditgraph-tenant')
+                # Phase 1C: Verify iss matches host slug (iss = origin domain)
+                token_iss = payload.get('iss', '')
                 host_slug = _derive_tenant_slug()
-                if host_slug and token_aud != f'{host_slug}.auditgraph.ai':
-                    return jsonify({'error': 'Token audience mismatch'}), 403
+                if host_slug and token_iss != f'{host_slug}.auditgraph.ai':
+                    return jsonify({'error': 'Token issuer mismatch'}), 403
+                # Phase 1C: Verify token.tenant_id matches resolved slug's tenant
+                if host_slug and not payload.get('is_superadmin'):
+                    token_tid = payload.get('tenant_id')
+                    if token_tid is not None:
+                        try:
+                            _db = Database()
+                            _cur = _db.conn.cursor()
+                            _cur.execute("SELECT id FROM tenants WHERE slug = %s", (host_slug,))
+                            _row = _cur.fetchone()
+                            _cur.close()
+                            _db.close()
+                            if _row and _row[0] != token_tid:
+                                return jsonify({'error': 'Token tenant mismatch'}), 403
+                        except Exception:
+                            pass  # Don't block on lookup failure
 
             if payload.get('type') != 'access':
                 return jsonify({'error': 'Invalid token type'}), 401
@@ -248,11 +275,15 @@ def auth_middleware():
                 'portal': portal,
             }
 
-            # Carry impersonation claims
+            # Carry impersonation claims + enforce impersonation_exp
             if payload.get('impersonating'):
+                imp_exp = payload.get('impersonation_exp')
+                if imp_exp and datetime.now(timezone.utc).timestamp() > imp_exp:
+                    return jsonify({'error': 'Impersonation session expired'}), 401
                 g.current_user['impersonating'] = True
                 g.current_user['impersonator_id'] = payload.get('impersonator_id')
                 g.current_user['impersonator_username'] = payload.get('impersonator_username')
+                g.current_user['impersonated_by'] = payload.get('impersonated_by')
 
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401

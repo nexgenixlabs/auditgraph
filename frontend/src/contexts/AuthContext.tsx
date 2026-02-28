@@ -354,10 +354,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.location.href = '/';
   }, [user]);
 
-  // Phase 1B: Exit impersonation — restore admin tokens
-  const exitImpersonation = useCallback(() => {
-    // Clear client tokens
+  // Phase 1B+1C: Exit impersonation — log end, restore admin tokens
+  const exitImpersonation = useCallback(async () => {
+    // Phase 1C: Log impersonation end on backend
     const clientKeys = tokenKeys('client');
+    const clientToken = localStorage.getItem(clientKeys.access);
+    try {
+      await originalFetchRef.current(resolveApiUrl('/api/admin/impersonate/end'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(clientToken ? { 'Authorization': `Bearer ${clientToken}` } : {}),
+        },
+      });
+    } catch { /* ignore — best-effort logging */ }
+
+    // Clear client tokens
     localStorage.removeItem(clientKeys.access);
     localStorage.removeItem(clientKeys.refresh);
 

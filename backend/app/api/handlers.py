@@ -6762,8 +6762,18 @@ def auth_refresh():
         token_hash = hash_refresh_token(raw_refresh)
         token_record = db.get_refresh_token(token_hash)
 
-        if not token_record or token_record.get('revoked'):
+        if not token_record:
             return jsonify({'error': 'Invalid refresh token'}), 401
+
+        # Phase 1C: Detect token reuse — if revoked token is presented,
+        # an attacker may have stolen it. Revoke ALL tokens for this user.
+        if token_record.get('revoked'):
+            try:
+                db.revoke_all_user_tokens(token_record['user_id'])
+                logger.warning(f"Refresh token reuse detected for user_id={token_record['user_id']} — all tokens revoked")
+            except Exception:
+                pass
+            return jsonify({'error': 'Token reuse detected — all sessions invalidated'}), 401
 
         if token_record['expires_at'].replace(tzinfo=None) < datetime.utcnow():
             return jsonify({'error': 'Refresh token expired'}), 401
@@ -17919,7 +17929,8 @@ def get_admin_action_log():
 
 
 def admin_impersonate():
-    """POST /api/admin/impersonate — generate tenant-scoped tokens for admin impersonation."""
+    """POST /api/admin/impersonate — generate tenant-scoped tokens for admin impersonation.
+    Phase 1C: 15-min hard cap, impersonated_by claim, audit logging."""
     from app.api.auth import generate_access_token, generate_refresh_token
     user = g.current_user
     data = request.get_json(silent=True) or {}
@@ -17952,7 +17963,7 @@ def admin_impersonate():
             'impersonator_username': user['username'],
         }
 
-        # Log impersonation to admin_audit_log
+        # Log impersonation start to admin_audit_log
         try:
             cursor = db.conn.cursor()
             cursor.execute("""
@@ -17962,7 +17973,12 @@ def admin_impersonate():
                 user['id'],
                 'impersonation_start',
                 tenant['id'],
-                json.dumps({'target_role': target_role, 'tenant_name': tenant.get('name')}),
+                json.dumps({
+                    'target_role': target_role,
+                    'tenant_name': tenant.get('name'),
+                    'impersonator': user['username'],
+                    'max_duration_min': 15,
+                }),
                 request.remote_addr,
             ))
             db.conn.commit()
@@ -17981,7 +17997,40 @@ def admin_impersonate():
         'tenant_slug': slug,
         'tenant_name': tenant.get('name'),
         'impersonation': True,
+        'expires_in_minutes': 15,
     })
+
+
+def admin_end_impersonation():
+    """POST /api/admin/impersonate/end — log impersonation end."""
+    user = g.current_user
+    if not user.get('impersonating'):
+        return jsonify({'error': 'Not currently impersonating'}), 400
+
+    db = Database()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            INSERT INTO admin_audit_log (admin_user_id, action, target_tenant_id, details, ip_address)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (
+            user.get('impersonator_id', user['id']),
+            'impersonation_end',
+            user.get('tenant_id'),
+            json.dumps({
+                'impersonator': user.get('impersonated_by', user.get('impersonator_username')),
+                'tenant_name': user.get('tenant_name'),
+            }),
+            request.remote_addr,
+        ))
+        db.conn.commit()
+        cursor.close()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+    return jsonify({'message': 'Impersonation ended'})
 
 
 def get_client_billing_summary():
