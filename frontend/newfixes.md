@@ -1621,3 +1621,326 @@ Wires existing plan-tier enforcement logic (`TIER_LIMITS`, `check_feature_gate`)
 
 ### 8. Frontend Sync (`pricing.ts`)
 - `TIER_LIMITS.free.blocked_features` updated to match backend (8 features)
+
+---
+
+# Phase 24 — Enterprise SaaS Readiness Audit
+
+**Date**: 2026-02-27
+
+## Audit Scope
+
+Full enterprise SaaS maturity assessment across five dimensions: Control Plane Isolation, Multi-Tenant Security, Billing Governance, Entitlement Enforcement, and Auditability. 48 findings identified, prioritized by severity.
+
+## Current Maturity Score: 6.5 / 10
+
+| Dimension | Score | Key Gaps |
+|-----------|-------|----------|
+| Control Plane Isolation | 7/10 | 1 CRITICAL RLS gap, silent middleware failures |
+| Multi-Tenant Security | 7/10 | API key auth not tenant-scoped, portal token reuse |
+| Billing Governance | 6/10 | `activate_all` bypasses limits, no DB-level invoice immutability |
+| Entitlement Enforcement | 5/10 | 14 routes missing `@require_feature`, dead code |
+| Auditability | 6/10 | Tenant deletion purges logs, auth failures unlogged |
+
+---
+
+## CRITICAL Findings (3)
+
+### C1. `cloud_connections` Table Has NO RLS Policies
+- **File**: `migrations/017_complete_rls_isolation.sql`
+- **Issue**: The `cloud_connections` table has a `tenant_id` column but is absent from the 44-table RLS migration. While current handlers use `Database()` (admin bypass) with manual `WHERE tenant_id = %s` filtering, any future code using `Database(tenant_id=N)` would see ALL tenants' connections because RLS is not enabled on the table.
+- **Impact**: Defense-in-depth failure. One missed tenant filter in new code = full cross-tenant credential exposure.
+- **Remediation**: Add `ENABLE ROW LEVEL SECURITY` + strict policies + auto-fill trigger to `cloud_connections`.
+
+### C2. `activate_all_subscriptions()` Bypasses Plan Limits
+- **File**: `handlers.py:17474`
+- **Issue**: `POST /api/subscriptions/activate-all` calls `db.activate_all_cloud_subscriptions()` with NO plan limit check. A free-plan tenant (limited to 1 active subscription) can activate ALL discovered subscriptions, bypassing `PLAN_LIMITS.max_active_subs`.
+- **Impact**: Free/trial plan subscription limits are trivially bypassable. Uncontrolled billing exposure.
+- **Remediation**: Add `can_activate_subscription()` check with count validation before bulk activation.
+
+### C3. Tenant Deletion Purges ALL Audit Logs
+- **File**: `database.py:7727`
+- **Issue**: `DELETE FROM activity_log WHERE tenant_id = %s` during tenant deletion permanently destroys the entire audit trail. The `admin_audit_log` is also wiped. No archival step exists.
+- **Impact**: SOC 2 / ISO 27001 non-compliance. Evidence destruction. Forensic investigation impossible after tenant offboarding.
+- **Remediation**: Archive audit logs to cold storage (S3/Blob) before deletion. Add `deleted_tenant_audit_archive` table or export to immutable storage.
+
+---
+
+## HIGH Findings (14)
+
+### H1. 14 Routes Missing `@require_feature` Gate
+- **File**: `main.py`
+- **Issue**: Phase 23 gated 12 write routes, but 14 related routes remain ungated:
+
+| Route | Missing Gate | Risk |
+|-------|-------------|------|
+| `GET /api/soar/playbooks` (line 488) | `soar` | Free users read all playbooks |
+| `PUT /api/soar/playbooks/<id>` (line 498) | `soar` | Free users update playbooks |
+| `DELETE /api/soar/playbooks/<id>` (line 503) | `soar` | Free users delete playbooks |
+| `POST /api/soar/playbooks/<id>/test` (line 508) | `soar` | Free users test-execute |
+| `GET /api/soar/actions` (line 513) | `soar` | Free users see action history |
+| `GET /api/soar/actions/stats` (line 517) | `soar` | Free users see stats |
+| `GET /api/api-keys` (line 464) | `api_keys` | Free users list keys |
+| `PUT /api/api-keys/<id>` (line 475) | `api_keys` | Free users modify keys |
+| `DELETE /api/api-keys/<id>` (line 480) | `api_keys` | Free users delete keys |
+| `GET /api/risk-rules` (line 1347) | `custom_risk_rules` | Free users read rules |
+| `POST /api/risk-rules/preview` (line 1369) | `custom_risk_rules` | Free users preview rules |
+| `GET /api/settings/sso` (line 812) | `sso` | Free users read SSO config |
+| `GET /api/copilot/conversations` (line 1739) | `ai_copilot` | Low — list only |
+| `GET /api/copilot/suggestions` (line 1743) | `ai_copilot` | Low — suggestions only |
+
+### H2. `_check_tier_limits()` Is Dead Code
+- **File**: `handlers.py:16249`
+- **Issue**: The function is defined but never called anywhere. Zero call sites across the entire backend. While Phase 23 added identity truncation in discovery engines, this function's trial-expiry and identity-count logic at the API level remains unused.
+- **Remediation**: Either wire it into the request pipeline or remove it to avoid false confidence.
+
+### H3. API Key Auth Failures Not Logged
+- **File**: `auth.py:85-96`
+- **Issue**: `_authenticate_api_key()` returns 401 for invalid/disabled/expired keys but never logs these failures. API key brute-force attempts are completely invisible.
+- **Remediation**: Log `api_key_auth_failed` with key prefix and IP address.
+
+### H4. Authorization Failures (403s) Not Logged
+- **File**: `auth.py:222-309`
+- **Issue**: `require_role()`, `require_superadmin()`, `require_portal_access()`, and `require_portal_role()` return 403 with NO logging. Only `require_feature()` logs denials. An attacker probing role boundaries leaves no trace.
+- **Remediation**: Add logging to all four decorators with action type `authorization_denied`.
+
+### H5. Anomaly Resolution Not Logged
+- **File**: `handlers.py:9469`
+- **Issue**: `resolve_anomaly_handler()` — resolving a security anomaly is a significant event but has no `_log()` call.
+- **Remediation**: Add `_log(db, 'anomaly_resolved', ...)`.
+
+### H6. Platform Settings Update Has Zero Logging
+- **File**: `handlers.py:17981`
+- **Issue**: `update_platform_settings_handler()` modifies platform-wide admin settings with no `_log()`, no `log_admin_audit()`, and no `log_billing_event()`.
+- **Remediation**: Add `log_admin_audit('platform_settings_updated', ...)`.
+
+### H7. Tenant Creation Missing from Admin Audit Log
+- **File**: `handlers.py:10047`
+- **Issue**: `create_tenant_handler()` has `_log()` but no `log_admin_audit()`. Tenant creation is a high-value admin action.
+- **Remediation**: Add `log_admin_audit('tenant_created', ...)`.
+
+### H8. Tenant Deletion Missing from Admin Audit Log
+- **File**: `handlers.py:10231`
+- **Issue**: `delete_tenant_handler()` has `_log()` but no `log_admin_audit()`. This is the highest-risk admin action.
+- **Remediation**: Add `log_admin_audit('tenant_deleted', ...)` BEFORE the deletion executes.
+
+### H9. No Minimum Retention Floor for Activity Log
+- **File**: `handlers.py:16093`, `database.py:8037`
+- **Issue**: An admin can set `retention_activity_days` to any value (minimum 7 days per validation) and trigger `POST /api/system/cleanup` to purge nearly all logs. No compliance-grade floor enforced.
+- **Remediation**: Enforce minimum 90-day floor for `activity_log` and `admin_audit_log`. Exempt security-relevant action types from cleanup.
+
+### H10. Admin Read Operations Not Logged
+- **File**: `handlers.py:17755-18109`
+- **Issue**: Admin billing reads (`get_admin_billing_summary`, `get_admin_billing_events`, `get_admin_invoices`, `get_admin_invoice`, `get_platform_settings`) have no audit log. SOC 2 / ISO 27001 require logging when platform administrators access tenant billing data.
+- **Remediation**: Add `log_admin_audit('billing_data_accessed', ...)` for read operations.
+
+### H11. NotificationService Uses Admin Bypass for All Writes
+- **File**: `services/notification_service.py:19-164`
+- **Issue**: Every method creates `db = Database()` (admin bypass, no RLS). Writes to `notifications` table bypass RLS. If `tenant_id` parameter is wrong or missing, the notification lands in the wrong tenant's scope with no RLS safety net.
+- **Remediation**: Use `Database(tenant_id=tid)` for notification writes.
+
+### H12. Resource Declassification Not Logged
+- **File**: `handlers.py:~12700`
+- **Issue**: Removing a PHI/PCI/PII classification from a resource has no activity log entry. Compliance-critical event.
+- **Remediation**: Add `_log(db, 'resource_declassified', ...)`.
+
+### H13. Public Slug Endpoint Exposes Tenant Metadata
+- **File**: `auth.py:130-131`, `handlers.py:13222-13239`
+- **Issue**: `/api/tenants/by-slug/<slug>` and `/api/clients/by-slug/<slug>` are public (no auth). They return internal database IDs, plan tier, and enabled status. Enables tenant enumeration and IDOR attempts.
+- **Remediation**: Return only `{ slug, name, branding }` — omit `id`, `plan`, internal fields.
+
+### H14. Pilot Tenant Creation Missing Admin Audit
+- **File**: `handlers.py:~20607`
+- **Issue**: `pilot_setup` creates a tenant with `_log()` but no `log_admin_audit()`.
+- **Remediation**: Add `log_admin_audit('pilot_tenant_created', ...)`.
+
+---
+
+## MEDIUM Findings (19)
+
+### M1. Host-Tenant Guard Silently Fails on DB Errors
+- **File**: `auth.py:204-217`
+- **Issue**: `except Exception: pass` means a DB outage disables the cross-subdomain token guard. Expired trial check (line 222-243) has the same pattern.
+- **Remediation**: Fail closed — return 503 on DB error instead of silently passing.
+
+### M2. Portal Users Exempt from Host-Tenant Guard
+- **File**: `auth.py:194`
+- **Issue**: Any user with `portal_role` (including `reader`, `billing`) is exempt from the host-tenant guard. Their token can be reused on any tenant subdomain.
+- **Remediation**: Only exempt `superadmin` and `poweradmin` from the guard.
+
+### M3. API Key Lookup Has No Tenant Filter
+- **File**: `database.py:6960`, `auth.py:88`
+- **Issue**: `get_api_key_by_hash()` queries `WHERE key_hash = %s` with no tenant_id filter, using admin bypass connection. Any API key from any tenant authenticates globally. Downstream RLS mitigates data access, but the auth layer is not tenant-aware.
+- **Remediation**: Add `tenant_id` filter to API key lookup.
+
+### M4. API Key Tenant Derived from Mutable Creator Record
+- **File**: `auth.py:100-118`
+- **Issue**: The API key's tenant context is looked up from the creator's current `users` record at request time. If the creator moves to a different tenant, the API key silently switches tenants.
+- **Remediation**: Store `tenant_id` on the `api_keys` row at creation time and use that for scoping.
+
+### M5. No Rate Limiting on Data API Endpoints
+- **File**: `security.py:77-109`
+- **Issue**: Rate limiting is only on auth endpoints (login, refresh, password reset). All data endpoints (`/api/identities`, `/api/resources`, `/api/reports/data`) have no limits. API key requests also bypass rate limiting entirely.
+- **Remediation**: Add per-tenant rate limiting on data endpoints (e.g., 100 req/min per tenant).
+
+### M6. In-Memory Rate Limiter Not Shared Across Workers
+- **File**: `security.py:18`
+- **Issue**: Each gunicorn worker has its own `RateLimiter` instance. With 2 workers, the effective rate limit is doubled.
+- **Remediation**: Use Redis-backed rate limiting for production.
+
+### M7. Invoice Immutability Has No DB-Level Enforcement
+- **File**: `database.py:9122-9149`
+- **Issue**: Financial columns on `invoices` can be modified via direct SQL. Application layer enforces immutability, but `auditgraph_admin` can bypass.
+- **Remediation**: Add a PostgreSQL `BEFORE UPDATE` trigger that raises exception when financial columns change.
+
+### M8. `require_feature()` Writes Activity Log via Admin Bypass
+- **File**: `auth.py:330-345`
+- **Issue**: Inserts into `activity_log` using `Database()` (admin bypass). The `tenant_id` from `user.get('tenant_id')` could be `None` for unassigned users, bypassing the auto-fill trigger.
+- **Remediation**: Use `Database(tenant_id=tid)` for the log write.
+
+### M9. Superadmin Unscoped Queries Return All-Tenant Data
+- **File**: `handlers.py:341-354`
+- **Issue**: When a superadmin hits `_db()`-backed endpoints without `X-Tenant-Id`, queries like `SELECT COUNT(*) FROM discovery_runs` return cross-tenant aggregates. Designed behavior but leaks operational data.
+- **Remediation**: Require `X-Tenant-Id` header for data endpoints when user is superadmin.
+
+### M10. SSRF Risk in SAML Metadata Parsing
+- **File**: `saml.py:107-119`
+- **Issue**: `parse_remote(url)` fetches arbitrary user-supplied URL from the server side. Admin-only, but classic SSRF vector targeting cloud metadata endpoints (`169.254.169.254`).
+- **Remediation**: Validate URL against allowlist or block private IP ranges.
+
+### M11. SSRF Risk in Webhook/Notification URLs
+- **File**: `services/webhook_service.py:90-95`, `services/notification_dispatcher.py:66,125`
+- **Issue**: Webhook URLs stored by admins are fetched with `requests.post()` without blocking private IP ranges.
+- **Remediation**: Add URL validation blocking RFC 1918, link-local, and cloud metadata ranges.
+
+### M12. Unbounded Pagination on `/api/identities`
+- **File**: `handlers.py:580`
+- **Issue**: `limit = request.args.get("limit", type=int)` has no upper bound. `limit=999999` returns all records.
+- **Remediation**: Add `min(limit, 500)` cap.
+
+### M13. Exception Details Leaked to Clients
+- **File**: `handlers.py:15777, 20033, 20277`
+- **Issue**: Diagnostic endpoints return `'detail': str(e)` which can contain DB connection strings, table names, SQL fragments.
+- **Remediation**: Sanitize exception messages or return generic error IDs.
+
+### M14. Default Admin Password Printed to Stdout
+- **File**: `database.py:3865-3870`
+- **Issue**: First-run admin password generation `print()`s password to stdout, which container log aggregation systems capture.
+- **Remediation**: Use `logger.warning()` with a secrets-safe log handler, or write to a file.
+
+### M15. Frontend Missing `max_active_subs` in TIER_LIMITS
+- **File**: `frontend/src/constants/pricing.ts:160`
+- **Issue**: Backend `PLAN_LIMITS` defines `max_active_subs` (free=1, trial=5) but frontend `TIER_LIMITS` doesn't include it. Cannot proactively warn users before activation.
+- **Remediation**: Add `max_active_subs` to frontend `TIER_LIMITS`.
+
+### M16. JWT Access Tokens Not Revocable (24-Hour Window)
+- **File**: `auth.py:20-21`
+- **Issue**: Access tokens are stateless JWTs with 24-hour expiry. No blacklist/revocation mechanism. Stolen tokens remain valid for up to 24 hours after password change.
+- **Remediation**: Reduce access token TTL to 15-30 minutes, or add a Redis-backed token blacklist.
+
+### M17. No User-Facing "Logout All Devices" Endpoint
+- **Issue**: `revoke_all_user_tokens()` exists in the DB layer but is only called internally. No user-facing API to revoke all sessions.
+- **Remediation**: Add `POST /api/auth/logout-all` endpoint.
+
+### M18. CORS Origin `*` Not Validated at Startup
+- **File**: `main.py:301-302`
+- **Issue**: If `CORS_ORIGINS` env var is set to `*`, CORS is wide open. No startup validation.
+- **Remediation**: Reject `*` origin in production; log warning if localhost origins in production.
+
+### M19. `GET /api/client/connections` Missing Role Decorator
+- **File**: `main.py:1284-1286`
+- **Issue**: Unlike all other cloud connection endpoints (create/update/delete/test), the GET list has no `@require_role` decorator. Any authenticated user can list connections.
+- **Remediation**: Add `@require_role('admin', 'security_admin')`.
+
+---
+
+## LOW Findings (12)
+
+| # | Finding | File |
+|---|---------|------|
+| L1 | Host guard only checks `auditgraph` domain pattern — custom CNAMEs bypass | `auth.py:198` |
+| L2 | Null `tenant_id` users not blocked by host guard | `auth.py:213-215` |
+| L3 | Superadmins can mark any tenant's notifications as read | `handlers.py:3065-3089` |
+| L4 | `set_tenant_context` does not commit the `set_config` (harmless but fragile) | `database.py:91-104` |
+| L5 | Negative offset not validated (harmless — PostgreSQL treats as 0) | `handlers.py:581` |
+| L6 | Stripe webhook timestamp not checked for replay | `handlers.py:20449` |
+| L7 | Admin password to stdout on first run | `database.py:3865` |
+| L8 | Unused dependencies (FastAPI, Starlette, Uvicorn) in requirements | `requirements.txt` |
+| L9 | Unpinned/mixed dependency versions | `requirements.txt` |
+| L10 | Build tools (gcc) left in production Docker image | `backend/Dockerfile:7-14` |
+| L11 | No `.dockerignore` in backend directory | `backend/` |
+| L12 | No `Content-Security-Policy` header on API responses | `security.py:112-142` |
+
+---
+
+## Remediation Roadmap to 10/10
+
+### Sprint 1 — Critical + Security (Target: 8/10)
+
+| # | Action | Effort | Dimension |
+|---|--------|--------|-----------|
+| R1 | Add RLS to `cloud_connections` table (CREATE POLICY + trigger) | 1hr | Isolation |
+| R2 | Add plan limit check in `activate_all_subscriptions()` | 30min | Billing |
+| R3 | Archive audit logs before tenant deletion (S3/Blob export) | 4hr | Auditability |
+| R4 | Gate remaining 14 routes with `@require_feature` | 1hr | Entitlement |
+| R5 | Log API key auth failures and authorization 403s | 1hr | Auditability |
+| R6 | Add `log_admin_audit()` to tenant create/delete, platform settings, pilot setup | 1hr | Auditability |
+| R7 | Enforce 90-day minimum retention floor for activity/admin audit logs | 1hr | Auditability |
+| R8 | Remove dead code `_check_tier_limits()` or wire it in | 30min | Entitlement |
+
+### Sprint 2 — Hardening (Target: 9/10)
+
+| # | Action | Effort | Dimension |
+|---|--------|--------|-----------|
+| R9 | Fail-closed on host-tenant guard DB errors (503 not pass) | 1hr | Isolation |
+| R10 | Add tenant_id filter to API key lookup + store tenant_id at creation | 2hr | Security |
+| R11 | Block private IPs in SSRF vectors (SAML metadata, webhooks) | 2hr | Security |
+| R12 | Add per-tenant rate limiting on data endpoints (Redis-backed) | 4hr | Security |
+| R13 | DB-level trigger preventing invoice financial field mutation | 1hr | Billing |
+| R14 | Reduce JWT access token TTL to 15min, add refresh-on-expiry | 2hr | Security |
+| R15 | Add `POST /api/auth/logout-all` endpoint | 1hr | Security |
+| R16 | Use `Database(tenant_id=tid)` in NotificationService writes | 1hr | Isolation |
+| R17 | Sanitize public slug endpoint response (omit id, plan) | 30min | Security |
+
+### Sprint 3 — Polish (Target: 10/10)
+
+| # | Action | Effort | Dimension |
+|---|--------|--------|-----------|
+| R18 | Cap `/api/identities` pagination to 500 | 15min | Security |
+| R19 | Validate CORS origins at startup (reject `*` in production) | 30min | Security |
+| R20 | Add `@require_role` to `GET /api/client/connections` | 15min | Security |
+| R21 | Pin all dependencies in requirements.txt | 1hr | Infra |
+| R22 | Remove unused dependencies (FastAPI, Starlette, Uvicorn) | 15min | Infra |
+| R23 | Multi-stage Docker build (remove gcc from production) | 1hr | Infra |
+| R24 | Add `.dockerignore` | 15min | Infra |
+| R25 | Add CSP header to API responses | 30min | Security |
+| R26 | Sanitize exception details in diagnostic endpoint responses | 30min | Security |
+| R27 | Log anomaly resolution, resource declassification, invoice ops | 1hr | Auditability |
+| R28 | Restrict portal_role host-guard exemption to superadmin+poweradmin only | 30min | Isolation |
+| R29 | Add `max_active_subs` to frontend TIER_LIMITS | 15min | Entitlement |
+
+---
+
+## Post-Remediation Target Scores
+
+| Dimension | Current | After Sprint 1 | After Sprint 2 | After Sprint 3 |
+|-----------|---------|----------------|----------------|----------------|
+| Control Plane Isolation | 7/10 | 8/10 | 9/10 | 10/10 |
+| Multi-Tenant Security | 7/10 | 7/10 | 9/10 | 10/10 |
+| Billing Governance | 6/10 | 8/10 | 9/10 | 10/10 |
+| Entitlement Enforcement | 5/10 | 8/10 | 9/10 | 10/10 |
+| Auditability | 6/10 | 8/10 | 9/10 | 10/10 |
+| **Overall** | **6.5** | **7.8** | **9.0** | **10.0** |
+
+---
+
+## Strengths (What's Working Well)
+
+1. **RLS architecture is sound** — 44 tables with strict policies, dual DB users, auto-fill triggers, NOT NULL constraints
+2. **Parameterized SQL everywhere** — zero SQL injection in query paths, allowlist-based query builder
+3. **Billing event immutability** — SHA-256 content hash, status-only updates, dual logging (billing_events + admin_audit)
+4. **Per-tenant scheduler isolation** — each job loops per-tenant with `Database(tenant_id=tid)`, try/except per tenant
+5. **Secret masking** — credentials masked in API responses, environment-based secret management, CI/CD uses GitHub Secrets
+6. **Security headers** — HSTS, X-Frame-Options, X-Content-Type-Options, Cache-Control, Permissions-Policy all properly set
+7. **Account lockout** — failed login tracking with lockout after threshold
+8. **Refresh token rotation** — old token revoked on refresh, 7-day expiry, revoke-all on user deletion
