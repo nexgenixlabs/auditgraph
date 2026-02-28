@@ -34,6 +34,8 @@ export interface ConnectionsTabProps {
   setWizardClientId: (v: string) => void;
   wizardClientSecret: string;
   setWizardClientSecret: (v: string) => void;
+  wizardRegion: string;
+  setWizardRegion: (v: string) => void;
   wizardTesting: boolean;
   wizardTestResult: ConnectionTestResult | null;
   wizardSaving: boolean;
@@ -80,6 +82,8 @@ export function ConnectionsTab({
   setWizardClientId,
   wizardClientSecret,
   setWizardClientSecret,
+  wizardRegion,
+  setWizardRegion,
   wizardTesting,
   wizardTestResult,
   wizardSaving,
@@ -244,7 +248,7 @@ export function ConnectionsTab({
                         <p className="text-sm text-gray-600">Select the cloud provider for this connection.</p>
                         {[
                           { key: 'azure', label: 'Azure / Entra ID', desc: 'Microsoft Azure cloud and Entra directory', color: 'blue' },
-                          { key: 'aws', label: 'AWS', desc: 'Amazon Web Services (coming soon)', color: 'orange', disabled: true },
+                          { key: 'aws', label: 'AWS', desc: 'Amazon Web Services', color: 'orange' },
                           { key: 'gcp', label: 'GCP', desc: 'Google Cloud Platform (coming soon)', color: 'red', disabled: true },
                         ].map(c => (
                           <button
@@ -280,49 +284,93 @@ export function ConnectionsTab({
                     {/* Step 1: Enter Credentials */}
                     {wizardStep === 1 && (
                       <div className="space-y-3">
-                        <p className="text-sm text-gray-600">Enter your Azure service principal credentials.</p>
+                        <p className="text-sm text-gray-600">
+                          {wizardCloud === 'aws' ? 'Enter your AWS IAM credentials.' : 'Enter your Azure service principal credentials.'}
+                        </p>
                         <div>
                           <label className="block text-xs font-medium text-gray-700 mb-1">Connection Name</label>
                           <input
                             value={wizardLabel}
                             onChange={e => setWizardLabel(e.target.value)}
-                            placeholder="e.g., Production Entra Directory"
+                            placeholder={wizardCloud === 'aws' ? 'e.g., Production AWS Account' : 'e.g., Production Entra Directory'}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
                           />
                         </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Entra Directory ID</label>
-                          <input
-                            value={wizardEntraTenantId}
-                            onChange={e => setWizardEntraTenantId(e.target.value)}
-                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Application (Client) ID</label>
-                          <input
-                            value={wizardClientId}
-                            onChange={e => setWizardClientId(e.target.value)}
-                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Client Secret</label>
-                          <input
-                            type="password"
-                            value={wizardClientSecret}
-                            onChange={e => setWizardClientSecret(e.target.value)}
-                            placeholder="Enter client secret"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
+                        {wizardCloud === 'azure' && (
+                          <>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700 mb-1">Entra Directory ID</label>
+                              <input
+                                value={wizardEntraTenantId}
+                                onChange={e => setWizardEntraTenantId(e.target.value)}
+                                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700 mb-1">Application (Client) ID</label>
+                              <input
+                                value={wizardClientId}
+                                onChange={e => setWizardClientId(e.target.value)}
+                                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700 mb-1">Client Secret</label>
+                              <input
+                                type="password"
+                                value={wizardClientSecret}
+                                onChange={e => setWizardClientSecret(e.target.value)}
+                                placeholder="Enter client secret"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                          </>
+                        )}
+                        {wizardCloud === 'aws' && (
+                          <>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700 mb-1">Access Key ID</label>
+                              <input
+                                value={wizardClientId}
+                                onChange={e => setWizardClientId(e.target.value)}
+                                placeholder="AKIA..."
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700 mb-1">Secret Access Key</label>
+                              <input
+                                type="password"
+                                value={wizardClientSecret}
+                                onChange={e => setWizardClientSecret(e.target.value)}
+                                placeholder="Enter secret access key"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700 mb-1">Region</label>
+                              <select
+                                value={wizardRegion}
+                                onChange={e => setWizardRegion(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                              >
+                                <option value="us-east-1">US East (N. Virginia)</option>
+                                <option value="us-west-2">US West (Oregon)</option>
+                                <option value="eu-west-1">EU (Ireland)</option>
+                                <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                              </select>
+                            </div>
+                          </>
+                        )}
                         <div className="flex justify-between pt-2">
                           <button onClick={() => setWizardStep(0)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
                           <button
                             onClick={() => setWizardStep(2)}
-                            disabled={!wizardLabel || !wizardEntraTenantId || !wizardClientId || !wizardClientSecret}
+                            disabled={!wizardLabel || (wizardCloud === 'azure'
+                              ? (!wizardEntraTenantId || !wizardClientId || !wizardClientSecret)
+                              : (!wizardClientId || !wizardClientSecret))}
                             className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             Next: Test Connection
@@ -334,11 +382,18 @@ export function ConnectionsTab({
                     {/* Step 2: Test Connection */}
                     {wizardStep === 2 && (
                       <div className="space-y-4">
-                        <p className="text-sm text-gray-600">Verify that AuditGraph can connect to your Entra directory.</p>
+                        <p className="text-sm text-gray-600">
+                          {wizardCloud === 'aws' ? 'Verify that AuditGraph can connect to your AWS account.' : 'Verify that AuditGraph can connect to your Entra directory.'}
+                        </p>
                         <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
                           <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
                           <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
-                          <div className="flex justify-between"><span className="text-gray-500">Directory</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                          {wizardCloud === 'azure' && (
+                            <div className="flex justify-between"><span className="text-gray-500">Directory</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                          )}
+                          {wizardCloud === 'aws' && (
+                            <div className="flex justify-between"><span className="text-gray-500">Region</span><span className="font-semibold text-gray-800">{wizardRegion}</span></div>
+                          )}
                         </div>
                         {wizardTestResult && (
                           <div className={`rounded-lg p-3 text-sm ${
@@ -384,9 +439,17 @@ export function ConnectionsTab({
                         <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
                           <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
                           <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
-                          <div className="flex justify-between"><span className="text-gray-500">Directory ID</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                          {wizardCloud === 'azure' && (
+                            <div className="flex justify-between"><span className="text-gray-500">Directory ID</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                          )}
+                          {wizardCloud === 'aws' && (
+                            <div className="flex justify-between"><span className="text-gray-500">Region</span><span className="font-semibold text-gray-800">{wizardRegion}</span></div>
+                          )}
                           {wizardTestResult?.subscriptions && (
-                            <div className="flex justify-between"><span className="text-gray-500">Subscriptions</span><span className="font-semibold text-gray-800">{wizardTestResult.subscriptions.length} found</span></div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">{wizardCloud === 'aws' ? 'Account' : 'Subscriptions'}</span>
+                              <span className="font-semibold text-gray-800">{wizardTestResult.subscriptions.length} found</span>
+                            </div>
                           )}
                         </div>
                         <div className="flex justify-between pt-2">

@@ -1489,3 +1489,76 @@ Added JSDoc at top of file:
 | `compute_invoice_hash()` deterministic | Confirmed — same input produces same 64-char hex |
 | Hash length | 64 characters (SHA-256 hex) |
 | Python import | `from app.pricing import compute_invoice_hash` — OK |
+
+---
+
+# Phase 22 — AWS IAM Discovery Engine
+
+**Date**: 2026-02-27
+
+## Summary
+
+Full AWS IAM identity discovery with risk scoring, extending the same tenant isolation, billing, and snapshot integrity patterns used by the Azure engine. The scheduler now dispatches to the correct engine based on cloud type.
+
+## Changes
+
+### 1. Backend Dependencies
+- Added `boto3>=1.34.0` to `requirements.txt`
+
+### 2. Risk Catalog (`risk_catalog.py`)
+- Replaced 2 AWS placeholder factors with 15 production factors
+- Categories: `aws_iam` with severity from critical (450 pts) down to low (30 pts)
+- All factors include `"cloud": "aws"` for filterability
+
+### 3. Identity Categories (`models.py`)
+- Added `IAM_USER`, `IAM_ROLE`, `IAM_SERVICE_LINKED_ROLE` to `IdentityCategory` enum
+
+### 4. AWS Discovery Engine (`aws_discovery.py`)
+- Full replacement of 115-line stub (~420 lines)
+- `__init__`: boto3 Session + IAM/STS clients with adaptive retry, STS account validation
+- `test_connection()`: STS `get_caller_identity` check
+- `run_discovery()`: orchestrates user + role discovery, risk scoring, activity check, DB save
+- `_discover_iam_users()`: paginated user list, per-user access keys, MFA, policies, groups, console access
+- `_discover_iam_roles()`: paginated role list, attached/inline policies, trust policy analysis
+- `_analyze_trust_policy()`: parses AssumeRolePolicyDocument for cross-account, wildcard, federated trust
+- `_calculate_risks()`: V2 catalog scoring with `make_factor()` + `score_to_level_v2()`
+- `_check_activity()`: activity status from PasswordLastUsed / RoleLastUsed / AccessKeyLastUsed
+- `_save_identities()`: saves to identities table with `cloud='aws'`, policies as role_assignments
+- `_sync_aws_account()`: inserts account into `cloud_subscriptions` with rate_cents=7900
+- Cross-account bleed prevention: validates `aws_account_id` match before save
+
+### 5. Scheduler (`scheduler.py`)
+- Added `AWSDiscoveryEngine` import
+- Removed `cloud='azure'` filter — now fetches all cloud connections
+- Removed `client_secret` gate — per-cloud validation in `_run_connection_discovery()`
+- Multi-cloud dispatch: azure → AzureDiscoveryEngine, aws → AWSDiscoveryEngine, else → skip
+
+### 6. Connection Handlers (`handlers.py`)
+- `test_client_connection()`: added `elif cloud == 'aws'` branch (STS test, account discovery)
+- `create_client_connection()`: added AWS auto-discover branch (STS → account_id → cloud_subscriptions)
+
+### 7. Frontend Settings.tsx
+- Added `wizardRegion` state (default `us-east-1`)
+- `handleWizardTest()`: cloud-aware payload (access_key_id/secret_access_key for AWS)
+- `handleWizardSave()`: cloud-aware payload with IAM connection_type and region metadata
+- `resetWizard()`: resets wizardRegion
+- Passes `wizardRegion`/`setWizardRegion` to ConnectionsTab
+
+### 8. Frontend ConnectionsTab.tsx
+- Added `wizardRegion`/`setWizardRegion` to props interface
+- Step 0: Removed `disabled: true` from AWS option
+- Step 1: Cloud-aware credential fields (Azure: Directory/Client ID/Secret; AWS: Access Key/Secret Key/Region)
+- Step 1: Cloud-aware validation (AWS doesn't require Entra Directory ID)
+- Step 2: Shows "Region" for AWS, "Directory" for Azure in summary
+- Step 3: Cloud-aware confirmation summary
+
+## Verification
+
+| Check | Result |
+|-------|--------|
+| `pip install boto3` | Installed successfully |
+| `from app.engines.discovery.aws_discovery import AWSDiscoveryEngine` | OK |
+| AWS risk factors count | 15 factors |
+| `from app.scheduler import run_scheduled_discovery` | OK (multi-cloud import) |
+| `npx tsc --noEmit` | Zero TypeScript errors |
+| Identity categories | `iam_user`, `iam_role`, `iam_service_linked_role` present |

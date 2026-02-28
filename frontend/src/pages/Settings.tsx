@@ -359,6 +359,7 @@ export default function Settings() {
   const [wizardEntraTenantId, setWizardEntraTenantId] = useState('');
   const [wizardClientId, setWizardClientId] = useState('');
   const [wizardClientSecret, setWizardClientSecret] = useState('');
+  const [wizardRegion, setWizardRegion] = useState('us-east-1');
   const [wizardTesting, setWizardTesting] = useState(false);
   const [wizardTestResult, setWizardTestResult] = useState<{ status: string; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
   const [wizardSaving, setWizardSaving] = useState(false);
@@ -404,12 +405,9 @@ export default function Settings() {
       const res = await fetch('/api/client/connections/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cloud: wizardCloud,
-          entra_tenant_id: wizardEntraTenantId,
-          client_id: wizardClientId,
-          client_secret: wizardClientSecret,
-        }),
+        body: JSON.stringify(wizardCloud === 'aws'
+          ? { cloud: 'aws', access_key_id: wizardClientId, secret_access_key: wizardClientSecret, region: wizardRegion }
+          : { cloud: wizardCloud, entra_tenant_id: wizardEntraTenantId, client_id: wizardClientId, client_secret: wizardClientSecret }),
       });
       const data = await res.json();
       setWizardTestResult(data);
@@ -427,15 +425,17 @@ export default function Settings() {
       const res = await fetch('/api/client/connections', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cloud: wizardCloud,
-          label: wizardLabel,
-          entra_tenant_id: wizardEntraTenantId,
-          client_id: wizardClientId,
-          client_secret: wizardClientSecret,
-          connection_type: 'entra',
-          status: 'connected',
-        }),
+        body: JSON.stringify(wizardCloud === 'aws'
+          ? {
+              cloud: 'aws', label: wizardLabel, client_id: wizardClientId,
+              client_secret: wizardClientSecret, connection_type: 'iam', status: 'connected',
+              metadata: { access_key_id: wizardClientId, secret_access_key: wizardClientSecret, region: wizardRegion },
+            }
+          : {
+              cloud: wizardCloud, label: wizardLabel, entra_tenant_id: wizardEntraTenantId,
+              client_id: wizardClientId, client_secret: wizardClientSecret,
+              connection_type: 'entra', status: 'connected',
+            }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -467,6 +467,7 @@ export default function Settings() {
     setWizardEntraTenantId('');
     setWizardClientId('');
     setWizardClientSecret('');
+    setWizardRegion('us-east-1');
     setWizardTestResult(null);
   }
 
@@ -1848,6 +1849,8 @@ export default function Settings() {
               setWizardClientId={setWizardClientId}
               wizardClientSecret={wizardClientSecret}
               setWizardClientSecret={setWizardClientSecret}
+              wizardRegion={wizardRegion}
+              setWizardRegion={setWizardRegion}
               wizardTesting={wizardTesting}
               wizardTestResult={wizardTestResult}
               wizardSaving={wizardSaving}

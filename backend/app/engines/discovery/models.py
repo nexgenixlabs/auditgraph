@@ -230,6 +230,9 @@ class IdentityCategory(Enum):
     HUMAN_USER = "human_user"
     GUEST = "guest"
     MICROSOFT_INTERNAL = "microsoft_internal"
+    IAM_USER = "iam_user"
+    IAM_ROLE = "iam_role"
+    IAM_SERVICE_LINKED_ROLE = "iam_service_linked_role"
     UNKNOWN = "unknown"
 
 

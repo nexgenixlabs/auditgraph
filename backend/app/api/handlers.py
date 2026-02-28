@@ -10905,7 +10905,7 @@ def create_client_connection():
             conn = db.update_cloud_connection(conn['id'], status='connected',
                                                last_test_status='success') or conn
 
-        # Auto-discover subscriptions for verified Azure connections
+        # Auto-discover subscriptions/accounts for verified connections
         discovered_count = 0
         discovered_subs = []
         if cloud == 'azure' and status == 'connected' and client_secret and entra_tenant_id and client_id:
@@ -10930,6 +10930,29 @@ def create_client_connection():
                 discovered_subs = subs_list
             except Exception:
                 pass  # Non-fatal — connection is still saved
+        elif cloud == 'aws' and status == 'connected':
+            access_key_id = metadata.get('access_key_id') or client_id
+            secret_access_key = metadata.get('secret_access_key') or client_secret
+            if access_key_id and secret_access_key:
+                try:
+                    import boto3
+                    sts = boto3.client(
+                        'sts',
+                        aws_access_key_id=access_key_id,
+                        aws_secret_access_key=secret_access_key,
+                        region_name=metadata.get('region', 'us-east-1'),
+                    )
+                    caller = sts.get_caller_identity()
+                    account_id = caller.get('Account', '')
+                    if account_id:
+                        subs_list = [{'id': account_id, 'name': f'AWS Account {account_id}'}]
+                        discovered_count = db.insert_discovered_subscriptions(
+                            tid, cloud, conn['id'], subs_list)
+                        discovered_subs = subs_list
+                        # Store account_id as entra_tenant_id for UNIQUE constraint compatibility
+                        db.update_cloud_connection(conn['id'], entra_tenant_id=account_id)
+                except Exception:
+                    pass  # Non-fatal
 
         _log(db, 'connection_created', f'Created {cloud} connection: {label}',
              {'connection_id': conn['id'], 'cloud': cloud, 'discovered_subs': discovered_count})
@@ -11067,6 +11090,58 @@ def test_client_connection():
                 'status': 'error',
                 'error': 'Connection test failed',
                 'message': 'Failed to connect. Check your credentials.',
+            }), 400
+    elif cloud == 'aws':
+        access_key_id = (data.get('access_key_id') or data.get('client_id') or '').strip()
+        secret_access_key = (data.get('secret_access_key') or data.get('client_secret') or '').strip()
+        region = (data.get('region') or 'us-east-1').strip()
+
+        if not all([access_key_id, secret_access_key]):
+            return jsonify({'error': 'Access Key ID and Secret Access Key are required'}), 400
+
+        try:
+            import boto3
+            sts = boto3.client(
+                'sts',
+                aws_access_key_id=access_key_id,
+                aws_secret_access_key=secret_access_key,
+                region_name=region,
+            )
+            caller = sts.get_caller_identity()
+            account_id = caller.get('Account', '')
+
+            # Update connection test status if connection_id provided
+            connection_id_param = data.get('connection_id')
+            if connection_id_param:
+                db = Database()
+                try:
+                    db.update_cloud_connection(connection_id_param,
+                                               last_test_at=datetime.now(timezone.utc).isoformat(),
+                                               last_test_status='success',
+                                               status='connected')
+                finally:
+                    db.close()
+
+            return jsonify({
+                'status': 'success',
+                'subscriptions': [{'id': account_id, 'name': f'AWS Account {account_id}'}],
+                'message': f'Connected successfully. AWS Account: {account_id}',
+            })
+        except Exception as e:
+            connection_id_param = data.get('connection_id')
+            if connection_id_param:
+                db = Database()
+                try:
+                    db.update_cloud_connection(connection_id_param,
+                                               last_test_at=datetime.now(timezone.utc).isoformat(),
+                                               last_test_status='failed')
+                finally:
+                    db.close()
+            logger.error(f"AWS connection test failed: {e}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'error': 'Connection test failed',
+                'message': 'Failed to connect to AWS. Check your credentials.',
             }), 400
     else:
         return jsonify({'error': f'Cloud provider "{cloud}" test not yet supported'}), 400

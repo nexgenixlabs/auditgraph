@@ -44,6 +44,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
 from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+from app.engines.discovery.aws_discovery import AWSDiscoveryEngine
 from app.engines.drift_detector import DriftDetector
 from app.engines.anomaly_detector import AnomalyDetector
 from app.services.email_service import EmailService
@@ -144,7 +145,7 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
     """
     admin_db = Database()
     try:
-        connections = admin_db.get_cloud_connections(db_tenant_id, cloud='azure',
+        connections = admin_db.get_cloud_connections(db_tenant_id,
                                                      include_secrets=True)
     finally:
         admin_db.close()
@@ -163,10 +164,6 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
         logger.info(f"  Found {len(connected)} connected connection(s) for {tenant_name}")
         any_ran = False
         for conn in connected:
-            meta = conn.get('metadata') or {}
-            if not meta.get('client_secret'):
-                logger.warning(f"  ⚠ Connection '{conn.get('label')}' (id={conn['id']}) missing client_secret in metadata — skipping")
-                continue
             _run_connection_discovery(db_tenant_id, tenant_name, conn, scan_mode)
             any_ran = True
         if not any_ran:
@@ -215,27 +212,43 @@ def _run_connection_discovery(db_tenant_id: int, tenant_name: str, conn: dict, s
     label = conn.get('label', 'Unknown')
     cloud = conn.get('cloud', 'azure')
 
-    # Extract credentials from connection fields + metadata
-    entra_tenant_id = conn.get('entra_tenant_id')
-    client_id = conn.get('client_id')
     metadata = conn.get('metadata') or {}
-    client_secret = metadata.get('client_secret')
-
-    if not all([entra_tenant_id, client_id, client_secret]):
-        logger.warning(f"  ⏭ Skipping connection '{label}' (id={conn_id}) — incomplete credentials")
-        return
 
     logger.info(f"  ▶ Scanning connection '{label}' (id={conn_id}, cloud={cloud})")
 
-    # Initialize discovery engine with connection-specific credentials
-    engine = AzureDiscoveryEngine(
-        tenant_id=entra_tenant_id,
-        client_id=client_id,
-        client_secret=client_secret,
-        db_tenant_id=db_tenant_id,
-        cloud_connection_id=conn_id,
-    )
-    logger.info(f"    ✓ Engine initialized for '{label}'")
+    if cloud == 'azure':
+        entra_tenant_id = conn.get('entra_tenant_id')
+        client_id = conn.get('client_id')
+        client_secret = metadata.get('client_secret')
+        if not all([entra_tenant_id, client_id, client_secret]):
+            logger.warning(f"  ⏭ Skipping '{label}' — incomplete Azure credentials")
+            return
+        engine = AzureDiscoveryEngine(
+            tenant_id=entra_tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            db_tenant_id=db_tenant_id,
+            cloud_connection_id=conn_id,
+        )
+    elif cloud == 'aws':
+        access_key_id = metadata.get('access_key_id') or conn.get('client_id')
+        secret_access_key = metadata.get('secret_access_key') or metadata.get('client_secret')
+        region = metadata.get('region', 'us-east-1')
+        if not all([access_key_id, secret_access_key]):
+            logger.warning(f"  ⏭ Skipping '{label}' — incomplete AWS credentials")
+            return
+        engine = AWSDiscoveryEngine(
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            region=region,
+            db_tenant_id=db_tenant_id,
+            cloud_connection_id=conn_id,
+        )
+    else:
+        logger.info(f"  ⏭ Skipping unsupported cloud '{cloud}' for connection '{label}'")
+        return
+
+    logger.info(f"    ✓ {cloud.upper()} engine initialized for '{label}'")
 
     engine.run_discovery()
     logger.info(f"    ✅ Discovery completed for connection '{label}'")
