@@ -10853,7 +10853,7 @@ def get_client_connections():
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
     cloud = request.args.get('cloud')
-    db = Database()
+    db = _db()
     try:
         connections = db.get_cloud_connections(tid, cloud=cloud)
 
@@ -10925,7 +10925,7 @@ def create_client_connection():
     if client_secret:
         metadata['client_secret'] = client_secret
 
-    db = Database()
+    db = _db()
     try:
         conn = db.create_cloud_connection(
             tenant_id=tid, cloud=cloud, label=label,
@@ -11013,7 +11013,7 @@ def update_client_connection(connection_id):
     if not data:
         return jsonify({'error': 'Expected JSON body'}), 400
 
-    db = Database()
+    db = _db()
     try:
         # Verify ownership
         existing = db.get_cloud_connection_by_id(connection_id)
@@ -11039,7 +11039,7 @@ def delete_client_connection(connection_id):
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
 
-    db = Database()
+    db = _db()
     try:
         existing = db.get_cloud_connection_by_id(connection_id)
         if not existing or existing['tenant_id'] != tid:
@@ -11094,7 +11094,7 @@ def test_client_connection():
             # If connection_id provided, update its test status
             connection_id = data.get('connection_id')
             if connection_id:
-                db = Database()
+                db = _db()
                 try:
                     db.update_cloud_connection(connection_id,
                                                last_test_at=datetime.now(timezone.utc).isoformat(),
@@ -11112,7 +11112,7 @@ def test_client_connection():
             # Update test status on failure
             connection_id = data.get('connection_id')
             if connection_id:
-                db = Database()
+                db = _db()
                 try:
                     db.update_cloud_connection(connection_id,
                                                last_test_at=datetime.now(timezone.utc).isoformat(),
@@ -11147,7 +11147,7 @@ def test_client_connection():
             # Update connection test status if connection_id provided
             connection_id_param = data.get('connection_id')
             if connection_id_param:
-                db = Database()
+                db = _db()
                 try:
                     db.update_cloud_connection(connection_id_param,
                                                last_test_at=datetime.now(timezone.utc).isoformat(),
@@ -11164,7 +11164,7 @@ def test_client_connection():
         except Exception as e:
             connection_id_param = data.get('connection_id')
             if connection_id_param:
-                db = Database()
+                db = _db()
                 try:
                     db.update_cloud_connection(connection_id_param,
                                                last_test_at=datetime.now(timezone.utc).isoformat(),
@@ -11187,7 +11187,7 @@ def discover_client_connection(connection_id):
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
 
-    db = Database()
+    db = _db()
     try:
         existing = db.get_cloud_connection_by_id(connection_id)
         if not existing or existing['tenant_id'] != tid:

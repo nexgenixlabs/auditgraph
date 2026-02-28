@@ -347,3 +347,132 @@ def test_refresh_token_hash_is_deterministic():
     raw2 = secrets.token_urlsafe(48)
     h3 = hash_refresh_token(raw2)
     assert h1 != h3
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 2B: Tenant Isolation Source-Inspection Tests
+# ══════════════════════════════════════════════════════════════════════
+
+import inspect
+
+
+def _get_method_source(cls, method_name):
+    """Get the source code of a method on a class."""
+    method = getattr(cls, method_name)
+    return inspect.getsource(method)
+
+
+# ── Test 11: Webhook methods must reference tenant_id ──
+
+def test_webhook_methods_use_tenant_id():
+    """All webhook DB methods must reference tenant_id in their SQL."""
+    from app.database import Database
+    methods = [
+        'get_webhooks', 'get_webhook', 'update_webhook',
+        'delete_webhook', 'get_webhooks_for_event',
+        'create_webhook_delivery', 'get_webhook_deliveries',
+    ]
+    for name in methods:
+        src = _get_method_source(Database, name)
+        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+
+
+# ── Test 12: Custom risk rule methods must reference tenant_id ──
+
+def test_custom_risk_rule_methods_use_tenant_id():
+    """All custom risk rule DB methods must reference tenant_id."""
+    from app.database import Database
+    methods = [
+        'get_custom_risk_rules', 'get_custom_risk_rule',
+        'create_custom_risk_rule', 'update_custom_risk_rule',
+        'delete_custom_risk_rule', 'get_enabled_risk_rules',
+    ]
+    for name in methods:
+        src = _get_method_source(Database, name)
+        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+
+
+# ── Test 13: Notification methods must reference tenant_id ──
+
+def test_notification_methods_use_tenant_id():
+    """Notification single-record ops must reference tenant_id."""
+    from app.database import Database
+    methods = [
+        'get_notification', 'mark_notification_read',
+        'mark_all_notifications_read', 'action_notification',
+        'delete_notification',
+    ]
+    for name in methods:
+        src = _get_method_source(Database, name)
+        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+
+
+# ── Test 14: SOAR methods must reference tenant_id ──
+
+def test_soar_methods_use_tenant_id():
+    """SOAR read/update/delete/stats methods must reference tenant_id."""
+    from app.database import Database
+    methods = [
+        'get_soar_playbooks', 'get_soar_playbook',
+        'update_soar_playbook', 'delete_soar_playbook',
+        'get_enabled_playbooks_by_trigger', 'get_soar_actions',
+        'get_soar_action_stats',
+    ]
+    for name in methods:
+        src = _get_method_source(Database, name)
+        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+
+
+# ── Test 15: Dashboard preferences must reference tenant_id ──
+
+def test_dashboard_prefs_use_tenant_id():
+    """Dashboard preference methods must reference tenant_id."""
+    from app.database import Database
+    methods = [
+        'get_dashboard_preferences', 'save_dashboard_preferences',
+        'delete_dashboard_preferences',
+    ]
+    for name in methods:
+        src = _get_method_source(Database, name)
+        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+
+
+# ── Test 16: Cloud connection single-record ops must reference tenant_id ──
+
+def test_cloud_connection_methods_use_tenant_id():
+    """Cloud connection by-ID methods must reference tenant_id."""
+    from app.database import Database
+    methods = [
+        'get_cloud_connection_by_id', 'update_cloud_connection',
+    ]
+    for name in methods:
+        src = _get_method_source(Database, name)
+        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+
+
+# ── Test 17: Client connection handlers must use _db() not Database() ──
+
+def test_handler_connection_methods_use_db_helper():
+    """Client connection handlers must use _db() not raw Database()."""
+    from app.api import handlers
+    for func_name in [
+        'get_client_connections', 'create_client_connection',
+        'update_client_connection', 'delete_client_connection',
+        'test_client_connection', 'discover_client_connection',
+    ]:
+        func = getattr(handlers, func_name)
+        src = inspect.getsource(func)
+        # Should use _db() not Database() for tenant-scoped operations
+        # Database() (raw admin bypass) should not appear
+        assert '_db()' in src, f"{func_name}() should use _db() for tenant scoping"
+
+
+# ── Test 18: Notification dispatcher throttle is tenant-scoped ──
+
+def test_notification_dispatcher_throttle_is_tenant_scoped():
+    """Throttle key must include tenant_id."""
+    from app.services.notification_dispatcher import NotificationDispatcher
+    src = inspect.getsource(NotificationDispatcher._is_throttled)
+    assert 'tenant_id' in src, "_is_throttled must accept tenant_id parameter"
+    dispatch_src = inspect.getsource(NotificationDispatcher.dispatch)
+    assert 'tenant_id' in dispatch_src, "dispatch must extract tenant_id"

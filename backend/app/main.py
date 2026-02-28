@@ -379,6 +379,7 @@ def create_app():
         return prometheus_metrics()
 
     @app.get("/api/system/health")
+    @require_portal_access()
     def system_health():
         return get_system_health()
 
@@ -637,6 +638,7 @@ def create_app():
         return admin_impersonate()
 
     @app.post("/api/admin/impersonate/end")
+    @require_portal_role('superadmin', 'poweradmin')
     def admin_end_impersonation_route():
         return admin_end_impersonation()
 

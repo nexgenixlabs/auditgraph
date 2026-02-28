@@ -2952,8 +2952,9 @@ class Database:
                    (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.webhook_id = w.id AND d.status = 'delivered') as successful_deliveries,
                    (SELECT MAX(d.delivered_at) FROM webhook_deliveries d WHERE d.webhook_id = w.id AND d.status = 'delivered') as last_delivered_at
             FROM webhooks w
+            WHERE w.tenant_id = %s
             ORDER BY w.created_at DESC
-        """)
+        """, (self._tenant_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -2966,7 +2967,7 @@ class Database:
         """Get a single webhook by ID."""
         self._ensure_webhook_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM webhooks WHERE id = %s", (webhook_id,))
+        cursor.execute("SELECT * FROM webhooks WHERE id = %s AND tenant_id = %s", (webhook_id, self._tenant_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -3011,11 +3012,12 @@ class Database:
                 params.append(val)
         set_parts.append("updated_at = NOW()")
         params.append(webhook_id)
+        params.append(self._tenant_id)
 
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE webhooks SET {', '.join(set_parts)}
-            WHERE id = %s RETURNING *
+            WHERE id = %s AND tenant_id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -3031,7 +3033,7 @@ class Database:
         """Delete a webhook and its delivery history (CASCADE)."""
         self._ensure_webhook_tables()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM webhooks WHERE id = %s", (webhook_id,))
+        cursor.execute("DELETE FROM webhooks WHERE id = %s AND tenant_id = %s", (webhook_id, self._tenant_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -3043,8 +3045,8 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT * FROM webhooks
-            WHERE enabled = true AND %s = ANY(event_types)
-        """, (event_type,))
+            WHERE enabled = true AND %s = ANY(event_types) AND tenant_id = %s
+        """, (event_type, self._tenant_id))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
@@ -3054,10 +3056,10 @@ class Database:
         self._ensure_webhook_tables()
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status, created_at)
-            VALUES (%s, %s, %s, 'pending', NOW())
+            INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status, created_at, tenant_id)
+            VALUES (%s, %s, %s, 'pending', NOW(), %s)
             RETURNING id
-        """, (webhook_id, event_type, json.dumps(payload)))
+        """, (webhook_id, event_type, json.dumps(payload), self._tenant_id))
         delivery_id = cursor.fetchone()[0]
         self.conn.commit()
         cursor.close()
@@ -3082,12 +3084,13 @@ class Database:
         self._ensure_webhook_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT id, event_type, status, http_status, attempts, created_at, delivered_at
-            FROM webhook_deliveries
-            WHERE webhook_id = %s
-            ORDER BY created_at DESC
+            SELECT d.id, d.event_type, d.status, d.http_status, d.attempts, d.created_at, d.delivered_at
+            FROM webhook_deliveries d
+            JOIN webhooks w ON w.id = d.webhook_id
+            WHERE d.webhook_id = %s AND w.tenant_id = %s
+            ORDER BY d.created_at DESC
             LIMIT %s
-        """, (webhook_id, limit))
+        """, (webhook_id, self._tenant_id, limit))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -3126,7 +3129,7 @@ class Database:
         """Get all custom risk rules ordered by priority."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM custom_risk_rules ORDER BY priority, id")
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE tenant_id = %s ORDER BY priority, id", (self._tenant_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -3138,7 +3141,7 @@ class Database:
         """Get a single custom risk rule by ID."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM custom_risk_rules WHERE id = %s", (rule_id,))
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE id = %s AND tenant_id = %s", (rule_id, self._tenant_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -3155,11 +3158,11 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO custom_risk_rules
-                (name, description, conditions, action_type, points_adjustment, force_level, reason_text, priority, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                (name, description, conditions, action_type, points_adjustment, force_level, reason_text, priority, created_at, updated_at, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s)
             RETURNING *
         """, (name, description, json.dumps(conditions), action_type,
-              points_adjustment or 0, force_level, reason_text, priority or 100))
+              points_adjustment or 0, force_level, reason_text, priority or 100, self._tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3187,11 +3190,12 @@ class Database:
                 params.append(val)
         set_parts.append("updated_at = NOW()")
         params.append(rule_id)
+        params.append(self._tenant_id)
 
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE custom_risk_rules SET {', '.join(set_parts)}
-            WHERE id = %s RETURNING *
+            WHERE id = %s AND tenant_id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -3207,7 +3211,7 @@ class Database:
         """Delete a custom risk rule."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM custom_risk_rules WHERE id = %s", (rule_id,))
+        cursor.execute("DELETE FROM custom_risk_rules WHERE id = %s AND tenant_id = %s", (rule_id, self._tenant_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -3217,7 +3221,7 @@ class Database:
         """Get only enabled custom risk rules, ordered by priority."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM custom_risk_rules WHERE enabled = true ORDER BY priority, id")
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE enabled = true AND tenant_id = %s ORDER BY priority, id", (self._tenant_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
@@ -3294,7 +3298,7 @@ class Database:
         """Get a single notification by ID."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM notifications WHERE id = %s", (notification_id,))
+        cursor.execute("SELECT * FROM notifications WHERE id = %s AND tenant_id = %s", (notification_id, self._tenant_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -3354,8 +3358,8 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             UPDATE notifications SET read = true, read_at = NOW()
-            WHERE id = %s RETURNING *
-        """, (notification_id,))
+            WHERE id = %s AND tenant_id = %s RETURNING *
+        """, (notification_id, self._tenant_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -3371,8 +3375,9 @@ class Database:
         """Mark all unread notifications as read. Returns count updated."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor()
-        if tenant_id is not None:
-            cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false AND tenant_id = %s", (tenant_id,))
+        effective_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
+        if effective_tenant_id is not None:
+            cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false AND tenant_id = %s", (effective_tenant_id,))
         else:
             cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false")
         count = cursor.rowcount
@@ -3387,8 +3392,8 @@ class Database:
         cursor.execute("""
             UPDATE notifications SET actioned = true, action_type = %s, action_at = NOW(),
                    read = true, read_at = COALESCE(read_at, NOW())
-            WHERE id = %s RETURNING *
-        """, (action_type, notification_id))
+            WHERE id = %s AND tenant_id = %s RETURNING *
+        """, (action_type, notification_id, self._tenant_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -3404,7 +3409,7 @@ class Database:
         """Delete a single notification."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM notifications WHERE id = %s", (notification_id,))
+        cursor.execute("DELETE FROM notifications WHERE id = %s AND tenant_id = %s", (notification_id, self._tenant_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -7090,7 +7095,7 @@ class Database:
         """List all SOAR playbooks."""
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM soar_playbooks ORDER BY created_at DESC")
+        cursor.execute("SELECT * FROM soar_playbooks WHERE tenant_id = %s ORDER BY created_at DESC", (self._tenant_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -7103,7 +7108,7 @@ class Database:
         """Get single SOAR playbook by ID."""
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM soar_playbooks WHERE id = %s", (playbook_id,))
+        cursor.execute("SELECT * FROM soar_playbooks WHERE id = %s AND tenant_id = %s", (playbook_id, self._tenant_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -7152,10 +7157,11 @@ class Database:
                 params.append(v)
         set_parts.append("updated_at = NOW()")
         params.append(playbook_id)
+        params.append(self._tenant_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE soar_playbooks SET {', '.join(set_parts)}
-            WHERE id = %s RETURNING *
+            WHERE id = %s AND tenant_id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -7172,7 +7178,7 @@ class Database:
         """Delete a SOAR playbook. Returns True if deleted."""
         self._ensure_soar_tables()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM soar_playbooks WHERE id = %s", (playbook_id,))
+        cursor.execute("DELETE FROM soar_playbooks WHERE id = %s AND tenant_id = %s", (playbook_id, self._tenant_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -7183,8 +7189,8 @@ class Database:
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
-            "SELECT * FROM soar_playbooks WHERE enabled = true AND trigger_type = %s ORDER BY id",
-            (trigger_type,)
+            "SELECT * FROM soar_playbooks WHERE enabled = true AND trigger_type = %s AND tenant_id = %s ORDER BY id",
+            (trigger_type, self._tenant_id)
         )
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
@@ -7240,8 +7246,8 @@ class Database:
     def get_soar_actions(self, limit=50, offset=0, playbook_id=None, status=None, identity_id=None):
         """Get SOAR action history with optional filters."""
         self._ensure_soar_tables()
-        where_parts = []
-        params = []
+        where_parts = ["sa.tenant_id = %s"]
+        params = [self._tenant_id]
         if playbook_id is not None:
             where_parts.append("sa.playbook_id = %s")
             params.append(playbook_id)
@@ -7282,13 +7288,14 @@ class Database:
                 COUNT(*) FILTER (WHERE status = 'pending') as pending_count,
                 COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as recent_24h
             FROM soar_actions
-        """)
+            WHERE tenant_id = %s
+        """, (self._tenant_id,))
         stats = dict(cursor.fetchone())
         stats['success_rate'] = round(stats['success_count'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
         cursor.execute("""
             SELECT integration, COUNT(*) as count
-            FROM soar_actions GROUP BY integration ORDER BY count DESC
-        """)
+            FROM soar_actions WHERE tenant_id = %s GROUP BY integration ORDER BY count DESC
+        """, (self._tenant_id,))
         stats['by_integration'] = {r['integration']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return stats
@@ -7314,6 +7321,12 @@ class Database:
             ON dashboard_preferences(user_id)
         """)
         cursor.execute("ALTER TABLE dashboard_preferences ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        # Composite unique index for multi-tenant isolation
+        cursor.execute("DROP INDEX IF EXISTS idx_dashboard_prefs_user_tenant")
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_prefs_user_tenant
+            ON dashboard_preferences(user_id, tenant_id)
+        """)
         self.conn.commit()
         cursor.close()
 
@@ -7322,8 +7335,8 @@ class Database:
         self._ensure_dashboard_preferences_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
-            "SELECT * FROM dashboard_preferences WHERE user_id = %s",
-            (user_id,)
+            "SELECT * FROM dashboard_preferences WHERE user_id = %s AND tenant_id = %s",
+            (user_id, self._tenant_id)
         )
         row = cursor.fetchone()
         cursor.close()
@@ -7340,13 +7353,13 @@ class Database:
         self._ensure_dashboard_preferences_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO dashboard_preferences (user_id, preferences)
-            VALUES (%s, %s)
-            ON CONFLICT (user_id) DO UPDATE SET
+            INSERT INTO dashboard_preferences (user_id, preferences, tenant_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, tenant_id) DO UPDATE SET
                 preferences = EXCLUDED.preferences,
                 updated_at = NOW()
             RETURNING *
-        """, (user_id, json.dumps(preferences)))
+        """, (user_id, json.dumps(preferences), self._tenant_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -7360,8 +7373,8 @@ class Database:
         self._ensure_dashboard_preferences_table()
         cursor = self.conn.cursor()
         cursor.execute(
-            "DELETE FROM dashboard_preferences WHERE user_id = %s",
-            (user_id,)
+            "DELETE FROM dashboard_preferences WHERE user_id = %s AND tenant_id = %s",
+            (user_id, self._tenant_id)
         )
         deleted = cursor.rowcount > 0
         self.conn.commit()
@@ -8210,6 +8223,21 @@ class Database:
                 updated_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        # RLS policies for tenant isolation (idempotent)
+        cursor.execute("ALTER TABLE copilot_conversations ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE copilot_conversations FORCE ROW LEVEL SECURITY")
+        for policy_stmt in [
+            "CREATE POLICY tenant_strict_sel ON copilot_conversations FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY tenant_strict_ins ON copilot_conversations FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY tenant_strict_upd ON copilot_conversations FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY tenant_strict_del ON copilot_conversations FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+        ]:
+            cursor.execute("SAVEPOINT rls_policy")
+            try:
+                cursor.execute(policy_stmt)
+                cursor.execute("RELEASE SAVEPOINT rls_policy")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
         self.conn.commit()
         cursor.close()
         Database._copilot_ensured = True
@@ -8301,6 +8329,21 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_tenant ON cloud_connections(tenant_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_cloud ON cloud_connections(cloud)")
+        # RLS policies for tenant isolation (idempotent)
+        cursor.execute("ALTER TABLE cloud_connections ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE cloud_connections FORCE ROW LEVEL SECURITY")
+        for policy_stmt in [
+            "CREATE POLICY tenant_strict_sel ON cloud_connections FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY tenant_strict_ins ON cloud_connections FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY tenant_strict_upd ON cloud_connections FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY tenant_strict_del ON cloud_connections FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+        ]:
+            cursor.execute("SAVEPOINT rls_policy")
+            try:
+                cursor.execute(policy_stmt)
+                cursor.execute("RELEASE SAVEPOINT rls_policy")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
         self.conn.commit()
         cursor.close()
         Database._cloud_connections_ensured = True
@@ -8372,7 +8415,10 @@ class Database:
         """Get a single cloud connection by ID."""
         self._ensure_cloud_connections_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM cloud_connections WHERE id = %s", (connection_id,))
+        if self._tenant_id is not None:
+            cursor.execute("SELECT * FROM cloud_connections WHERE id = %s AND tenant_id = %s", (connection_id, self._tenant_id))
+        else:
+            cursor.execute("SELECT * FROM cloud_connections WHERE id = %s", (connection_id,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -8398,10 +8444,15 @@ class Database:
             params.append(json.dumps(v) if k == 'metadata' else v)
         set_parts.append("updated_at = NOW()")
         params.append(connection_id)
+        if self._tenant_id is not None:
+            params.append(self._tenant_id)
+            tenant_clause = " AND tenant_id = %s"
+        else:
+            tenant_clause = ""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE cloud_connections SET {', '.join(set_parts)}
-            WHERE id = %s RETURNING *
+            WHERE id = %s{tenant_clause} RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -9736,6 +9787,23 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_identity_db ON workload_anomaly_events(identity_db_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_type ON workload_anomaly_events(anomaly_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_severity ON workload_anomaly_events(severity)")
+
+            # RLS policies for tenant isolation on all 3 workload tables (idempotent)
+            for tbl in ('workload_signin_events', 'workload_activity_stats', 'workload_anomaly_events'):
+                cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+                cursor.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
+                for policy_stmt in [
+                    f"CREATE POLICY tenant_strict_sel ON {tbl} FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+                    f"CREATE POLICY tenant_strict_ins ON {tbl} FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+                    f"CREATE POLICY tenant_strict_upd ON {tbl} FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+                    f"CREATE POLICY tenant_strict_del ON {tbl} FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+                ]:
+                    cursor.execute("SAVEPOINT rls_policy")
+                    try:
+                        cursor.execute(policy_stmt)
+                        cursor.execute("RELEASE SAVEPOINT rls_policy")
+                    except Exception:
+                        cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
 
             self.conn.commit()
             Database._workload_telemetry_ensured = True

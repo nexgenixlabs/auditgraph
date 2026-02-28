@@ -1017,7 +1017,7 @@ def run_scheduled_report():
                     db.close()
                     continue
 
-                success = email_service.send_scheduled_report()
+                success = email_service.send_scheduled_report(tenant_id=db_tenant_id)
 
                 if success:
                     db.log_activity('report_emailed', f'Scheduled executive summary report sent for {tenant_name}')
