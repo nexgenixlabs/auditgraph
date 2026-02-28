@@ -86,6 +86,9 @@ const settingsIcon = icon('M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 10
 // Connectors
 const connectorsIcon = icon('M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01');
 
+// Billing
+const billingIcon = icon('M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z');
+
 // ── Sidebar Component ─────────────────────────────────────────────
 
 const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
@@ -145,6 +148,14 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           ...(isAdmin ? [{ to: '/settings/general', label: 'Tenant Settings', icon: settingsIcon }] : []),
         ],
       },
+      ...(isAdmin ? [{
+        label: 'Billing',
+        color: '#059669',
+        items: [
+          { to: '/billing', label: 'Billing Overview', icon: billingIcon },
+          { to: '/subscriptions', label: 'Subscriptions', icon: connectorsIcon },
+        ],
+      }] : []),
     ];
     return groups;
   }, [isAdmin]);

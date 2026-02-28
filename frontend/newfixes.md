@@ -1285,3 +1285,207 @@ The AuditGraph multi-tenant isolation is **production-grade** with defense-in-de
 | `frontend/src/components/layout/TopBar.tsx` | 215-273 | TenantSwitcher component |
 | `frontend/src/pages/AdminConsole.tsx` | 1-256 | Admin portal auth gating |
 | `frontend/src/App.tsx` | 187-304 | Route guards, ProtectedRoute |
+
+---
+
+# Phase 21 — Transparent Per-Subscription Billing with Immutable Invoices
+
+**Date**: 2026-02-27
+
+---
+
+## Summary
+
+Added cryptographic integrity (SHA-256 content hashing) to invoices, a unified client-facing billing page with projected charges and invoice verification, a billing preview endpoint, and PDF hash footers. All pricing calculations remain server-side; frontend is display-only.
+
+---
+
+## 1. Invoice Content Hash Function
+
+**File**: `backend/app/pricing.py`
+
+Added `compute_invoice_hash()` — computes SHA-256 over canonical JSON of all immutable financial fields.
+
+- **Canonical JSON**: `sort_keys=True`, `separators=(',', ':')` for deterministic output
+- **Hash scope**: `invoice_number`, `tenant_id`, `period_start`, `period_end`, `subtotal_cents`, `tax_amount_cents`, `discount_cents`, `total_cents`, `line_items`, `seller_snapshot`, `buyer_snapshot`
+- **Excludes mutable fields**: `status`, `paid_at`, `voided_at`, `notes`
+- **Output**: 64-character hex string
+- Consistent with existing SHA-256 patterns (refresh tokens, API keys, webhooks)
+
+---
+
+## 2. Database: `content_hash` Column + Integrity Verification
+
+**File**: `backend/app/database.py`
+
+### DDL
+- `ALTER TABLE invoices ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)` — added in `_ensure_invoices_table()` after existing indexes
+
+### `create_invoice()` updated
+- New parameter: `content_hash=None`
+- Added `content_hash` to INSERT column list, VALUES placeholders, and params tuple
+
+### New method: `verify_invoice_integrity(invoice_id)`
+- Fetches invoice by ID, recomputes hash via `compute_invoice_hash()`, compares against stored `content_hash`
+- Returns: `{verified, content_hash, computed_hash, invoice_id, invoice_number}`
+- Returns `{verified: false, reason: 'No content hash stored'}` for legacy invoices
+
+### Immutability guard comment
+- Added to `update_invoice_status()` documenting that financial fields are never modified after creation
+
+---
+
+## 3. Hash Computation in Invoice Generation
+
+**File**: `backend/app/api/handlers.py` — `generate_invoice()`
+
+- Import updated: `from app.pricing import calculate_invoice, compute_invoice_hash`
+- After `discount_cents` computation, builds `hash_data` dict with all immutable fields
+- Calls `compute_invoice_hash(hash_data)` to get 64-char hex
+- Passes `content_hash=content_hash` to `db.create_invoice()`
+
+---
+
+## 4. Invoice Verification Endpoints
+
+**File**: `backend/app/api/handlers.py`
+
+### `verify_client_invoice(invoice_id)`
+- `GET /api/client/invoices/<id>/verify`
+- Validates tenant_id matches JWT context, rejects draft invoices
+- Calls `db.verify_invoice_integrity(invoice_id)`
+- Role: `admin`, `security_admin`
+
+### `verify_admin_invoice(invoice_id)`
+- `GET /api/admin/invoices/<id>/verify`
+- No tenant restriction (admin portal)
+- Role: `superadmin`, `poweradmin`, `billing`
+
+**File**: `backend/app/main.py` — routes registered:
+
+| Method | Route | Roles |
+|--------|-------|-------|
+| GET | `/api/admin/invoices/<id>/verify` | superadmin, poweradmin, billing |
+| GET | `/api/client/invoices/<id>/verify` | admin, security_admin |
+
+---
+
+## 5. Billing Preview Endpoint (Projected Charges)
+
+**File**: `backend/app/api/handlers.py` — `get_client_billing_preview()`
+
+- `GET /api/client/billing/preview`
+- Fetches tenant + subscriptions, calls `calculate_invoice()` for current calendar month
+- Returns: `period_start`, `period_end`, `plan`, `active_subscriptions`, `subscriptions_by_cloud`, `platform_fee_cents`, `subscription_total_cents`, `discount_pct`, `subtotal_cents`, `tax_*`, `projected_total_cents`, `line_items`, `note`
+- Uses `_tenant_id()` + admin DB for tenant lookup (same pattern as `get_client_billing_summary`)
+
+**File**: `backend/app/main.py` — route:
+
+| Method | Route | Roles |
+|--------|-------|-------|
+| GET | `/api/client/billing/preview` | admin, security_admin |
+
+---
+
+## 6. Unified Client Billing Page
+
+**File**: NEW `frontend/src/pages/ClientBilling.tsx` (~230 lines)
+
+Fetches from 3 endpoints in parallel:
+- `GET /api/client/billing/preview` — projected charges
+- `GET /api/client/invoices` — invoice history
+- `GET /api/subscriptions/stats` — subscription summary
+
+### Sections
+
+1. **4 Summary Cards**: Active Subscriptions, Projected Monthly Cost, Next Invoice (1st of next month), Outstanding Balance (sum of sent/overdue invoices)
+2. **Projected Charges Card**: Current period line items from billing preview, period dates, plan badge (color-coded), per-cloud subscription counts, discount line (green), projected total
+3. **Invoice History Table**: Invoice #, Period, Total, Status (badge), Due Date, Actions (PDF download + Verify button)
+   - Verify button calls `GET /api/client/invoices/<id>/verify` → shows green checkmark or red warning inline
+   - PDF download fetches full invoice then calls `generateInvoicePdf()`
+4. **Server-Side Calculation Notice**: "All billing calculations are computed server-side. Amounts shown are projections based on current subscription configuration."
+
+### UI Patterns
+- Dark mode: `bg-white dark:bg-slate-900`, `text-gray-900 dark:text-white`, `border-gray-200 dark:border-slate-700`
+- Status badges: blue (sent), green (paid), red (overdue), gray (draft/void)
+- Plan badges: gray (free), amber (trial), blue (pro), purple (enterprise)
+- Follows existing Invoices.tsx patterns (Tailwind, apiClient, text sizes)
+
+---
+
+## 7. App + Sidebar Wiring
+
+### `frontend/src/App.tsx`
+- Import: `ClientBilling` from `./pages/ClientBilling`
+- Route: `/billing` → `<ClientBilling />` (with locked guard)
+
+### `frontend/src/components/layout/Sidebar.tsx`
+- New icon: `billingIcon` (credit card SVG path)
+- New nav group: **Billing** (color `#059669`, admin-only)
+  - Billing Overview → `/billing`
+  - Subscriptions → `/subscriptions`
+- Group rendered conditionally: `...(isAdmin ? [{ label: 'Billing', ... }] : [])`
+
+---
+
+## 8. Integrity Hash Footer in Invoice PDF
+
+**File**: `frontend/src/utils/invoicePdfGenerator.ts`
+
+- Added `content_hash?: string` to `Invoice` interface
+- Before the footer divider line, renders integrity hash when present:
+  - Font: 6pt helvetica normal, color rgb(180,180,180)
+  - Text: `Integrity: SHA-256 <64-char-hex>` centered above footer line
+
+---
+
+## 9. Display-Only Documentation Comment
+
+**File**: `frontend/src/constants/pricing.ts`
+
+Added JSDoc at top of file:
+```
+/**
+ * DISPLAY-ONLY pricing constants and helpers.
+ * All billing calculations are performed server-side in backend/app/pricing.py.
+ * These constants are used ONLY for UI display (labels, badges, plan names, rate display).
+ * No values from this file are submitted to the backend for billing computation.
+ */
+```
+
+---
+
+## New API Endpoints
+
+| Method | Route | Handler | Roles |
+|--------|-------|---------|-------|
+| GET | `/api/client/billing/preview` | `get_client_billing_preview` | admin, security_admin |
+| GET | `/api/client/invoices/<id>/verify` | `verify_client_invoice` | admin, security_admin |
+| GET | `/api/admin/invoices/<id>/verify` | `verify_admin_invoice` | superadmin, poweradmin, billing |
+
+---
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `backend/app/pricing.py` | Added `compute_invoice_hash()` with SHA-256 canonical JSON |
+| `backend/app/database.py` | `content_hash` column DDL, `create_invoice()` param, `verify_invoice_integrity()` method, immutability guard comment |
+| `backend/app/api/handlers.py` | Hash in `generate_invoice()`, 3 new handlers (verify_client, verify_admin, billing_preview) |
+| `backend/app/main.py` | 3 new route registrations + handler imports |
+| `frontend/src/pages/ClientBilling.tsx` | **NEW** — unified billing page |
+| `frontend/src/App.tsx` | `/billing` route + ClientBilling import |
+| `frontend/src/components/layout/Sidebar.tsx` | `billingIcon` + Billing nav group (admin-only) |
+| `frontend/src/utils/invoicePdfGenerator.ts` | `content_hash` on Invoice interface + SHA-256 footer line |
+| `frontend/src/constants/pricing.ts` | Display-only JSDoc comment |
+
+---
+
+## Verification
+
+| Check | Result |
+|-------|--------|
+| `npx tsc --noEmit` | Zero errors |
+| `compute_invoice_hash()` deterministic | Confirmed — same input produces same 64-char hex |
+| Hash length | 64 characters (SHA-256 hex) |
+| Python import | `from app.pricing import compute_invoice_hash` — OK |

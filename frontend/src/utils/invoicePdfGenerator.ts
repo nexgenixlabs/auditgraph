@@ -60,6 +60,7 @@ export interface Invoice {
   paid_at: string | null;
   notes: string | null;
   payment_terms: number;
+  content_hash?: string;
 }
 
 function formatCentsExact(cents: number): string {
@@ -292,6 +293,14 @@ export function generateInvoicePdf(invoice: Invoice): void {
 
   // ─── Footer ────────────────────────────────────────────────
   const footerY = doc.internal.pageSize.getHeight() - 15;
+
+  if (invoice.content_hash) {
+    doc.setFontSize(6);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(180, 180, 180);
+    doc.text(`Integrity: SHA-256 ${invoice.content_hash}`, pageWidth / 2, footerY - 10, { align: 'center' });
+  }
+
   doc.setDrawColor(229, 231, 235);
   doc.setLineWidth(0.2);
   doc.line(margin, footerY - 5, pageWidth - margin, footerY - 5);

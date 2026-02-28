@@ -1,3 +1,10 @@
+/**
+ * DISPLAY-ONLY pricing constants and helpers.
+ * All billing calculations are performed server-side in backend/app/pricing.py.
+ * These constants are used ONLY for UI display (labels, badges, plan names, rate display).
+ * No values from this file are submitted to the backend for billing computation.
+ */
+
 // ── Per-Cloud Pricing (Pro Tier) ────────────────────────────────────────────
 // Each cloud has its own monthly price. All features included with Pro.
 export const CLOUD_PRICING: Record<string, Record<string, number>> = {

@@ -17912,7 +17912,7 @@ def update_platform_settings_handler():
 
 def generate_invoice(tenant_id):
     """POST /api/admin/tenants/<id>/invoices — generate invoice for a billing period."""
-    from app.pricing import calculate_invoice
+    from app.pricing import calculate_invoice, compute_invoice_hash
     db = Database()
     try:
         tenant = db.get_tenant_by_id(tenant_id)
@@ -17964,6 +17964,21 @@ def generate_invoice(tenant_id):
             li['amount_cents'] for li in invoice_data['line_items'] if li.get('type') == 'discount'
         ))
 
+        hash_data = {
+            'invoice_number': invoice_number,
+            'tenant_id': tenant_id,
+            'period_start': period_start,
+            'period_end': period_end,
+            'subtotal_cents': invoice_data['subtotal_cents'],
+            'tax_amount_cents': invoice_data['tax_amount_cents'],
+            'discount_cents': discount_cents,
+            'total_cents': invoice_data['total_cents'],
+            'line_items': invoice_data['line_items'],
+            'seller_snapshot': seller_snapshot,
+            'buyer_snapshot': buyer_snapshot,
+        }
+        content_hash = compute_invoice_hash(hash_data)
+
         invoice = db.create_invoice(
             tenant_id=tenant_id,
             invoice_number=invoice_number,
@@ -17982,6 +17997,7 @@ def generate_invoice(tenant_id):
             notes=notes,
             payment_terms=payment_terms,
             created_by=created_by,
+            content_hash=content_hash,
         )
 
         db.log_billing_event(tenant_id, 'invoice_generated', 'invoice',
@@ -18146,6 +18162,92 @@ def get_client_invoice(invoice_id):
         if invoice.get('status') == 'draft':
             return jsonify({'error': 'Invoice not found'}), 404
         return jsonify({'invoice': invoice})
+    finally:
+        db.close()
+
+
+def verify_client_invoice(invoice_id):
+    """GET /api/client/invoices/<id>/verify — verify invoice integrity for client."""
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'No tenant context'}), 403
+    db = Database()
+    try:
+        invoice = db.get_invoice_by_id(invoice_id)
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+        if invoice.get('tenant_id') != tid:
+            return jsonify({'error': 'Access denied'}), 403
+        if invoice.get('status') == 'draft':
+            return jsonify({'error': 'Invoice not found'}), 404
+        result = db.verify_invoice_integrity(invoice_id)
+        if not result:
+            return jsonify({'error': 'Invoice not found'}), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def verify_admin_invoice(invoice_id):
+    """GET /api/admin/invoices/<id>/verify — verify invoice integrity for admin."""
+    db = Database()
+    try:
+        result = db.verify_invoice_integrity(invoice_id)
+        if not result:
+            return jsonify({'error': 'Invoice not found'}), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_client_billing_preview():
+    """GET /api/client/billing/preview — projected charges for current period."""
+    from app.pricing import calculate_invoice
+    tid = _tenant_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'No tenant context'}), 403
+    admin_db = Database()
+    try:
+        tenant = admin_db.get_tenant_by_id(tid)
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+    finally:
+        admin_db.close()
+    db = _db()
+    try:
+        subs = db.get_cloud_subscriptions(tid)
+        invoice_data = calculate_invoice(tenant, subs)
+        now = datetime.now(timezone.utc)
+        period_start = now.replace(day=1).strftime('%Y-%m-%d')
+        if now.month == 12:
+            next_month = now.replace(year=now.year + 1, month=1, day=1)
+        else:
+            next_month = now.replace(month=now.month + 1, day=1)
+        period_end = (next_month - timedelta(days=1)).strftime('%Y-%m-%d')
+
+        active_subs = [s for s in subs if s.get('monitored')]
+        by_cloud = {}
+        for s in active_subs:
+            cloud = s.get('cloud', 'azure')
+            by_cloud[cloud] = by_cloud.get(cloud, 0) + 1
+
+        return jsonify({
+            'period_start': period_start,
+            'period_end': period_end,
+            'plan': tenant.get('plan', 'free'),
+            'active_subscriptions': len(active_subs),
+            'subscriptions_by_cloud': by_cloud,
+            'platform_fee_cents': invoice_data.get('platform_fee_cents', 0),
+            'subscription_total_cents': invoice_data.get('subscription_total_cents', 0),
+            'discount_pct': invoice_data.get('discount_pct', 0),
+            'subtotal_cents': invoice_data.get('subtotal_cents', 0),
+            'tax_label': invoice_data.get('tax_label', 'Tax'),
+            'tax_rate': invoice_data.get('tax_rate', 0),
+            'tax_amount_cents': invoice_data.get('tax_amount_cents', 0),
+            'projected_total_cents': invoice_data.get('total_cents', 0),
+            'line_items': invoice_data.get('line_items', []),
+            'note': 'Projected estimate based on current subscription configuration',
+        })
     finally:
         db.close()
 

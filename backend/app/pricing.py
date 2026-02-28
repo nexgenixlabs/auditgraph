@@ -4,6 +4,31 @@ AuditGraph Billing Engine — Pure pricing logic (no DB access).
 All monetary values are in integer cents to avoid floating-point issues.
 """
 
+import hashlib
+import json
+
+
+def compute_invoice_hash(invoice_data: dict) -> str:
+    """Compute SHA-256 hash of immutable invoice financial fields.
+
+    Uses canonical JSON (sort_keys, compact separators) for deterministic output.
+    Excludes mutable fields (status, paid_at, voided_at, notes).
+    """
+    canonical = json.dumps({
+        'invoice_number': invoice_data['invoice_number'],
+        'tenant_id': invoice_data['tenant_id'],
+        'period_start': str(invoice_data['period_start']),
+        'period_end': str(invoice_data['period_end']),
+        'subtotal_cents': invoice_data['subtotal_cents'],
+        'tax_amount_cents': invoice_data['tax_amount_cents'],
+        'discount_cents': invoice_data['discount_cents'],
+        'total_cents': invoice_data['total_cents'],
+        'line_items': invoice_data['line_items'],
+        'seller_snapshot': invoice_data['seller_snapshot'],
+        'buyer_snapshot': invoice_data['buyer_snapshot'],
+    }, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
 # ── Platform fees by account plan (cents/month) ─────────────────────────────
 PLATFORM_FEES = {
     'free': 0,

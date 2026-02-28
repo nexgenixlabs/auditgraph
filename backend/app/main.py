@@ -237,6 +237,9 @@ from app.api.handlers import (
     send_invoice_email,
     get_client_invoices,
     get_client_invoice,
+    verify_client_invoice,
+    verify_admin_invoice,
+    get_client_billing_preview,
     get_client_connections,
     create_client_connection,
     update_client_connection,
@@ -631,6 +634,11 @@ def create_app():
     def client_billing_usage():
         return get_client_usage_metering()
 
+    @app.get("/api/client/billing/preview")
+    @require_role('admin', 'security_admin')
+    def client_billing_preview():
+        return get_client_billing_preview()
+
     # Admin Billing Client Aliases
     @app.get("/api/admin/clients/<int:tenant_id>/billing")
     @require_portal_access()
@@ -695,6 +703,11 @@ def create_app():
     def admin_invoice_send(invoice_id):
         return send_invoice_email(invoice_id)
 
+    @app.get("/api/admin/invoices/<int:invoice_id>/verify")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_invoice_verify(invoice_id):
+        return verify_admin_invoice(invoice_id)
+
     # Client Invoice Endpoints
     @app.get("/api/client/invoices")
     @require_role('admin', 'security_admin')
@@ -705,6 +718,11 @@ def create_app():
     @require_role('admin', 'security_admin')
     def client_invoice_detail(invoice_id):
         return get_client_invoice(invoice_id)
+
+    @app.get("/api/client/invoices/<int:invoice_id>/verify")
+    @require_role('admin', 'security_admin')
+    def client_invoice_verify(invoice_id):
+        return verify_client_invoice(invoice_id)
 
     @app.get("/api/tenant")
     def tenant_current():

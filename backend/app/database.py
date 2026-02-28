@@ -9023,6 +9023,7 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_tenant ON invoices(tenant_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_number ON invoices(invoice_number)")
+        cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)")
         self.conn.commit()
         cursor.close()
         Database._invoices_ensured = True
@@ -9052,7 +9053,8 @@ class Database:
     def create_invoice(self, tenant_id, invoice_number, period_start, period_end,
                        subtotal_cents, tax_label, tax_rate, tax_amount_cents,
                        discount_cents, total_cents, line_items, seller_snapshot,
-                       buyer_snapshot, due_at, notes, payment_terms, created_by):
+                       buyer_snapshot, due_at, notes, payment_terms, created_by,
+                       content_hash=None):
         """Create a new invoice and return it."""
         self._ensure_invoices_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -9061,13 +9063,15 @@ class Database:
                 tenant_id, invoice_number, period_start, period_end,
                 subtotal_cents, tax_label, tax_rate, tax_amount_cents,
                 discount_cents, total_cents, line_items, seller_snapshot,
-                buyer_snapshot, issued_at, due_at, notes, payment_terms, created_by
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s)
+                buyer_snapshot, issued_at, due_at, notes, payment_terms, created_by,
+                content_hash
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s)
             RETURNING *
         """, (tenant_id, invoice_number, period_start, period_end,
               subtotal_cents, tax_label, tax_rate, tax_amount_cents,
               discount_cents, total_cents, json.dumps(line_items), json.dumps(seller_snapshot),
-              json.dumps(buyer_snapshot), due_at, notes, payment_terms, created_by))
+              json.dumps(buyer_snapshot), due_at, notes, payment_terms, created_by,
+              content_hash))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -9116,7 +9120,12 @@ class Database:
         return self._serialize_invoice(dict(row))
 
     def update_invoice_status(self, invoice_id, status, paid_at=None, voided_at=None):
-        """Update invoice status and optional timestamp fields."""
+        """Update invoice status and optional timestamp fields.
+
+        IMMUTABILITY GUARD: Only status/timestamp fields are modified here.
+        Financial fields (subtotal, tax, total, line_items, snapshots, content_hash)
+        are NEVER modified after creation. content_hash validates this invariant.
+        """
         self._ensure_invoices_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         set_parts = ["status = %s", "updated_at = NOW()"]
@@ -9150,6 +9159,24 @@ class Database:
         if row.get('tax_rate') is not None:
             row['tax_rate'] = float(row['tax_rate'])
         return row
+
+    def verify_invoice_integrity(self, invoice_id):
+        """Verify invoice content hash matches recomputed hash."""
+        from app.pricing import compute_invoice_hash
+        invoice = self.get_invoice_by_id(invoice_id)
+        if not invoice:
+            return None
+        stored_hash = invoice.get('content_hash')
+        if not stored_hash:
+            return {'verified': False, 'reason': 'No content hash stored', 'invoice_id': invoice_id}
+        computed_hash = compute_invoice_hash(invoice)
+        return {
+            'verified': stored_hash == computed_hash,
+            'content_hash': stored_hash,
+            'computed_hash': computed_hash,
+            'invoice_id': invoice_id,
+            'invoice_number': invoice.get('invoice_number'),
+        }
 
     # ================================================================
     # Identity ↔ Subscription Access (multi-subscription model)

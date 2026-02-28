@@ -55,6 +55,7 @@ import IdentityCorrelation from './pages/IdentityCorrelation';
 import WorkloadIdentities from './pages/WorkloadIdentities';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
+import ClientBilling from './pages/ClientBilling';
 import RbacHygiene from './pages/RbacHygiene';
 import AccessGraph from './pages/AccessGraph';
 import EffectiveAccessExplorer from './pages/EffectiveAccessExplorer';
@@ -288,6 +289,7 @@ function AppContent() {
                   <Route path="/key-vaults" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><KeyVaultSecurity /></ErrorBoundary>} />
                   <Route path="/storage-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><StorageSecurity /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
+                  <Route path="/billing" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ClientBilling /></ErrorBoundary>} />
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><Settings /></ErrorBoundary>
