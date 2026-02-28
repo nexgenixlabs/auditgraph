@@ -6771,8 +6771,8 @@ def auth_refresh():
             try:
                 db.revoke_all_user_tokens(token_record['user_id'])
                 logger.warning(f"Refresh token reuse detected for user_id={token_record['user_id']} — all tokens revoked")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to revoke all tokens for user_id={token_record['user_id']}: {e}")
             return jsonify({'error': 'Token reuse detected — all sessions invalidated'}), 401
 
         if token_record['expires_at'].replace(tzinfo=None) < datetime.utcnow():

@@ -1,9 +1,10 @@
 """
-Phase 31 + Phase 1B: JWT Authentication Middleware & Helpers
+Phase 31 + Phase 1B–1D: JWT Authentication Middleware & Helpers
 - Dual JWT signing keys (admin vs tenant portal)
 - Host-derived portal detection
 - iss/aud standard claims
 - Portal-aware middleware with cryptographic isolation
+- Phase 1D: kid header, ver claim, fail-closed slug lookup
 """
 from __future__ import annotations
 import os
@@ -28,6 +29,11 @@ if not ADMIN_JWT_SECRET or not TENANT_JWT_SECRET:
         raise RuntimeError("FATAL: ADMIN_JWT_SECRET + TENANT_JWT_SECRET (or JWT_SECRET) required.")
     raise RuntimeError("FATAL: ADMIN_JWT_SECRET and TENANT_JWT_SECRET are required in production.")
 JWT_ALGORITHM = 'HS256'
+
+# Phase 1D: Token schema version and key IDs for key rotation prep
+TOKEN_SCHEMA_VERSION = 1
+ADMIN_KEY_ID = 'admin-v1'
+TENANT_KEY_ID = 'tenant-v1'
 
 # Phase 1B: Portal-specific TTLs
 ADMIN_TOKEN_EXPIRY = timedelta(minutes=30)
@@ -108,6 +114,7 @@ def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str |
         'iat': datetime.now(timezone.utc),
         'exp': datetime.now(timezone.utc) + expiry,
         'type': 'access',
+        'ver': TOKEN_SCHEMA_VERSION,
     }
 
     # Phase 1C: Impersonation claims with 15-min hard cap
@@ -122,7 +129,9 @@ def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str |
             payload['exp'] = imp_exp
         payload['impersonation_exp'] = int(imp_exp.timestamp())
 
-    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+    # Phase 1D: kid header for key rotation prep
+    kid = ADMIN_KEY_ID if portal == 'admin' else TENANT_KEY_ID
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={'kid': kid})
 
 
 def generate_refresh_token(user: dict, portal: str = 'client') -> str:
@@ -244,8 +253,9 @@ def auth_middleware():
                 host_slug = _derive_tenant_slug()
                 if host_slug and token_iss != f'{host_slug}.auditgraph.ai':
                     return jsonify({'error': 'Token issuer mismatch'}), 403
-                # Phase 1C: Verify token.tenant_id matches resolved slug's tenant
-                if host_slug and not payload.get('is_superadmin'):
+                # Phase 1C+1D: Verify token.tenant_id matches resolved slug's tenant
+                # Phase 1D: Superadmins no longer exempt — cross-tenant only via impersonation
+                if host_slug:
                     token_tid = payload.get('tenant_id')
                     if token_tid is not None:
                         try:
@@ -257,11 +267,17 @@ def auth_middleware():
                             _db.close()
                             if _row and _row[0] != token_tid:
                                 return jsonify({'error': 'Token tenant mismatch'}), 403
-                        except Exception:
-                            pass  # Don't block on lookup failure
+                        except Exception as e:
+                            # Phase 1D: Fail-closed — slug lookup failure blocks request
+                            logger.error(f"Tenant slug lookup failed for slug={host_slug}: {e}")
+                            return jsonify({'error': 'Tenant verification failed'}), 500
 
             if payload.get('type') != 'access':
                 return jsonify({'error': 'Invalid token type'}), 401
+
+            # Phase 1D: Verify token schema version
+            if payload.get('ver') != TOKEN_SCHEMA_VERSION:
+                return jsonify({'error': 'Unsupported token version'}), 401
 
             g.current_user = {
                 'id': int(payload['sub']),
@@ -299,6 +315,25 @@ def auth_middleware():
         try:
             g.current_user['tenant_id'] = int(override_tid)
             g.current_user['tenant_id_override'] = True
+            # Phase 1D: Log cross-tenant admin actions
+            logger.info(f"Superadmin cross-tenant override: user_id={g.current_user['id']} -> tenant_id={override_tid}")
+            try:
+                _log_db = Database()
+                _log_cur = _log_db.conn.cursor()
+                _log_cur.execute(
+                    """INSERT INTO activity_log (action, description, user_id, tenant_id, metadata, created_at)
+                       VALUES (%s, %s, %s, %s, %s, NOW())""",
+                    ('cross_tenant_admin_action',
+                     f'Superadmin {g.current_user["username"]} overrode tenant context to tenant_id={override_tid}',
+                     g.current_user['id'],
+                     int(override_tid),
+                     '{}')
+                )
+                _log_db.conn.commit()
+                _log_cur.close()
+                _log_db.close()
+            except Exception as e:
+                logger.warning(f"Failed to log cross-tenant admin action: {e}")
         except (ValueError, TypeError):
             pass
 

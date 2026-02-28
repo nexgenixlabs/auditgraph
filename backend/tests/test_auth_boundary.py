@@ -1,8 +1,8 @@
 """
-Phase 1C: Auth Boundary Tests
+Phase 1C+1D: Auth Boundary Tests
 
 Tests cryptographic isolation between admin and tenant portals,
-impersonation expiry, and refresh token rotation.
+impersonation expiry, refresh token rotation, kid headers, and ver claims.
 """
 import os
 import time
@@ -33,6 +33,9 @@ from app.api.auth import (
     JWT_ALGORITHM,
     ADMIN_TOKEN_EXPIRY,
     TENANT_TOKEN_EXPIRY,
+    TOKEN_SCHEMA_VERSION,
+    ADMIN_KEY_ID,
+    TENANT_KEY_ID,
 )
 
 
@@ -276,3 +279,71 @@ def test_keys_are_distinct():
     assert ADMIN_JWT_SECRET == ADMIN_KEY
     assert TENANT_JWT_SECRET == TENANT_KEY
     assert ADMIN_JWT_SECRET != TENANT_JWT_SECRET
+
+
+# ── Test 8: JWT kid header (Phase 1D) ──
+
+def test_admin_token_has_kid_header():
+    """Admin token has kid='admin-v1' in JWT header."""
+    user = _make_admin_user()
+    token = generate_access_token(user, portal='admin')
+    header = jwt.get_unverified_header(token)
+    assert header['kid'] == ADMIN_KEY_ID
+    assert header['kid'] == 'admin-v1'
+
+
+def test_tenant_token_has_kid_header():
+    """Tenant token has kid='tenant-v1' in JWT header."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    header = jwt.get_unverified_header(token)
+    assert header['kid'] == TENANT_KEY_ID
+    assert header['kid'] == 'tenant-v1'
+
+
+# ── Test 9: Token schema version (Phase 1D) ──
+
+def test_admin_token_has_ver_claim():
+    """Admin token contains ver claim matching TOKEN_SCHEMA_VERSION."""
+    user = _make_admin_user()
+    token = generate_access_token(user, portal='admin')
+    payload = jwt.decode(token, ADMIN_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-platform')
+    assert payload['ver'] == TOKEN_SCHEMA_VERSION
+    assert payload['ver'] == 1
+
+
+def test_tenant_token_has_ver_claim():
+    """Tenant token contains ver claim matching TOKEN_SCHEMA_VERSION."""
+    user = _make_tenant_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+    assert payload['ver'] == TOKEN_SCHEMA_VERSION
+    assert payload['ver'] == 1
+
+
+def test_impersonation_token_has_kid_and_ver():
+    """Impersonation token carries both kid and ver correctly."""
+    user = _make_impersonation_user()
+    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    header = jwt.get_unverified_header(token)
+    assert header['kid'] == TENANT_KEY_ID
+    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+                         audience='auditgraph-tenant')
+    assert payload['ver'] == TOKEN_SCHEMA_VERSION
+    assert payload['impersonating'] is True
+
+
+# ── Test 10: Refresh token rotation atomicity (Phase 1D) ──
+
+def test_refresh_token_hash_is_deterministic():
+    """Same raw token always produces the same hash (atomic rotation relies on this)."""
+    raw = secrets.token_urlsafe(48)
+    h1 = hash_refresh_token(raw)
+    h2 = hash_refresh_token(raw)
+    assert h1 == h2
+    # Different tokens produce different hashes
+    raw2 = secrets.token_urlsafe(48)
+    h3 = hash_refresh_token(raw2)
+    assert h1 != h3

@@ -537,3 +537,156 @@ except Exception as e:
 | `TENANT_JWT_SECRET` | Optional (falls back to `JWT_SECRET`) | **Required** |
 | `JWT_SECRET` | Used as fallback when above are missing | **Not accepted** — startup fails |
 | `FLASK_ENV` | `development` enables fallback | Any other value or unset = production mode |
+
+---
+
+# Phase 1D — Final Auth Hardening Closure (IMPLEMENTED)
+
+**Date**: 2026-02-28
+**Status**: IMPLEMENTED — 20 tests passing (14 from 1C + 6 new)
+
+## Changes
+
+### 1. Fail-closed tenant slug lookup
+- **Before**: `except Exception: pass` in middleware's tenant slug→id DB lookup — DB failure silently bypassed validation
+- **After**: `except Exception` → logs error + returns `500 "Tenant verification failed"`
+- Request is blocked if the slug cannot be verified, rather than silently passing
+
+### 2. Superadmin must use platform token
+- **Before**: `if host_slug and not payload.get('is_superadmin')` — superadmins bypassed tenant_id validation on client portal
+- **After**: `if host_slug:` — all tokens on tenant subdomains must match the slug's tenant_id, including superadmin tokens
+- **Cross-tenant access only via impersonation**: Superadmins should use admin portal tokens on `admin.auditgraph.ai`. To access tenant data as a tenant user, they must impersonate (which generates a properly scoped tenant token)
+- **Cross-tenant admin action logging**: When superadmin uses `X-Tenant-Id` header override on admin portal, a `cross_tenant_admin_action` entry is logged to `activity_log` with the target tenant_id
+
+### 3. JWT `kid` header for key rotation prep
+- **Admin tokens**: `kid: "admin-v1"` in JWT header
+- **Tenant tokens**: `kid: "tenant-v1"` in JWT header
+- Enables future zero-downtime key rotation by adding a new key version and gradually deprecating old ones
+- Token header example: `{"alg": "HS256", "typ": "JWT", "kid": "admin-v1"}`
+
+### 4. Token schema version (`ver` claim)
+- All tokens now contain `ver: 1` claim in the payload
+- Middleware rejects tokens where `ver != TOKEN_SCHEMA_VERSION` with `401 "Unsupported token version"`
+- Enables forced logout of all sessions during schema migration by bumping `TOKEN_SCHEMA_VERSION`
+
+### 5. Refresh token rotation atomicity confirmed
+- **Sequence**: (1) lookup token → (2) check revoked (reuse detection) → (3) check expiry → (4) revoke old token → (5) close DB connection → (6) generate new tokens
+- Old token is revoked (committed to DB) before new token is generated — no window where both are valid
+- Reuse detection: if a revoked token is presented, ALL tokens for that user are revoked + logged
+- Reuse detection failure (DB error) now logs the error instead of silently swallowing it
+
+## Updated Token Structure
+
+### Admin Token
+```
+Header: {"alg": "HS256", "typ": "JWT", "kid": "admin-v1"}
+```
+```json
+{
+  "sub": "1",
+  "username": "techadmin",
+  "role": "admin",
+  "display_name": "Tech Admin",
+  "tenant_id": null,
+  "tenant_name": null,
+  "is_superadmin": true,
+  "portal_role": "superadmin",
+  "force_password_change": false,
+  "portal": "admin",
+  "iss": "admin.auditgraph.ai",
+  "aud": "auditgraph-platform",
+  "iat": 1740700000,
+  "exp": 1740701800,
+  "type": "access",
+  "ver": 1
+}
+```
+
+### Tenant Token
+```
+Header: {"alg": "HS256", "typ": "JWT", "kid": "tenant-v1"}
+```
+```json
+{
+  "sub": "42",
+  "username": "jdoe",
+  "role": "admin",
+  "display_name": "Jane Doe",
+  "tenant_id": 5,
+  "tenant_name": "Acme Corp",
+  "is_superadmin": false,
+  "portal_role": null,
+  "force_password_change": false,
+  "portal": "client",
+  "iss": "acme.auditgraph.ai",
+  "aud": "auditgraph-tenant",
+  "iat": 1740700000,
+  "exp": 1740703600,
+  "type": "access",
+  "ver": 1
+}
+```
+
+### Impersonation Token
+```
+Header: {"alg": "HS256", "typ": "JWT", "kid": "tenant-v1"}
+```
+```json
+{
+  "sub": "1",
+  "username": "techadmin",
+  "role": "admin",
+  "display_name": "Tech Admin",
+  "tenant_id": 5,
+  "tenant_name": "Acme Corp",
+  "is_superadmin": false,
+  "portal_role": null,
+  "portal": "client",
+  "iss": "acme.auditgraph.ai",
+  "aud": "auditgraph-tenant",
+  "iat": 1740700000,
+  "exp": 1740700900,
+  "type": "access",
+  "ver": 1,
+  "impersonating": true,
+  "impersonator_id": 1,
+  "impersonator_username": "techadmin",
+  "impersonated_by": "techadmin",
+  "impersonation_exp": 1740700900
+}
+```
+
+## New Constants (auth.py)
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `TOKEN_SCHEMA_VERSION` | `1` | Token payload version; bump to invalidate all active sessions |
+| `ADMIN_KEY_ID` | `"admin-v1"` | JWT `kid` header for admin tokens |
+| `TENANT_KEY_ID` | `"tenant-v1"` | JWT `kid` header for tenant tokens |
+
+## Tests Added (6 new, 20 total)
+| Test | Asserts |
+|------|---------|
+| `test_admin_token_has_kid_header` | `kid == 'admin-v1'` in JWT header |
+| `test_tenant_token_has_kid_header` | `kid == 'tenant-v1'` in JWT header |
+| `test_admin_token_has_ver_claim` | `ver == 1` in admin payload |
+| `test_tenant_token_has_ver_claim` | `ver == 1` in tenant payload |
+| `test_impersonation_token_has_kid_and_ver` | Both `kid` and `ver` present + impersonation claims |
+| `test_refresh_token_hash_is_deterministic` | Hash consistency for atomic rotation |
+
+## Remaining Fallback Logic
+- **None in production**: `JWT_SECRET` fallback is strictly dev-only (`FLASK_ENV=development`)
+- **No graceful degradation**: All DB lookups in auth path are fail-closed
+- **No superadmin bypass**: Tenant_id validation applies to all tokens on tenant subdomains
+
+## Security Properties After Phase 1D
+| Property | Enforced By |
+|----------|------------|
+| Portal cryptographic isolation | Dual signing keys (ADMIN_JWT_SECRET / TENANT_JWT_SECRET) |
+| Token origin verification | `iss` = origin domain, verified against host slug |
+| Token audience verification | `aud` = logical audience, verified on jwt.decode() |
+| Tenant_id↔slug match | DB lookup, fail-closed on error |
+| Token version gating | `ver` claim, rejected if != TOKEN_SCHEMA_VERSION |
+| Key rotation readiness | `kid` header identifies which key version signed the token |
+| Impersonation time-bomb | `impersonation_exp` = 15min hard cap, checked in middleware |
+| Refresh token rotation | Revoke-before-issue, reuse detection with full session kill |
+| Cross-tenant admin logging | `cross_tenant_admin_action` logged when X-Tenant-Id override used |
