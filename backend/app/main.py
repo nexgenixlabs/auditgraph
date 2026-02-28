@@ -1902,7 +1902,6 @@ def create_app():
     # -----------------------
     # Start background scheduler (only in main process, not reloader)
     # -----------------------
-    import os
     if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         start_scheduler()
         atexit.register(stop_scheduler)
