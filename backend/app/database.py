@@ -91,14 +91,15 @@ class Database:
     def set_organization_context(self, organization_id):
         """Set PostgreSQL session variable for RLS organization isolation.
 
-        Uses set_config with is_local=FALSE so the setting persists for
-        the entire connection lifetime (not just the current transaction).
-        Since each request creates a new Database(), this is safe.
+        # IMPORTANT:
+        # Using transaction-scoped RLS context (SET LOCAL via is_local=TRUE).
+        # Prevents organization context leakage if connection pooling is introduced.
+        # Do NOT change to session-level scope (is_local=FALSE).
         """
         if organization_id is not None and self.conn:
             cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT set_config('app.current_organization_id', %s, FALSE)",
+                "SELECT set_config('app.current_organization_id', %s, TRUE)",
                 (str(organization_id),)
             )
             cursor.close()

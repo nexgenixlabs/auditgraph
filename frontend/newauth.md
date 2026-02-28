@@ -1403,4 +1403,45 @@ Request arrives
 - [x] No leaked connections (no handler path exits without close)
 - [x] `--preload` prevents DDL deadlock on startup
 - [x] Dual DB users: `auditgraph_app` (NOBYPASSRLS) + `auditgraph_admin` (BYPASSRLS)
-- [x] `is_local=FALSE` is safe today but must be revisited before pooling adoption
+- [x] `is_local=FALSE` was safe but has been hardened to `is_local=TRUE` in Phase 2E
+
+---
+
+## Phase 2E — RLS Transaction Scope Hardening
+
+**Date**: 2026-02-28
+**Scope**: Convert session-level RLS context to transaction-scoped context
+**Status**: IMPLEMENTED — zero behavior change, future-proofed against connection pooling
+
+### Change
+
+**File**: `backend/app/database.py`, method `set_organization_context()` (lines 91–104)
+
+```python
+# Before (Phase 2D finding):
+set_config('app.current_organization_id', %s, FALSE)   # session-level
+
+# After (Phase 2E hardening):
+set_config('app.current_organization_id', %s, TRUE)    # transaction-scoped
+```
+
+### Why This Is Safe (No Behavior Change)
+
+1. **psycopg2 `autocommit` is `False` by default** — every connection starts in an implicit transaction. Confirmed: no `autocommit=True` anywhere in the codebase.
+2. **`is_local=TRUE` scopes the variable to the current transaction** — it auto-resets on COMMIT or ROLLBACK.
+3. **Each request creates a fresh `Database()` → fresh connection → fresh implicit transaction** — the variable is set at the start of the transaction and all queries run within that same transaction.
+4. **`db.close()` in 290 `finally:` blocks** still closes the connection, which also destroys any transaction state.
+
+### What This Prevents
+
+If connection pooling (pgbouncer, psycopg pool, SQLAlchemy) is ever introduced:
+- **Before (is_local=FALSE)**: Org context would persist on the pooled connection and leak to the next request → **cross-tenant data exposure**
+- **After (is_local=TRUE)**: Org context auto-resets when the transaction ends → **safe even with pooling**
+
+### Verification
+
+- [x] `set_config` uses `is_local=TRUE` (confirmed via source inspection)
+- [x] `autocommit` is not set anywhere (psycopg2 default = False)
+- [x] 36/36 tests pass (`test_auth_boundary.py` + `test_org_isolation.py`)
+- [x] TypeScript compiles clean (`npx tsc --noEmit`)
+- [x] Python imports work (`from app.database import Database`)
