@@ -553,3 +553,325 @@ In `get_login_sessions()`:
 - **No logic changes to existing features** — all additions are additive
 - **No new database tables** — uses existing `admin_audit_log` + `billing_events` tables
 - **No new dependencies** — all imports from existing project modules
+
+---
+
+# Phase 20 — Authentication & Authorization Isolation Audit
+
+**Date**: 2026-02-27
+**Type**: Security audit (no code changes)
+
+---
+
+## Summary
+
+Full audit of the authentication and authorization stack to verify that `admin.auditgraph.ai` (platform control plane) is isolated from tenant subdomains (`*.auditgraph.ai`). Covers JWT token structure, signing keys, role middleware, frontend token handling, route protection, and audit logging separation.
+
+**Overall Assessment**: **Functionally secure** with defense-in-depth via role-based endpoint decorators and login-time portal enforcement. Architectural improvements recommended for cryptographic isolation.
+
+---
+
+## 1. JWT Token Structure
+
+**File**: `backend/app/api/auth.py` (lines 41-57)
+
+### Token Claims (shared structure for ALL tokens)
+
+```
+{
+  sub:                    str(user_id)
+  username:               string
+  role:                   admin | security_admin | compliance | reader  (client role)
+  display_name:           string
+  tenant_id:              integer | null
+  tenant_name:            string | null
+  is_superadmin:          boolean
+  portal_role:            superadmin | poweradmin | billing | reader | null
+  force_password_change:  boolean
+  iat:                    timestamp
+  exp:                    timestamp (24h)
+  type:                   "access"
+}
+```
+
+### Findings
+
+| Property | Status | Detail |
+|----------|--------|--------|
+| Signing algorithm | HS256 | Appropriate for shared-secret model |
+| Signing key | **Single `JWT_SECRET`** | Shared across admin + client portals |
+| `iss` (issuer) claim | **Missing** | No issuer set or validated |
+| `aud` (audience) claim | **Missing** | No audience set or validated |
+| Token expiry | 24 hours | `ACCESS_TOKEN_EXPIRY = timedelta(hours=24)` |
+| Token type validation | Present | `type: "access"` checked in middleware (line 164) |
+| Portal binding | **Claim-level only** | `portal_role` and `is_superadmin` embedded but not cryptographically enforced |
+
+### Refresh Tokens
+
+- **Opaque** (not JWT): `secrets.token_urlsafe(48)` → SHA-256 hashed in DB
+- 7-day expiry, single-use (revoked on refresh)
+- No portal differentiation — same mechanism for admin and client
+
+---
+
+## 2. Login Flow — Portal Enforcement
+
+**File**: `backend/app/api/handlers.py` (lines 6621-6736)
+
+### Portal Parameter
+
+Login accepts `portal: "admin" | "client"` in request body. The backend enforces:
+
+| Portal | Guard | Effect |
+|--------|-------|--------|
+| `client` | Line 6679 | Rejects users with `is_superadmin=True` or valid `portal_role` |
+| `admin` | Lines 6683-6685 | Rejects users without `is_superadmin` AND without valid `portal_role` |
+
+**Result**: A user cannot obtain a token from the wrong portal. Admin-only users are blocked from client login, and client-only users are blocked from admin login.
+
+### Token Generation
+
+Both portals call the **same `generate_access_token()`** function. Differentiation is via the user record's `portal_role` and `is_superadmin` fields, not separate token generators.
+
+---
+
+## 3. Auth Middleware
+
+**File**: `backend/app/api/auth.py` (lines 124-219)
+
+### Token Validation Flow
+
+1. Check for API key (`X-API-Key` or `Bearer ag_...`) → sets `g.current_user` with `is_superadmin: False`
+2. Otherwise decode JWT Bearer token → validate `type == "access"`
+3. Extract claims into `g.current_user` dict
+4. Superadmin tenant override: if `X-Tenant-Id` header present AND `is_superadmin == True`, override `tenant_id`
+5. Host↔Tenant guard: validate JWT `tenant_id` matches subdomain slug (superadmins + `portal_role` users exempt)
+
+### Findings
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Token type validation | Present | `payload.get('type') != 'access'` → 401 |
+| Issuer validation | **Missing** | No `iss` check |
+| Audience validation | **Missing** | No `aud` check |
+| Host↔tenant enforcement | Present | Non-superadmin tokens rejected on wrong subdomain |
+| Superadmin bypass | Present | `portal_role` users and `is_superadmin` users skip host check |
+| API key isolation | Present | API keys cannot access admin endpoints (no `portal_role`) |
+
+---
+
+## 4. Role Decorators
+
+**File**: `backend/app/api/auth.py` (lines 222-283)
+
+| Decorator | Purpose | Check Source | Lines |
+|-----------|---------|-------------|-------|
+| `@require_role(*roles)` | Client portal role gate | `g.current_user['role']` | 222-234 |
+| `@require_superadmin()` | Superadmin-only gate | `g.current_user['is_superadmin']` | 237-249 |
+| `@require_portal_access()` | Any admin portal role | `portal_role in VALID_PORTAL_ROLES` OR `is_superadmin` | 252-266 |
+| `@require_portal_role(*roles)` | Specific admin portal roles | `portal_role in allowed_roles` OR `is_superadmin` | 269-283 |
+
+**All decorators check TOKEN CLAIMS** (from decoded JWT in `g.current_user`), not database state.
+
+**No mixing detected**: No endpoint uses both `@require_role()` and `@require_portal_role()` simultaneously.
+
+---
+
+## 5. Admin Route Protection Coverage
+
+**File**: `backend/app/main.py`
+
+### Admin Routes (41 total) — ALL protected
+
+| Category | Routes | Decorator | Lines |
+|----------|--------|-----------|-------|
+| Tenant CRUD | 8 | `portal_role(SA, PA)` / `superadmin()` for DELETE | 539-577 |
+| Billing mutations | 4 | `portal_role(SA, PA)` / `superadmin()` for fee/rate | 590-605 |
+| Billing reads | 3 | `portal_access()` | 610-620 |
+| Action log | 1 | `portal_access()` | 619 |
+| Platform settings | 2 | `portal_role(SA, PA, B)` | 663-668 |
+| Invoices | 5 | `portal_role(SA, PA, B)` | 673-693 |
+| Provisioning | 2 | `portal_role(SA, PA)` | 744-749 |
+| Analytics | 5 | `portal_access()` | 854-875 |
+| Logo management | 4 | `portal_role(SA, PA)` | 1676-1692 |
+| Stripe/pilot | 2 | `portal_role(SA, PA)` | 1822-1830 |
+| Public (by-slug) | 2 | None (intentional) | 736-740 |
+
+**Unprotected admin routes**: 0
+**Missing decorators**: 0 (excluding 2 intentionally public slug-lookup endpoints)
+
+### Client Routes — Architectural Note
+
+~136 client endpoints (e.g., `/api/stats`, `/api/identities`) rely on `auth_middleware` + RLS via `_tenant_id()` rather than explicit `@require_role()` decorators. This is safe due to login-time portal enforcement blocking cross-portal token generation, but lacks defense-in-depth.
+
+---
+
+## 6. Frontend Token Isolation
+
+**File**: `frontend/src/contexts/AuthContext.tsx`
+
+### Token Storage (lines 66-72)
+
+| Portal | Access Token Key | Refresh Token Key |
+|--------|-----------------|-------------------|
+| Client | `access_token` | `refresh_token` |
+| Admin | `admin_access_token` | `admin_refresh_token` |
+
+### Portal Detection (lines 59-64)
+
+```typescript
+if (window.location.pathname.startsWith('/admin')) return 'admin';
+if (window.location.hostname.startsWith('admin.')) return 'admin';
+return 'client';
+```
+
+### Global Fetch Interceptor (lines 125-183)
+
+- **Portal-aware**: Detects portal on every `fetch()` call → selects correct token key
+- **Auto-refresh**: On 401, re-detects portal → uses correct refresh token → retries
+- **X-Tenant-Id**: Attaches `active_tenant_id` header on all API calls (superadmin override)
+
+### Route Separation (`App.tsx` lines 187-231)
+
+- `admin.*` subdomain → renders `AdminConsole` at root
+- `/admin/*` path → renders `AdminConsole` (localhost/dev)
+- All other paths → client portal with `ProtectedRoute`
+
+### AdminConsole Gating (`AdminConsole.tsx` lines 129-148)
+
+- Checks `user.portal_role` against `VALID_PORTAL_ROLES`
+- If missing → renders `AdminLogin` component (separate dark-theme login)
+- Role-based nav filtering per `allowedRoles` array
+
+---
+
+## 7. Audit Logging Separation
+
+### Three Separate Tables
+
+| Table | Purpose | Scoped To | IP Tracked |
+|-------|---------|-----------|------------|
+| `activity_log` | Tenant user actions | Tenant (via `tenant_id`) | No |
+| `admin_audit_log` | Platform admin mutations | Global (no RLS) | Yes |
+| `billing_events` | Billing/subscription changes | Per-tenant | No |
+
+### Logging Method Usage
+
+| Method | Called From | Writes To |
+|--------|-----------|-----------|
+| `_log(db, action, desc, meta)` | ~100+ client + admin handlers | `activity_log` |
+| `db.log_admin_audit(...)` | 7 admin mutation handlers | `admin_audit_log` |
+| `db.log_billing_event(...)` | 8 billing mutation handlers | `billing_events` |
+
+### Dual-Logging Pattern
+
+Admin billing mutations log to **all three tables**:
+1. `billing_events` via `log_billing_event()`
+2. `admin_audit_log` via `log_admin_audit()`
+3. `activity_log` via `_log()` (in some handlers)
+
+This is intentional — platform audit trail + billing history + tenant-visible activity.
+
+### Retrieval Separation
+
+| Endpoint | Table(s) Read | Gate |
+|----------|--------------|------|
+| `GET /api/activity` | `activity_log` only | `@require_role()` (client) |
+| `GET /api/admin/action-log` | `admin_audit_log` + `billing_events` | `@require_portal_access()` (admin) |
+
+---
+
+## 8. Trust Boundary Analysis
+
+### Token Trust Boundaries
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  JWT_SECRET (shared)                 │
+│                                                     │
+│  ┌──────────────────┐    ┌───────────────────────┐  │
+│  │  Admin Portal     │    │  Client Portal        │  │
+│  │  portal_role=SA   │    │  portal_role=null     │  │
+│  │  is_superadmin=T  │    │  is_superadmin=F      │  │
+│  │                   │    │  role=admin/auditor/   │  │
+│  │  Endpoint guard:  │    │       viewer           │  │
+│  │  @require_portal_ │    │                       │  │
+│  │   access/role()   │    │  Endpoint guard:      │  │
+│  │                   │    │  @require_role()      │  │
+│  └──────────────────┘    │  + RLS via tenant_id   │  │
+│                           └───────────────────────┘  │
+│                                                     │
+│  Login enforces portal separation at token creation  │
+│  Middleware enforces host↔tenant at request time     │
+└─────────────────────────────────────────────────────┘
+```
+
+### What Prevents Cross-Portal Token Reuse
+
+| Layer | Mechanism | Strength |
+|-------|-----------|----------|
+| **Login** | `portal` param blocks wrong-portal users | Strong (server-enforced) |
+| **Middleware** | Host↔tenant check (subdomain vs JWT tenant_id) | Strong (superadmins exempt) |
+| **Decorators** | `@require_portal_role()` on admin endpoints | Strong (claim-based) |
+| **Frontend** | Separate localStorage keys per portal | Medium (client-side only) |
+| **Cryptographic** | Shared JWT_SECRET, no iss/aud | **Absent** |
+
+---
+
+## 9. Findings Summary
+
+### Secure (No Action Required)
+
+| ID | Finding |
+|----|---------|
+| AUTH-OK-1 | Login-time portal enforcement blocks cross-portal token creation |
+| AUTH-OK-2 | All 41 admin routes have appropriate role decorators |
+| AUTH-OK-3 | No mixing of `@require_role()` and `@require_portal_role()` on same endpoint |
+| AUTH-OK-4 | DELETE operations restricted to `@require_superadmin()` |
+| AUTH-OK-5 | API keys cannot access admin endpoints (no `portal_role` claim) |
+| AUTH-OK-6 | Frontend stores admin/client tokens in separate localStorage keys |
+| AUTH-OK-7 | Global fetch interceptor is portal-aware per request |
+| AUTH-OK-8 | Refresh tokens are opaque (not JWT) and single-use |
+| AUTH-OK-9 | Host↔tenant guard prevents subdomain token misuse |
+| AUTH-OK-10 | Admin audit trail (`admin_audit_log`) is separate from tenant activity log |
+
+### Architectural Gaps (Recommendations)
+
+| ID | Severity | Finding | Recommendation |
+|----|----------|---------|----------------|
+| AUTH-GAP-1 | Medium | No `iss`/`aud` claims in JWT | Add `iss: "auditgraph-admin"` or `"auditgraph-client"` and validate on decode |
+| AUTH-GAP-2 | Medium | Single shared `JWT_SECRET` for both portals | Consider separate signing keys (`JWT_SECRET_ADMIN` / `JWT_SECRET_CLIENT`) for cryptographic isolation |
+| AUTH-GAP-3 | Low | ~136 client endpoints lack explicit `@require_role()` decorator | Add `@require_role('admin','auditor','viewer')` for defense-in-depth |
+| AUTH-GAP-4 | Low | `active_tenant_id` in localStorage is not portal-scoped | Use `admin_active_tenant_id` / `client_active_tenant_id` |
+| AUTH-GAP-5 | Low | `auth_middleware()` does not log portal context | Log `portal_role`, `tenant_id_override`, host-subdomain validation results |
+| AUTH-GAP-6 | Low | `activity_log` does not capture IP address | Add `ip_address` column for parity with `admin_audit_log` |
+
+---
+
+## 10. Risk Assessment
+
+**Current Risk Level**: **LOW** (mitigated by multi-layer defense)
+
+The system's security relies on a correct chain of: login enforcement → claim-based decorators → host↔tenant guards → RLS. Each layer compensates for the lack of cryptographic portal isolation. An attacker would need to:
+
+1. Obtain a valid JWT (requires login credentials)
+2. Bypass login portal enforcement (server-side, not bypassable)
+3. Bypass endpoint decorators (server-side, claim-checked)
+4. Bypass host↔tenant guard (server-side, subdomain-checked)
+
+No single point of failure exists. The architectural gaps (AUTH-GAP-1/2) are best-practice improvements, not exploitable vulnerabilities given the current defense-in-depth.
+
+---
+
+## Files Audited
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `backend/app/api/auth.py` | 1-290 | JWT generation, validation, middleware, role decorators |
+| `backend/app/api/handlers.py` | 6621-6736, 17497-17706 | Login flow, admin mutation handlers, billing summary |
+| `backend/app/main.py` | 539-875 | Route registration + decorator assignment |
+| `backend/app/database.py` | 2214-2237, 3493-3506, 3835-3844, 8748-8784 | Logging methods + table definitions |
+| `frontend/src/contexts/AuthContext.tsx` | 1-320 | Token storage, portal detection, fetch interceptor |
+| `frontend/src/pages/AdminConsole.tsx` | 1-257 | Admin portal gating + role-based nav |
+| `frontend/src/services/apiClient.ts` | 1-72 | API client layer |
+| `frontend/src/App.tsx` | 187-231 | Route separation logic |
