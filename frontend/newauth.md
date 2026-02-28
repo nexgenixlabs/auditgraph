@@ -690,3 +690,465 @@ Header: {"alg": "HS256", "typ": "JWT", "kid": "tenant-v1"}
 | Impersonation time-bomb | `impersonation_exp` = 15min hard cap, checked in middleware |
 | Refresh token rotation | Revoke-before-issue, reuse detection with full session kill |
 | Cross-tenant admin logging | `cross_tenant_admin_action` logged when X-Tenant-Id override used |
+
+---
+
+# Phase 2A — Tenant Isolation Audit (READ-ONLY)
+
+**Date**: 2026-02-28
+**Scope**: All database queries, handlers, background jobs, services, exports, caching
+**Status**: READ-ONLY AUDIT — no code changes
+
+---
+
+## Executive Summary
+
+Audited the entire backend for tenant isolation gaps across 4 layers: database methods, API handlers, background jobs/services, and auth middleware/routes. Found **27 findings** across 4 severity levels. The core RLS infrastructure (PostgreSQL row-level security, `Database(tenant_id=N)` constructor) is sound, but application-layer bypasses exist in several areas.
+
+**Architecture context**: 54 tables, 44 with `tenant_id` (NOT NULL), strict RLS policies on all 44 via migration 017. Dual DB users: `auditgraph_app` (NOBYPASSRLS) + `auditgraph_admin` (BYPASSRLS). `Database(tenant_id=N)` connects as app user + sets RLS context; `Database()` connects as admin (bypasses RLS).
+
+---
+
+## 1. CRITICAL Findings (P0 — Active Data Leakage Risk)
+
+### C1. Webhooks — No Tenant Filtering on READ/UPDATE/DELETE
+**File**: `database.py:2945-3050`
+**Tables**: `webhooks`, `webhook_deliveries`
+
+| Method | Line | Issue |
+|--------|------|-------|
+| `get_webhooks()` | 2945 | `SELECT *` — no tenant filter, returns ALL tenants' webhooks |
+| `get_webhook(webhook_id)` | ~2960 | ID-only lookup — no tenant verification |
+| `update_webhook(webhook_id)` | ~2975 | ID-only update — no tenant verification |
+| `delete_webhook(webhook_id)` | ~2990 | ID-only delete — can delete other tenant's webhooks |
+| `get_webhooks_for_event(event_type)` | ~3005 | No tenant filter — fires webhooks from ALL tenants |
+| `get_webhook_deliveries(webhook_id)` | ~3020 | No tenant filter on delivery history |
+
+**Note**: `create_webhook()` correctly uses `self._tenant_id` (line 2987). The isolation gap is on all read/modify paths.
+
+**Risk**: Tenant A can see/modify/delete Tenant B's webhook configurations. The `get_webhooks_for_event()` gap means events in Tenant A trigger webhooks registered by Tenant B.
+
+**Effort**: Medium — add `WHERE tenant_id = %s` to 6 methods.
+
+---
+
+### C2. Custom Risk Rules — No Tenant Scoping At All
+**File**: `database.py:3125-3220`
+**Table**: `custom_risk_rules`
+
+| Method | Line | Issue |
+|--------|------|-------|
+| `get_custom_risk_rules()` | 3125 | `SELECT * FROM custom_risk_rules ORDER BY priority, id` — no tenant filter |
+| `get_custom_risk_rule(rule_id)` | ~3145 | ID-only lookup |
+| `create_custom_risk_rule()` | ~3158 | Does NOT populate `tenant_id` in INSERT |
+| `update_custom_risk_rule(rule_id)` | ~3175 | ID-only update |
+| `delete_custom_risk_rule(rule_id)` | ~3190 | ID-only delete |
+| `get_enabled_risk_rules()` | ~3200 | No tenant filter — returns ALL tenants' rules |
+
+**Risk**: All tenants share risk rules. Tenant A's custom rules affect Tenant B's risk scoring. `create_custom_risk_rule()` doesn't even set `tenant_id`, so rules are orphaned.
+
+**Effort**: Medium — add tenant_id to create + filter on all reads.
+
+---
+
+### C3. SOAR Playbooks — No Tenant Filtering on READ
+**File**: `database.py:7089-7202`
+**Tables**: `soar_playbooks`, `soar_actions`
+
+| Method | Line | Issue |
+|--------|------|-------|
+| `get_soar_playbooks()` | 7089 | `SELECT * FROM soar_playbooks ORDER BY created_at DESC` — all tenants |
+| `get_soar_playbook(playbook_id)` | ~7105 | ID-only lookup |
+| `get_enabled_playbooks_by_trigger(trigger_type)` | 7186 | No tenant filter — fires ALL tenants' playbooks |
+| `delete_soar_playbook(playbook_id)` | ~7155 | ID-only delete |
+| `update_soar_playbook(playbook_id)` | ~7140 | ID-only update |
+
+**Risk**: Tenant A's anomaly triggers Tenant B's SOAR playbook via `get_enabled_playbooks_by_trigger()`. Cross-tenant automated response execution.
+
+**Effort**: Medium — add tenant filter to 5 methods.
+
+---
+
+### C4. SOAR Action Stats — Cross-Tenant Data Aggregation
+**File**: `database.py:7273-7294`
+**Table**: `soar_actions`
+
+```sql
+SELECT COUNT(*) ... FROM soar_actions                    -- line 7284, NO tenant filter
+SELECT integration, COUNT(*) FROM soar_actions GROUP BY  -- line 7290, NO tenant filter
+```
+
+**Risk**: Any authenticated user sees aggregated SOAR stats from ALL tenants — total actions, success rates, integration breakdown. Active cross-tenant information disclosure.
+
+**Effort**: Low — add `WHERE tenant_id = %s` to both queries.
+
+---
+
+### C5. Notification Single-Record Operations — No Tenant Verification
+**File**: `database.py:3293-3412`
+**Table**: `notifications`
+
+| Method | Line | Issue |
+|--------|------|-------|
+| `get_notification(notification_id)` | 3293 | `WHERE id = %s` — no tenant check |
+| `mark_notification_read(notification_id)` | ~3357 | ID-only update |
+| `action_notification(notification_id)` | ~3390 | ID-only update |
+| `delete_notification(notification_id)` | ~3407 | ID-only delete |
+
+**Note**: `get_notifications()` accepts tenant_id parameter and filters correctly. Only single-record CRUD bypasses.
+
+**Risk**: User can mark/action/delete notifications belonging to other tenants by guessing sequential IDs.
+
+**Effort**: Low — add tenant_id parameter and `AND tenant_id = %s` to 4 methods.
+
+---
+
+### C6. NotificationDispatcher Throttle — Shared Across All Tenants
+**File**: `services/notification_dispatcher.py:27`
+
+```python
+class NotificationDispatcher:
+    _throttle: dict = {}     # CLASS-LEVEL — shared across ALL tenants
+    THROTTLE_SECONDS = 300   # 5 minutes
+```
+
+**Risk**: If Tenant A triggers `scan_complete` notification, Tenant B's `scan_complete` notification is silently dropped for the next 5 minutes because the throttle key `scan_complete` is shared globally.
+
+**Effort**: Low — make throttle dict keyed by `(tenant_id, event_type)`.
+
+---
+
+### C7. mark_overdue_invoices() — Blanket UPDATE Without RLS
+**File**: `scheduler.py:1113-1137`
+
+```python
+db = Database()   # line 1117 — NO tenant context, bypasses RLS
+cursor.execute("""
+    UPDATE invoices SET status = 'overdue', updated_at = NOW()
+    WHERE status = 'sent' AND due_at < NOW()
+""")              # line 1120-1122 — updates ALL tenants' invoices
+```
+
+**Risk**: Not a data leakage risk per se (the UPDATE is correct), but uses admin bypass unnecessarily. If this function had a bug, it would affect all tenants simultaneously. Should use per-tenant RLS for defense-in-depth.
+
+**Effort**: Low — wrap in per-tenant loop or add explicit `tenant_id` filter with RETURNING.
+
+---
+
+### C8. send_scheduled_report() — No Tenant Context
+**File**: `services/email_service.py:527-545`
+
+```python
+def send_scheduled_report(self) -> bool:
+    db = Database()                    # line 530 — NO tenant context
+    report_data = db.get_report_data() # could return cross-tenant data
+```
+
+**Risk**: When called from scheduler (which loops per-tenant), the `Database()` call bypasses RLS. If `get_report_data()` queries tenant-scoped tables, it returns data from all tenants mixed together.
+
+**Effort**: Medium — pass tenant_id from scheduler loop into send_scheduled_report().
+
+---
+
+## 2. HIGH Findings (P1 — Privilege Escalation / Missing Guards)
+
+### H1. cloud_connections Table — Missing RLS Policies
+**File**: `database.py:8283`, `migrations/017_complete_rls_isolation.sql`
+
+The `cloud_connections` table is created with `tenant_id INTEGER NOT NULL` but is NOT included in migration 017's RLS policy setup. Grep for `cloud_connections` in migration 017 returns no matches. The table has 44 RLS-protected peers but no policy itself.
+
+**Impact**: Even when handlers use `Database(tenant_id=N)`, RLS doesn't filter `cloud_connections` rows because no policy exists. Currently mitigated by explicit `WHERE tenant_id = %s` in database methods, but if any method forgets the filter, all tenants' cloud credentials are exposed.
+
+**Effort**: Low — add RLS policy in a new migration.
+
+---
+
+### H2. Client Connection Handlers — Use Database() Instead of _db()
+**File**: `handlers.py:10856, 10928, 11016, 11042, 11097, 11115, 11150, 11167, 11190`
+
+All 9 occurrences in `get_client_connections()`, `create_client_connection()`, `update_client_connection()`, `delete_client_connection()`, `test_client_connection()`, `discover_client_connection()` use `Database()` (admin bypass) instead of `_db()` (tenant-scoped).
+
+Each handler correctly calls `_tenant_id()` and passes it to database methods, providing application-layer filtering. But the RLS safety net is bypassed.
+
+**Effort**: Low — change `Database()` to `_db()` in 9 locations.
+
+---
+
+### H3. /api/system/health — No Access Decorator, Cross-Tenant Data
+**File**: `main.py:381-383`, `handlers.py:14824-14850`
+
+```python
+@app.get("/api/system/health")     # NO @require_portal_access() or @require_superadmin()
+def system_health():
+    return get_system_health()
+```
+
+The handler queries `discovery_runs ORDER BY id DESC LIMIT 10` — for superadmins this returns runs from ALL tenants. For regular users, RLS scopes it, but the endpoint should be admin-only. Any authenticated user can access it.
+
+**Effort**: Low — add `@require_portal_access()` or `@require_superadmin()`.
+
+---
+
+### H4. /api/analytics/login-sessions — Unvalidated tenant_id Query Param
+**File**: `handlers.py:10610`, `main.py:910-913`
+
+```python
+@app.get("/api/analytics/login-sessions")
+@require_portal_access()                    # allows billing + reader roles
+def analytics_login_sessions():
+    ...
+    tenant_id_filter = request.args.get('tenant_id', type=int)  # line 10610
+```
+
+Any user with portal access (including `billing` and `reader` roles) can pass `?tenant_id=<any>` to view login sessions from any tenant. Should restrict cross-tenant filtering to superadmin/poweradmin only.
+
+**Effort**: Low — validate `tenant_id` against caller's role.
+
+---
+
+### H5. /api/admin/billing/events — Unvalidated tenant_id Query Param
+**File**: `handlers.py:17842-17849`, `main.py:623-626`
+
+```python
+@app.get("/api/admin/billing/events")
+@require_portal_access()                   # allows billing + reader roles
+def admin_billing_events():
+    ...
+    tenant_id = request.args.get('tenant_id', type=int)  # line 17846
+```
+
+Same pattern as H4 — billing/reader roles can view any tenant's billing events.
+
+**Effort**: Low — restrict cross-tenant query to superadmin/poweradmin.
+
+---
+
+### H6. Missing Decorator on /api/admin/impersonate/end
+**File**: `main.py:639-641`
+
+```python
+@app.post("/api/admin/impersonate/end")     # NO @require_portal_role()
+def admin_end_impersonation_route():
+    return admin_end_impersonation()
+```
+
+The paired `/api/admin/impersonate` route (line 635) has `@require_portal_role('superadmin', 'poweradmin')`. The end route has no decorator — any authenticated user can call it.
+
+**Impact**: Low immediate risk (handler checks impersonation flag), but breaks the decorator symmetry and violates least-privilege.
+
+**Effort**: Trivial — add same decorator.
+
+---
+
+### H7. CopilotService.gather_context() — No Tenant Filtering
+**File**: `services/copilot_service.py:49-70`
+
+```python
+cursor.execute("""
+    SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
+    FROM discovery_runs WHERE status = 'completed'
+    ORDER BY id DESC LIMIT 1
+""")  # NO tenant filter
+```
+
+The copilot handler uses `_db()` (line 16339 in handlers.py), so RLS applies. But `gather_context()` executes raw SQL without explicit tenant filters — relies entirely on RLS. If the method is ever called with `Database()` (admin bypass), it leaks cross-tenant discovery data into AI prompts.
+
+**Effort**: Low — add explicit `WHERE tenant_id` filter as defense-in-depth.
+
+---
+
+## 3. MEDIUM Findings (P2 — Design Gaps)
+
+### M1. X-Tenant-Id Override — No Tenant Existence Validation
+**File**: `auth.py:312-338`
+
+```python
+g.current_user['tenant_id'] = int(override_tid)  # No check that tenant exists
+```
+
+Superadmin can set `X-Tenant-Id: 999999` targeting a non-existent tenant. Downstream code may create orphaned records or behave unexpectedly.
+
+**Effort**: Low — add `db.get_tenant_by_id(int(override_tid))` check.
+
+---
+
+### M2. /api/metrics — PUBLIC Endpoint, Cross-Tenant Metadata
+**File**: `main.py:377-379`, `auth.py:51` (PUBLIC_PATHS)
+
+`/api/metrics` is in PUBLIC_PATHS — no authentication required. Returns Prometheus-format metrics including total request counts, error rates, latency distributions, and top endpoints across ALL tenants.
+
+**Impact**: Information disclosure of platform usage patterns, but no tenant-specific data.
+
+**Effort**: Low — remove from PUBLIC_PATHS, add auth requirement.
+
+---
+
+### M3. MetricsCollector Singleton — Cross-Tenant Aggregation
+**File**: `metrics.py:12-30`
+
+```python
+class MetricsCollector:
+    _instance = None   # GLOBAL SINGLETON — all tenants share one instance
+```
+
+All request metrics are aggregated globally. Not a tenant isolation issue per se (metrics are operational, not tenant data), but means `/api/system/health` shows cross-tenant operational data.
+
+**Effort**: Medium — would require per-tenant metric buckets; may not be worth the complexity.
+
+---
+
+### M4. Dashboard Preferences — user_id Only, No Tenant Check
+**File**: `database.py` (dashboard_preferences methods)
+
+Methods use `WHERE user_id = %s` without tenant verification. If user IDs were ever reused across tenants (unlikely with serial PKs), preferences could leak.
+
+**Effort**: Low — add `AND tenant_id = %s` to queries.
+
+---
+
+### M5. API Key Lookup by Hash — No Tenant Context
+**File**: `database.py:6962-6977`
+
+`get_api_key_by_hash(key_hash)` does `SELECT * WHERE key_hash = %s` without tenant filter. Used by auth middleware where tenant isn't known yet (pre-auth). The hash-based lookup inherently prevents enumeration, so risk is low.
+
+**Effort**: N/A — by design (pre-auth context). Could add tenant_id to response and verify post-auth.
+
+---
+
+### M6. Admin Impersonation — No PowerAdmin Scope Restriction
+**File**: `handlers.py:17931-17945`
+
+`admin_impersonate()` accepts `tenant_id` from request body. While gated by `@require_portal_role('superadmin', 'poweradmin')`, PowerAdmins can impersonate ANY tenant. If PowerAdmin roles should have tenant boundaries, this is a privilege escalation.
+
+**Effort**: Medium — depends on whether PowerAdmin scoping is desired.
+
+---
+
+### M7. User Creation/Update — Trusted tenant_id from Request Body
+**File**: `handlers.py:7138-7141, 7216`
+
+```python
+elif current_user.get('is_superadmin') and 'tenant_id' in data:
+    tenant_id = data.get('tenant_id')   # Trusted from body, no existence check
+```
+
+Superadmin-gated, so risk is low. But `tenant_id` from body isn't validated to exist in the `tenants` table.
+
+**Effort**: Low — add existence check.
+
+---
+
+### M8. get_email_service() — Missing Tenant Context
+**File**: `services/email_service.py:41-62`
+
+```python
+def get_email_service():
+    db = Database()   # line 49 — NO tenant context
+    provider = db.get_system_setting('email_provider', 'graph')
+```
+
+Reads `email_provider` setting without tenant context. Could read wrong tenant's setting. Currently mitigated because `get_system_setting()` reads from a system-level settings namespace, not tenant-scoped.
+
+**Effort**: Low — verify `get_system_setting` is truly system-level, not tenant-scoped.
+
+---
+
+## 4. LOW Findings (P3 — Cosmetic / Defense-in-Depth)
+
+### L1. Inconsistent Decorator Patterns on Admin Routes
+**File**: `main.py` (various)
+
+Some admin endpoints that query all tenants use permissive `@require_portal_access()` (4 roles) when they should use `@require_portal_role('superadmin', 'poweradmin')`. No documented intent behind role grants.
+
+### L2. Scheduler Engine Init — Potential Argument Mismatch
+**File**: `scheduler.py:1170`
+
+`check_scan_schedules()` creates `AzureDiscoveryEngine(conn_row, tenant_db)` — need to verify constructor signature matches. May cause errors rather than isolation issues.
+
+### L3. EmailService Credentials — Shared Azure SP
+**File**: `services/email_service.py:79-84`
+
+All tenants share the same Azure service principal credentials for email. By design (platform-level email), but credential blast radius is high.
+
+---
+
+## 5. What's Working Correctly
+
+| Component | Status | Evidence |
+|-----------|--------|----------|
+| RLS infrastructure | **SOLID** | Migration 017: strict policies on 44 tables, auto-fill trigger, NOT NULL enforcement |
+| `Database(tenant_id=N)` constructor | **CORRECT** | Sets `app.current_tenant_id` session var, connects as `auditgraph_app` (NOBYPASSRLS) |
+| `_db()` helper | **CORRECT** | Derives tenant from `g.current_user`, returns scoped `Database` instance |
+| `_tenant_id()` helper | **CORRECT** | Returns sentinel `-1` for non-superadmin without tenant (matches no rows) |
+| Settings methods | **CORRECT** | All require `tenant_id` parameter |
+| API Key CRUD | **CORRECT** | 5/6 methods properly verify tenant_id (exception: hash lookup, by design) |
+| Cloud connection DB methods | **CORRECT** | All require `tenant_id` parameter in queries |
+| Scheduler per-tenant loop | **CORRECT** | Iterates `SELECT id FROM tenants WHERE enabled = TRUE`, creates `Database(tenant_id=tid)` per tenant |
+| SAML/SSO flow | **CORRECT** | Derives tenant from RelayState (slug), not client input |
+| Export endpoints | **CORRECT** | Use `_tenant_id()` + in-memory files (BytesIO/StringIO), no shared temp files |
+| Auth middleware tenant context | **CORRECT** | `g.current_user['tenant_id']` set from JWT payload, X-Tenant-Id only for superadmins |
+
+---
+
+## 6. Risk Severity Summary
+
+| Severity | Count | Category |
+|----------|-------|----------|
+| **CRITICAL (P0)** | 8 | C1-C8: Active cross-tenant data leakage or execution |
+| **HIGH (P1)** | 7 | H1-H7: Missing RLS, missing decorators, unvalidated params |
+| **MEDIUM (P2)** | 8 | M1-M8: Design gaps, defense-in-depth missing |
+| **LOW (P3)** | 3 | L1-L3: Cosmetic, documentation, blast radius |
+| **Total** | **27** | |
+
+---
+
+## 7. Remediation Roadmap
+
+### Immediate (Block Next Release)
+
+| # | Finding | Fix | Effort | Files |
+|---|---------|-----|--------|-------|
+| 1 | C1 | Add `WHERE tenant_id = %s` to 6 webhook methods | 1h | database.py |
+| 2 | C2 | Add tenant_id to create + filter on 6 custom_risk_rules methods | 1h | database.py |
+| 3 | C3 | Add `WHERE tenant_id = %s` to 5 SOAR playbook methods | 1h | database.py |
+| 4 | C4 | Add `WHERE tenant_id = %s` to 2 SOAR stats queries | 30m | database.py |
+| 5 | C5 | Add tenant_id param to 4 notification single-record methods | 30m | database.py |
+| 6 | C6 | Make throttle dict keyed by `(tenant_id, event_type)` | 30m | notification_dispatcher.py |
+| 7 | H1 | Add RLS policy for `cloud_connections` table | 30m | new migration |
+| 8 | H2 | Change 9 `Database()` to `_db()` in client connection handlers | 30m | handlers.py |
+
+### High Priority (Before Next Release)
+
+| # | Finding | Fix | Effort | Files |
+|---|---------|-----|--------|-------|
+| 9 | C7 | Wrap mark_overdue_invoices() in per-tenant loop | 30m | scheduler.py |
+| 10 | C8 | Pass tenant_id into send_scheduled_report() | 1h | email_service.py, scheduler.py |
+| 11 | H3 | Add `@require_portal_access()` to /api/system/health | 5m | main.py |
+| 12 | H4 | Validate tenant_id param in login-sessions | 15m | handlers.py |
+| 13 | H5 | Validate tenant_id param in billing events | 15m | handlers.py |
+| 14 | H6 | Add `@require_portal_role('superadmin', 'poweradmin')` to impersonate/end | 5m | main.py |
+| 15 | H7 | Add explicit tenant filter to copilot gather_context() | 15m | copilot_service.py |
+
+### Medium Priority (Next Sprint)
+
+| # | Finding | Fix | Effort | Files |
+|---|---------|-----|--------|-------|
+| 16 | M1 | Add tenant existence check to X-Tenant-Id override | 15m | auth.py |
+| 17 | M2 | Remove /api/metrics from PUBLIC_PATHS | 5m | auth.py |
+| 18 | M4 | Add tenant_id to dashboard_preferences queries | 15m | database.py |
+| 19 | M6 | Add PowerAdmin scope validation to impersonation | 1h | handlers.py |
+| 20 | M7 | Add tenant existence check in user create/update | 15m | handlers.py |
+
+---
+
+## 8. High-Risk Exposure Areas
+
+1. **SOAR/Automation Engine**: The combination of C3 (unscoped playbook reads) + C4 (unscoped stats) means the entire SOAR subsystem operates without tenant boundaries. Tenant A's anomaly can trigger Tenant B's automated response playbook.
+
+2. **Webhook System**: C1 means webhook event dispatch (`get_webhooks_for_event()`) fires ALL tenants' webhooks for every event, potentially sending Tenant A's security data to Tenant B's webhook endpoint.
+
+3. **Risk Scoring Engine**: C2 means all tenants share the same custom risk rules. A rule created by Tenant A modifies risk scores for all tenants, corrupting risk assessments platform-wide.
+
+4. **Cloud Connection Management**: H1 + H2 means the `cloud_connections` table (which stores cloud provider credentials) has no RLS policy and handlers bypass RLS. While application-layer filtering exists, a single bug in the filtering logic would expose all tenants' cloud credentials.
+
+5. **Cross-Portal Data Visibility**: H3 + H4 + H5 mean non-privileged admin portal users (billing/reader) can view cross-tenant operational data, audit trails, and billing events by manipulating query parameters.
