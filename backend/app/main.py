@@ -343,6 +343,8 @@ def create_app():
         from app.database import _ensure_scan_schedules_table, _ensure_stripe_columns
         _ensure_scan_schedules_table(_db_init.conn)
         _ensure_stripe_columns(_db_init.conn)
+        # Phase 3A: Entitlements tables
+        _db_init._ensure_entitlements_tables()
         # Phase 6: Performance indexes for scale (500+ identities)
         _perf_cursor = _db_init.conn.cursor()
         for idx_sql in [
@@ -500,16 +502,19 @@ def create_app():
 
     @app.put("/api/soar/playbooks/<int:playbook_id>")
     @require_role('admin')
+    @require_feature('soar')
     def soar_playbooks_update(playbook_id):
         return update_soar_playbook_handler(playbook_id)
 
     @app.delete("/api/soar/playbooks/<int:playbook_id>")
     @require_role('admin')
+    @require_feature('soar')
     def soar_playbooks_delete(playbook_id):
         return delete_soar_playbook_handler(playbook_id)
 
     @app.post("/api/soar/playbooks/<int:playbook_id>/test")
     @require_role('admin')
+    @require_feature('soar')
     def soar_playbooks_test(playbook_id):
         return test_soar_playbook_handler(playbook_id)
 

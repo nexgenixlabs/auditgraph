@@ -10903,6 +10903,17 @@ def create_client_connection():
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
+
+    # Enforce subscription limit before creating connection
+    from app.entitlements.service import enforce_subscription_limit
+    admin_db = Database()
+    try:
+        allowed, err_msg = enforce_subscription_limit(admin_db, tid)
+        if not allowed:
+            return jsonify({'error': err_msg, 'upgrade_required': True}), 403
+    finally:
+        admin_db.close()
+
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Expected JSON body'}), 400
@@ -10990,6 +11001,10 @@ def create_client_connection():
 
         _log(db, 'connection_created', f'Created {cloud} connection: {label}',
              {'connection_id': conn['id'], 'cloud': cloud, 'discovered_subs': discovered_count})
+
+        # Track usage
+        from app.entitlements.service import track_usage
+        track_usage(db, tid, 'connection', str(conn['id']), 'added', {'cloud': cloud})
 
         result = dict(conn)
         result['discovered_count'] = discovered_count
@@ -17401,28 +17416,15 @@ def test_integration_webhook():
 
 
 def check_feature_gate(feature_name):
-    """Check if a feature is available for the current organization's plan."""
+    """Check if a feature is available for the current organization's plan.
+    Delegates to the entitlements engine (per-org overrides, trial expiry, plan check)."""
+    from app.entitlements.service import is_feature_enabled
     db = _db()
     try:
         organization_id = _org_id()
         if not organization_id:
             return True, None
-
-        org = db.get_organization_by_id(organization_id)
-        if not org:
-            return True, None
-
-        plan = org.get('plan', 'free')
-        limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
-        blocked = limits.get('blocked_features', [])
-
-        if feature_name in blocked:
-            return False, {
-                'error': f'{feature_name.replace("_", " ").title()} is not available on the {plan.capitalize()} plan.',
-                'upgrade_required': True,
-                'current_plan': plan,
-            }
-        return True, None
+        return is_feature_enabled(db, organization_id, feature_name)
     finally:
         db.close()
 
@@ -17501,6 +17503,11 @@ def activate_subscription():
             return jsonify({'error': 'Subscription not found'}), 404
 
         _log(db, 'subscription_activated', f"Activated subscription {result.get('account_id')}", {'subscription_id': sub_id})
+
+        # Track usage
+        from app.entitlements.service import track_usage
+        track_usage(db, tid, 'subscription', str(sub_id), 'activated')
+
         return jsonify(result)
     finally:
         db.close()
@@ -17525,11 +17532,17 @@ def deactivate_subscription(sub_id):
     """PUT /api/subscriptions/<id>/deactivate — stop monitoring."""
     db = _db()
     try:
-        result = db.deactivate_cloud_subscription(sub_id, organization_id=_org_id())
+        tid = _org_id()
+        result = db.deactivate_cloud_subscription(sub_id, organization_id=tid)
         if not result:
             return jsonify({'error': 'Subscription not found'}), 404
 
         _log(db, 'subscription_deactivated', f"Deactivated subscription {result.get('account_id')}", {'subscription_id': sub_id})
+
+        # Track usage
+        from app.entitlements.service import track_usage
+        track_usage(db, tid, 'subscription', str(sub_id), 'deactivated')
+
         return jsonify(result)
     finally:
         db.close()

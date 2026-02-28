@@ -439,39 +439,6 @@ def require_portal_role(*allowed_roles):
 
 def require_feature(feature_name):
     """Decorator that gates a route behind a plan feature.
-    Superadmins bypass all gates. Logs entitlement_blocked to activity_log."""
-    def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            user = getattr(g, 'current_user', None)
-            if not user:
-                return jsonify({'error': 'Authentication required'}), 401
-            # Superadmins bypass all feature gates
-            if user.get('is_superadmin'):
-                return f(*args, **kwargs)
-            # Lazy import to avoid circular dependency (auth <- handlers)
-            from app.api.handlers import check_feature_gate
-            allowed, err = check_feature_gate(feature_name)
-            if not allowed:
-                # Log the blocked attempt
-                try:
-                    db = Database()
-                    cursor = db.conn.cursor()
-                    cursor.execute(
-                        """INSERT INTO activity_log (action, description, user_id, organization_id, metadata, created_at)
-                           VALUES (%s, %s, %s, %s, %s, NOW())""",
-                        ('entitlement_blocked',
-                         f'Feature "{feature_name}" blocked for {err.get("current_plan", "free")} plan',
-                         user.get('id'),
-                         user.get('organization_id'),
-                         '{}')
-                    )
-                    db.conn.commit()
-                    cursor.close()
-                    db.close()
-                except Exception:
-                    pass
-                return jsonify(err), 403
-            return f(*args, **kwargs)
-        return wrapper
-    return decorator
+    Backward-compat alias — delegates to the entitlements engine."""
+    from app.entitlements.decorator import require_entitlement
+    return require_entitlement(feature_name)

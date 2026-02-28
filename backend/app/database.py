@@ -7388,6 +7388,7 @@ class Database:
 
     _organizations_ensured = False
     _migration_018_ensured = False
+    _migration_019_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -7680,6 +7681,112 @@ class Database:
 
         cursor.close()
         Database._organizations_ensured = True
+
+    # ── Migration 019: Entitlements ────────────────────────────────────────────
+
+    def _run_migration_019_entitlements(self):
+        """Phase 3A: Add entitlement columns to organizations + create entitlement tables.
+        Idempotent — uses IF NOT EXISTS / ADD COLUMN IF NOT EXISTS. Runs as admin (BYPASSRLS)."""
+        if Database._migration_019_ensured:
+            return
+        self._ensure_organizations_table()
+        cursor = self.conn.cursor()
+
+        # 1a. Extend organizations table
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS plan_type VARCHAR(20) NOT NULL DEFAULT 'self_serve'")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS plan_status VARCHAR(20) NOT NULL DEFAULT 'active'")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS subscription_limit INTEGER DEFAULT NULL")
+        self.conn.commit()
+
+        # 1b. Create organization_entitlements table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS organization_entitlements (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                feature_key VARCHAR(100) NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT true,
+                granted_by INTEGER REFERENCES users(id),
+                granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ,
+                reason TEXT,
+                UNIQUE(organization_id, feature_key)
+            )
+        """)
+        self.conn.commit()
+
+        # 1c. Create organization_usage table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS organization_usage (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                resource_type VARCHAR(50) NOT NULL,
+                resource_id VARCHAR(255),
+                action VARCHAR(20) NOT NULL,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_org_usage_org_type ON organization_usage(organization_id, resource_type)")
+        self.conn.commit()
+
+        # 1d. RLS policies + auto-fill triggers for both new tables
+        for tbl in ('organization_entitlements', 'organization_usage'):
+            cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+            for suffix in ('sel', 'ins', 'upd', 'del'):
+                cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON {tbl}")
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    CREATE POLICY org_strict_sel ON {tbl} FOR SELECT
+                        USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    CREATE POLICY org_strict_ins ON {tbl} FOR INSERT
+                        WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE
+                        USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    CREATE POLICY org_strict_del ON {tbl} FOR DELETE
+                        USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+            # Auto-fill trigger
+            cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}")
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
+                    BEGIN
+                        IF NEW.organization_id IS NULL THEN
+                            NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
+                        END IF;
+                        IF NEW.organization_id IS NULL THEN
+                            RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $fn$ LANGUAGE plpgsql;
+
+                    CREATE TRIGGER trg_auto_organization_id
+                        BEFORE INSERT ON {tbl}
+                        FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+            self.conn.commit()
+
+        # Grant app user access
+        try:
+            cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON organization_entitlements TO auditgraph_app")
+            cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON organization_usage TO auditgraph_app")
+            cursor.execute("GRANT USAGE, SELECT ON SEQUENCE organization_entitlements_id_seq TO auditgraph_app")
+            cursor.execute("GRANT USAGE, SELECT ON SEQUENCE organization_usage_id_seq TO auditgraph_app")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
+        cursor.close()
+        Database._migration_019_ensured = True
+
+    def _ensure_entitlements_tables(self):
+        """Ensure entitlements tables exist (calls migration 019). Idempotent."""
+        self._run_migration_019_entitlements()
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 

@@ -1445,3 +1445,72 @@ If connection pooling (pgbouncer, psycopg pool, SQLAlchemy) is ever introduced:
 - [x] 36/36 tests pass (`test_auth_boundary.py` + `test_org_isolation.py`)
 - [x] TypeScript compiles clean (`npx tsc --noEmit`)
 - [x] Python imports work (`from app.database import Database`)
+
+---
+
+## Phase 3A — Organization Entitlement Engine Foundation
+
+### Overview
+
+Replaces the ad-hoc `TIER_LIMITS` dict + `check_feature_gate()` with a database-backed entitlements engine supporting per-org overrides, trial expiry enforcement, and usage tracking.
+
+### Schema (Migration 019)
+
+- **`organizations`** table gains: `plan_type` (self_serve/msp/enterprise_agreement), `plan_status` (active/trialing/suspended/cancelled), `subscription_limit` (per-org override, NULL = use plan default)
+- **`organization_entitlements`** — per-org feature overrides (organization_id, feature_key, enabled, expires_at, granted_by, reason). RLS-enabled.
+- **`organization_usage`** — usage tracking events (organization_id, resource_type, resource_id, action, metadata). RLS-enabled.
+
+### Entitlements Package (`backend/app/entitlements/`)
+
+| File | Purpose |
+|------|---------|
+| `registry.py` | `FEATURES` dict (8 gated features), `FEATURE_ALIASES` (soar→soar_automation), `PLAN_DEFAULTS` (subscription/identity limits per plan) |
+| `service.py` | `is_feature_enabled()` (override→plan→trial expiry), `enforce_subscription_limit()`, `get_org_entitlements()`, `track_usage()` |
+| `decorator.py` | `require_entitlement(feature_key)` — route decorator with superadmin bypass + activity_log denial |
+| `__init__.py` | Re-exports all public API |
+
+### Feature Check Order (is_feature_enabled)
+
+1. Query `organization_entitlements` for per-org override (check `enabled` + `expires_at`)
+2. If no override → check `FEATURES[key]['plans']` against org's `plan`
+3. If plan is `trial` → check `trial_expires_at` (expired trial = denied)
+4. Return `(True, None)` or `(False, error_dict)`
+
+### Wiring
+
+- **`require_feature`** in `auth.py` → now delegates to `require_entitlement` (backward compat)
+- **`check_feature_gate`** in `handlers.py` → now calls `is_feature_enabled` from entitlements engine
+- **SOAR routes**: `PUT /api/soar/playbooks/<id>`, `DELETE /api/soar/playbooks/<id>`, `POST /api/soar/playbooks/<id>/test` now gated with `@require_feature('soar')`
+- **`create_client_connection`** → `enforce_subscription_limit()` check before connection creation
+- **Usage tracking**: `activate_subscription`, `deactivate_subscription`, `create_client_connection` → `track_usage()` calls
+
+### Tests (8 tests in `test_entitlements.py`)
+
+1. `test_trial_org_denied_paid_feature` — free plan blocked
+2. `test_paid_org_allowed` — pro plan allowed
+3. `test_subscription_limit_enforcement` — free plan limited to 1 sub
+4. `test_expired_trial_denial` — expired trial blocked
+5. `test_superadmin_bypass` — decorator source has is_superadmin check
+6. `test_per_org_override` — org-level grant overrides plan block
+7. `test_feature_registry_completeness` — all FEATURES keys valid
+8. `test_soar_routes_protected` — all SOAR write routes in main.py gated
+
+### Files Changed
+
+| File | Action |
+|------|--------|
+| `backend/app/database.py` | Migration 019 + `_ensure_entitlements_tables()` |
+| `backend/app/entitlements/__init__.py` | **New** |
+| `backend/app/entitlements/registry.py` | **New** |
+| `backend/app/entitlements/service.py` | **New** |
+| `backend/app/entitlements/decorator.py` | **New** |
+| `backend/app/api/auth.py` | `require_feature` → alias to `require_entitlement` |
+| `backend/app/api/handlers.py` | `check_feature_gate` → entitlements engine + usage tracking |
+| `backend/app/main.py` | Gate SOAR update/delete/test routes + startup DDL |
+| `backend/tests/test_entitlements.py` | **New** — 8 tests |
+
+### Verification
+
+- [x] 44/44 tests pass (`test_auth_boundary.py` + `test_org_isolation.py` + `test_entitlements.py`)
+- [x] Python imports work (`from app.entitlements.service import is_feature_enabled`)
+- [x] All SOAR write routes protected (`grep require_feature main.py | grep soar` → 5 hits)
