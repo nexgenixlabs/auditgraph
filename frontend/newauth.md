@@ -1755,3 +1755,66 @@ CREATE TABLE IF NOT EXISTS billing_audit_log (
 - [x] Default snapshot insert uses `DO NOTHING` (no accidental overwrite)
 - [x] `billing_audit_log` captures all billing mutations
 - [x] `GET /api/billing/status` route registered
+
+---
+
+# Phase 4A — Production Guardrails & Runtime Safety
+
+**Date**: 2026-02-28
+**Status**: IMPLEMENTED
+
+## Changes
+
+### Stage 1: Structured JSON Logging
+- **New file**: `backend/app/logging_config.py`
+- `JSONFormatter` outputs JSON lines with `timestamp`, `level`, `logger`, `message`, `request_id`
+- `configure_logging()` called from `create_app()` — JSON in production, human-readable in dev
+
+### Stage 2: Request ID Middleware
+- `before_request`: reads `X-Request-ID` header or generates UUID4, stores in `g.request_id`
+- `after_request`: echoes `X-Request-ID` back in all response headers
+
+### Stage 3: Global Error Boundary
+- `@app.errorhandler(404)` — returns JSON with `request_id`
+- `@app.errorhandler(405)` — returns JSON with `request_id`
+- `@app.errorhandler(500)` — returns JSON with `request_id`
+- `@app.errorhandler(Exception)` — logs full traceback with `request_id`, returns 500
+
+### Stage 4: Rate Limiting
+- `POST /api/admin/impersonate` — 3 req / 60s per IP (privilege escalation)
+- `POST /api/admin/organizations/<id>/billing/snapshot` — 5 req / 60s per IP (expensive computation)
+- Login (5/60s) and refresh (10/60s) were already rate-limited — unchanged
+
+### Stage 5: Startup Secrets Validation
+- `_validate_startup_secrets()` in `main.py` — fails fast in production if missing:
+  - `ADMIN_JWT_SECRET`, `CLIENT_JWT_SECRET`, `DB_HOST`, `DB_PASSWORD`
+- Skipped in development (`FLASK_ENV=development`)
+
+### Stage 6: Split Health Endpoints
+- `GET /health/live` — liveness probe (always 200, process alive)
+- `GET /health/ready` — readiness probe (checks DB + scheduler, returns 503 if not ready)
+- `GET /api/health` + `GET /health` — alias for `/health/ready` (backward compat)
+- `GET /api/health/detailed` — full diagnostics (existing health_check)
+- `GET /api/system/health` — admin-only detailed view (unchanged)
+
+### Stage 7: Tests
+- **New file**: `backend/tests/test_production_guardrails.py` — 11 tests, all passing
+
+## Files Modified
+
+| File | Action |
+|------|--------|
+| `backend/app/logging_config.py` | **New** — JSONFormatter + configure_logging() |
+| `backend/app/main.py` | Request ID, error handlers, startup validation, health split, logging init |
+| `backend/app/api/handlers.py` | New health_live() + health_ready() handlers |
+| `backend/tests/test_production_guardrails.py` | **New** — 11 tests |
+
+## Verification
+
+- [x] 76/76 tests pass (all existing + 11 new production guardrails)
+- [x] `from app.logging_config import configure_logging` — imports OK
+- [x] Impersonate route has `@rate_limit(max_requests=3, window_seconds=60)`
+- [x] Billing snapshot route has `@rate_limit(max_requests=5, window_seconds=60)`
+- [x] `/health/live` and `/health/ready` routes registered
+- [x] Global error handlers return JSON with `request_id`
+- [x] Startup validation fails fast in production, skips in development

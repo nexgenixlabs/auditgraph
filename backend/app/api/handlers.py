@@ -14827,6 +14827,50 @@ def health_check():
     })
 
 
+def health_live():
+    """GET /health/live — Kubernetes liveness probe. Always returns 200."""
+    return jsonify({
+        'status': 'alive',
+        'timestamp': datetime.utcnow().isoformat(),
+    })
+
+
+def health_ready():
+    """GET /health/ready — Kubernetes readiness probe. Checks DB + scheduler."""
+    checks = {}
+    ready = True
+
+    # DB connectivity
+    try:
+        db = _db()
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        cursor.close()
+        db.close()
+        checks['database'] = 'ok'
+    except Exception:
+        checks['database'] = 'failed'
+        ready = False
+
+    # Scheduler running
+    try:
+        from app.scheduler import scheduler as _sched
+        sched_ok = _sched is not None
+        checks['scheduler'] = 'ok' if sched_ok else 'stopped'
+        if not sched_ok:
+            ready = False
+    except Exception:
+        checks['scheduler'] = 'unknown'
+
+    status_code = 200 if ready else 503
+    return jsonify({
+        'status': 'ready' if ready else 'not_ready',
+        'timestamp': datetime.utcnow().isoformat(),
+        'checks': checks,
+    }), status_code
+
+
 def prometheus_metrics():
     """GET /api/metrics — Prometheus text exposition format."""
     from app.metrics import MetricsCollector

@@ -2,10 +2,13 @@ from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 from datetime import datetime
 import atexit
+import logging
 import os
 import re
 import time
+import uuid
 
+from app.logging_config import configure_logging
 from app.metrics import MetricsCollector
 from app.security import rate_limit, add_security_headers
 
@@ -173,6 +176,8 @@ from app.api.handlers import (
     post_governance_decision,
     get_governance_stats,
     health_check,
+    health_live,
+    health_ready,
     prometheus_metrics,
     get_system_health,
     get_sla_metrics,
@@ -306,7 +311,37 @@ from app.api.handlers import (
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
+logger = logging.getLogger(__name__)
+
+
+def _validate_startup_secrets():
+    """Fail fast if critical secrets are missing in production."""
+    if os.getenv('FLASK_ENV') == 'development':
+        return  # Skip in dev
+
+    required = [
+        ('ADMIN_JWT_SECRET', 'Admin portal JWT signing'),
+        ('CLIENT_JWT_SECRET', 'Client portal JWT signing'),
+        ('DB_HOST', 'Database host'),
+        ('DB_PASSWORD', 'Database password'),
+    ]
+    missing = [(name, desc) for name, desc in required if not os.getenv(name)]
+    if missing:
+        for name, desc in missing:
+            logger.critical(f"Missing required secret: {name} ({desc})")
+        raise RuntimeError(
+            f"Missing {len(missing)} required secret(s): "
+            + ', '.join(name for name, _ in missing)
+        )
+
+
 def create_app():
+    # Phase 4A: Structured logging
+    configure_logging()
+
+    # Phase 4A: Startup secrets validation
+    _validate_startup_secrets()
+
     app = Flask(__name__)
     cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
     CORS(app, resources={r"/*": {"origins": [o.strip() for o in cors_origins]}})
@@ -314,13 +349,19 @@ def create_app():
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
 
-    # Phase 68: Request timing middleware
+    # Phase 4A: Request ID correlation + Phase 68: Request timing middleware
     @app.before_request
     def _start_timer():
+        g.request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
         g._request_start = time.time()
 
     @app.after_request
     def _record_metrics(response):
+        # Phase 4A: Echo request ID in response
+        request_id = getattr(g, 'request_id', None)
+        if request_id:
+            response.headers['X-Request-ID'] = request_id
+
         start = getattr(g, '_request_start', None)
         if start and request.path.startswith('/api/'):
             duration_ms = (time.time() - start) * 1000
@@ -332,6 +373,37 @@ def create_app():
 
     # Phase 5: Security headers on all responses
     app.after_request(add_security_headers)
+
+    # Phase 4A: Global error boundary
+    @app.errorhandler(404)
+    def _not_found(e):
+        return jsonify({
+            'error': 'Not found',
+            'request_id': getattr(g, 'request_id', None),
+        }), 404
+
+    @app.errorhandler(405)
+    def _method_not_allowed(e):
+        return jsonify({
+            'error': 'Method not allowed',
+            'request_id': getattr(g, 'request_id', None),
+        }), 405
+
+    @app.errorhandler(500)
+    def _internal_error(e):
+        return jsonify({
+            'error': 'Internal server error',
+            'request_id': getattr(g, 'request_id', None),
+        }), 500
+
+    @app.errorhandler(Exception)
+    def _unhandled_exception(e):
+        request_id = getattr(g, 'request_id', None)
+        logger.exception(f"Unhandled exception [request_id={request_id}]")
+        return jsonify({
+            'error': 'Internal server error',
+            'request_id': request_id,
+        }), 500
 
     # Ensure tables exist at startup (run as admin user for DDL privileges)
     try:
@@ -377,11 +449,21 @@ def create_app():
         print(f"  ⚠️ Could not ensure tables/backfill: {e}")
 
     # -----------------------
-    # Health & Monitoring (Phase 68)
+    # Health & Monitoring (Phase 68 + Phase 4A)
     # -----------------------
+    @app.get("/health/live")
+    def health_liveness():
+        return health_live()
+
+    @app.get("/health/ready")
     @app.get("/api/health")
     @app.get("/health")
-    def health():
+    def health_readiness():
+        return health_ready()
+
+    # Backward compat: detailed health_check remains at /api/health
+    @app.get("/api/health/detailed")
+    def health_detailed():
         return health_check()
 
     @app.get("/api/metrics")
@@ -694,6 +776,7 @@ def create_app():
     # Phase 1B+1C: Admin impersonation
     @app.post("/api/admin/impersonate")
     @require_portal_role('superadmin', 'poweradmin')
+    @rate_limit(max_requests=3, window_seconds=60)
     def admin_impersonate_route():
         return admin_impersonate()
 
@@ -2037,6 +2120,7 @@ def create_app():
     # Admin billing overrides
     @app.post("/api/admin/organizations/<int:organization_id>/billing/snapshot")
     @require_portal_role('superadmin', 'poweradmin', 'billing')
+    @rate_limit(max_requests=5, window_seconds=60)
     def admin_billing_snapshot(organization_id):
         return admin_generate_billing_snapshot(organization_id)
 
