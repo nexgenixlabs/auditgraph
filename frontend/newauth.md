@@ -1312,3 +1312,95 @@ New canonical routes: `/api/organizations/*`, `/api/organization/*`.
   6. Notification methods use `organization_id`
   7. Handler helpers use `_org_id()` and `organization_id`
   8. No `tenant_id` in SQL queries (exemptions only)
+
+---
+
+## Phase 2D — RLS Session Safety Audit
+
+**Date**: 2026-02-28
+**Scope**: Connection pooling, session variable lifecycle, cross-request isolation safety
+**Status**: AUDIT COMPLETE — no code change required (documentation-only finding)
+
+### 1. Connection Pooling Strategy
+
+| Question | Answer |
+|----------|--------|
+| SQLAlchemy engine? | **No** — listed in requirements.txt but unused |
+| Psycopg pool? | **No** — raw `psycopg2.connect()` per request |
+| pgbouncer? | **No** — direct TCP to PostgreSQL |
+| Gunicorn workers? | **2 workers** (`--preload`, `--timeout 120`) |
+| Max concurrent connections | ~2–4 (1–2 per worker) |
+
+**Connection lifecycle**: Each handler call to `_db()` creates a new `Database(organization_id=tid)` instance which opens a fresh `psycopg2.connect()` TCP connection. The connection is closed in a `finally:` block (`db.close()` → `conn.close()`). There are **290 `finally:` blocks** in handlers ensuring systematic cleanup. No connection is reused across requests.
+
+### 2. Where `app.current_organization_id` Is SET
+
+**File**: `backend/app/database.py`, method `set_organization_context()` (lines 91–104)
+
+```python
+def set_organization_context(self, organization_id):
+    cursor = self.conn.cursor()
+    cursor.execute(
+        "SELECT set_config('app.current_organization_id', %s, FALSE)",
+        (str(organization_id),)
+    )
+    cursor.close()
+```
+
+**Called from**: `Database.__init__()` immediately after `connect()`, before any queries.
+
+**Call chain**: `auth_middleware()` → handler → `_db()` → `Database(organization_id=tid)` → `__init__` → `set_organization_context(tid)`.
+
+### 3. SET vs SET LOCAL
+
+| Aspect | Current |
+|--------|---------|
+| **Method** | `set_config('app.current_organization_id', %s, FALSE)` |
+| **Scope** | **Session-level** (`is_local=FALSE`) — persists for connection lifetime |
+| **Transaction** | Not inside explicit transaction block |
+| **Cleanup** | **None** — no RESET, no after_request hook |
+| **Safety guarantee** | Connection closure discards the variable |
+
+### 4. Risk Assessment
+
+**Current risk: NONE** — no connection pooling means each request gets a fresh connection with its own session variables. When `db.close()` terminates the TCP connection, all session state is destroyed. There is zero chance of cross-request variable leakage.
+
+**Latent risk if pooling added: CRITICAL** — if connection pooling (pgbouncer, psycopg pool, SQLAlchemy engine) is ever introduced, `is_local=FALSE` means the session variable would **persist across requests** on the same pooled connection. A request for Org A could see Org B's data if the pool returns a connection that still carries Org A's context. This would be a **cross-tenant data leak**.
+
+### 5. Defensive Hardening Recommendation (Future-Proofing)
+
+If connection pooling is ever introduced, the fix is:
+
+1. **Switch to `SET LOCAL`**: Change `is_local=FALSE` → `is_local=TRUE` in `set_organization_context()`. This scopes the variable to the current transaction, so it auto-resets on COMMIT/ROLLBACK.
+2. **Ensure explicit transactions**: Wrap each request's DB work in `BEGIN`/`COMMIT` (psycopg2 already does this implicitly when `autocommit=False`, which is the default).
+3. **Add connection-return cleanup**: If using a pool, add a `RESET ALL` or `DISCARD ALL` on connection return.
+
+**No code change needed today** — the per-request create/close pattern is inherently safe. This finding is documented so the team knows to address it before adopting pooling.
+
+### 6. Connection Lifecycle Diagram
+
+```
+Request arrives
+  │
+  ├─ auth_middleware() extracts org_id from JWT
+  │
+  ├─ handler calls _db()
+  │     └─ Database(organization_id=tid)
+  │           ├─ psycopg2.connect() → NEW TCP connection
+  │           └─ set_config('app.current_organization_id', tid, FALSE)
+  │
+  ├─ handler executes queries (RLS policies enforce org isolation)
+  │
+  └─ finally: db.close() → conn.close() → TCP destroyed
+       └─ session variable destroyed with connection
+```
+
+### 7. Verification Checklist
+
+- [x] No connection pooling in use (confirmed: raw psycopg2)
+- [x] Session variable set per-request in `Database.__init__`
+- [x] 290 `finally:` blocks ensure `db.close()` on every handler
+- [x] No leaked connections (no handler path exits without close)
+- [x] `--preload` prevents DDL deadlock on startup
+- [x] Dual DB users: `auditgraph_app` (NOBYPASSRLS) + `auditgraph_admin` (BYPASSRLS)
+- [x] `is_local=FALSE` is safe today but must be revisited before pooling adoption
