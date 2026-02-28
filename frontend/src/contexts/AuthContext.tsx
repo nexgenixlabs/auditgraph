@@ -18,7 +18,7 @@ interface AuthContextValue {
   user: User | null;
   loading: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  login: (username: string, password: string, tenantSlug?: string, portal?: PortalContext) => Promise<any>;
+  login: (username: string, password: string, tenantSlug?: string) => Promise<any>;
   loginWithSsoCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
@@ -37,6 +37,11 @@ interface AuthContextValue {
   activeTenantId: number | null;
   activeTenantName: string | null;
   switchTenant: (tenantId: number | null, tenantName?: string) => void;
+  // Phase 1B: Impersonation
+  isImpersonating: boolean;
+  impersonatorUsername: string | null;
+  impersonate: (tenantId: number) => Promise<void>;
+  exitImpersonation: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -84,6 +89,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   });
   const [activeTenantName, setActiveTenantName] = useState<string | null>(
     () => localStorage.getItem('active_tenant_name')
+  );
+
+  // Phase 1B: Impersonation state
+  const [isImpersonating, setIsImpersonating] = useState<boolean>(
+    () => localStorage.getItem('impersonating') === 'true'
+  );
+  const [impersonatorUsername, setImpersonatorUsername] = useState<string | null>(
+    () => localStorage.getItem('impersonator_username')
   );
 
   const switchTenant = useCallback((tenantId: number | null, tenantName?: string) => {
@@ -143,6 +156,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const activeTid = localStorage.getItem('active_tenant_id');
           if (activeTid && !headers.has('X-Tenant-Id')) {
             headers.set('X-Tenant-Id', activeTid);
+          }
+          // Phase 1B: Send portal context header in dev mode (no subdomain routing)
+          if (!API_BASE && detectPortal() === 'admin') {
+            headers.set('X-Portal-Context', 'admin');
           }
           init = { ...init, headers };
         }
@@ -211,15 +228,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setLoading(false));
   }, [tryRefresh]);
 
-  const login = useCallback(async (username: string, password: string, tenantSlug?: string, portal?: PortalContext) => {
-    const resolvedPortal = portal || detectPortal();
+  // Phase 1B: login no longer accepts portal param — derived from host on backend
+  const login = useCallback(async (username: string, password: string, tenantSlug?: string) => {
+    const resolvedPortal = detectPortal();
     const keys = tokenKeys(resolvedPortal);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const body: any = { username, password, portal: resolvedPortal };
+    const body: any = { username, password };
     if (tenantSlug) body.tenant_slug = tenantSlug;
+
+    // Phase 1B: Build headers — include portal context for dev mode
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (!API_BASE && resolvedPortal === 'admin') {
+      headers['X-Portal-Context'] = 'admin';
+    }
+
     const res = await originalFetchRef.current(resolveApiUrl('/api/auth/login'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -268,12 +293,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           'Content-Type': 'application/json',
           ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
         },
-        body: JSON.stringify({ refresh_token: refreshToken, portal }),
+        body: JSON.stringify({ refresh_token: refreshToken }),
       });
     } catch { /* ignore */ }
     // Only clear the current portal's tokens
     localStorage.removeItem(keys.access);
     localStorage.removeItem(keys.refresh);
+    // Clear impersonation state
+    localStorage.removeItem('impersonating');
+    localStorage.removeItem('impersonator_username');
+    localStorage.removeItem('admin_backup_access');
+    localStorage.removeItem('admin_backup_refresh');
+    setIsImpersonating(false);
+    setImpersonatorUsername(null);
     // Only clear tenant context if logging out of admin portal
     if (portal === 'admin') {
       localStorage.removeItem('active_tenant_id');
@@ -282,6 +314,68 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setActiveTenantName(null);
     }
     setUser(null);
+  }, []);
+
+  // Phase 1B: Impersonation — generate tenant-scoped tokens from admin portal
+  const impersonate = useCallback(async (tenantId: number) => {
+    const adminKeys = tokenKeys('admin');
+    const adminAccess = localStorage.getItem(adminKeys.access);
+    const adminRefresh = localStorage.getItem(adminKeys.refresh);
+
+    // Backup admin tokens
+    if (adminAccess) localStorage.setItem('admin_backup_access', adminAccess);
+    if (adminRefresh) localStorage.setItem('admin_backup_refresh', adminRefresh);
+
+    const res = await originalFetchRef.current(resolveApiUrl('/api/admin/impersonate'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(adminAccess ? { 'Authorization': `Bearer ${adminAccess}` } : {}),
+        'X-Portal-Context': 'admin',
+      },
+      body: JSON.stringify({ tenant_id: tenantId }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Impersonation failed');
+    }
+    const data = await res.json();
+
+    // Store tenant-scoped tokens as client tokens
+    const clientKeys = tokenKeys('client');
+    localStorage.setItem(clientKeys.access, data.access_token);
+    localStorage.setItem(clientKeys.refresh, data.refresh_token);
+    localStorage.setItem('impersonating', 'true');
+    localStorage.setItem('impersonator_username', user?.username || '');
+    setIsImpersonating(true);
+    setImpersonatorUsername(user?.username || null);
+
+    // Redirect to client portal root
+    window.location.href = '/';
+  }, [user]);
+
+  // Phase 1B: Exit impersonation — restore admin tokens
+  const exitImpersonation = useCallback(() => {
+    // Clear client tokens
+    const clientKeys = tokenKeys('client');
+    localStorage.removeItem(clientKeys.access);
+    localStorage.removeItem(clientKeys.refresh);
+
+    // Restore admin tokens from backup
+    const adminKeys = tokenKeys('admin');
+    const backupAccess = localStorage.getItem('admin_backup_access');
+    const backupRefresh = localStorage.getItem('admin_backup_refresh');
+    if (backupAccess) localStorage.setItem(adminKeys.access, backupAccess);
+    if (backupRefresh) localStorage.setItem(adminKeys.refresh, backupRefresh);
+    localStorage.removeItem('admin_backup_access');
+    localStorage.removeItem('admin_backup_refresh');
+    localStorage.removeItem('impersonating');
+    localStorage.removeItem('impersonator_username');
+    setIsImpersonating(false);
+    setImpersonatorUsername(null);
+
+    // Redirect back to admin portal
+    window.location.href = '/admin';
   }, []);
 
   const role = user?.role;
@@ -307,6 +401,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     activeTenantId,
     activeTenantName,
     switchTenant,
+    isImpersonating,
+    impersonatorUsername,
+    impersonate,
+    exitImpersonation,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

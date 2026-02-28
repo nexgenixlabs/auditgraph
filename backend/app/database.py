@@ -3503,6 +3503,8 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_action ON admin_audit_log(action)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_target_user ON admin_audit_log(target_user_id)")
+        # Phase 1B: portal column on refresh_tokens
+        cursor.execute("ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS portal VARCHAR(10) DEFAULT 'client'")
         self.conn.commit()
         cursor.close()
         # Ensure tenants table + migration (adds tenant_id/is_superadmin to users if needed)
@@ -3690,14 +3692,14 @@ class Database:
         self.conn.commit()
         cursor.close()
 
-    def save_refresh_token(self, user_id, token_hash, expires_at):
-        """Save a hashed refresh token."""
+    def save_refresh_token(self, user_id, token_hash, expires_at, portal='client'):
+        """Save a hashed refresh token with portal context."""
         self._ensure_users_table()
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-            VALUES (%s, %s, %s)
-        """, (user_id, token_hash, expires_at))
+            INSERT INTO refresh_tokens (user_id, token_hash, expires_at, portal)
+            VALUES (%s, %s, %s, %s)
+        """, (user_id, token_hash, expires_at, portal))
         self.conn.commit()
         cursor.close()
 

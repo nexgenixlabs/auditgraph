@@ -1,6 +1,11 @@
 """
-Phase 31: JWT Authentication Middleware & Helpers
+Phase 31 + Phase 1B: JWT Authentication Middleware & Helpers
+- Dual JWT signing keys (admin vs tenant portal)
+- Host-derived portal detection
+- iss/aud standard claims
+- Portal-aware middleware with cryptographic isolation
 """
+from __future__ import annotations
 import os
 import jwt
 import hashlib
@@ -13,11 +18,16 @@ from app.database import Database
 
 logger = logging.getLogger(__name__)
 
-JWT_SECRET = os.getenv('JWT_SECRET')
-if not JWT_SECRET:
-    raise RuntimeError("FATAL: JWT_SECRET environment variable is required. Set it before starting the application.")
+# Phase 1B: Dual JWT keys with legacy fallback for zero-downtime migration
+ADMIN_JWT_SECRET = os.getenv('ADMIN_JWT_SECRET') or os.getenv('JWT_SECRET')
+TENANT_JWT_SECRET = os.getenv('TENANT_JWT_SECRET') or os.getenv('JWT_SECRET')
+if not ADMIN_JWT_SECRET or not TENANT_JWT_SECRET:
+    raise RuntimeError("FATAL: ADMIN_JWT_SECRET + TENANT_JWT_SECRET (or JWT_SECRET) required.")
 JWT_ALGORITHM = 'HS256'
-ACCESS_TOKEN_EXPIRY = timedelta(hours=24)
+
+# Phase 1B: Portal-specific TTLs
+ADMIN_TOKEN_EXPIRY = timedelta(minutes=30)
+TENANT_TOKEN_EXPIRY = timedelta(minutes=60)
 REFRESH_TOKEN_EXPIRY = timedelta(days=7)
 
 # Phase 76: Valid portal roles for admin console access
@@ -38,8 +48,45 @@ PUBLIC_PATHS = {
 }
 
 
-def generate_access_token(user: dict) -> str:
-    """Generate a JWT access token containing user_id, username, role, tenant."""
+# ── Phase 1B: Host-derived portal detection ──
+
+def _derive_portal() -> str:
+    """Derive portal from Host header. admin.* -> 'admin', else -> 'client'."""
+    host = request.host.split(':')[0]
+    if host.startswith('admin.') or host == 'admin':
+        return 'admin'
+    # Dev mode: accept X-Portal-Context header when no subdomain routing
+    if os.getenv('FLASK_ENV') == 'development' or host in ('localhost', '127.0.0.1'):
+        override = request.headers.get('X-Portal-Context', '')
+        if override in ('admin', 'client'):
+            return override
+    return 'client'
+
+
+def _derive_tenant_slug() -> str | None:
+    """Extract tenant slug from subdomain. aglabs.auditgraph.ai -> 'aglabs'."""
+    host = request.host.split(':')[0]
+    parts = host.split('.')
+    if len(parts) >= 3 and parts[0] not in ('app', 'api', 'admin', 'www'):
+        return parts[0]
+    return None
+
+
+# ── Token generation ──
+
+def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str | None = None) -> str:
+    """Generate a JWT access token with portal-specific key, iss, aud, and TTL."""
+    if portal == 'admin':
+        iss = 'auditgraph-platform'
+        aud = 'admin.auditgraph.ai'
+        secret = ADMIN_JWT_SECRET
+        expiry = ADMIN_TOKEN_EXPIRY
+    else:
+        iss = 'auditgraph-tenant'
+        aud = f'{tenant_slug}.auditgraph.ai' if tenant_slug else 'app.auditgraph.ai'
+        secret = TENANT_JWT_SECRET
+        expiry = TENANT_TOKEN_EXPIRY
+
     payload = {
         'sub': str(user['id']),
         'username': user['username'],
@@ -50,31 +97,36 @@ def generate_access_token(user: dict) -> str:
         'is_superadmin': user.get('is_superadmin', False),
         'portal_role': user.get('portal_role'),
         'force_password_change': user.get('force_password_change', False),
+        'portal': portal,
+        'iss': iss,
+        'aud': aud,
         'iat': datetime.now(timezone.utc),
-        'exp': datetime.now(timezone.utc) + ACCESS_TOKEN_EXPIRY,
+        'exp': datetime.now(timezone.utc) + expiry,
         'type': 'access',
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    # Impersonation claims
+    if user.get('impersonating'):
+        payload['impersonating'] = True
+        payload['impersonator_id'] = user['impersonator_id']
+        payload['impersonator_username'] = user['impersonator_username']
+
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
-def generate_refresh_token(user: dict) -> str:
-    """Generate an opaque refresh token, store SHA-256 hash in DB."""
+def generate_refresh_token(user: dict, portal: str = 'client') -> str:
+    """Generate an opaque refresh token, store SHA-256 hash in DB with portal context."""
     raw_token = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
 
     db = Database()
     try:
         expires_at = datetime.now(timezone.utc) + REFRESH_TOKEN_EXPIRY
-        db.save_refresh_token(user['id'], token_hash, expires_at)
+        db.save_refresh_token(user['id'], token_hash, expires_at, portal=portal)
     finally:
         db.close()
 
     return raw_token
-
-
-def verify_access_token(token: str) -> dict:
-    """Verify and decode JWT access token. Raises on invalid/expired."""
-    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
 
 
 def hash_refresh_token(raw_token: str) -> str:
@@ -122,7 +174,8 @@ def _authenticate_api_key(raw_key: str):
 
 
 def auth_middleware():
-    """Flask before_request hook. Sets g.current_user or returns 401."""
+    """Flask before_request hook. Sets g.current_user or returns 401.
+    Phase 1B: Portal-aware with cryptographic key isolation."""
     if request.path in PUBLIC_PATHS:
         return None
 
@@ -140,6 +193,9 @@ def auth_middleware():
     if request.method == 'OPTIONS':
         return None
 
+    # Phase 1B: Derive portal from host header
+    portal = _derive_portal()
+
     # Phase 42: Check for API key auth before JWT
     api_key = request.headers.get('X-API-Key', '')
     auth_header = request.headers.get('Authorization', '')
@@ -152,17 +208,34 @@ def auth_middleware():
         result = _authenticate_api_key(api_key)
         if result is not None:
             return result
-        # Fall through to X-Tenant-Id override below
+        # Phase 1B: API keys blocked on admin portal
+        if portal == 'admin':
+            return jsonify({'error': 'API keys cannot access admin portal'}), 403
+        g.current_user['portal'] = 'client'
     else:
-        # Standard JWT auth
+        # Standard JWT auth with portal-specific key
         if not auth_header.startswith('Bearer '):
             return jsonify({'error': 'Missing or invalid Authorization header'}), 401
 
         token = auth_header[7:]
+        secret = ADMIN_JWT_SECRET if portal == 'admin' else TENANT_JWT_SECRET
+
         try:
-            payload = verify_access_token(token)
+            if portal == 'admin':
+                payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM],
+                                     audience='admin.auditgraph.ai')
+            else:
+                payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM],
+                                     options={'verify_aud': False})
+                # Verify aud matches host slug if present
+                token_aud = payload.get('aud', '')
+                host_slug = _derive_tenant_slug()
+                if host_slug and token_aud != f'{host_slug}.auditgraph.ai':
+                    return jsonify({'error': 'Token audience mismatch'}), 403
+
             if payload.get('type') != 'access':
                 return jsonify({'error': 'Invalid token type'}), 401
+
             g.current_user = {
                 'id': int(payload['sub']),
                 'username': payload['username'],
@@ -172,11 +245,22 @@ def auth_middleware():
                 'tenant_name': payload.get('tenant_name'),
                 'is_superadmin': payload.get('is_superadmin', False),
                 'portal_role': payload.get('portal_role'),
+                'portal': portal,
             }
+
+            # Carry impersonation claims
+            if payload.get('impersonating'):
+                g.current_user['impersonating'] = True
+                g.current_user['impersonator_id'] = payload.get('impersonator_id')
+                g.current_user['impersonator_username'] = payload.get('impersonator_username')
+
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401
+        except jwt.InvalidAudienceError:
+            return jsonify({'error': 'Token not valid for this portal'}), 403
         except jwt.InvalidTokenError:
             return jsonify({'error': 'Invalid token'}), 401
+        # NO except Exception: pass — fail-closed
 
     # Phase 46: Superadmin tenant override via X-Tenant-Id header
     override_tid = request.headers.get('X-Tenant-Id')
@@ -187,37 +271,8 @@ def auth_middleware():
         except (ValueError, TypeError):
             pass
 
-    # Phase 87: Host↔Tenant guard — prevent cross-subdomain token reuse
-    # If request comes from a tenant subdomain (e.g., aglabs.auditgraph.ai),
-    # verify the JWT's tenant matches that subdomain.
-    # Superadmins bypass (they legitimately access all tenants).
-    if not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
-        host = request.host.split(':')[0]  # strip port
-        parts = host.split('.')
-        # Only enforce for subdomain patterns like <slug>.auditgraph.ai
-        if len(parts) >= 3 and parts[-2] in ('auditgraph',):
-            host_slug = parts[0]
-            # Skip for common non-tenant subdomains
-            if host_slug not in ('app', 'api', 'admin', 'www', 'localhost'):
-                user_tenant_name = (g.current_user.get('tenant_name') or '').lower().replace(' ', '')
-                # Look up slug from DB if needed
-                try:
-                    db = Database()
-                    cursor = db.conn.cursor()
-                    cursor.execute("SELECT id, slug FROM tenants WHERE slug = %s", (host_slug,))
-                    tenant_row = cursor.fetchone()
-                    cursor.close()
-                    db.close()
-                    if tenant_row:
-                        host_tenant_id = tenant_row[0]
-                        jwt_tenant_id = g.current_user.get('tenant_id')
-                        if jwt_tenant_id and jwt_tenant_id != host_tenant_id:
-                            return jsonify({'error': 'Token does not match this tenant'}), 403
-                except Exception:
-                    pass  # Don't block on lookup failure
-
-    # Phase 23: Trial expiry check — only fires for plan='trial', zero overhead otherwise
-    if not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
+    # Phase 23: Trial expiry check — only fires on client portal
+    if portal == 'client' and not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
         tenant_id = g.current_user.get('tenant_id')
         if tenant_id:
             try:
@@ -321,7 +376,7 @@ def require_feature(feature_name):
             # Superadmins bypass all feature gates
             if user.get('is_superadmin'):
                 return f(*args, **kwargs)
-            # Lazy import to avoid circular dependency (auth ← handlers)
+            # Lazy import to avoid circular dependency (auth <- handlers)
             from app.api.handlers import check_feature_gate
             allowed, err = check_feature_gate(feature_name)
             if not allowed:
@@ -347,9 +402,3 @@ def require_feature(feature_name):
             return f(*args, **kwargs)
         return wrapper
     return decorator
-
-
-def get_tenant_id():
-    """Get tenant_id from the current authenticated user context."""
-    user = getattr(g, 'current_user', None)
-    return user.get('tenant_id') if user else None

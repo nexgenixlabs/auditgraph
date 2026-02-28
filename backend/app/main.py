@@ -226,6 +226,7 @@ from app.api.handlers import (
     get_admin_billing_summary,
     get_admin_billing_events,
     get_admin_action_log,
+    admin_impersonate,
     get_client_billing_summary,
     get_client_usage_metering,
     get_platform_settings,
@@ -627,6 +628,12 @@ def create_app():
     @require_portal_access()
     def admin_action_log():
         return get_admin_action_log()
+
+    # Phase 1B: Admin impersonation
+    @app.post("/api/admin/impersonate")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_impersonate_route():
+        return admin_impersonate()
 
     @app.get("/api/client/billing/summary")
     @require_role('admin', 'security_admin')

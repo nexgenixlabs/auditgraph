@@ -18,7 +18,7 @@ const CLOUD_BRAND_DOT: Record<string, string> = {
 const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout, isSuperAdmin, activeTenantId, activeTenantName, switchTenant } = useAuth();
+  const { user, logout, isSuperAdmin, activeTenantId, activeTenantName, switchTenant, isImpersonating, exitImpersonation } = useAuth();
   const { connections, selectedConnectionId, setSelectedConnectionId } = useConnection();
   const [unreadCount, setUnreadCount] = useState(0);
   const [tenantDropdownOpen, setTenantDropdownOpen] = useState(false);
@@ -59,9 +59,29 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
   const isActive = (path: string) => location.pathname.startsWith(path);
 
   return (
+    <>
+    {/* Phase 1B: Impersonation banner */}
+    {isImpersonating && (
+      <div className="fixed top-0 left-0 right-0 z-50 flex items-center justify-center gap-3 px-4 py-1.5 text-xs font-medium"
+        style={{ backgroundColor: '#b45309', color: '#fff' }}>
+        <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z" />
+        </svg>
+        <span>Impersonating {user?.tenant_name || 'tenant'} as {user?.role || 'admin'}</span>
+        <button
+          onClick={exitImpersonation}
+          className="px-2 py-0.5 rounded text-xs font-semibold transition-colors"
+          style={{ backgroundColor: 'rgba(255,255,255,0.2)', color: '#fff' }}
+          onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.3)')}
+          onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.2)')}
+        >
+          Exit Impersonation
+        </button>
+      </div>
+    )}
     <header
       className="topbar-glass fixed top-0 left-0 right-0 z-40 flex items-center px-4 gap-3"
-      style={{ height: 'var(--header-height, 56px)' }}
+      style={{ height: 'var(--header-height, 56px)', marginTop: isImpersonating ? '32px' : '0' }}
     >
       {/* Logo & Brand */}
       <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity mr-2 flex-shrink-0">
@@ -334,6 +354,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
         )}
       </div>
     </header>
+    </>
   );
 };
 

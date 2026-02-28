@@ -6630,7 +6630,9 @@ def auth_login():
     username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
     tenant_slug = str(data.get('tenant_slug', '')).strip() or None  # Phase 53
-    portal = str(data.get('portal', 'client')).strip()  # 'admin' or 'client'
+    # Phase 1B: Derive portal from host header (not client-supplied body)
+    from app.api.auth import _derive_portal, _derive_tenant_slug
+    portal = _derive_portal()
 
     if not username or not password:
         return jsonify({'error': 'Username and password are required'}), 400
@@ -6722,8 +6724,10 @@ def auth_login():
         db.close()
 
     # Generate tokens AFTER closing connection 1 (generate_refresh_token opens its own connection)
-    access_token = generate_access_token(user)
-    refresh_token = generate_refresh_token(user)
+    # Phase 1B: Pass portal + tenant_slug for portal-scoped tokens
+    effective_slug = tenant_slug or _derive_tenant_slug()
+    access_token = generate_access_token(user, portal=portal, tenant_slug=effective_slug)
+    refresh_token = generate_refresh_token(user, portal=portal)
 
     return jsonify({
         'access_token': access_token,
@@ -6769,12 +6773,26 @@ def auth_refresh():
             return jsonify({'error': 'User disabled'}), 401
 
         db.revoke_refresh_token(token_hash)
+
+        # Phase 1B: Preserve portal context from stored refresh token
+        portal = token_record.get('portal', 'client')
+
+        # Look up tenant slug for audience claim if client portal
+        slug = None
+        if portal == 'client' and user.get('tenant_id'):
+            try:
+                tenant = db.get_tenant_by_id(user['tenant_id'])
+                if tenant:
+                    slug = tenant.get('slug')
+            except Exception:
+                pass
     finally:
         db.close()
 
     # Generate tokens AFTER closing connection 1
-    access_token = generate_access_token(user)
-    new_refresh = generate_refresh_token(user)
+    # Phase 1B: Pass portal + tenant_slug for portal-scoped tokens
+    access_token = generate_access_token(user, portal=portal, tenant_slug=slug)
+    new_refresh = generate_refresh_token(user, portal=portal)
 
     return jsonify({
         'access_token': access_token,
@@ -13508,14 +13526,21 @@ def saml_token_exchange():
         if not user:
             return jsonify({'error': 'User not found'}), 404
 
-        # Add tenant_name for token generation
+        # Add tenant_name for token generation + look up slug for aud claim
+        slug = None
         if user.get('tenant_id') and not user.get('tenant_name'):
             t = db.get_tenant_by_id(user['tenant_id'])
             if t:
                 user['tenant_name'] = t['name']
+                slug = t.get('slug')
+        elif user.get('tenant_id'):
+            t = db.get_tenant_by_id(user['tenant_id'])
+            if t:
+                slug = t.get('slug')
 
-        access_token = generate_access_token(user)
-        refresh_token = generate_refresh_token(user)
+        # Phase 1B: SSO is inherently tenant-only
+        access_token = generate_access_token(user, portal='client', tenant_slug=slug)
+        refresh_token = generate_refresh_token(user, portal='client')
 
         return jsonify({
             'access_token': access_token,
@@ -17891,6 +17916,72 @@ def get_admin_action_log():
         return jsonify({'events': rows, 'limit': limit, 'offset': offset})
     finally:
         db.close()
+
+
+def admin_impersonate():
+    """POST /api/admin/impersonate — generate tenant-scoped tokens for admin impersonation."""
+    from app.api.auth import generate_access_token, generate_refresh_token
+    user = g.current_user
+    data = request.get_json(silent=True) or {}
+    target_tenant_id = data.get('tenant_id')
+    target_role = data.get('role', 'admin')
+
+    if not target_tenant_id:
+        return jsonify({'error': 'tenant_id is required'}), 400
+
+    db = Database()
+    try:
+        tenant = db.get_tenant_by_id(int(target_tenant_id))
+        if not tenant:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        slug = tenant.get('slug')
+
+        # Build synthetic impersonation user
+        impersonation_user = {
+            'id': user['id'],
+            'username': user['username'],
+            'display_name': user.get('display_name', user['username']),
+            'role': target_role,
+            'tenant_id': tenant['id'],
+            'tenant_name': tenant.get('name'),
+            'is_superadmin': False,
+            'portal_role': None,
+            'impersonating': True,
+            'impersonator_id': user['id'],
+            'impersonator_username': user['username'],
+        }
+
+        # Log impersonation to admin_audit_log
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                INSERT INTO admin_audit_log (admin_user_id, action, target_tenant_id, details, ip_address)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                user['id'],
+                'impersonation_start',
+                tenant['id'],
+                json.dumps({'target_role': target_role, 'tenant_name': tenant.get('name')}),
+                request.remote_addr,
+            ))
+            db.conn.commit()
+            cursor.close()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+    access_token = generate_access_token(impersonation_user, portal='client', tenant_slug=slug)
+    refresh_token = generate_refresh_token(impersonation_user, portal='client')
+
+    return jsonify({
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'tenant_slug': slug,
+        'tenant_name': tenant.get('name'),
+        'impersonation': True,
+    })
 
 
 def get_client_billing_summary():
