@@ -374,11 +374,12 @@ def create_app():
     # Phase 5: Security headers on all responses
     app.after_request(add_security_headers)
 
-    # Phase 4A: Global error boundary
+    # Phase 4A/4B: Global error boundary with standardized error_code
     @app.errorhandler(404)
     def _not_found(e):
         return jsonify({
             'error': 'Not found',
+            'error_code': 'NOT_FOUND',
             'request_id': getattr(g, 'request_id', None),
         }), 404
 
@@ -386,13 +387,23 @@ def create_app():
     def _method_not_allowed(e):
         return jsonify({
             'error': 'Method not allowed',
+            'error_code': 'METHOD_NOT_ALLOWED',
             'request_id': getattr(g, 'request_id', None),
         }), 405
+
+    @app.errorhandler(429)
+    def _too_many_requests(e):
+        return jsonify({
+            'error': 'Too many requests',
+            'error_code': 'RATE_LIMITED',
+            'request_id': getattr(g, 'request_id', None),
+        }), 429
 
     @app.errorhandler(500)
     def _internal_error(e):
         return jsonify({
             'error': 'Internal server error',
+            'error_code': 'INTERNAL_ERROR',
             'request_id': getattr(g, 'request_id', None),
         }), 500
 
@@ -402,6 +413,7 @@ def create_app():
         logger.exception(f"Unhandled exception [request_id={request_id}]")
         return jsonify({
             'error': 'Internal server error',
+            'error_code': 'INTERNAL_ERROR',
             'request_id': request_id,
         }), 500
 

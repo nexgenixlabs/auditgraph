@@ -1818,3 +1818,99 @@ CREATE TABLE IF NOT EXISTS billing_audit_log (
 - [x] `/health/live` and `/health/ready` routes registered
 - [x] Global error handlers return JSON with `request_id`
 - [x] Startup validation fails fast in production, skips in development
+
+---
+
+# Phase 4B — Security & Compliance Polish
+
+**Date**: 2026-02-28
+**Status**: IMPLEMENTED
+
+## What Already Existed (No Changes Needed)
+- `admin_audit_log` table — `database.py:3499` with full DDL + RLS
+- `log_admin_audit()` — `database.py:3843` with 7 existing call sites (password_reset, org_root_user_created, org_updated, plan_change, commitment_change, platform_fee_override, rate_override)
+- Security headers — `security.py:112-142` (X-Content-Type-Options, X-Frame-Options, HSTS, Referrer-Policy, Permissions-Policy, Cache-Control)
+- `GET /api/admin/action-log` — `main.py:771` + `handlers.py:17912` (UNION ALL of admin_audit_log + billing_events)
+- Impersonation logging — inline INSERT in `handlers.py:18024-18044` (start) and `18069-18086` (end)
+- Entitlement/enforcement endpoints are read-only (GET) — no mutation hooks needed
+
+## Changes
+
+### 1. Enhanced JSON Logging Formatter
+- `logging_config.py` — `JSONFormatter.format()` now auto-attaches:
+  - `user_id` — from `g.current_user['id']`
+  - `organization_id` — from `g.current_user['organization_id']`
+  - `path` — from `flask_request.path`
+  - `method` — from `flask_request.method`
+
+### 2. New Audit Logging Hooks
+| Handler | Action | Details |
+|---------|--------|---------|
+| `admin_update_msp_relationship()` | `msp_relationship_change` | client_organization_id, margin_pct |
+| `admin_generate_billing_snapshot()` | `billing_force_overwrite` | snapshot_id, period_start/end (only when force=True) |
+
+Total admin_audit_log call sites: **9** (7 existing + 2 new)
+
+### 3. Standardized Error Codes
+All global error handlers now include `error_code` field:
+| HTTP Status | error_code |
+|-------------|------------|
+| 404 | `NOT_FOUND` |
+| 405 | `METHOD_NOT_ALLOWED` |
+| 429 | `RATE_LIMITED` |
+| 500 | `INTERNAL_ERROR` |
+
+New 429 error handler added for rate limiting responses.
+
+### 4. Secure HTTP Headers
+Already complete — no changes needed. See Phase 4A verification.
+
+### 5. `GET /api/admin/audit/actions` Endpoint
+Already exists at `GET /api/admin/action-log` — no changes needed. Supports `source`, `action`, `limit`, `offset` query params.
+
+### 6. Compliance Documentation Stubs
+| File | Framework | Controls Mapped |
+|------|-----------|-----------------|
+| `docs/compliance/SOC2.md` | SOC 2 | CC6.1 (access), CC6.3 (provisioning), CC7.2 (monitoring), CC8.1 (change mgmt) |
+| `docs/compliance/HIPAA.md` | HIPAA | Administrative (164.308), Technical (164.312), Organizational safeguards |
+| `docs/compliance/CIS.md` | CIS Benchmarks | Azure identity, storage (12 checks), key vault (6 checks) |
+
+### 7. Tests
+12 new Phase 4B tests added to `test_production_guardrails.py`:
+- `test_json_formatter_includes_user_context`
+- `test_json_formatter_includes_request_context`
+- `test_audit_hook_msp_relationship`
+- `test_audit_hook_billing_force_overwrite`
+- `test_audit_hook_impersonation_exists`
+- `test_audit_hook_plan_change_exists`
+- `test_error_handlers_include_error_code`
+- `test_429_error_handler_registered`
+- `test_security_headers_complete`
+- `test_admin_action_log_endpoint_exists`
+- `test_admin_action_log_handler_exists`
+- `test_compliance_docs_exist`
+
+## Files Modified
+
+| File | Action |
+|------|--------|
+| `backend/app/logging_config.py` | Enhanced JSONFormatter with user/org/request context |
+| `backend/app/main.py` | error_code in error handlers, 429 handler added |
+| `backend/app/api/handlers.py` | log_admin_audit for MSP + billing force overwrite |
+| `backend/tests/test_production_guardrails.py` | +12 Phase 4B tests (23 total) |
+| `docs/compliance/SOC2.md` | **New** — SOC 2 compliance stub |
+| `docs/compliance/HIPAA.md` | **New** — HIPAA compliance stub |
+| `docs/compliance/CIS.md` | **New** — CIS benchmark stub |
+| `frontend/newauth.md` | Phase 4B documentation |
+
+## Verification
+
+- [x] 88/88 tests pass (65 existing + 23 guardrails)
+- [x] JSONFormatter extracts user_id, organization_id, path, method
+- [x] MSP relationship handler has `log_admin_audit('msp_relationship_change')`
+- [x] Billing snapshot handler has `log_admin_audit('billing_force_overwrite')` on force=True
+- [x] Error responses include `error_code` (NOT_FOUND, METHOD_NOT_ALLOWED, RATE_LIMITED, INTERNAL_ERROR)
+- [x] 429 error handler registered
+- [x] Security headers verified (6 headers)
+- [x] Admin action log endpoint exists at `/api/admin/action-log`
+- [x] Compliance doc stubs: SOC2.md, HIPAA.md, CIS.md

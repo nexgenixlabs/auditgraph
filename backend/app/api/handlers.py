@@ -21021,6 +21021,16 @@ def admin_generate_billing_snapshot(organization_id):
                                    'force': force,
                                    'period_start': str(period_start),
                                    'period_end': str(period_end)})
+
+        # Phase 4B: Admin audit log for billing snapshot (especially force overwrite)
+        if force:
+            db.log_admin_audit(actor_id, 'billing_force_overwrite',
+                               target_organization_id=organization_id,
+                               details={'snapshot_id': stored.get('id') if stored else None,
+                                        'period_start': str(period_start),
+                                        'period_end': str(period_end)},
+                               ip_address=request.remote_addr)
+
         _log(db, 'billing_snapshot_generated',
              f'Admin generated billing snapshot for org {organization_id}',
              {'organization_id': organization_id, 'snapshot_id': stored.get('id') if stored else None})
@@ -21084,6 +21094,15 @@ def admin_update_msp_relationship():
             row['created_at'] = row['created_at'].isoformat()
         if row.get('margin_pct') is not None:
             row['margin_pct'] = float(row['margin_pct'])
+
+        # Phase 4B: Admin audit log for MSP relationship changes
+        user = getattr(g, 'current_user', None)
+        admin_id = user.get('id') if user else None
+        db.log_admin_audit(admin_id, 'msp_relationship_change',
+                           target_organization_id=int(msp_id),
+                           details={'client_organization_id': client_id,
+                                    'margin_pct': margin_pct},
+                           ip_address=request.remote_addr)
 
         _log(db, 'msp_relationship_updated',
              f'MSP relationship: org {msp_id} → client {client_id} (margin {margin_pct}%)',

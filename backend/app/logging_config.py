@@ -1,8 +1,9 @@
 """
-Phase 4A — Structured JSON Logging
+Phase 4A/4B — Structured JSON Logging
 
 Provides JSON-formatted log output for production and human-readable
-format for development. Injects request_id from flask.g when available.
+format for development. Injects request context (request_id, user_id,
+organization_id, path, method) from flask.g when available.
 """
 import json
 import logging
@@ -22,12 +23,29 @@ class JSONFormatter(logging.Formatter):
             'message': record.getMessage(),
         }
 
-        # Inject request_id from Flask g if available
+        # Inject request context from Flask g/request if available
         try:
-            from flask import g
+            from flask import g, request as flask_request
             request_id = getattr(g, 'request_id', None)
             if request_id:
                 log_entry['request_id'] = request_id
+
+            # Phase 4B: Auto-attach user and org context
+            current_user = getattr(g, 'current_user', None)
+            if current_user and isinstance(current_user, dict):
+                uid = current_user.get('id')
+                if uid:
+                    log_entry['user_id'] = uid
+                org_id = current_user.get('organization_id')
+                if org_id:
+                    log_entry['organization_id'] = org_id
+
+            # Phase 4B: Auto-attach request path and method
+            try:
+                log_entry['path'] = flask_request.path
+                log_entry['method'] = flask_request.method
+            except RuntimeError:
+                pass
         except RuntimeError:
             pass  # Outside request context
 
