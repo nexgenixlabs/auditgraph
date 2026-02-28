@@ -8,9 +8,39 @@ import json
 import logging
 from datetime import date, datetime, timezone, timedelta
 
-from app.pricing import calculate_billing, calculate_invoice
+from app.pricing import (
+    calculate_billing, calculate_invoice,
+    PRICING_VERSION, PLATFORM_FEES, DEFAULT_SUB_RATES,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _build_unit_prices(org):
+    """Build a snapshot of current unit prices for audit trail."""
+    plan = org.get('plan', 'free')
+    return {
+        'platform_fee_cents': org.get('platform_fee_cents', PLATFORM_FEES.get(plan, 0)),
+        'sub_rates': dict(DEFAULT_SUB_RATES),
+        'discount_pct': float(org.get('discount_pct', 0)),
+    }
+
+
+def log_billing_audit(db, organization_id, action, actor_id=None, details=None):
+    """Write an entry to billing_audit_log."""
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            INSERT INTO billing_audit_log (organization_id, action, actor_id, details)
+            VALUES (%s, %s, %s, %s)
+        """, (organization_id, action, actor_id, json.dumps(details or {})))
+        db.conn.commit()
+        cursor.close()
+    except Exception:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
 
 
 def calculate_monthly_snapshot(db, organization_id, period_start=None, period_end=None):
@@ -58,6 +88,8 @@ def calculate_monthly_snapshot(db, organization_id, period_start=None, period_en
         'tax_cents': invoice_data.get('tax_amount_cents', 0),
         'total_cents': invoice_data.get('total_cents', invoice_data['net_monthly_cents']),
         'active_subscriptions': len(active_subs),
+        'pricing_version': PRICING_VERSION,
+        'unit_prices': _build_unit_prices(org),
         'breakdown': {
             'subscriptions_by_cloud': invoice_data.get('subscriptions_by_cloud', {}),
             'line_items': invoice_data['line_items'],
@@ -65,40 +97,89 @@ def calculate_monthly_snapshot(db, organization_id, period_start=None, period_en
     }
 
 
-def store_billing_snapshot(db, snapshot):
+def store_billing_snapshot(db, snapshot, force=False):
     """Persist a billing snapshot to organization_billing_snapshots.
 
-    Uses UPSERT (ON CONFLICT) so re-running for the same period is safe.
-    Returns the stored row as dict.
+    Uses INSERT ... ON CONFLICT DO NOTHING by default (snapshot is immutable once created).
+    If force=True, overwrites existing snapshot (admin override).
+    Returns the stored/existing row as dict, or None if conflict and not forced.
     """
     from psycopg2.extras import RealDictCursor
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        INSERT INTO organization_billing_snapshots
-            (organization_id, period_start, period_end, plan,
-             platform_fee_cents, subscription_total_cents, gross_cents,
-             discount_pct, discount_cents, net_cents,
-             tax_rate, tax_cents, total_cents,
-             active_subscriptions, breakdown)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (organization_id, period_start)
-        DO UPDATE SET
-            period_end = EXCLUDED.period_end,
-            plan = EXCLUDED.plan,
-            platform_fee_cents = EXCLUDED.platform_fee_cents,
-            subscription_total_cents = EXCLUDED.subscription_total_cents,
-            gross_cents = EXCLUDED.gross_cents,
-            discount_pct = EXCLUDED.discount_pct,
-            discount_cents = EXCLUDED.discount_cents,
-            net_cents = EXCLUDED.net_cents,
-            tax_rate = EXCLUDED.tax_rate,
-            tax_cents = EXCLUDED.tax_cents,
-            total_cents = EXCLUDED.total_cents,
-            active_subscriptions = EXCLUDED.active_subscriptions,
-            breakdown = EXCLUDED.breakdown,
-            created_at = NOW()
-        RETURNING *
-    """, (
+
+    if force:
+        # Admin override — UPSERT
+        cursor.execute("""
+            INSERT INTO organization_billing_snapshots
+                (organization_id, period_start, period_end, plan,
+                 platform_fee_cents, subscription_total_cents, gross_cents,
+                 discount_pct, discount_cents, net_cents,
+                 tax_rate, tax_cents, total_cents,
+                 active_subscriptions, pricing_version, unit_prices, breakdown)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (organization_id, period_start)
+            DO UPDATE SET
+                period_end = EXCLUDED.period_end,
+                plan = EXCLUDED.plan,
+                platform_fee_cents = EXCLUDED.platform_fee_cents,
+                subscription_total_cents = EXCLUDED.subscription_total_cents,
+                gross_cents = EXCLUDED.gross_cents,
+                discount_pct = EXCLUDED.discount_pct,
+                discount_cents = EXCLUDED.discount_cents,
+                net_cents = EXCLUDED.net_cents,
+                tax_rate = EXCLUDED.tax_rate,
+                tax_cents = EXCLUDED.tax_cents,
+                total_cents = EXCLUDED.total_cents,
+                active_subscriptions = EXCLUDED.active_subscriptions,
+                pricing_version = EXCLUDED.pricing_version,
+                unit_prices = EXCLUDED.unit_prices,
+                breakdown = EXCLUDED.breakdown,
+                created_at = NOW()
+            RETURNING *
+        """, _snapshot_params(snapshot))
+    else:
+        # Default — DO NOTHING on conflict (snapshot is immutable)
+        cursor.execute("""
+            INSERT INTO organization_billing_snapshots
+                (organization_id, period_start, period_end, plan,
+                 platform_fee_cents, subscription_total_cents, gross_cents,
+                 discount_pct, discount_cents, net_cents,
+                 tax_rate, tax_cents, total_cents,
+                 active_subscriptions, pricing_version, unit_prices, breakdown)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (organization_id, period_start) DO NOTHING
+            RETURNING *
+        """, _snapshot_params(snapshot))
+
+    row = cursor.fetchone()
+    db.conn.commit()
+
+    if row is None and not force:
+        # Conflict — return existing row
+        cursor.execute("""
+            SELECT * FROM organization_billing_snapshots
+            WHERE organization_id = %s AND period_start = %s
+        """, (snapshot['organization_id'], snapshot['period_start']))
+        row = cursor.fetchone()
+
+    cursor.close()
+
+    if not row:
+        return None
+
+    result = dict(row)
+    for k in ('period_start', 'period_end', 'created_at'):
+        if result.get(k):
+            result[k] = result[k].isoformat() if hasattr(result[k], 'isoformat') else str(result[k])
+    for k in ('discount_pct', 'tax_rate'):
+        if result.get(k) is not None:
+            result[k] = float(result[k])
+    return result
+
+
+def _snapshot_params(snapshot):
+    """Build param tuple for snapshot INSERT."""
+    return (
         snapshot['organization_id'],
         snapshot['period_start'],
         snapshot['period_end'],
@@ -113,20 +194,10 @@ def store_billing_snapshot(db, snapshot):
         snapshot['tax_cents'],
         snapshot['total_cents'],
         snapshot['active_subscriptions'],
+        snapshot.get('pricing_version', PRICING_VERSION),
+        json.dumps(snapshot.get('unit_prices', {})),
         json.dumps(snapshot['breakdown']),
-    ))
-    row = cursor.fetchone()
-    db.conn.commit()
-    cursor.close()
-    result = dict(row)
-    # Serialize date/decimal fields
-    for k in ('period_start', 'period_end', 'created_at'):
-        if result.get(k):
-            result[k] = result[k].isoformat() if hasattr(result[k], 'isoformat') else str(result[k])
-    for k in ('discount_pct', 'tax_rate'):
-        if result.get(k) is not None:
-            result[k] = float(result[k])
-    return result
+    )
 
 
 def get_current_estimated_bill(db, organization_id):
@@ -171,6 +242,58 @@ def get_billing_history(db, organization_id, limit=12):
     return rows
 
 
+def get_billing_status(db, organization_id):
+    """Return billing health summary for the organization."""
+    from psycopg2.extras import RealDictCursor
+    org = db.get_organization_by_id(organization_id)
+    if not org:
+        return None
+
+    # Latest snapshot
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("""
+        SELECT id, period_start, period_end, total_cents, pricing_version, created_at
+        FROM organization_billing_snapshots
+        WHERE organization_id = %s
+        ORDER BY period_start DESC LIMIT 1
+    """, (organization_id,))
+    latest_snapshot = cursor.fetchone()
+
+    # Count invoice documents
+    cursor.execute("""
+        SELECT COUNT(*) as doc_count FROM invoice_documents WHERE organization_id = %s
+    """, (organization_id,))
+    doc_count = cursor.fetchone()['doc_count']
+
+    # Count audit log entries
+    cursor.execute("""
+        SELECT COUNT(*) as audit_count FROM billing_audit_log WHERE organization_id = %s
+    """, (organization_id,))
+    audit_count = cursor.fetchone()['audit_count']
+
+    cursor.close()
+
+    result = {
+        'organization_id': organization_id,
+        'plan': org.get('plan', 'free'),
+        'plan_status': org.get('plan_status', 'active'),
+        'enforcement_mode': org.get('enforcement_mode', 'strict'),
+        'current_pricing_version': PRICING_VERSION,
+        'invoice_document_count': doc_count,
+        'billing_audit_entries': audit_count,
+        'latest_snapshot': None,
+    }
+
+    if latest_snapshot:
+        snap = dict(latest_snapshot)
+        for k in ('period_start', 'period_end', 'created_at'):
+            if snap.get(k):
+                snap[k] = snap[k].isoformat() if hasattr(snap[k], 'isoformat') else str(snap[k])
+        result['latest_snapshot'] = snap
+
+    return result
+
+
 def generate_invoice_pdf(db, organization_id, snapshot_id=None, invoice_id=None, generated_by=None):
     """Generate a simple text-based invoice document and store in invoice_documents.
 
@@ -206,6 +329,7 @@ def generate_invoice_pdf(db, organization_id, snapshot_id=None, invoice_id=None,
         f"INVOICE — {org_name}",
         f"Period: {period}",
         f"Plan: {snapshot.get('plan', 'N/A')}",
+        f"Pricing Version: {snapshot.get('pricing_version', PRICING_VERSION)}",
         "",
         "Line Items:",
     ]
@@ -252,6 +376,12 @@ def generate_invoice_pdf(db, organization_id, snapshot_id=None, invoice_id=None,
 
     if doc.get('generated_at'):
         doc['generated_at'] = doc['generated_at'].isoformat()
+
+    # Audit log
+    log_billing_audit(db, organization_id, 'invoice_document_generated',
+                      actor_id=generated_by,
+                      details={'document_id': doc.get('id'), 'file_name': file_name})
+
     return doc
 
 

@@ -7391,6 +7391,7 @@ class Database:
     _migration_019_ensured = False
     _migration_020_ensured = False
     _migration_021_ensured = False
+    _migration_022_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -7787,10 +7788,11 @@ class Database:
         Database._migration_019_ensured = True
 
     def _ensure_entitlements_tables(self):
-        """Ensure entitlements + billing tables exist (calls migrations 019-021). Idempotent."""
+        """Ensure entitlements + billing tables exist (calls migrations 019-022). Idempotent."""
         self._run_migration_019_entitlements()
         self._run_migration_020_entitlement_hardening()
         self._run_migration_021_billing_transparency()
+        self._run_migration_022_billing_integrity()
 
     # ── Migration 020: Entitlement Hardening ───────────────────────────────────
 
@@ -8017,6 +8019,105 @@ class Database:
 
         cursor.close()
         Database._migration_021_ensured = True
+
+    # ── Migration 022: Billing Integrity Hardening ─────────────────────────────
+
+    def _run_migration_022_billing_integrity(self):
+        """Phase 3C: Invoice immutability trigger, pricing_version columns, billing_audit_log.
+        Idempotent — uses IF NOT EXISTS / ADD COLUMN IF NOT EXISTS. Runs as admin (BYPASSRLS)."""
+        if Database._migration_022_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # 1. Add pricing_version + unit price columns to snapshots
+        cursor.execute("ALTER TABLE organization_billing_snapshots ADD COLUMN IF NOT EXISTS pricing_version VARCHAR(20)")
+        cursor.execute("ALTER TABLE organization_billing_snapshots ADD COLUMN IF NOT EXISTS unit_prices JSONB DEFAULT '{}'")
+        self.conn.commit()
+
+        # 2. Invoice immutability trigger — prevent UPDATE/DELETE on immutable invoice_documents
+        cursor.execute("""
+            CREATE OR REPLACE FUNCTION fn_invoice_document_immutable() RETURNS trigger AS $fn$
+            BEGIN
+                IF OLD.immutable = true THEN
+                    RAISE EXCEPTION 'Cannot modify immutable invoice document (id=%)', OLD.id;
+                END IF;
+                RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+            END;
+            $fn$ LANGUAGE plpgsql
+        """)
+        cursor.execute("DROP TRIGGER IF EXISTS trg_invoice_document_immutable ON invoice_documents")
+        cursor.execute("""
+            CREATE TRIGGER trg_invoice_document_immutable
+                BEFORE UPDATE OR DELETE ON invoice_documents
+                FOR EACH ROW EXECUTE FUNCTION fn_invoice_document_immutable()
+        """)
+        self.conn.commit()
+
+        # 3. Create billing_audit_log table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS billing_audit_log (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                action VARCHAR(50) NOT NULL,
+                actor_id INTEGER REFERENCES users(id),
+                details JSONB NOT NULL DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_audit_org ON billing_audit_log(organization_id, created_at DESC)")
+        self.conn.commit()
+
+        # 4. RLS + auto-fill trigger for billing_audit_log
+        tbl = 'billing_audit_log'
+        cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+        for suffix in ('sel', 'ins', 'upd', 'del'):
+            cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON {tbl}")
+        cursor.execute(f"""
+            DO $$ BEGIN
+                CREATE POLICY org_strict_sel ON {tbl} FOR SELECT
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_ins ON {tbl} FOR INSERT
+                    WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_del ON {tbl} FOR DELETE
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """)
+        cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}")
+        cursor.execute(f"""
+            DO $$ BEGIN
+                CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
+                BEGIN
+                    IF NEW.organization_id IS NULL THEN
+                        NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
+                    END IF;
+                    IF NEW.organization_id IS NULL THEN
+                        RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $fn$ LANGUAGE plpgsql;
+
+                CREATE TRIGGER trg_auto_organization_id
+                    BEFORE INSERT ON {tbl}
+                    FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """)
+        self.conn.commit()
+
+        # 5. Grants
+        try:
+            cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {tbl} TO auditgraph_app")
+            cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE {tbl}_id_seq TO auditgraph_app")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
+        cursor.close()
+        Database._migration_022_ensured = True
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 

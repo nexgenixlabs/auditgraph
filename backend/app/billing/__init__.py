@@ -7,6 +7,8 @@ from app.billing.service import (
     get_msp_aggregate_bill,
     get_billing_history,
     store_billing_snapshot,
+    log_billing_audit,
+    get_billing_status,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     'get_msp_aggregate_bill',
     'get_billing_history',
     'store_billing_snapshot',
+    'log_billing_audit',
+    'get_billing_status',
 ]

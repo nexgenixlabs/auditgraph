@@ -1,4 +1,4 @@
-"""Phase 3B: Billing Transparency & Invoice Engine tests.
+"""Phase 3B/3C: Billing Transparency, Invoice Engine & Integrity Hardening tests.
 
 Mock-based + source inspection (no live DB required).
 """
@@ -199,3 +199,81 @@ def test_migration_021_creates_tables():
     assert 'msp_relationships' in source
     assert 'invoice_documents' in source
     assert '_migration_021_ensured' in source
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 3C: Billing Integrity Hardening
+# ══════════════════════════════════════════════════════════════════════════
+
+
+# ── Test 9: Immutable invoice trigger exists ─────────────────────────────
+
+def test_immutable_invoice_trigger():
+    """Migration 022 must create a trigger that prevents UPDATE/DELETE on immutable invoices."""
+    import os
+    db_path = os.path.join(os.path.dirname(__file__), '..', 'app', 'database.py')
+    with open(db_path) as f:
+        source = f.read()
+
+    assert 'trg_invoice_document_immutable' in source, "Immutability trigger must exist"
+    assert 'RAISE EXCEPTION' in source, "Trigger must raise on mutation"
+    assert 'immutable' in source
+
+
+# ── Test 10: Snapshot includes pricing_version ───────────────────────────
+
+def test_snapshot_includes_pricing_version():
+    """calculate_monthly_snapshot must include pricing_version from pricing module."""
+    from app.billing.service import calculate_monthly_snapshot
+    from app.pricing import PRICING_VERSION
+
+    mock_db = MagicMock()
+    mock_db.get_organization_by_id.return_value = _mock_org(plan='pro')
+    mock_db.get_cloud_subscriptions.return_value = _mock_subs(count=1)
+
+    snapshot = calculate_monthly_snapshot(mock_db, 1)
+    assert snapshot is not None
+    assert snapshot['pricing_version'] == PRICING_VERSION
+    assert 'unit_prices' in snapshot
+    assert 'platform_fee_cents' in snapshot['unit_prices']
+    assert 'sub_rates' in snapshot['unit_prices']
+
+
+# ── Test 11: Snapshot overwrite prevented (DO NOTHING default) ───────────
+
+def test_snapshot_overwrite_prevented():
+    """store_billing_snapshot without force must use DO NOTHING on conflict."""
+    import os
+    service_path = os.path.join(os.path.dirname(__file__), '..', 'app', 'billing', 'service.py')
+    with open(service_path) as f:
+        source = f.read()
+
+    assert 'ON CONFLICT (organization_id, period_start) DO NOTHING' in source, \
+        "Default insert must use DO NOTHING"
+    assert 'force' in source, "store_billing_snapshot must accept force parameter"
+
+
+# ── Test 12: Billing audit log table exists ──────────────────────────────
+
+def test_billing_audit_log_table():
+    """Migration 022 must create billing_audit_log table."""
+    import os
+    db_path = os.path.join(os.path.dirname(__file__), '..', 'app', 'database.py')
+    with open(db_path) as f:
+        source = f.read()
+
+    assert 'billing_audit_log' in source
+    assert '_migration_022_ensured' in source
+
+
+# ── Test 13: Status endpoint registered ──────────────────────────────────
+
+def test_billing_status_route_registered():
+    """GET /api/billing/status must be registered in main.py."""
+    import os
+    main_path = os.path.join(os.path.dirname(__file__), '..', 'app', 'main.py')
+    with open(main_path) as f:
+        source = f.read()
+
+    assert '/api/billing/status' in source
+    assert 'get_billing_status_handler' in source

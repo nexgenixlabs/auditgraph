@@ -20925,14 +20925,38 @@ def get_msp_billing_aggregate():
         db.close()
 
 
+def get_billing_status_handler():
+    """GET /api/billing/status — billing health summary for current org."""
+    from app.billing.service import get_billing_status
+    db = Database()
+    try:
+        tid = _org_id()
+        if not tid:
+            return jsonify({'error': 'Organization context required'}), 403
+        result = get_billing_status(db, tid)
+        if not result:
+            return jsonify({'error': 'Organization not found'}), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 def admin_generate_billing_snapshot(organization_id):
     """POST /api/admin/organizations/<id>/billing/snapshot — admin-triggered snapshot."""
-    from app.billing.service import calculate_monthly_snapshot, store_billing_snapshot
+    from app.billing.service import calculate_monthly_snapshot, store_billing_snapshot, log_billing_audit
     db = Database()
     try:
         data = request.get_json(silent=True) or {}
         period_start = data.get('period_start')
         period_end = data.get('period_end')
+        force = data.get('force', False)
+
+        # Only superadmin can force-overwrite an existing snapshot
+        user = getattr(g, 'current_user', None)
+        if force:
+            is_super = user.get('is_superadmin', False) if user else False
+            if not is_super:
+                return jsonify({'error': 'Only superadmin can force-overwrite snapshots'}), 403
 
         # Parse date strings if provided
         from datetime import date as date_type
@@ -20945,10 +20969,17 @@ def admin_generate_billing_snapshot(organization_id):
         if not snapshot:
             return jsonify({'error': 'Organization not found'}), 404
 
-        stored = store_billing_snapshot(db, snapshot)
+        stored = store_billing_snapshot(db, snapshot, force=force)
+        actor_id = user.get('id') if user else None
+        log_billing_audit(db, organization_id, 'snapshot_generated',
+                          actor_id=actor_id,
+                          details={'snapshot_id': stored.get('id') if stored else None,
+                                   'force': force,
+                                   'period_start': str(period_start),
+                                   'period_end': str(period_end)})
         _log(db, 'billing_snapshot_generated',
              f'Admin generated billing snapshot for org {organization_id}',
-             {'organization_id': organization_id, 'snapshot_id': stored.get('id')})
+             {'organization_id': organization_id, 'snapshot_id': stored.get('id') if stored else None})
         return jsonify(stored), 201
     finally:
         db.close()

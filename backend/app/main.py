@@ -298,6 +298,7 @@ from app.api.handlers import (
     get_billing_current_estimate,
     get_billing_history_handler,
     get_billing_invoice_download,
+    get_billing_status_handler,
     get_msp_billing_aggregate,
     admin_generate_billing_snapshot,
     admin_generate_invoice_document,
@@ -2022,6 +2023,11 @@ def create_app():
     @require_role('admin', 'security_admin')
     def billing_invoice_download(doc_id):
         return get_billing_invoice_download(doc_id)
+
+    @app.get("/api/billing/status")
+    @require_role('admin', 'security_admin')
+    def billing_status():
+        return get_billing_status_handler()
 
     @app.get("/api/msp/billing/aggregate")
     @require_role('admin', 'security_admin')

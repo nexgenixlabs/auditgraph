@@ -1662,3 +1662,96 @@ Monthly billing snapshots — runs on the **1st of each month at 04:00 UTC**. Lo
 - [x] Python imports work (`from app.billing.service import calculate_monthly_snapshot`)
 - [x] All billing routes registered in main.py
 - [x] Scheduler job registered with `day=1, hour=4`
+
+---
+
+## Phase 3C — Billing Integrity Hardening
+
+**Date**: 2026-02-28
+**Status**: IMPLEMENTED
+
+### Objective
+
+Harden billing data integrity: make invoices immutable at the database level, lock pricing versions into snapshots, prevent accidental snapshot overwrites, and create an audit trail for all billing mutations.
+
+### Migration 022 — Billing Integrity
+
+Added `_run_migration_022_billing_integrity()` guarded by `_migration_022_ensured`.
+
+#### 1. Invoice immutability trigger
+
+```sql
+CREATE FUNCTION fn_invoice_document_immutable() RETURNS trigger
+-- RAISE EXCEPTION on UPDATE or DELETE when immutable = true
+
+CREATE TRIGGER trg_invoice_document_immutable
+    BEFORE UPDATE OR DELETE ON invoice_documents
+    FOR EACH ROW EXECUTE FUNCTION fn_invoice_document_immutable()
+```
+
+#### 2. Snapshot pricing columns
+
+```sql
+ALTER TABLE organization_billing_snapshots
+    ADD COLUMN IF NOT EXISTS pricing_version VARCHAR(20) DEFAULT '2026-02-01',
+    ADD COLUMN IF NOT EXISTS unit_prices JSONB DEFAULT '{}'
+```
+
+#### 3. Billing audit log table
+
+```sql
+CREATE TABLE IF NOT EXISTS billing_audit_log (
+    id SERIAL PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    action VARCHAR(100) NOT NULL,
+    actor_id INTEGER REFERENCES users(id),
+    details JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+```
++ RLS policies (`org_strict_sel/ins`) + auto-fill trigger + index on `(organization_id, created_at)`
+
+### Billing Service Changes
+
+| Change | Detail |
+|--------|--------|
+| `PRICING_VERSION` | Imported from `app.pricing`, stored in every snapshot |
+| `_build_unit_prices(org)` | Captures platform_fee, sub_rates, discount at snapshot time |
+| `store_billing_snapshot(force=False)` | Default: `ON CONFLICT DO NOTHING` (immutable). `force=True`: UPSERT (admin override) |
+| `log_billing_audit()` | Writes to `billing_audit_log` table |
+| `get_billing_status()` | Returns billing health summary (plan, latest snapshot, doc/audit counts) |
+| `generate_invoice_pdf()` | Now writes `billing_audit_log` entry on generation |
+
+### Handler Changes
+
+| Handler | Change |
+|---------|--------|
+| `admin_generate_billing_snapshot` | Accepts `force` param; only superadmin can force-overwrite; writes `billing_audit_log` |
+| `get_billing_status_handler` | **New** — `GET /api/billing/status` |
+
+### Routes Added
+
+| Method | Path | Access |
+|--------|------|--------|
+| GET | `/api/billing/status` | admin, security_admin |
+
+### Files Changed
+
+| File | Action |
+|------|--------|
+| `backend/app/pricing.py` | Added `PRICING_VERSION = '2026-02-01'` |
+| `backend/app/database.py` | Migration 022 (trigger + columns + audit table) |
+| `backend/app/billing/__init__.py` | Exports `log_billing_audit`, `get_billing_status` |
+| `backend/app/billing/service.py` | Pricing version, DO NOTHING semantics, audit logging, status |
+| `backend/app/api/handlers.py` | Updated `admin_generate_billing_snapshot` + new `get_billing_status_handler` |
+| `backend/app/main.py` | New route + import |
+| `backend/tests/test_billing.py` | 5 new tests (13 total) |
+
+### Verification
+
+- [x] 65/65 tests pass (auth_boundary + org_isolation + entitlements + billing)
+- [x] Immutability trigger prevents UPDATE/DELETE on locked invoices
+- [x] Snapshots include `pricing_version` and `unit_prices`
+- [x] Default snapshot insert uses `DO NOTHING` (no accidental overwrite)
+- [x] `billing_audit_log` captures all billing mutations
+- [x] `GET /api/billing/status` route registered

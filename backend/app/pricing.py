@@ -7,6 +7,9 @@ All monetary values are in integer cents to avoid floating-point issues.
 import hashlib
 import json
 
+# Pricing version — bump when rates/fees change. Stored in snapshots for auditability.
+PRICING_VERSION = '2026-02-01'
+
 
 def compute_invoice_hash(invoice_data: dict) -> str:
     """Compute SHA-256 hash of immutable invoice financial fields.
