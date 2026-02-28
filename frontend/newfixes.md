@@ -1562,3 +1562,62 @@ Full AWS IAM identity discovery with risk scoring, extending the same tenant iso
 | `from app.scheduler import run_scheduled_discovery` | OK (multi-cloud import) |
 | `npx tsc --noEmit` | Zero TypeScript errors |
 | Identity categories | `iam_user`, `iam_role`, `iam_service_linked_role` present |
+
+---
+
+# Phase 23 — Backend-Driven Entitlement Engine
+
+**Date**: 2026-02-27
+
+## Summary
+
+Wires existing plan-tier enforcement logic (`TIER_LIMITS`, `check_feature_gate`) into the actual request pipeline. Previously, free-plan tenants could call any gated endpoint directly. Now all 8 blocked features are enforced via route decorators, settings guards, discovery-time truncation, and scheduler checks. Trial expiry is enforced in middleware.
+
+## Changes
+
+### 1. `@require_feature` Decorator (`auth.py`)
+- New `require_feature(feature_name)` decorator — mirrors `require_role` pattern
+- Lazy-imports `check_feature_gate` from handlers to avoid circular dependency
+- Superadmins bypass all feature gates
+- Logs `entitlement_blocked` action to `activity_log` on denial
+- Returns 403 with `upgrade_required: true` and `current_plan` in response body
+
+### 2. Trial Expiry Middleware (`auth.py`)
+- Inserted at end of `auth_middleware()` before final `return None`
+- Only fires for `plan='trial'` — zero overhead for free/pro/enterprise
+- Direct SQL on `tenants` table (admin connection, no RLS on tenants)
+- Returns 403 with `trial_expired: true` when trial exceeds 14 days
+
+### 3. Expanded `TIER_LIMITS` (`handlers.py`)
+- Free plan `blocked_features` expanded from 4 → 8:
+  - Existing: `soar`, `api_keys`, `advanced_query`, `custom_risk_rules`
+  - Added: `ai_copilot`, `scheduled_reports`, `compliance_export`, `sso`
+
+### 4. Settings Save Gate (`handlers.py`)
+- `save_app_settings()` checks `check_feature_gate('scheduled_reports')` when `report_schedule_enabled = 'true'`
+- Returns 403 before saving if feature is blocked
+
+### 5. Route Decorators (`main.py`)
+- `require_feature` imported and stacked on 12 routes (below `@require_role` so role checks run first):
+
+| Feature | Routes |
+|---------|--------|
+| `soar` | `POST /api/soar/playbooks`, `POST /api/soar/execute` |
+| `api_keys` | `POST /api/api-keys` |
+| `advanced_query` | `POST /api/identities/query` |
+| `ai_copilot` | `POST /api/copilot/chat` |
+| `custom_risk_rules` | `POST /api/risk-rules`, `PUT /api/risk-rules/<id>`, `DELETE /api/risk-rules/<id>` |
+| `compliance_export` | `GET /api/export/evidence-zip`, `GET /api/export/<export_type>` |
+| `sso` | `POST /api/settings/sso`, `POST /api/settings/sso/parse-metadata` |
+
+### 6. Identity Count Enforcement at Discovery Time
+- **Azure** (`azure_discovery.py`): Before save loop, looks up tenant plan, truncates `identities` list to `max_identities` limit (free=50, trial=500)
+- **AWS** (`aws_discovery.py`): Same pattern, truncates `self._identities`
+- Truncate instead of reject — keeps latest data within limit
+
+### 7. Scheduler Entitlement Check (`scheduler.py`)
+- `run_scheduled_report()`: After `report_schedule_enabled` check, verifies `scheduled_reports` not in plan's `blocked_features`
+- Skips tenant with log message if blocked
+
+### 8. Frontend Sync (`pricing.ts`)
+- `TIER_LIMITS.free.blocked_features` updated to match backend (8 features)

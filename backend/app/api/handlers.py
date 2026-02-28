@@ -1899,6 +1899,12 @@ def save_app_settings():
     if errors:
         return jsonify({"error": "; ".join(errors)}), 400
 
+    # Phase 23: Gate scheduled_reports behind entitlement
+    if updates.get('report_schedule_enabled') == 'true':
+        allowed, err = check_feature_gate('scheduled_reports')
+        if not allowed:
+            return jsonify(err), 403
+
     db = _db()
     try:
         tid = _tenant_id()
@@ -16233,7 +16239,7 @@ def get_scan_modes():
 # ============================================================
 
 TIER_LIMITS = {
-    'free': {'max_identities': 50, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules']},
+    'free': {'max_identities': 50, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso']},
     'trial': {'max_identities': 500, 'trial_days': 14, 'blocked_features': []},
     'pro': {'max_identities': None, 'blocked_features': []},
     'enterprise': {'max_identities': None, 'blocked_features': []},

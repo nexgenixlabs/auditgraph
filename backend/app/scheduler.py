@@ -997,6 +997,20 @@ def run_scheduled_report():
                     db.close()
                     continue
 
+                # Phase 23: Check plan entitlement for scheduled_reports
+                from app.api.handlers import TIER_LIMITS
+                ent_cursor = db.conn.cursor()
+                ent_cursor.execute("SELECT plan FROM tenants WHERE id = %s", (db_tenant_id,))
+                ent_row = ent_cursor.fetchone()
+                ent_cursor.close()
+                if ent_row:
+                    t_plan = ent_row[0] or 'free'
+                    t_limits = TIER_LIMITS.get(t_plan, TIER_LIMITS['free'])
+                    if 'scheduled_reports' in t_limits.get('blocked_features', []):
+                        logger.info(f"Scheduled reports not available on {t_plan} plan for {tenant_name} - skipping")
+                        db.close()
+                        continue
+
                 email_service = EmailService()
                 if not email_service.credentials_configured:
                     logger.warning(f"Azure credentials not configured for {tenant_name} - skipping")

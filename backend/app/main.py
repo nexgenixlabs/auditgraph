@@ -9,7 +9,7 @@ import time
 from app.metrics import MetricsCollector
 from app.security import rate_limit, add_security_headers
 
-from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access, require_portal_role
+from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access, require_portal_role, require_feature
 from app.api.handlers import (
     get_stats,
     get_identities,
@@ -468,6 +468,7 @@ def create_app():
 
     @app.post("/api/api-keys")
     @require_role('admin')
+    @require_feature('api_keys')
     def api_keys_create():
         return create_api_key_handler()
 
@@ -490,6 +491,7 @@ def create_app():
 
     @app.post("/api/soar/playbooks")
     @require_role('admin')
+    @require_feature('soar')
     def soar_playbooks_create():
         return create_soar_playbook_handler()
 
@@ -518,6 +520,7 @@ def create_app():
 
     @app.post("/api/soar/execute")
     @require_role('admin', 'security_admin')
+    @require_feature('soar')
     def soar_execute():
         return execute_soar_action_handler()
 
@@ -813,11 +816,13 @@ def create_app():
 
     @app.post("/api/settings/sso")
     @require_role('admin')
+    @require_feature('sso')
     def sso_settings_save():
         return save_sso_settings()
 
     @app.post("/api/settings/sso/parse-metadata")
     @require_role('admin')
+    @require_feature('sso')
     def sso_parse_metadata_route():
         return parse_sso_metadata()
 
@@ -1021,6 +1026,7 @@ def create_app():
     # Advanced Query Builder (Phase 39)
     # -----------------------
     @app.post("/api/identities/query")
+    @require_feature('advanced_query')
     def identities_query():
         return query_identities()
 
@@ -1344,16 +1350,19 @@ def create_app():
 
     @app.post("/api/risk-rules")
     @require_role('admin')
+    @require_feature('custom_risk_rules')
     def risk_rules_create():
         return create_risk_rule()
 
     @app.put("/api/risk-rules/<int:rule_id>")
     @require_role('admin')
+    @require_feature('custom_risk_rules')
     def risk_rules_update(rule_id):
         return update_risk_rule(rule_id)
 
     @app.delete("/api/risk-rules/<int:rule_id>")
     @require_role('admin')
+    @require_feature('custom_risk_rules')
     def risk_rules_delete(rule_id):
         return delete_risk_rule(rule_id)
 
@@ -1367,11 +1376,13 @@ def create_app():
     # -----------------------
     @app.get("/api/export/evidence-zip")
     @require_role('admin', 'security_admin', 'compliance')
+    @require_feature('compliance_export')
     def export_evidence_zip_route():
         return export_evidence_zip()
 
     @app.get("/api/export/<export_type>")
     @require_role('admin', 'security_admin', 'compliance')
+    @require_feature('compliance_export')
     def export(export_type):
         return export_data(export_type)
 
@@ -1721,6 +1732,7 @@ def create_app():
     # Phase 79: AI Security Copilot
     # -----------------------
     @app.post("/api/copilot/chat")
+    @require_feature('ai_copilot')
     def copilot_chat_route():
         return copilot_chat()
 

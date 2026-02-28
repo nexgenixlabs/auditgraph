@@ -2698,6 +2698,24 @@ class AzureDiscoveryEngine:
         """Save all identities to database (customer-owned only, Microsoft system apps excluded at discovery)"""
         saved_count = 0
 
+        # Phase 23: Enforce identity count limit based on tenant plan
+        if self.db_tenant_id:
+            try:
+                from app.api.handlers import TIER_LIMITS
+                cursor = self.db.conn.cursor()
+                cursor.execute("SELECT plan FROM tenants WHERE id = %s", (self.db_tenant_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                if row:
+                    plan = row[0] or 'free'
+                    limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
+                    max_ids = limits.get('max_identities')
+                    if max_ids and len(identities) > max_ids:
+                        logger.warning(f"Tenant {self.db_tenant_id} ({plan} plan): truncating {len(identities)} identities to {max_ids}")
+                        identities = identities[:max_ids]
+            except Exception as e:
+                logger.error(f"Entitlement check failed, proceeding without limit: {e}")
+
         for identity in identities:
             
             # Set source for multi-cloud

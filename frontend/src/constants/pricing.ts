@@ -158,7 +158,7 @@ export const PLATFORM_FEE = {
 
 // Phase 78: Tier limits for free/trial enforcement
 export const TIER_LIMITS: Record<string, { max_identities: number | null; trial_days?: number; blocked_features: string[] }> = {
-  free: { max_identities: 50, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot'] },
+  free: { max_identities: 50, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso'] },
   trial: { max_identities: 500, trial_days: 14, blocked_features: [] },
   pro: { max_identities: null, blocked_features: [] },
   enterprise: { max_identities: null, blocked_features: [] },

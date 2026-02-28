@@ -216,6 +216,32 @@ def auth_middleware():
                 except Exception:
                     pass  # Don't block on lookup failure
 
+    # Phase 23: Trial expiry check — only fires for plan='trial', zero overhead otherwise
+    if not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
+        tenant_id = g.current_user.get('tenant_id')
+        if tenant_id:
+            try:
+                tdb = Database()
+                tcur = tdb.conn.cursor()
+                tcur.execute("SELECT plan, license_activated_at FROM tenants WHERE id = %s", (tenant_id,))
+                trow = tcur.fetchone()
+                tcur.close()
+                tdb.close()
+                if trow and trow[0] == 'trial' and trow[1]:
+                    activated = trow[1]
+                    if isinstance(activated, str):
+                        activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
+                    tz = activated.tzinfo if activated.tzinfo else None
+                    if datetime.now(tz) > activated + timedelta(days=14):
+                        return jsonify({
+                            'error': 'Trial period has expired. Please upgrade to continue.',
+                            'upgrade_required': True,
+                            'current_plan': 'trial',
+                            'trial_expired': True,
+                        }), 403
+            except Exception:
+                pass  # Don't block on lookup failure
+
     return None
 
 
@@ -279,6 +305,46 @@ def require_portal_role(*allowed_roles):
             if portal_role in allowed_roles or user.get('is_superadmin'):
                 return f(*args, **kwargs)
             return jsonify({'error': 'Insufficient portal permissions'}), 403
+        return wrapper
+    return decorator
+
+
+def require_feature(feature_name):
+    """Decorator that gates a route behind a plan feature.
+    Superadmins bypass all gates. Logs entitlement_blocked to activity_log."""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            user = getattr(g, 'current_user', None)
+            if not user:
+                return jsonify({'error': 'Authentication required'}), 401
+            # Superadmins bypass all feature gates
+            if user.get('is_superadmin'):
+                return f(*args, **kwargs)
+            # Lazy import to avoid circular dependency (auth ← handlers)
+            from app.api.handlers import check_feature_gate
+            allowed, err = check_feature_gate(feature_name)
+            if not allowed:
+                # Log the blocked attempt
+                try:
+                    db = Database()
+                    cursor = db.conn.cursor()
+                    cursor.execute(
+                        """INSERT INTO activity_log (action, description, user_id, tenant_id, metadata, created_at)
+                           VALUES (%s, %s, %s, %s, %s, NOW())""",
+                        ('entitlement_blocked',
+                         f'Feature "{feature_name}" blocked for {err.get("current_plan", "free")} plan',
+                         user.get('id'),
+                         user.get('tenant_id'),
+                         '{}')
+                    )
+                    db.conn.commit()
+                    cursor.close()
+                    db.close()
+                except Exception:
+                    pass
+                return jsonify(err), 403
+            return f(*args, **kwargs)
         return wrapper
     return decorator
 

@@ -562,6 +562,24 @@ class AWSDiscoveryEngine:
         """Save all discovered identities to the database."""
         counts = {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
 
+        # Phase 23: Enforce identity count limit based on tenant plan
+        if self.db_tenant_id:
+            try:
+                from app.api.handlers import TIER_LIMITS
+                cursor = self.db.conn.cursor()
+                cursor.execute("SELECT plan FROM tenants WHERE id = %s", (self.db_tenant_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                if row:
+                    plan = row[0] or 'free'
+                    limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
+                    max_ids = limits.get('max_identities')
+                    if max_ids and len(self._identities) > max_ids:
+                        logger.warning(f"Tenant {self.db_tenant_id} ({plan} plan): truncating {len(self._identities)} identities to {max_ids}")
+                        self._identities = self._identities[:max_ids]
+            except Exception as e:
+                logger.error(f"Entitlement check failed, proceeding without limit: {e}")
+
         for identity in self._identities:
             # Cross-account bleed prevention
             acct = identity.get('tags', {}).get('aws_account_id')
