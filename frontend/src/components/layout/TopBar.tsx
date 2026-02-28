@@ -18,12 +18,12 @@ const CLOUD_BRAND_DOT: Record<string, string> = {
 const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout, isSuperAdmin, activeTenantId, activeTenantName, switchTenant, isImpersonating, exitImpersonation } = useAuth();
+  const { user, logout, isSuperAdmin, activeOrgId, activeOrgName, switchOrganization, isImpersonating, exitImpersonation } = useAuth();
   const { connections, selectedConnectionId, setSelectedConnectionId } = useConnection();
   const [unreadCount, setUnreadCount] = useState(0);
-  const [tenantDropdownOpen, setTenantDropdownOpen] = useState(false);
+  const [orgDropdownOpen, setOrgDropdownOpen] = useState(false);
   const [scopeDropdownOpen, setScopeDropdownOpen] = useState(false);
-  const [tenantsList, setTenantsList] = useState<{ id: number; name: string }[]>([]);
+  const [orgsList, setOrgsList] = useState<{ id: number; name: string }[]>([]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const scopeRef = useRef<HTMLDivElement>(null);
   const userRef = useRef<HTMLDivElement>(null);
@@ -47,12 +47,12 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
     return () => { mounted = false; clearInterval(interval); };
   }, []);
 
-  // Tenant list for superadmin switcher
+  // Organization list for superadmin switcher
   useEffect(() => {
     if (!isSuperAdmin) return;
     fetch('/api/clients')
       .then(r => r.ok ? r.json() : null)
-      .then(d => d && setTenantsList(d.tenants || []))
+      .then(d => d && setOrgsList(d.organizations || []))
       .catch(() => {});
   }, [isSuperAdmin]);
 
@@ -67,7 +67,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
         <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z" />
         </svg>
-        <span>Impersonating {user?.tenant_name || 'tenant'} as {user?.role || 'admin'}</span>
+        <span>Impersonating {user?.org_name || 'org'} as {user?.role || 'admin'}</span>
         <button
           onClick={exitImpersonation}
           className="px-2 py-0.5 rounded text-xs font-semibold transition-colors"
@@ -93,7 +93,7 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
         <div className="leading-tight hidden sm:block">
           <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>AuditGraph</span>
           <p className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
-            {user?.tenant_name || 'Identity Risk OS'}
+            {user?.org_name || 'Identity Risk OS'}
           </p>
         </div>
       </Link>
@@ -232,11 +232,11 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
           )}
         </button>
 
-        {/* Tenant Switcher (superadmin only) */}
+        {/* Organization Switcher (superadmin only) */}
         {isSuperAdmin && (
           <div className="relative">
             <button
-              onClick={() => setTenantDropdownOpen(!tenantDropdownOpen)}
+              onClick={() => setOrgDropdownOpen(!orgDropdownOpen)}
               className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors"
               style={{
                 backgroundColor: 'var(--tint-purple)',
@@ -247,38 +247,38 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
-              <span className="hidden md:inline">{activeTenantName || 'All Clients'}</span>
+              <span className="hidden md:inline">{activeOrgName || 'All Clients'}</span>
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
-            {tenantDropdownOpen && (
+            {orgDropdownOpen && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setTenantDropdownOpen(false)} />
+                <div className="fixed inset-0 z-40" onClick={() => setOrgDropdownOpen(false)} />
                 <div
                   className="absolute right-0 mt-1 w-52 rounded-lg shadow-lg z-50 py-1"
                   style={{ backgroundColor: 'var(--bg-raised)', border: '1px solid var(--border-default)' }}
                 >
                   <button
-                    onClick={() => { switchTenant(null); setTenantDropdownOpen(false); }}
+                    onClick={() => { switchOrganization(null); setOrgDropdownOpen(false); }}
                     className="w-full text-left px-3 py-2 text-xs transition-colors"
                     style={{
-                      color: !activeTenantId ? 'var(--accent-purple)' : 'var(--text-secondary)',
-                      fontWeight: !activeTenantId ? 600 : 400,
+                      color: !activeOrgId ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                      fontWeight: !activeOrgId ? 600 : 400,
                     }}
                     onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
                     onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
                   >
                     All Clients (no filter)
                   </button>
-                  {tenantsList.map(t => (
+                  {orgsList.map(t => (
                     <button
                       key={t.id}
-                      onClick={() => { switchTenant(t.id, t.name); setTenantDropdownOpen(false); }}
+                      onClick={() => { switchOrganization(t.id, t.name); setOrgDropdownOpen(false); }}
                       className="w-full text-left px-3 py-2 text-xs transition-colors"
                       style={{
-                        color: activeTenantId === t.id ? 'var(--accent-purple)' : 'var(--text-secondary)',
-                        fontWeight: activeTenantId === t.id ? 600 : 400,
+                        color: activeOrgId === t.id ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                        fontWeight: activeOrgId === t.id ? 600 : 400,
                       }}
                       onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
                       onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}

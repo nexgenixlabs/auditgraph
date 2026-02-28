@@ -23,7 +23,7 @@ SEVERITY_COLORS = {
 class NotificationDispatcher:
     """Dispatches notifications to Slack and Teams via webhooks."""
 
-    # In-memory rate limiter: {(tenant_id, event_type): last_sent_timestamp}
+    # In-memory rate limiter: {(organization_id, event_type): last_sent_timestamp}
     _throttle: dict = {}
     THROTTLE_SECONDS = 300  # 5 minutes
 
@@ -133,16 +133,16 @@ class NotificationDispatcher:
             logger.error(f"Teams webhook error: {e}")
             return False
 
-    def _is_throttled(self, event_type: str, tenant_id: int = None) -> bool:
-        key = (tenant_id, event_type)
+    def _is_throttled(self, event_type: str, organization_id: int = None) -> bool:
+        key = (organization_id, event_type)
         last = self._throttle.get(key, 0)
         return (time.time() - last) < self.THROTTLE_SECONDS
 
     def dispatch(self, event_type: str, event_data: dict, db):
         """Dispatch notifications to configured channels."""
-        tenant_id = getattr(db, '_tenant_id', None)
-        if self._is_throttled(event_type, tenant_id=tenant_id):
-            logger.debug(f"Throttled {event_type} notification for tenant {tenant_id}")
+        organization_id = getattr(db, '_organization_id', None)
+        if self._is_throttled(event_type, organization_id=organization_id):
+            logger.debug(f"Throttled {event_type} notification for organization {organization_id}")
             return
 
         try:
@@ -169,7 +169,7 @@ class NotificationDispatcher:
                 sent = True
 
             if sent:
-                self._throttle[(tenant_id, event_type)] = time.time()
+                self._throttle[(organization_id, event_type)] = time.time()
 
         except Exception as e:
             logger.error(f"Error dispatching {event_type}: {e}")

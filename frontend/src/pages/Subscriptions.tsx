@@ -6,7 +6,7 @@ import { formatCents, SUB_RATES_CENTS } from '../constants/pricing';
 
 interface CloudSubscription {
   id: number;
-  tenant_id: number;
+  organization_id: number;
   cloud: string;
   account_id: string;
   account_name: string | null;

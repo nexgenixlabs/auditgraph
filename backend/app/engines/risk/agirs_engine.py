@@ -64,14 +64,14 @@ class AGIRSEngine:
     def __init__(self, db):
         self.db = db
 
-    def compute(self, tenant_id: int, run_id: int) -> Dict:
+    def compute(self, organization_id: int, run_id: int) -> Dict:
         """Run full AGIRS computation, persist results, and update blast_radius_score on identities."""
         cursor = self.db.conn.cursor()
         try:
-            # Get all run_ids for this tenant's latest completed runs
-            run_ids = self._get_run_ids(cursor, tenant_id)
+            # Get all run_ids for this organization's latest completed runs
+            run_ids = self._get_run_ids(cursor, organization_id)
             if not run_ids:
-                logger.warning(f"AGIRS: No completed runs for tenant {tenant_id}")
+                logger.warning(f"AGIRS: No completed runs for organization {organization_id}")
                 return self._empty_result()
 
             hiri = self._compute_hiri(cursor, run_ids)
@@ -112,13 +112,13 @@ class AGIRSEngine:
         finally:
             cursor.close()
 
-    def _get_run_ids(self, cursor, tenant_id: int) -> List[int]:
-        """Get latest completed discovery run IDs for this tenant."""
+    def _get_run_ids(self, cursor, organization_id: int) -> List[int]:
+        """Get latest completed discovery run IDs for this organization."""
         cursor.execute("""
             SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s
+            WHERE status = 'completed' AND organization_id = %s
             ORDER BY completed_at DESC LIMIT 10
-        """, (tenant_id,))
+        """, (organization_id,))
         rows = cursor.fetchall()
         return [r[0] for r in rows] if rows else []
 

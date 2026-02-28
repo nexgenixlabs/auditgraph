@@ -111,15 +111,15 @@ interface SnapshotInfo {
 export default function Exports() {
   const { addToast } = useToast();
   const { withConnection } = useConnection();
-  const { user, activeTenantId, activeTenantName } = useAuth();
+  const { user, activeOrgId, activeOrgName } = useAuth();
   const [downloading, setDownloading] = useState<string | null>(null);
   const [lastExported, setLastExported] = useState<Record<string, string>>({});
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [latestSnapshot, setLatestSnapshot] = useState<SnapshotInfo | null>(null);
 
-  const tenantId = activeTenantId ?? user?.tenant_id ?? null;
-  const tenantName = activeTenantName ?? user?.tenant_name ?? null;
+  const orgId = activeOrgId ?? user?.organization_id ?? null;
+  const orgName = activeOrgName ?? user?.org_name ?? null;
 
   useEffect(() => {
     fetch(withConnection('/api/runs'))
@@ -134,7 +134,7 @@ export default function Exports() {
   }, [withConnection]);
 
   function getMeta() {
-    return buildExportMeta(latestSnapshot?.id ?? null, tenantId, tenantName);
+    return buildExportMeta(latestSnapshot?.id ?? null, orgId, orgName);
   }
 
   async function handleExport(exportType: string, format: 'csv' | 'json' | 'zip') {
@@ -250,10 +250,10 @@ export default function Exports() {
             </div>
           </div>
           <div>
-            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Tenant ID</div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Organization ID</div>
             <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
-              {tenantId ?? 'N/A'}
-              {tenantName && <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-secondary)' }}>({tenantName})</span>}
+              {orgId ?? 'N/A'}
+              {orgName && <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-secondary)' }}>({orgName})</span>}
             </div>
           </div>
           <div>
@@ -360,7 +360,7 @@ export default function Exports() {
       {/* Info */}
       <div className="border rounded-xl p-4 text-xs space-y-1" style={{ backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))', color: 'var(--text-secondary)', borderColor: 'var(--border-default)' }}>
         <p><strong>CSV</strong> format is optimized for spreadsheet import (Excel, Google Sheets). Metadata is prepended as comment rows (# prefix).</p>
-        <p><strong>JSON</strong> format includes an <code>_export_metadata</code> envelope with Snapshot ID, Timestamp, Tenant ID, and Schema version.</p>
+        <p><strong>JSON</strong> format includes an <code>_export_metadata</code> envelope with Snapshot ID, Timestamp, Organization ID, and Schema version.</p>
         <p><strong>ZIP</strong> evidence packages include metadata in the MANIFEST. All exports reflect the latest snapshot data.</p>
       </div>
     </div>

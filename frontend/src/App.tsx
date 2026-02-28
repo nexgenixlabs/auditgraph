@@ -72,7 +72,7 @@ import Sidebar from './components/layout/Sidebar';
 import TopBar from './components/layout/TopBar';
 import CopilotPanel from './components/CopilotPanel';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { TenantProvider, useTenant } from './contexts/TenantContext';
+import { OrganizationProvider, useOrganization } from './contexts/TenantContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 // ConnectionSwitcher removed — scope selection now in TopBar
@@ -101,12 +101,12 @@ function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode;
 
 function AppContent() {
   const { user, loading, isAdmin, isSuperAdmin, canManageConnections } = useAuth();
-  const { loading: tenantLoading, error: tenantError } = useTenant();
+  const { loading: orgLoading, error: orgError } = useOrganization();
   const location = useLocation();
   const [searchOpen, setSearchOpen] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
-  const [tenantStage, setTenantStage] = useState<string>('active');
+  const [orgStage, setTenantStage] = useState<string>('active');
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -132,11 +132,11 @@ function AppContent() {
       .catch(() => {});
   }, [user, loading]);
 
-  // Phase 85: Fetch tenant onboarding stage (non-superadmin only)
+  // Phase 85: Fetch organization onboarding stage (non-superadmin only)
   // Re-fetch on route change so navigating away from Settings picks up stage updates
   useEffect(() => {
     if (!user || loading || user.is_superadmin) return;
-    fetch('/api/tenant/stage')
+    fetch('/api/organization/stage')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data?.stage) setTenantStage(data.stage);
@@ -144,8 +144,8 @@ function AppContent() {
       .catch(() => {});
   }, [user, loading, location.pathname]);
 
-  // Phase 53: Tenant resolution loading
-  if (tenantLoading) {
+  // Phase 53: Organization resolution loading
+  if (orgLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
@@ -156,14 +156,14 @@ function AppContent() {
     );
   }
 
-  // Phase 53: Tenant resolution error
-  if (tenantError) {
+  // Phase 53: Organization resolution error
+  if (orgError) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center max-w-md">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-red-100 text-red-600 text-2xl font-bold mb-4">!</div>
           <h1 className="text-xl font-bold text-gray-900 mb-2">Organization Not Found</h1>
-          <p className="text-sm text-gray-500 mb-4">{tenantError}</p>
+          <p className="text-sm text-gray-500 mb-4">{orgError}</p>
           <p className="text-xs text-gray-400">
             Please check the URL or contact your administrator.
           </p>
@@ -191,8 +191,8 @@ function AppContent() {
     || window.location.hostname === 'localhost'
     || window.location.hostname === '127.0.0.1';
 
-  // Lock all non-settings routes when tenant is not yet active
-  const locked = tenantStage !== 'active';
+  // Lock all non-settings routes when organization is not yet active
+  const locked = orgStage !== 'active';
 
   return (
     <ToastProvider>
@@ -239,7 +239,7 @@ function AppContent() {
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
 
               {/* Left Sidebar */}
-              <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={tenantStage !== 'active'} canManageConnections={canManageConnections} />
+              <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={orgStage !== 'active'} canManageConnections={canManageConnections} />
 
               {/* Global Search Modal */}
               <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
@@ -251,12 +251,12 @@ function AppContent() {
               <main className="min-h-screen w-full overflow-x-hidden" style={{ paddingLeft: 'var(--sidebar-width, 220px)', paddingTop: 'var(--header-height, 56px)' }}>
                 <Routes>
                   <Route path="/" element={
-                    tenantStage !== 'active'
+                    orgStage !== 'active'
                       ? <ErrorBoundary><LockedDashboard /></ErrorBoundary>
                       : <ErrorBoundary><CISODashboard /></ErrorBoundary>
                   } />
                   <Route path="/dashboard" element={
-                    tenantStage !== 'active'
+                    orgStage !== 'active'
                       ? <Navigate to="/" replace />
                       : <ErrorBoundary><Dashboard /></ErrorBoundary>
                   } />
@@ -317,13 +317,13 @@ function App() {
   return (
     <ThemeProvider>
       <Router>
-        <TenantProvider>
+        <OrganizationProvider>
           <AuthProvider>
             <ConnectionProvider>
               <AppContent />
             </ConnectionProvider>
           </AuthProvider>
-        </TenantProvider>
+        </OrganizationProvider>
       </Router>
     </ThemeProvider>
   );

@@ -27,7 +27,7 @@ class P2TelemetryService:
         })
         return session
 
-    def ingest_signin_logs(self, run_id, tenant_id, lookback_days=30):
+    def ingest_signin_logs(self, run_id, organization_id, lookback_days=30):
         """Fetch service principal sign-in logs from MS Graph and bulk-insert."""
         session = self._get_graph_client()
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -95,7 +95,7 @@ class P2TelemetryService:
                         ca_status = 'failure'
 
                 rows.append((
-                    tenant_id,
+                    organization_id,
                     identity_db_id,
                     sp_id,
                     evt.get('id'),
@@ -122,7 +122,7 @@ class P2TelemetryService:
                 from psycopg2.extras import execute_values
                 execute_values(cursor, """
                     INSERT INTO workload_signin_events
-                    (tenant_id, identity_db_id, identity_id, sign_in_id, created_datetime,
+                    (organization_id, identity_db_id, identity_id, sign_in_id, created_datetime,
                      status, error_code, failure_reason, resource_display_name, resource_id,
                      ip_address, location_city, location_country, app_display_name,
                      client_app_type, is_interactive, risk_level, risk_detail,
@@ -139,7 +139,7 @@ class P2TelemetryService:
         print(f"  ✓ Ingested {total_ingested} P2 sign-in events")
         return total_ingested
 
-    def compute_activity_stats(self, run_id, tenant_id, lookback_days=30):
+    def compute_activity_stats(self, run_id, organization_id, lookback_days=30):
         """Aggregate sign-in events into per-identity activity stats for the period."""
         cursor = self.db.conn.cursor()
         period_end = datetime.utcnow().date()
@@ -148,13 +148,13 @@ class P2TelemetryService:
         try:
             cursor.execute("""
                 INSERT INTO workload_activity_stats
-                (tenant_id, identity_db_id, identity_id, period_start, period_end,
+                (organization_id, identity_db_id, identity_id, period_start, period_end,
                  total_sign_ins, successful_sign_ins, failed_sign_ins,
                  unique_resources, unique_ips, unique_locations,
                  peak_hour, off_hours_pct, avg_daily_sign_ins,
                  risk_sign_ins, ca_failures, discovery_run_id)
                 SELECT
-                    e.tenant_id,
+                    e.organization_id,
                     e.identity_db_id,
                     e.identity_id,
                     %s AS period_start,
@@ -180,7 +180,7 @@ class P2TelemetryService:
                 WHERE e.discovery_run_id = %s
                   AND e.identity_db_id IS NOT NULL
                   AND e.created_datetime >= %s
-                GROUP BY e.tenant_id, e.identity_db_id, e.identity_id
+                GROUP BY e.organization_id, e.identity_db_id, e.identity_id
                 ON CONFLICT (identity_db_id, period_start, period_end)
                 DO UPDATE SET
                     total_sign_ins = EXCLUDED.total_sign_ins,

@@ -27,8 +27,8 @@ interface TenantMetrics {
 }
 
 interface GlobalMetrics {
-  total_tenants: number;
-  active_tenants: number;
+  total_orgs: number;
+  active_orgs: number;
   total_identities: number;
   total_critical: number;
   total_high: number;
@@ -36,7 +36,7 @@ interface GlobalMetrics {
 }
 
 interface AnalyticsResponse {
-  tenants: TenantMetrics[];
+  organizations: TenantMetrics[];
   global: GlobalMetrics;
 }
 
@@ -81,7 +81,7 @@ function trendArrow(current: number, prev: number | null): React.ReactNode {
 
 export default function CrossTenantAnalytics() {
   const navigate = useNavigate();
-  const { isSuperAdmin, switchTenant } = useAuth();
+  const { isSuperAdmin, switchOrganization } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
@@ -119,8 +119,8 @@ export default function CrossTenantAnalytics() {
   };
 
   const sorted = useMemo(() => {
-    if (!data?.tenants) return [];
-    const items = [...data.tenants];
+    if (!data?.organizations) return [];
+    const items = [...data.organizations];
     items.sort((a, b) => {
       let av: any = a[sortKey];
       let bv: any = b[sortKey];
@@ -135,7 +135,7 @@ export default function CrossTenantAnalytics() {
   }, [data, sortKey, sortAsc]);
 
   const handleTenantClick = (tenant: TenantMetrics) => {
-    switchTenant(tenant.id, tenant.name);
+    switchOrganization(tenant.id, tenant.name);
     navigate('/dashboard');
   };
 
@@ -199,11 +199,11 @@ export default function CrossTenantAnalytics() {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="bg-white border rounded-xl p-5">
           <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Clients</div>
-          <div className="text-3xl font-bold text-gray-900 mt-1">{g.total_tenants}</div>
+          <div className="text-3xl font-bold text-gray-900 mt-1">{g.total_orgs}</div>
         </div>
         <div className="bg-white border rounded-xl p-5">
           <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Active Clients</div>
-          <div className="text-3xl font-bold text-green-700 mt-1">{g.active_tenants}</div>
+          <div className="text-3xl font-bold text-green-700 mt-1">{g.active_orgs}</div>
           <div className="text-xs text-gray-400 mt-0.5">with discovery data</div>
         </div>
         <div className="bg-white border rounded-xl p-5">

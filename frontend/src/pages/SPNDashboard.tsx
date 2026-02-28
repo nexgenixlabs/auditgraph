@@ -458,7 +458,7 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
 export default function SPNDashboard() {
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
-  const { user, activeTenantId, activeTenantName } = useAuth();
+  const { user, activeOrgId, activeOrgName } = useAuth();
 
   const [stats, setStats] = useState<SPNStats | null>(null);
   const [spns, setSpns] = useState<SPNRow[]>([]);
@@ -619,14 +619,14 @@ export default function SPNDashboard() {
   ], []);
 
   const handleCSVExport = useCallback(() => {
-    const meta = buildExportMeta(latestSnapshotId, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(latestSnapshotId, activeOrgId ?? user?.organization_id ?? null, activeOrgName ?? user?.org_name ?? null);
     downloadCSV(
       exportData as unknown as Record<string, unknown>[],
       SPN_CSV_COLS,
       exportFilename('spn-exposure-audit', 'csv'),
       meta
     );
-  }, [exportData, SPN_CSV_COLS, latestSnapshotId, activeTenantId, activeTenantName, user]);
+  }, [exportData, SPN_CSV_COLS, latestSnapshotId, activeOrgId, activeOrgName, user]);
 
   const [pdfGenerating, setPdfGenerating] = useState(false);
 
@@ -705,7 +705,7 @@ export default function SPNDashboard() {
         <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50">
           <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
           <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{latestSnapshotId}</span></span>
-          <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Organization: <span className="font-mono font-semibold text-gray-700">{activeOrgId ?? user?.organization_id ?? 'N/A'}</span></span>
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
         </div>
       )}

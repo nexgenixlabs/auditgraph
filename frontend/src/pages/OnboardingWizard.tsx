@@ -74,7 +74,7 @@ export default function OnboardingWizard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          azure_tenant_id: azureTenantId.trim(),
+          azure_directory_id: azureTenantId.trim(),
           azure_client_id: azureClientId.trim(),
           azure_client_secret: azureClientSecret.trim(),
         }),
@@ -101,7 +101,7 @@ export default function OnboardingWizard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           org_name: orgName.trim(),
-          azure_tenant_id: azureTenantId.trim(),
+          azure_directory_id: azureTenantId.trim(),
           azure_client_id: azureClientId.trim(),
           azure_client_secret: azureClientSecret.trim(),
           discovery_interval_hours: discoveryInterval,

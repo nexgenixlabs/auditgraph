@@ -95,57 +95,57 @@ SCAN_MODES = {
 
 def run_scheduled_discovery(scan_mode: str = 'deep'):
     """
-    Runs the discovery process for ALL enabled tenants.
-    Each tenant's Azure credentials are read from tenant-scoped settings.
+    Runs the discovery process for ALL enabled organizations.
+    Each organization's Azure credentials are read from org-scoped settings.
     Called by the scheduler.
     """
     logger.info("=" * 70)
-    logger.info("SCHEDULED DISCOVERY STARTED (multi-tenant)")
+    logger.info("SCHEDULED DISCOVERY STARTED (multi-org)")
     logger.info(f"Time: {datetime.utcnow().isoformat()}")
     logger.info("=" * 70)
 
-    # Get list of enabled tenants
-    admin_db = Database()  # No tenant context → superadmin/startup path
+    # Get list of enabled organizations
+    admin_db = Database()  # No org context → superadmin/startup path
     try:
         cursor = admin_db.conn.cursor()
-        cursor.execute("SELECT id, name FROM tenants WHERE enabled = TRUE ORDER BY id")
-        tenants = cursor.fetchall()
+        cursor.execute("SELECT id, name FROM organizations WHERE enabled = TRUE ORDER BY id")
+        orgs = cursor.fetchall()
         cursor.close()
     finally:
         admin_db.close()
 
-    if not tenants:
-        logger.warning("No enabled tenants found, skipping discovery")
+    if not orgs:
+        logger.warning("No enabled organizations found, skipping discovery")
         return
 
-    for db_tenant_id, tenant_name in tenants:
-        logger.info(f"▶ Running discovery for tenant: {tenant_name} (id={db_tenant_id})")
+    for db_org_id, org_name in orgs:
+        logger.info(f"▶ Running discovery for organization: {org_name} (id={db_org_id})")
         try:
-            _run_tenant_discovery(db_tenant_id, tenant_name, scan_mode)
+            _run_org_discovery(db_org_id, org_name, scan_mode)
         except Exception as e:
-            logger.error(f"❌ Discovery FAILED for tenant {tenant_name}: {str(e)}")
+            logger.error(f"❌ Discovery FAILED for organization {org_name}: {str(e)}")
             logger.exception(e)
             _dispatch_notification('scan_failed', {
-                'title': f'Discovery Scan Failed — {tenant_name}',
-                'description': f'Discovery failed for tenant {tenant_name}: {str(e)[:200]}',
+                'title': f'Discovery Scan Failed — {org_name}',
+                'description': f'Discovery failed for organization {org_name}: {str(e)[:200]}',
                 'severity': 'critical',
-            }, db_tenant_id=db_tenant_id)
+            }, db_org_id=db_org_id)
 
     logger.info("=" * 70)
-    logger.info("SCHEDULED DISCOVERY COMPLETED (all tenants)")
+    logger.info("SCHEDULED DISCOVERY COMPLETED (all organizations)")
     logger.info("=" * 70)
 
 
-def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep',
-                          connection_id: int = None):
-    """Run discovery for a single tenant using their cloud connections.
+def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
+                       connection_id: int = None):
+    """Run discovery for a single organization using their cloud connections.
     If connection_id is provided, only scan that specific connection.
-    Otherwise scan ALL connected connections for the tenant.
+    Otherwise scan ALL connected connections for the organization.
     Falls back to legacy settings-based credentials if no connections exist.
     """
     admin_db = Database()
     try:
-        connections = admin_db.get_cloud_connections(db_tenant_id,
+        connections = admin_db.get_cloud_connections(db_org_id,
                                                      include_secrets=True)
     finally:
         admin_db.close()
@@ -154,32 +154,32 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
     if connection_id:
         connections = [c for c in connections if c['id'] == connection_id]
         if not connections:
-            logger.warning(f"  ⚠ Connection {connection_id} not found for tenant {tenant_name}")
+            logger.warning(f"  ⚠ Connection {connection_id} not found for organization {org_name}")
             return
 
     # Filter to only connected connections
     connected = [c for c in connections if c.get('status') == 'connected']
 
     if connected:
-        logger.info(f"  Found {len(connected)} connected connection(s) for {tenant_name}")
+        logger.info(f"  Found {len(connected)} connected connection(s) for {org_name}")
         any_ran = False
         for conn in connected:
-            _run_connection_discovery(db_tenant_id, tenant_name, conn, scan_mode)
+            _run_connection_discovery(db_org_id, org_name, conn, scan_mode)
             any_ran = True
         if not any_ran:
-            logger.info(f"  All connections skipped (missing credentials), trying legacy settings for {tenant_name}")
-            _run_legacy_settings_discovery(db_tenant_id, tenant_name, scan_mode)
+            logger.info(f"  All connections skipped (missing credentials), trying legacy settings for {org_name}")
+            _run_legacy_settings_discovery(db_org_id, org_name, scan_mode)
     else:
         # Fallback: legacy settings-based credentials
-        logger.info(f"  No cloud_connections found, trying legacy settings for {tenant_name}")
-        _run_legacy_settings_discovery(db_tenant_id, tenant_name, scan_mode)
+        logger.info(f"  No cloud_connections found, trying legacy settings for {org_name}")
+        _run_legacy_settings_discovery(db_org_id, org_name, scan_mode)
 
-    logger.info(f"  ✅ Discovery completed for {tenant_name}")
+    logger.info(f"  ✅ Discovery completed for {org_name}")
 
-    # Log activity (with tenant context)
+    # Log activity (with organization context)
     try:
-        act_db = Database(tenant_id=db_tenant_id)
-        act_db.log_activity('discovery_completed', f'Scheduled discovery run completed for {tenant_name}')
+        act_db = Database(organization_id=db_org_id)
+        act_db.log_activity('discovery_completed', f'Scheduled discovery run completed for {org_name}')
         act_db.close()
     except Exception:
         pass
@@ -187,26 +187,26 @@ def _run_tenant_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 
     # Auto-advance onboarding stage to 'active' after first successful discovery
     try:
         admin_db = Database()
-        tenant = admin_db.get_tenant_by_id(db_tenant_id)
-        if tenant and tenant.get('onboarding_stage') in ('locked', 'authenticating', 'password_change'):
-            admin_db.update_tenant(db_tenant_id, onboarding_stage='active')
-            logger.info(f"  ✓ Tenant {tenant_name} onboarding stage advanced to 'active'")
+        org = admin_db.get_organization_by_id(db_org_id)
+        if org and org.get('onboarding_stage') in ('locked', 'authenticating', 'password_change'):
+            admin_db.update_organization(db_org_id, onboarding_stage='active')
+            logger.info(f"  ✓ Organization {org_name} onboarding stage advanced to 'active'")
         admin_db.close()
     except Exception as e:
-        logger.warning(f"  ⚠ Failed to advance onboarding stage for {tenant_name}: {e}")
+        logger.warning(f"  ⚠ Failed to advance onboarding stage for {org_name}: {e}")
 
     # Check for identity changes and send email notification
-    _send_change_notification_if_needed(db_tenant_id=db_tenant_id)
+    _send_change_notification_if_needed(db_org_id=db_org_id)
 
     # Phase 83: Dispatch scan_complete notification
     _dispatch_notification('scan_complete', {
-        'title': f'Discovery Scan Complete — {tenant_name}',
-        'description': f'Scheduled discovery run completed for {tenant_name}.',
+        'title': f'Discovery Scan Complete — {org_name}',
+        'description': f'Scheduled discovery run completed for {org_name}.',
         'severity': 'info',
-    }, db_tenant_id=db_tenant_id)
+    }, db_org_id=db_org_id)
 
 
-def _run_connection_discovery(db_tenant_id: int, tenant_name: str, conn: dict, scan_mode: str = 'deep'):
+def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mode: str = 'deep'):
     """Run discovery for a single cloud connection."""
     conn_id = conn['id']
     label = conn.get('label', 'Unknown')
@@ -217,17 +217,17 @@ def _run_connection_discovery(db_tenant_id: int, tenant_name: str, conn: dict, s
     logger.info(f"  ▶ Scanning connection '{label}' (id={conn_id}, cloud={cloud})")
 
     if cloud == 'azure':
-        entra_tenant_id = conn.get('entra_tenant_id')
+        azure_directory_id = conn.get('azure_directory_id')
         client_id = conn.get('client_id')
         client_secret = metadata.get('client_secret')
-        if not all([entra_tenant_id, client_id, client_secret]):
+        if not all([azure_directory_id, client_id, client_secret]):
             logger.warning(f"  ⏭ Skipping '{label}' — incomplete Azure credentials")
             return
         engine = AzureDiscoveryEngine(
-            tenant_id=entra_tenant_id,
+            tenant_id=azure_directory_id,
             client_id=client_id,
             client_secret=client_secret,
-            db_tenant_id=db_tenant_id,
+            db_org_id=db_org_id,
             cloud_connection_id=conn_id,
         )
     elif cloud == 'aws':
@@ -241,7 +241,7 @@ def _run_connection_discovery(db_tenant_id: int, tenant_name: str, conn: dict, s
             access_key_id=access_key_id,
             secret_access_key=secret_access_key,
             region=region,
-            db_tenant_id=db_tenant_id,
+            db_org_id=db_org_id,
             cloud_connection_id=conn_id,
         )
     else:
@@ -262,43 +262,43 @@ def _run_connection_discovery(db_tenant_id: int, tenant_name: str, conn: dict, s
         logger.warning(f"    ⚠ Failed to update last_discovery_at for connection {conn_id}: {e}")
 
 
-def _run_legacy_settings_discovery(db_tenant_id: int, tenant_name: str, scan_mode: str = 'deep'):
+def _run_legacy_settings_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep'):
     """Fallback: run discovery using legacy settings-table credentials (single connection)."""
-    settings_db = Database(tenant_id=db_tenant_id)
+    settings_db = Database(organization_id=db_org_id)
     try:
-        settings = settings_db.get_settings(tenant_id=db_tenant_id)
+        settings = settings_db.get_settings(organization_id=db_org_id)
     finally:
         settings_db.close()
 
-    azure_tenant_id = settings.get('azure_tenant_id')
+    azure_directory_id = settings.get('azure_directory_id')
     azure_client_id = settings.get('azure_client_id')
     azure_client_secret = settings.get('azure_client_secret')
 
-    if not all([azure_tenant_id, azure_client_id, azure_client_secret]):
-        logger.info(f"  ⏭ Skipping tenant {tenant_name} — no Azure credentials configured")
+    if not all([azure_directory_id, azure_client_id, azure_client_secret]):
+        logger.info(f"  ⏭ Skipping organization {org_name} — no Azure credentials configured")
         return
 
-    logger.info(f"  ✓ Azure credentials loaded from settings for {tenant_name}")
+    logger.info(f"  ✓ Azure credentials loaded from settings for {org_name}")
 
     engine = AzureDiscoveryEngine(
-        tenant_id=azure_tenant_id,
+        tenant_id=azure_directory_id,
         client_id=azure_client_id,
         client_secret=azure_client_secret,
-        db_tenant_id=db_tenant_id,
+        db_org_id=db_org_id,
     )
-    logger.info(f"  ✓ Discovery engine initialized for {tenant_name}")
+    logger.info(f"  ✓ Discovery engine initialized for {org_name}")
     engine.run_discovery()
 
 
-def _send_change_notification_if_needed(db_tenant_id: int = None):
+def _send_change_notification_if_needed(db_org_id: int = None):
     """
     Compare discovery runs PER-CONNECTION and send email if changes detected.
     Each connection's latest run is compared against that same connection's
     previous run (not against a different connection's run).
-    Called after each successful tenant discovery cycle.
+    Called after each successful organization discovery cycle.
     """
     try:
-        db = Database(tenant_id=db_tenant_id)
+        db = Database(organization_id=db_org_id)
 
         # Get the two most recent completed runs PER CONNECTION
         cursor = db.conn.cursor()
@@ -424,7 +424,7 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
                 'title': f'{total_changes} Changes Detected in Discovery',
                 'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
                 'severity': 'high' if new_count + removed_count > 0 else 'medium',
-            }, db_tenant_id=db_tenant_id)
+            }, db_org_id=db_org_id)
 
         # Phase 43: SOAR evaluation for drift and change events
         _evaluate_soar_triggers_for_changes(changes, db)
@@ -451,7 +451,7 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
         _save_compliance_snapshot(current_run_id, db)
 
         # AGIRS: Compute and persist AGIRS scores
-        _compute_agirs_scores(current_run_id, db_tenant_id, db)
+        _compute_agirs_scores(current_run_id, db_org_id, db)
 
         db.close()
 
@@ -460,11 +460,11 @@ def _send_change_notification_if_needed(db_tenant_id: int = None):
         logger.exception(e)
 
 
-def _dispatch_notification(event_type: str, event_data: dict, db_tenant_id: int = None):
+def _dispatch_notification(event_type: str, event_data: dict, db_org_id: int = None):
     """Phase 83: Dispatch notification to Slack/Teams if configured."""
     try:
         from app.services.notification_dispatcher import NotificationDispatcher
-        db = Database(tenant_id=db_tenant_id)
+        db = Database(organization_id=db_org_id)
         dispatcher = NotificationDispatcher()
         dispatcher.dispatch(event_type, event_data, db)
         db.close()
@@ -500,12 +500,12 @@ def _save_compliance_snapshot(run_id: int, db: Database):
         logger.error(f"Error saving compliance snapshot: {e}")
 
 
-def _compute_agirs_scores(run_id: int, tenant_id: int, db: Database):
+def _compute_agirs_scores(run_id: int, organization_id: int, db: Database):
     """Compute and persist AGIRS (AuditGraph Identity Risk Score) for the run."""
     try:
         from app.engines.risk.agirs_engine import AGIRSEngine
         engine = AGIRSEngine(db)
-        result = engine.compute(tenant_id, run_id)
+        result = engine.compute(organization_id, run_id)
         if result.get('agirs_score') is not None:
             logger.info(
                 f"AGIRS computed for run #{run_id}: "
@@ -622,11 +622,11 @@ def _generate_notifications(current_run_id: int, changes: dict, db: Database):
         from app.services.notification_service import NotificationService
         notifier = NotificationService()
 
-        # Look up tenant_id from the discovery run
+        # Look up organization_id from the discovery run
         cursor = db.conn.cursor()
-        cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (current_run_id,))
-        run_tenant = cursor.fetchone()
-        tid = run_tenant[0] if run_tenant else None
+        cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (current_run_id,))
+        run_org = cursor.fetchone()
+        oid = run_org[0] if run_org else None
         cursor.close()
 
         # Get run summary
@@ -648,28 +648,28 @@ def _generate_notifications(current_run_id: int, changes: dict, db: Database):
                 'low': run_row[4] or 0,
             }
 
-        notifier.notify_discovery_completed(current_run_id, summary, tenant_id=tid)
+        notifier.notify_discovery_completed(current_run_id, summary, organization_id=oid)
 
         new_ids = changes.get('new_identities', [])
         if new_ids:
-            notifier.notify_new_identities(current_run_id, new_ids, tenant_id=tid)
+            notifier.notify_new_identities(current_run_id, new_ids, organization_id=oid)
 
         removed_ids = changes.get('removed_identities', [])
         if removed_ids:
-            notifier.notify_removed_identities(current_run_id, removed_ids, tenant_id=tid)
+            notifier.notify_removed_identities(current_run_id, removed_ids, organization_id=oid)
 
         risk_changes = changes.get('risk_changes', [])
         escalations = [c for c in risk_changes if c.get('direction') == 'increased' or c.get('new_risk') in ('critical', 'high')]
         if escalations:
-            notifier.notify_risk_escalations(current_run_id, escalations, tenant_id=tid)
+            notifier.notify_risk_escalations(current_run_id, escalations, organization_id=oid)
 
         perm_changes = changes.get('permission_changes', [])
         if perm_changes:
-            notifier.notify_permission_changes(current_run_id, perm_changes, tenant_id=tid)
+            notifier.notify_permission_changes(current_run_id, perm_changes, organization_id=oid)
 
         cred_changes = changes.get('credential_changes', [])
         if cred_changes:
-            notifier.notify_credential_changes(current_run_id, cred_changes, tenant_id=tid)
+            notifier.notify_credential_changes(current_run_id, cred_changes, organization_id=oid)
 
         # Cleanup old notifications
         cleaned = db.cleanup_old_notifications(days=90)
@@ -698,7 +698,7 @@ def _run_ghost_detection(current_run_id: int, db: Database):
                     'title': f'{len(critical_ghosts)} Critical Ghost Identities Detected',
                     'description': f'Run #{current_run_id}: {", ".join(a["identity_name"] for a in critical_ghosts[:3])} retain active roles despite being disabled/deleted',
                     'severity': 'critical',
-                }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
         else:
             logger.info(f"Ghost detection: no ghost identities found for run #{current_run_id}")
     except Exception as e:
@@ -735,7 +735,7 @@ def _run_identity_correlation(current_run_id: int, db: Database):
                             f'retain active roles while paired regular accounts are disabled'
                         ),
                         'severity': 'critical',
-                    }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+                    }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
             else:
                 logger.info("ICE orphan detection: no orphaned privileged accounts found")
 
@@ -756,7 +756,7 @@ def _run_identity_correlation(current_run_id: int, db: Database):
                             f'retain access via correlated active accounts'
                         ),
                         'severity': 'critical',
-                    }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+                    }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
             else:
                 logger.info("ICE zombie detection: no zombie personas found")
     except Exception as e:
@@ -791,7 +791,7 @@ def _run_anomaly_detection(current_run_id: int, previous_run_id: int, db: Databa
                     'title': f'{len(critical_anomalies)} Critical/High Anomalies Detected',
                     'description': f'Run #{current_run_id}: {", ".join(a["title"] for a in critical_anomalies[:3])}',
                     'severity': critical_anomalies[0].get('severity', 'high'),
-                }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
         else:
             logger.info(f"Anomaly detection: no anomalies found for run #{current_run_id}")
 
@@ -830,7 +830,7 @@ def _run_resource_anomaly_detection(current_run_id: int, previous_run_id: int, d
                     'title': f'{len(critical_anomalies)} Resource Anomalies Detected',
                     'description': f'Run #{current_run_id}: {", ".join(a["title"] for a in critical_anomalies[:3])}',
                     'severity': critical_anomalies[0].get('severity', 'high'),
-                }, db_tenant_id=db._tenant_id if hasattr(db, '_tenant_id') else None)
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
         else:
             logger.info(f"Resource anomaly detection: no anomalies found for run #{current_run_id}")
 
@@ -971,7 +971,7 @@ def run_scheduled_report():
     """
     Send the scheduled executive summary report email.
     Called by the scheduler on the configured cadence.
-    Loops per-tenant so each tenant's settings and data are scoped.
+    Loops per-organization so each organization's settings and data are scoped.
     """
     logger.info("=" * 70)
     logger.info("SCHEDULED REPORT EMAIL STARTED")
@@ -979,55 +979,55 @@ def run_scheduled_report():
     logger.info("=" * 70)
 
     try:
-        # Get tenant list (tenants table has no RLS)
+        # Get organization list (organizations table has no RLS)
         admin_db = Database()
         cursor = admin_db.conn.cursor()
-        cursor.execute("SELECT id, name FROM tenants WHERE enabled = TRUE ORDER BY id")
-        tenants = cursor.fetchall()
+        cursor.execute("SELECT id, name FROM organizations WHERE enabled = TRUE ORDER BY id")
+        orgs = cursor.fetchall()
         cursor.close()
         admin_db.close()
 
-        for db_tenant_id, tenant_name in tenants:
+        for db_org_id, org_name in orgs:
             try:
-                db = Database(tenant_id=db_tenant_id)
+                db = Database(organization_id=db_org_id)
                 enabled = db.get_system_setting('report_schedule_enabled', 'false')
 
                 if enabled != 'true':
-                    logger.info(f"Scheduled reports disabled for {tenant_name} - skipping")
+                    logger.info(f"Scheduled reports disabled for {org_name} - skipping")
                     db.close()
                     continue
 
                 # Phase 23: Check plan entitlement for scheduled_reports
                 from app.api.handlers import TIER_LIMITS
                 ent_cursor = db.conn.cursor()
-                ent_cursor.execute("SELECT plan FROM tenants WHERE id = %s", (db_tenant_id,))
+                ent_cursor.execute("SELECT plan FROM organizations WHERE id = %s", (db_org_id,))
                 ent_row = ent_cursor.fetchone()
                 ent_cursor.close()
                 if ent_row:
                     t_plan = ent_row[0] or 'free'
                     t_limits = TIER_LIMITS.get(t_plan, TIER_LIMITS['free'])
                     if 'scheduled_reports' in t_limits.get('blocked_features', []):
-                        logger.info(f"Scheduled reports not available on {t_plan} plan for {tenant_name} - skipping")
+                        logger.info(f"Scheduled reports not available on {t_plan} plan for {org_name} - skipping")
                         db.close()
                         continue
 
                 email_service = EmailService()
                 if not email_service.credentials_configured:
-                    logger.warning(f"Azure credentials not configured for {tenant_name} - skipping")
+                    logger.warning(f"Azure credentials not configured for {org_name} - skipping")
                     db.close()
                     continue
 
-                success = email_service.send_scheduled_report(tenant_id=db_tenant_id)
+                success = email_service.send_scheduled_report(organization_id=db_org_id)
 
                 if success:
-                    db.log_activity('report_emailed', f'Scheduled executive summary report sent for {tenant_name}')
-                    logger.info(f"✅ Scheduled report email sent for {tenant_name}")
+                    db.log_activity('report_emailed', f'Scheduled executive summary report sent for {org_name}')
+                    logger.info(f"✅ Scheduled report email sent for {org_name}")
                 else:
-                    db.log_activity('report_email_failed', f'Scheduled report email failed for {tenant_name}')
-                    logger.warning(f"Failed to send scheduled report email for {tenant_name}")
+                    db.log_activity('report_email_failed', f'Scheduled report email failed for {org_name}')
+                    logger.warning(f"Failed to send scheduled report email for {org_name}")
                 db.close()
             except Exception as e:
-                logger.error(f"Scheduled report failed for {tenant_name}: {e}")
+                logger.error(f"Scheduled report failed for {org_name}: {e}")
 
     except Exception as e:
         logger.error(f"Scheduled report failed: {e}")
@@ -1038,7 +1038,7 @@ def run_data_retention():
     """
     Run data retention cleanup based on configured policies.
     Called daily by the scheduler at 03:00 UTC.
-    Loops per-tenant so each tenant's retention settings are respected.
+    Loops per-organization so each organization's retention settings are respected.
     """
     logger.info("=" * 70)
     logger.info("DATA RETENTION CLEANUP STARTED")
@@ -1046,21 +1046,21 @@ def run_data_retention():
     logger.info("=" * 70)
 
     try:
-        # Get tenant list (tenants table has no RLS)
+        # Get organization list (organizations table has no RLS)
         admin_db = Database()
         cursor = admin_db.conn.cursor()
-        cursor.execute("SELECT id, name FROM tenants WHERE enabled = TRUE ORDER BY id")
-        tenants = cursor.fetchall()
+        cursor.execute("SELECT id, name FROM organizations WHERE enabled = TRUE ORDER BY id")
+        orgs = cursor.fetchall()
         cursor.close()
         admin_db.close()
 
-        for db_tenant_id, tenant_name in tenants:
+        for db_org_id, org_name in orgs:
             try:
-                db = Database(tenant_id=db_tenant_id)
+                db = Database(organization_id=db_org_id)
                 enabled = db.get_system_setting('retention_enabled', 'false')
 
                 if enabled != 'true':
-                    logger.info(f"Data retention disabled for {tenant_name} - skipping")
+                    logger.info(f"Data retention disabled for {org_name} - skipping")
                     db.close()
                     continue
 
@@ -1092,18 +1092,18 @@ def run_data_retention():
 
                 total = sum(results.values())
                 if total > 0:
-                    db.log_activity('data_retention', f'Scheduled cleanup for {tenant_name}: {total} records deleted',
+                    db.log_activity('data_retention', f'Scheduled cleanup for {org_name}: {total} records deleted',
                                     json.dumps(results))
-                    logger.info(f"✅ Data retention for {tenant_name}: {total} records deleted")
+                    logger.info(f"✅ Data retention for {org_name}: {total} records deleted")
                     for table, count in results.items():
                         if count > 0:
                             logger.info(f"   {table}: {count} deleted")
                 else:
-                    logger.info(f"Data retention for {tenant_name}: no records to clean up")
+                    logger.info(f"Data retention for {org_name}: no records to clean up")
 
                 db.close()
             except Exception as e:
-                logger.error(f"Data retention failed for {tenant_name}: {e}")
+                logger.error(f"Data retention failed for {org_name}: {e}")
 
     except Exception as e:
         logger.error(f"Data retention failed: {e}")
@@ -1120,7 +1120,7 @@ def mark_overdue_invoices():
         cursor.execute("""
             UPDATE invoices SET status = 'overdue', updated_at = NOW()
             WHERE status = 'sent' AND due_at < NOW()
-            RETURNING id, tenant_id, invoice_number
+            RETURNING id, organization_id, invoice_number
         """)
         rows = cursor.fetchall()
         db.conn.commit()
@@ -1128,7 +1128,7 @@ def mark_overdue_invoices():
         if rows:
             logger.info(f"Marked {len(rows)} invoices as overdue")
             for r in rows:
-                logger.info(f"  Invoice {r['invoice_number']} (tenant {r['tenant_id']})")
+                logger.info(f"  Invoice {r['invoice_number']} (organization {r['organization_id']})")
         else:
             logger.info("No overdue invoices found")
     except Exception as e:
@@ -1140,7 +1140,7 @@ def mark_overdue_invoices():
 def check_scan_schedules():
     """Phase 6: Check for due scan schedules and trigger discovery runs."""
     from app.database import Database
-    db = Database()  # admin connection to see all tenants
+    db = Database()  # admin connection to see all organizations
     try:
         due_schedules = db.get_due_scan_schedules()
         if not due_schedules:
@@ -1149,34 +1149,34 @@ def check_scan_schedules():
         logger.info(f"Found {len(due_schedules)} due scan schedules")
 
         for sched in due_schedules:
-            tenant_id = sched['tenant_id']
+            org_id = sched['organization_id']
             schedule_id = sched['id']
-            tenant_name = sched.get('tenant_name', f'Tenant {tenant_id}')
+            org_name = sched.get('organization_name', f'Organization {org_id}')
 
-            logger.info(f"Triggering scheduled scan for {tenant_name} (schedule {schedule_id})")
+            logger.info(f"Triggering scheduled scan for {org_name} (schedule {schedule_id})")
 
             try:
-                # Trigger discovery for this tenant
-                tenant_db = Database(tenant_id=tenant_id)
+                # Trigger discovery for this organization
+                org_db = Database(organization_id=org_id)
                 try:
                     # Import and run discovery (same as manual trigger)
                     from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
-                    connections = tenant_db.get_cloud_connections(tenant_id)
+                    connections = org_db.get_cloud_connections(org_id)
 
                     ran = False
                     for conn_row in connections:
                         if conn_row.get('cloud') == 'azure' and conn_row.get('enabled'):
                             try:
-                                engine = AzureDiscoveryEngine(conn_row, tenant_db)
+                                engine = AzureDiscoveryEngine(conn_row, org_db)
                                 engine.discover()
                                 ran = True
                             except Exception as de:
-                                logger.error(f"Discovery error for tenant {tenant_id}: {de}")
+                                logger.error(f"Discovery error for organization {org_id}: {de}")
                     if not ran:
-                        logger.warning(f"No enabled Azure connections for tenant {tenant_id}")
+                        logger.warning(f"No enabled Azure connections for organization {org_id}")
 
                 finally:
-                    tenant_db.close()
+                    org_db.close()
 
                 # Calculate next run
                 from datetime import datetime, timedelta, timezone
@@ -1192,10 +1192,10 @@ def check_scan_schedules():
                     next_run = now + timedelta(days=1)
 
                 db.mark_scan_schedule_run(schedule_id, 'completed', next_run)
-                logger.info(f"Scheduled scan completed for {tenant_name}, next: {next_run}")
+                logger.info(f"Scheduled scan completed for {org_name}, next: {next_run}")
 
             except Exception as e:
-                logger.error(f"Scheduled scan failed for {tenant_name}: {e}")
+                logger.error(f"Scheduled scan failed for {org_name}: {e}")
                 from datetime import datetime, timedelta, timezone
                 now = datetime.now(timezone.utc)
                 next_run = now + timedelta(hours=1)  # Retry in 1 hour on failure
@@ -1252,9 +1252,9 @@ def start_scheduler():
     )
     
     # Phase 18: Add scheduled report job
-    # Use defaults — actual per-tenant behavior is in run_scheduled_report()
+    # Use defaults — actual per-org behavior is in run_scheduled_report()
     report_freq = 'weekly'
-    report_enabled = True  # Always schedule; per-tenant check at execution time
+    report_enabled = True  # Always schedule; per-org check at execution time
 
     if report_freq == 'monthly':
         report_trigger = CronTrigger(day=1, hour=8, minute=0, timezone="UTC")
@@ -1375,21 +1375,21 @@ def get_next_report_time():
     return None
 
 
-def trigger_manual_discovery(scan_mode: str = 'deep', db_tenant_id: int = None,
-                             tenant_name: str = None, connection_id: int = None):
+def trigger_manual_discovery(scan_mode: str = 'deep', db_org_id: int = None,
+                             org_name: str = None, connection_id: int = None):
     """
     Trigger discovery immediately (manual override).
-    If db_tenant_id is provided, runs for that single tenant only.
+    If db_org_id is provided, runs for that single organization only.
     If connection_id is also provided, only scans that specific connection.
-    Otherwise runs for all tenants (scheduled behavior).
+    Otherwise runs for all organizations (scheduled behavior).
     """
-    if db_tenant_id is not None:
+    if db_org_id is not None:
         suffix = f" connection={connection_id}" if connection_id else ""
-        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for tenant {tenant_name or db_tenant_id} (mode={scan_mode}){suffix}")
-        _run_tenant_discovery(db_tenant_id, tenant_name or str(db_tenant_id), scan_mode,
-                              connection_id=connection_id)
+        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for organization {org_name or db_org_id} (mode={scan_mode}){suffix}")
+        _run_org_discovery(db_org_id, org_name or str(db_org_id), scan_mode,
+                           connection_id=connection_id)
     else:
-        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for all tenants (mode={scan_mode})")
+        logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for all organizations (mode={scan_mode})")
         run_scheduled_discovery(scan_mode=scan_mode)
 
 

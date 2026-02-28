@@ -386,7 +386,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
 export default function AppRegistrations() {
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
-  const { user, activeTenantId, activeTenantName } = useAuth();
+  const { user, activeOrgId, activeOrgName } = useAuth();
 
   const [stats, setStats] = useState<AppRegStats | null>(null);
   const [items, setItems] = useState<AppRegRow[]>([]);
@@ -552,14 +552,14 @@ export default function AppRegistrations() {
   );
 
   const handleCSVExport = useCallback(() => {
-    const meta = buildExportMeta(latestSnapshotId, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(latestSnapshotId, activeOrgId ?? user?.organization_id ?? null, activeOrgName ?? user?.org_name ?? null);
     downloadCSV(
       exportData as unknown as Record<string, unknown>[],
       CSV_COLS,
       exportFilename('app-registrations-audit', 'csv'),
       meta
     );
-  }, [exportData, CSV_COLS, latestSnapshotId, activeTenantId, activeTenantName, user]);
+  }, [exportData, CSV_COLS, latestSnapshotId, activeOrgId, activeOrgName, user]);
 
   return (
     <div className="space-y-4">
@@ -589,7 +589,7 @@ export default function AppRegistrations() {
         <div className="flex items-center gap-4 text-[10px] border rounded-lg px-3 py-1.5" style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))' }}>
           <span className="font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Export Metadata</span>
           <span>Snapshot: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>#{latestSnapshotId}</span></span>
-          <span>Tenant: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Organization: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>{activeOrgId ?? user?.organization_id ?? 'N/A'}</span></span>
           <span>Schema: <span className="font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>v1.0</span></span>
         </div>
       )}

@@ -24,8 +24,8 @@ export interface InvoiceLineItem {
 
 export interface Invoice {
   id: number;
-  tenant_id: number;
-  tenant_name?: string;
+  organization_id: number;
+  org_name?: string;
   invoice_number: string;
   status: string;
   period_start: string;

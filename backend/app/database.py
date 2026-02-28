@@ -41,34 +41,34 @@ class Database:
     """PostgreSQL database handler.
 
     Connection strategy (Phase 87 — RLS enforcement):
-      - tenant_id=N   → connects as DB_USER (auditgraph_app, NOBYPASSRLS),
-                         sets RLS context to tenant N. Only sees tenant N data.
-      - tenant_id=None → connects as DB_ADMIN_USER (auditgraph_admin, BYPASSRLS).
+      - organization_id=N   → connects as DB_USER (auditgraph_app, NOBYPASSRLS),
+                         sets RLS context to org N. Only sees org N data.
+      - organization_id=None → connects as DB_ADMIN_USER (auditgraph_admin, BYPASSRLS).
                          Sees all data. Used for superadmin/system/startup ops.
     """
 
-    def __init__(self, tenant_id=None):
+    def __init__(self, organization_id=None):
         """Initialize database connection.
 
         Args:
-            tenant_id: If provided, connects as RLS-enforcing user and sets
-                       tenant context. None = superadmin/startup (bypasses RLS).
+            organization_id: If provided, connects as RLS-enforcing user and sets
+                       organization context. None = superadmin/startup (bypasses RLS).
         """
         self.conn = None
-        self._tenant_id = tenant_id
+        self._organization_id = organization_id
         self.connect()
-        if tenant_id is not None:
-            self.set_tenant_context(tenant_id)
+        if organization_id is not None:
+            self.set_organization_context(organization_id)
 
     def connect(self):
         """Connect to PostgreSQL database.
 
-        Uses DB_USER (auditgraph_app, NOBYPASSRLS) for tenant-scoped connections,
+        Uses DB_USER (auditgraph_app, NOBYPASSRLS) for organization-scoped connections,
         and DB_ADMIN_USER (auditgraph_admin, BYPASSRLS) for system/superadmin ops.
         """
         try:
-            if self._tenant_id is not None:
-                # Tenant-scoped: use RLS-enforcing user
+            if self._organization_id is not None:
+                # Organization-scoped: use RLS-enforcing user
                 db_user = os.getenv("DB_USER", "auditgraph_app")
                 db_password = os.getenv("DB_PASSWORD")
             else:
@@ -88,23 +88,23 @@ class Database:
             print(f"✗ Database connection failed: {e}")
             raise
 
-    def set_tenant_context(self, tenant_id):
-        """Set PostgreSQL session variable for RLS tenant isolation.
+    def set_organization_context(self, organization_id):
+        """Set PostgreSQL session variable for RLS organization isolation.
 
         Uses set_config with is_local=FALSE so the setting persists for
         the entire connection lifetime (not just the current transaction).
         Since each request creates a new Database(), this is safe.
         """
-        if tenant_id is not None and self.conn:
+        if organization_id is not None and self.conn:
             cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT set_config('app.current_tenant_id', %s, FALSE)",
-                (str(tenant_id),)
+                "SELECT set_config('app.current_organization_id', %s, FALSE)",
+                (str(organization_id),)
             )
             cursor.close()
 
     def create_discovery_run(self, subscription_id: str, subscription_name: str,
-                             tenant_id=None, cloud_connection_id=None) -> int:
+                             organization_id=None, cloud_connection_id=None) -> int:
         """
         Create a new discovery run record
 
@@ -115,11 +115,11 @@ class Database:
         cursor.execute(
             """
             INSERT INTO discovery_runs (
-                subscription_id, subscription_name, started_at, status, tenant_id, cloud_connection_id
+                subscription_id, subscription_name, started_at, status, organization_id, cloud_connection_id
             ) VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
         """,
-            (subscription_id, subscription_name, datetime.utcnow(), "running", tenant_id, cloud_connection_id),
+            (subscription_id, subscription_name, datetime.utcnow(), "running", organization_id, cloud_connection_id),
         )
 
         run_id = cursor.fetchone()[0]
@@ -475,7 +475,7 @@ class Database:
 
                 permission_plane,
 
-                tenant_id,
+                organization_id,
 
                 -- ICE columns
                 upn,
@@ -603,7 +603,7 @@ class Database:
                 identity_type_normalized,
                 identity_data.get("display_name"),  # canonical_name = display_name
                 identity_data.get("object_id"),  # principal_id = object_id for Azure
-                identity_data.get("tenant_id"),  # tenant_or_org_id
+                identity_data.get("tenant_id"),  # tenant_or_org_id (Azure directory)
                 identity_data.get("source", "entra"),  # source_normalized
                 is_federated,
                 status,
@@ -613,7 +613,7 @@ class Database:
 
                 identity_data.get("permission_plane", "entra_id"),
 
-                self._tenant_id,
+                self._organization_id,
 
                 # ICE columns
                 identity_data.get("upn"),
@@ -667,7 +667,7 @@ class Database:
                 scope_exists, usage_status, days_since_assigned,
                 redundant_with, role_type, risk_level, why_critical,
                 resource_type, resource_name,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
@@ -688,7 +688,7 @@ class Database:
                 role_data.get("why_critical"),
                 role_data.get("resource_type"),
                 role_data.get("resource_name"),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
         self.conn.commit()
@@ -704,7 +704,7 @@ class Database:
                 -- Usage intelligence fields
                 usage_status, assigned_on, days_since_assigned,
                 redundant_with, role_type, risk_level, why_critical,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
@@ -720,7 +720,7 @@ class Database:
                 entra_role_data.get("role_type", "entra"),
                 entra_role_data.get("risk_level"),
                 entra_role_data.get("why_critical"),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
         self.conn.commit()
@@ -898,14 +898,14 @@ class Database:
             cursor.execute(
                 """
                 INSERT INTO graph_api_permissions
-                (identity_db_id, permission_name, permission_description, risk_level, tenant_id)
+                (identity_db_id, permission_name, permission_description, risk_level, organization_id)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (identity_db_id, permission_name) DO UPDATE
                 SET permission_description = EXCLUDED.permission_description,
                     risk_level = EXCLUDED.risk_level,
                     discovered_at = CURRENT_TIMESTAMP
             """,
-                (identity_db_id, perm_name, perm_desc, risk, self._tenant_id),
+                (identity_db_id, perm_name, perm_desc, risk, self._organization_id),
             )
 
         self.conn.commit()
@@ -936,7 +936,7 @@ class Database:
                         principal_display_name,
                         created_date_time,
                         risk_level,
-                        tenant_id
+                        organization_id
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (identity_db_id, app_role_id, resource_id)
                     DO UPDATE SET
@@ -952,7 +952,7 @@ class Database:
                         role.get("principal_display_name"),
                         role.get("created_date_time"),
                         risk_level,
-                        self._tenant_id,
+                        self._organization_id,
                     ),
                 )
             except Exception as e:
@@ -1079,7 +1079,7 @@ class Database:
                     owner_type,
                     ownership_type,
                     is_primary_owner,
-                    tenant_id
+                    organization_id
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (identity_db_id, owner_object_id)
                 DO UPDATE SET
@@ -1097,7 +1097,7 @@ class Database:
                     owner.get("owner_type", "user"),
                     owner.get("ownership_type", "application"),
                     owner.get("is_primary_owner", False),
-                    self._tenant_id,
+                    self._organization_id,
                 ),
             )
 
@@ -1168,7 +1168,7 @@ class Database:
             INSERT INTO pim_eligible_assignments (
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 assignment_type, start_datetime, end_datetime, member_type,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id, role_definition_id, directory_scope)
             DO UPDATE SET
@@ -1188,7 +1188,7 @@ class Database:
                 data.get("start_datetime"),
                 data.get("end_datetime"),
                 data.get("member_type"),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
         self.conn.commit()
@@ -1204,7 +1204,7 @@ class Database:
                 status, activation_start, activation_end,
                 justification, ticket_number, ticket_system,
                 is_approval_required, created_datetime,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
@@ -1220,7 +1220,7 @@ class Database:
                 data.get("ticket_system"),
                 data.get("is_approval_required", False),
                 data.get("created_datetime"),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
         self.conn.commit()
@@ -1337,7 +1337,7 @@ class Database:
                 client_app_types, grant_controls, session_controls,
                 requires_mfa, targets_all_users, has_exclusions,
                 allows_legacy_auth, modified_datetime,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (discovery_run_id, policy_id)
             DO UPDATE SET
@@ -1371,7 +1371,7 @@ class Database:
                 policy.get("has_exclusions", False),
                 policy.get("allows_legacy_auth", False),
                 policy.get("modified_datetime"),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
         self.conn.commit()
@@ -1385,7 +1385,7 @@ class Database:
             INSERT INTO ca_identity_coverage (
                 identity_db_id, coverage_status, mfa_enforced,
                 applicable_policy_count, excluded_from_count, risk_flags,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id)
             DO UPDATE SET
@@ -1402,7 +1402,7 @@ class Database:
                 coverage.get("applicable_policy_count", 0),
                 coverage.get("excluded_from_count", 0),
                 json.dumps(coverage.get("risk_flags", [])),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
         # Also update denormalized fields on identity
@@ -2011,7 +2011,7 @@ class Database:
                 new_identities_count, removed_identities_count,
                 permission_changes_count, risk_changes_count,
                 credential_changes_count, total_changes,
-                changes, events, tenant_id
+                changes, events, organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (current_run_id, previous_run_id) DO UPDATE SET
                 new_identities_count = EXCLUDED.new_identities_count,
@@ -2027,7 +2027,7 @@ class Database:
         """, (
             current_run_id, previous_run_id,
             new_count, removed_count, perm_count, risk_count, cred_count, total,
-            json.dumps(changes, default=str), events_json, self._tenant_id
+            json.dumps(changes, default=str), events_json, self._organization_id
         ))
 
         report_id = cursor.fetchone()[0]
@@ -2091,57 +2091,57 @@ class Database:
     # Phase 15: Settings & Configuration
     # ========================================================================
 
-    def get_settings(self, tenant_id=None) -> Dict[str, str]:
-        """Returns all settings as a key-value dict, scoped by tenant.
-        SECURITY: Returns empty dict when tenant_id is None to prevent cross-tenant data leak."""
-        if tenant_id is None:
+    def get_settings(self, organization_id=None) -> Dict[str, str]:
+        """Returns all settings as a key-value dict, scoped by organization.
+        SECURITY: Returns empty dict when organization_id is None to prevent cross-organization data leak."""
+        if organization_id is None:
             import logging
-            logging.getLogger('tenant_isolation').warning(
-                'get_settings() called with tenant_id=None — returning empty dict')
+            logging.getLogger('org_isolation').warning(
+                'get_settings() called with organization_id=None — returning empty dict')
             return {}
         cursor = self.conn.cursor()
-        cursor.execute("SELECT key, value FROM settings WHERE tenant_id = %s ORDER BY key", (tenant_id,))
+        cursor.execute("SELECT key, value FROM settings WHERE organization_id = %s ORDER BY key", (organization_id,))
         result = {row[0]: row[1] for row in cursor.fetchall()}
         cursor.close()
         return result
 
-    def get_setting(self, key: str, default: Optional[str] = None, tenant_id=None) -> Optional[str]:
+    def get_setting(self, key: str, default: Optional[str] = None, organization_id=None) -> Optional[str]:
         """Returns a single setting value, or default if not found.
-        SECURITY: Returns default when tenant_id is None to prevent cross-tenant data leak."""
-        if tenant_id is None:
+        SECURITY: Returns default when organization_id is None to prevent cross-organization data leak."""
+        if organization_id is None:
             import logging
-            logging.getLogger('tenant_isolation').warning(
-                f'get_setting({key}) called with tenant_id=None — returning default')
+            logging.getLogger('org_isolation').warning(
+                f'get_setting({key}) called with organization_id=None — returning default')
             return default
         cursor = self.conn.cursor()
-        cursor.execute("SELECT value FROM settings WHERE key = %s AND tenant_id = %s", (key, tenant_id))
+        cursor.execute("SELECT value FROM settings WHERE key = %s AND organization_id = %s", (key, organization_id))
         row = cursor.fetchone()
         cursor.close()
         return row[0] if row else default
 
-    def save_settings(self, settings_dict: Dict[str, str], tenant_id=None) -> None:
-        """Upsert multiple settings in one call, scoped by tenant.
-        SECURITY: Rejects writes when tenant_id is None to prevent cross-tenant data leak."""
-        if tenant_id is None:
+    def save_settings(self, settings_dict: Dict[str, str], organization_id=None) -> None:
+        """Upsert multiple settings in one call, scoped by organization.
+        SECURITY: Rejects writes when organization_id is None to prevent cross-organization data leak."""
+        if organization_id is None:
             import logging
-            logging.getLogger('tenant_isolation').warning(
-                'save_settings() called with tenant_id=None — rejecting write')
+            logging.getLogger('org_isolation').warning(
+                'save_settings() called with organization_id=None — rejecting write')
             return
         cursor = self.conn.cursor()
         for key, value in settings_dict.items():
             cursor.execute("""
-                INSERT INTO settings (key, value, tenant_id, updated_at)
+                INSERT INTO settings (key, value, organization_id, updated_at)
                 VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (tenant_id, key) DO UPDATE SET
+                ON CONFLICT (organization_id, key) DO UPDATE SET
                     value = EXCLUDED.value,
                     updated_at = NOW()
-            """, (key, value, tenant_id))
+            """, (key, value, organization_id))
         self.conn.commit()
         cursor.close()
 
     # ── System-level setting accessors (for scheduler/background services ONLY) ──
-    # These read from tenant_id IS NULL rows (system-wide operational settings).
-    # NEVER use these in request-scoped handlers — use get_setting(tenant_id=...) instead.
+    # These read from organization_id IS NULL rows (system-wide operational settings).
+    # NEVER use these in request-scoped handlers — use get_setting(organization_id=...) instead.
 
     _SYSTEM_SETTING_ALLOWLIST = frozenset([
         'email_enabled', 'email_provider', 'email_to',
@@ -2155,31 +2155,31 @@ class Database:
         'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
         'scheduler_interval_hours', 'org_name',
         'slack_webhook_url', 'teams_webhook_url', 'slack_events', 'teams_events',
-        'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
+        'azure_organization_id', 'azure_client_id', 'azure_client_secret',
         'p2_telemetry_enabled',
         'resource_anomaly_score_spike_threshold', 'resource_anomaly_expiry_window_days',
         'resource_anomaly_expiry_threshold', 'resource_anomaly_privilege_creep_threshold',
     ])
 
     def get_system_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """Read a system-level operational setting (tenant_id IS NULL).
+        """Read a system-level operational setting (organization_id IS NULL).
         Only allowed for keys in the allowlist."""
         if key not in self._SYSTEM_SETTING_ALLOWLIST:
             import logging
-            logging.getLogger('tenant_isolation').warning(
+            logging.getLogger('org_isolation').warning(
                 f'get_system_setting() blocked for non-allowlisted key: {key}')
             return default
         cursor = self.conn.cursor()
-        cursor.execute("SELECT value FROM settings WHERE key = %s AND tenant_id IS NULL", (key,))
+        cursor.execute("SELECT value FROM settings WHERE key = %s AND organization_id IS NULL", (key,))
         row = cursor.fetchone()
         cursor.close()
         return row[0] if row else default
 
     def get_system_settings(self) -> Dict[str, str]:
-        """Read all system-level operational settings (tenant_id IS NULL).
+        """Read all system-level operational settings (organization_id IS NULL).
         Filters to allowlisted keys only."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT key, value FROM settings WHERE tenant_id IS NULL ORDER BY key")
+        cursor.execute("SELECT key, value FROM settings WHERE organization_id IS NULL ORDER BY key")
         result = {row[0]: row[1] for row in cursor.fetchall()
                   if row[0] in self._SYSTEM_SETTING_ALLOWLIST}
         cursor.close()
@@ -2203,29 +2203,29 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_created_at ON activity_log(created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_action_type ON activity_log(action_type)")
-        # Phase 46: Add user_id and tenant_id columns
+        # Phase 46: Add user_id and organization_id columns
         cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS user_id INTEGER")
-        cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_tenant_id ON activity_log(tenant_id)")
+        cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_organization_id ON activity_log(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_user_id ON activity_log(user_id)")
         self.conn.commit()
         cursor.close()
 
     def log_activity(self, action_type: str, description: str, metadata: dict = None,
-                     user_id: int = None, tenant_id: int = None):
+                     user_id: int = None, organization_id: int = None):
         """Append an entry to the activity log. Never raises — errors are logged only."""
         try:
             self._ensure_activity_log_table()
             cursor = self.conn.cursor()
             cursor.execute("""
-                INSERT INTO activity_log (action_type, description, metadata, user_id, tenant_id, created_at)
+                INSERT INTO activity_log (action_type, description, metadata, user_id, organization_id, created_at)
                 VALUES (%s, %s, %s, %s, %s, NOW())
             """, (
                 action_type,
                 description,
                 json.dumps(metadata) if metadata else None,
                 user_id,
-                tenant_id,
+                organization_id,
             ))
             self.conn.commit()
             cursor.close()
@@ -2237,14 +2237,14 @@ class Database:
                 pass
 
     def get_activity_log(self, limit: int = 50, offset: int = 0,
-                         action_type: str = None, tenant_id: int = None) -> list:
-        """Get activity log entries, most recent first. Optionally filtered by tenant."""
+                         action_type: str = None, organization_id: int = None) -> list:
+        """Get activity log entries, most recent first. Optionally filtered by organization."""
         self._ensure_activity_log_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
         query = """
             SELECT a.id, a.action_type, a.description, a.metadata, a.created_at,
-                   a.user_id, a.tenant_id,
+                   a.user_id, a.organization_id,
                    u.username AS user_username, u.display_name AS user_display_name
             FROM activity_log a
             LEFT JOIN users u ON u.id = a.user_id
@@ -2255,9 +2255,9 @@ class Database:
         if action_type:
             conditions.append("a.action_type = %s")
             params.append(action_type)
-        if tenant_id is not None:
-            conditions.append("a.tenant_id = %s")
-            params.append(tenant_id)
+        if organization_id is not None:
+            conditions.append("a.organization_id = %s")
+            params.append(organization_id)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
@@ -2290,7 +2290,7 @@ class Database:
             INSERT INTO credentials (
                 identity_db_id, credential_type, key_id, display_name,
                 start_datetime, end_datetime, thumbprint, issuer, subject,
-                tenant_id
+                organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id, key_id)
             DO UPDATE SET
@@ -2313,7 +2313,7 @@ class Database:
                 credential.get("thumbprint"),
                 credential.get("issuer"),
                 credential.get("subject"),
-                self._tenant_id,
+                self._organization_id,
             ),
         )
 
@@ -2431,7 +2431,7 @@ class Database:
                 cursor.execute(f"ALTER TABLE remediation_actions ADD COLUMN IF NOT EXISTS {col} {typedef}")
             except Exception:
                 self.conn.rollback()
-        cursor.execute("ALTER TABLE remediation_actions ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE remediation_actions ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -2937,8 +2937,8 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id)")
-        cursor.execute("ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-        cursor.execute("ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        cursor.execute("ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -2952,9 +2952,9 @@ class Database:
                    (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.webhook_id = w.id AND d.status = 'delivered') as successful_deliveries,
                    (SELECT MAX(d.delivered_at) FROM webhook_deliveries d WHERE d.webhook_id = w.id AND d.status = 'delivered') as last_delivered_at
             FROM webhooks w
-            WHERE w.tenant_id = %s
+            WHERE w.organization_id = %s
             ORDER BY w.created_at DESC
-        """, (self._tenant_id,))
+        """, (self._organization_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -2967,7 +2967,7 @@ class Database:
         """Get a single webhook by ID."""
         self._ensure_webhook_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM webhooks WHERE id = %s AND tenant_id = %s", (webhook_id, self._tenant_id))
+        cursor.execute("SELECT * FROM webhooks WHERE id = %s AND organization_id = %s", (webhook_id, self._organization_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -2982,10 +2982,10 @@ class Database:
         self._ensure_webhook_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO webhooks (name, url, secret, event_types, headers, created_at, updated_at, tenant_id)
+            INSERT INTO webhooks (name, url, secret, event_types, headers, created_at, updated_at, organization_id)
             VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), %s)
             RETURNING *
-        """, (name, url, secret or None, event_types, json.dumps(headers) if headers else None, self._tenant_id))
+        """, (name, url, secret or None, event_types, json.dumps(headers) if headers else None, self._organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3012,12 +3012,12 @@ class Database:
                 params.append(val)
         set_parts.append("updated_at = NOW()")
         params.append(webhook_id)
-        params.append(self._tenant_id)
+        params.append(self._organization_id)
 
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE webhooks SET {', '.join(set_parts)}
-            WHERE id = %s AND tenant_id = %s RETURNING *
+            WHERE id = %s AND organization_id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -3033,7 +3033,7 @@ class Database:
         """Delete a webhook and its delivery history (CASCADE)."""
         self._ensure_webhook_tables()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM webhooks WHERE id = %s AND tenant_id = %s", (webhook_id, self._tenant_id))
+        cursor.execute("DELETE FROM webhooks WHERE id = %s AND organization_id = %s", (webhook_id, self._organization_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -3045,8 +3045,8 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT * FROM webhooks
-            WHERE enabled = true AND %s = ANY(event_types) AND tenant_id = %s
-        """, (event_type, self._tenant_id))
+            WHERE enabled = true AND %s = ANY(event_types) AND organization_id = %s
+        """, (event_type, self._organization_id))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
@@ -3056,10 +3056,10 @@ class Database:
         self._ensure_webhook_tables()
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status, created_at, tenant_id)
+            INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status, created_at, organization_id)
             VALUES (%s, %s, %s, 'pending', NOW(), %s)
             RETURNING id
-        """, (webhook_id, event_type, json.dumps(payload), self._tenant_id))
+        """, (webhook_id, event_type, json.dumps(payload), self._organization_id))
         delivery_id = cursor.fetchone()[0]
         self.conn.commit()
         cursor.close()
@@ -3087,10 +3087,10 @@ class Database:
             SELECT d.id, d.event_type, d.status, d.http_status, d.attempts, d.created_at, d.delivered_at
             FROM webhook_deliveries d
             JOIN webhooks w ON w.id = d.webhook_id
-            WHERE d.webhook_id = %s AND w.tenant_id = %s
+            WHERE d.webhook_id = %s AND w.organization_id = %s
             ORDER BY d.created_at DESC
             LIMIT %s
-        """, (webhook_id, self._tenant_id, limit))
+        """, (webhook_id, self._organization_id, limit))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -3121,7 +3121,7 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        cursor.execute("ALTER TABLE custom_risk_rules ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE custom_risk_rules ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -3129,7 +3129,7 @@ class Database:
         """Get all custom risk rules ordered by priority."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM custom_risk_rules WHERE tenant_id = %s ORDER BY priority, id", (self._tenant_id,))
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE organization_id = %s ORDER BY priority, id", (self._organization_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -3141,7 +3141,7 @@ class Database:
         """Get a single custom risk rule by ID."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM custom_risk_rules WHERE id = %s AND tenant_id = %s", (rule_id, self._tenant_id))
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE id = %s AND organization_id = %s", (rule_id, self._organization_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -3158,11 +3158,11 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO custom_risk_rules
-                (name, description, conditions, action_type, points_adjustment, force_level, reason_text, priority, created_at, updated_at, tenant_id)
+                (name, description, conditions, action_type, points_adjustment, force_level, reason_text, priority, created_at, updated_at, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s)
             RETURNING *
         """, (name, description, json.dumps(conditions), action_type,
-              points_adjustment or 0, force_level, reason_text, priority or 100, self._tenant_id))
+              points_adjustment or 0, force_level, reason_text, priority or 100, self._organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3190,12 +3190,12 @@ class Database:
                 params.append(val)
         set_parts.append("updated_at = NOW()")
         params.append(rule_id)
-        params.append(self._tenant_id)
+        params.append(self._organization_id)
 
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE custom_risk_rules SET {', '.join(set_parts)}
-            WHERE id = %s AND tenant_id = %s RETURNING *
+            WHERE id = %s AND organization_id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -3211,7 +3211,7 @@ class Database:
         """Delete a custom risk rule."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM custom_risk_rules WHERE id = %s AND tenant_id = %s", (rule_id, self._tenant_id))
+        cursor.execute("DELETE FROM custom_risk_rules WHERE id = %s AND organization_id = %s", (rule_id, self._organization_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -3221,7 +3221,7 @@ class Database:
         """Get only enabled custom risk rules, ordered by priority."""
         self._ensure_custom_risk_rules_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM custom_risk_rules WHERE enabled = true AND tenant_id = %s ORDER BY priority, id", (self._tenant_id,))
+        cursor.execute("SELECT * FROM custom_risk_rules WHERE enabled = true AND organization_id = %s ORDER BY priority, id", (self._organization_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
@@ -3256,20 +3256,20 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_read_created ON notifications(read, created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_severity ON notifications(severity)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_category ON notifications(category)")
-        cursor.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_tenant ON notifications(tenant_id)")
+        cursor.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS organization_id INTEGER REFERENCES organizations(id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(organization_id)")
         self.conn.commit()
         cursor.close()
 
-    def get_notifications(self, limit=50, offset=0, read=None, severity=None, category=None, tenant_id=None) -> list:
+    def get_notifications(self, limit=50, offset=0, read=None, severity=None, category=None, organization_id=None) -> list:
         """Get notifications with optional filters."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         conditions = []
         params = []
-        if tenant_id is not None:
-            conditions.append("tenant_id = %s")
-            params.append(tenant_id)
+        if organization_id is not None:
+            conditions.append("organization_id = %s")
+            params.append(organization_id)
         if read is not None:
             conditions.append("read = %s")
             params.append(read)
@@ -3298,7 +3298,7 @@ class Database:
         """Get a single notification by ID."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM notifications WHERE id = %s AND tenant_id = %s", (notification_id, self._tenant_id))
+        cursor.execute("SELECT * FROM notifications WHERE id = %s AND organization_id = %s", (notification_id, self._organization_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -3309,41 +3309,41 @@ class Database:
                 result[ts_field] = result[ts_field].isoformat()
         return result
 
-    def get_notification_stats(self, tenant_id=None) -> dict:
+    def get_notification_stats(self, organization_id=None) -> dict:
         """Get notification statistics (unread count, by severity, by category)."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        tenant_filter = ""
-        tenant_params: list = []
-        if tenant_id is not None:
-            tenant_filter = " AND tenant_id = %s"
-            tenant_params = [tenant_id]
-        cursor.execute(f"SELECT COUNT(*) as total FROM notifications WHERE true{tenant_filter}", tenant_params)
+        org_filter = ""
+        org_params: list = []
+        if organization_id is not None:
+            org_filter = " AND organization_id = %s"
+            org_params = [organization_id]
+        cursor.execute(f"SELECT COUNT(*) as total FROM notifications WHERE true{org_filter}", org_params)
         total = cursor.fetchone()['total']
-        cursor.execute(f"SELECT COUNT(*) as unread FROM notifications WHERE read = false{tenant_filter}", tenant_params)
+        cursor.execute(f"SELECT COUNT(*) as unread FROM notifications WHERE read = false{org_filter}", org_params)
         unread = cursor.fetchone()['unread']
-        cursor.execute(f"SELECT severity, COUNT(*) as cnt FROM notifications WHERE read = false{tenant_filter} GROUP BY severity", tenant_params)
+        cursor.execute(f"SELECT severity, COUNT(*) as cnt FROM notifications WHERE read = false{org_filter} GROUP BY severity", org_params)
         by_severity = {r['severity']: r['cnt'] for r in cursor.fetchall()}
-        cursor.execute(f"SELECT category, COUNT(*) as cnt FROM notifications WHERE read = false{tenant_filter} GROUP BY category", tenant_params)
+        cursor.execute(f"SELECT category, COUNT(*) as cnt FROM notifications WHERE read = false{org_filter} GROUP BY category", org_params)
         by_category = {r['category']: r['cnt'] for r in cursor.fetchall()}
         cursor.close()
         return {'total': total, 'unread': unread, 'by_severity': by_severity, 'by_category': by_category}
 
     def create_notification(self, event_type, category, severity, title, description,
                             payload=None, related_identity_id=None, related_identity_name=None,
-                            related_run_id=None, tenant_id=None) -> dict:
+                            related_run_id=None, organization_id=None) -> dict:
         """Create a new notification."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO notifications
                 (event_type, category, severity, title, description, payload,
-                 related_identity_id, related_identity_name, related_run_id, tenant_id)
+                 related_identity_id, related_identity_name, related_run_id, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (event_type, category, severity, title, description,
               json.dumps(payload) if payload else None,
-              related_identity_id, related_identity_name, related_run_id, tenant_id))
+              related_identity_id, related_identity_name, related_run_id, organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3358,8 +3358,8 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             UPDATE notifications SET read = true, read_at = NOW()
-            WHERE id = %s AND tenant_id = %s RETURNING *
-        """, (notification_id, self._tenant_id))
+            WHERE id = %s AND organization_id = %s RETURNING *
+        """, (notification_id, self._organization_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -3371,13 +3371,13 @@ class Database:
                 result[ts_field] = result[ts_field].isoformat()
         return result
 
-    def mark_all_notifications_read(self, tenant_id=None) -> int:
+    def mark_all_notifications_read(self, organization_id=None) -> int:
         """Mark all unread notifications as read. Returns count updated."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor()
-        effective_tenant_id = tenant_id if tenant_id is not None else self._tenant_id
-        if effective_tenant_id is not None:
-            cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false AND tenant_id = %s", (effective_tenant_id,))
+        effective_organization_id = organization_id if organization_id is not None else self._organization_id
+        if effective_organization_id is not None:
+            cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false AND organization_id = %s", (effective_organization_id,))
         else:
             cursor.execute("UPDATE notifications SET read = true, read_at = NOW() WHERE read = false")
         count = cursor.rowcount
@@ -3392,8 +3392,8 @@ class Database:
         cursor.execute("""
             UPDATE notifications SET actioned = true, action_type = %s, action_at = NOW(),
                    read = true, read_at = COALESCE(read_at, NOW())
-            WHERE id = %s AND tenant_id = %s RETURNING *
-        """, (action_type, notification_id, self._tenant_id))
+            WHERE id = %s AND organization_id = %s RETURNING *
+        """, (action_type, notification_id, self._organization_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -3409,7 +3409,7 @@ class Database:
         """Delete a single notification."""
         self._ensure_notifications_table()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM notifications WHERE id = %s AND tenant_id = %s", (notification_id, self._tenant_id))
+        cursor.execute("DELETE FROM notifications WHERE id = %s AND organization_id = %s", (notification_id, self._organization_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -3448,7 +3448,7 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
                 last_login_at TIMESTAMPTZ,
                 created_by INTEGER,
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 is_superadmin BOOLEAN DEFAULT false
             )
         """)
@@ -3475,7 +3475,7 @@ class Database:
                 id SERIAL PRIMARY KEY,
                 code VARCHAR(128) UNIQUE NOT NULL,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 used BOOLEAN DEFAULT false,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL
@@ -3500,7 +3500,7 @@ class Database:
                 admin_user_id INTEGER,
                 action TEXT NOT NULL,
                 target_user_id INTEGER,
-                target_tenant_id INTEGER,
+                target_organization_id INTEGER,
                 details JSONB DEFAULT '{}',
                 ip_address TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
@@ -3512,19 +3512,19 @@ class Database:
         cursor.execute("ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS portal VARCHAR(10) DEFAULT 'client'")
         self.conn.commit()
         cursor.close()
-        # Ensure tenants table + migration (adds tenant_id/is_superadmin to users if needed)
-        self._ensure_tenants_table()
+        # Ensure organizations table + migration (adds organization_id/is_superadmin to users if needed)
+        self._ensure_organizations_table()
         Database._users_ensured = True
 
-    def create_user(self, username, password_hash, display_name, role='compliance', created_by=None, tenant_id=None, is_superadmin=False, portal_role=None, email=None, phone=None, force_password_change=False, is_root_user=False):
+    def create_user(self, username, password_hash, display_name, role='compliance', created_by=None, organization_id=None, is_superadmin=False, portal_role=None, email=None, phone=None, force_password_change=False, is_root_user=False):
         """Create a new user. Returns user dict (without password_hash)."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user)
+            INSERT INTO users (username, password_hash, display_name, role, created_by, organization_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user
-        """, (username, password_hash, display_name, role, created_by, tenant_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user))
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, organization_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user
+        """, (username, password_hash, display_name, role, created_by, organization_id, is_superadmin, portal_role, email, phone, force_password_change, is_root_user))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -3538,9 +3538,9 @@ class Database:
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
+            SELECT u.*, o.name AS org_name, o.slug AS org_slug
             FROM users u
-            LEFT JOIN tenants t ON t.id = u.tenant_id
+            LEFT JOIN organizations o ON o.id = u.organization_id
             WHERE u.username = %s
         """, (username,))
         row = cursor.fetchone()
@@ -3560,11 +3560,11 @@ class Database:
         cursor.execute("""
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
-                   u.tenant_id, u.is_superadmin, u.portal_role,
+                   u.organization_id, u.is_superadmin, u.portal_role,
                    u.email, u.phone, u.force_password_change,
-                   t.name AS tenant_name, t.slug AS tenant_slug
+                   o.name AS org_name, o.slug AS org_slug
             FROM users u
-            LEFT JOIN tenants t ON t.id = u.tenant_id
+            LEFT JOIN organizations o ON o.id = u.organization_id
             WHERE u.id = %s
         """, (user_id,))
         row = cursor.fetchone()
@@ -3585,23 +3585,23 @@ class Database:
         self.conn.commit()
         cursor.close()
 
-    def get_users(self, tenant_id=None, exclude_portal=False):
+    def get_users(self, organization_id=None, exclude_portal=False):
         """Get all users. Returns list of user dicts WITHOUT password_hash."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         query = """
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
-                   u.tenant_id, u.is_superadmin, u.portal_role,
-                   t.name AS tenant_name
+                   u.organization_id, u.is_superadmin, u.portal_role,
+                   o.name AS org_name
             FROM users u
-            LEFT JOIN tenants t ON t.id = u.tenant_id
+            LEFT JOIN organizations o ON o.id = u.organization_id
         """
         params = []
         conditions = []
-        if tenant_id is not None:
-            conditions.append("u.tenant_id = %s")
-            params.append(tenant_id)
+        if organization_id is not None:
+            conditions.append("u.organization_id = %s")
+            params.append(organization_id)
         if exclude_portal:
             conditions.append("u.portal_role IS NULL")
         if conditions:
@@ -3623,11 +3623,11 @@ class Database:
         cursor.execute("""
             SELECT u.id, u.username, u.display_name, u.role, u.enabled,
                    u.created_at, u.updated_at, u.last_login_at, u.created_by,
-                   u.tenant_id, u.is_superadmin, u.portal_role,
+                   u.organization_id, u.is_superadmin, u.portal_role,
                    u.email, u.phone,
-                   t.name AS tenant_name
+                   o.name AS org_name
             FROM users u
-            LEFT JOIN tenants t ON t.id = u.tenant_id
+            LEFT JOIN organizations o ON o.id = u.organization_id
             WHERE u.portal_role IS NOT NULL
             ORDER BY u.portal_role DESC, u.id
         """)
@@ -3640,9 +3640,9 @@ class Database:
         return rows
 
     def update_user(self, user_id, **kwargs):
-        """Update user fields. Allowed: display_name, role, enabled, password_hash, tenant_id, is_superadmin, portal_role, email, phone."""
+        """Update user fields. Allowed: display_name, role, enabled, password_hash, organization_id, is_superadmin, portal_role, email, phone."""
         self._ensure_users_table()
-        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'tenant_id', 'is_superadmin', 'portal_role', 'email', 'phone'}
+        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'organization_id', 'is_superadmin', 'portal_role', 'email', 'phone'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_user_by_id(user_id)
@@ -3657,7 +3657,7 @@ class Database:
         cursor.execute(f"""
             UPDATE users SET {', '.join(set_parts)}
             WHERE id = %s
-            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, tenant_id, is_superadmin, portal_role, email, phone
+            RETURNING id, username, display_name, role, enabled, created_at, updated_at, last_login_at, created_by, organization_id, is_superadmin, portal_role, email, phone
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -3737,20 +3737,20 @@ class Database:
     # Phase 84: Password reset & account lockout methods
     # --------------------------------------------------
 
-    def get_user_by_email(self, email, tenant_id=None):
+    def get_user_by_email(self, email, organization_id=None):
         """Lookup user by email (for forgot password). Returns full dict INCLUDING password_hash."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
-                SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
-                FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id
-                WHERE LOWER(u.email) = LOWER(%s) AND u.tenant_id = %s AND u.enabled = true
-            """, (email, tenant_id))
+                SELECT u.*, o.name AS org_name, o.slug AS org_slug
+                FROM users u LEFT JOIN organizations o ON o.id = u.organization_id
+                WHERE LOWER(u.email) = LOWER(%s) AND u.organization_id = %s AND u.enabled = true
+            """, (email, organization_id))
         else:
             cursor.execute("""
-                SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
-                FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id
+                SELECT u.*, o.name AS org_name, o.slug AS org_slug
+                FROM users u LEFT JOIN organizations o ON o.id = u.organization_id
                 WHERE LOWER(u.email) = LOWER(%s) AND u.enabled = true
             """, (email,))
         row = cursor.fetchone()
@@ -3762,8 +3762,8 @@ class Database:
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
-            FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id
+            SELECT u.*, o.name AS org_name, o.slug AS org_slug
+            FROM users u LEFT JOIN organizations o ON o.id = u.organization_id
             WHERE u.password_reset_token = %s
               AND u.password_reset_expires > NOW()
               AND u.enabled = true
@@ -3839,14 +3839,14 @@ class Database:
         cursor.close()
         return count
 
-    def log_admin_audit(self, admin_user_id, action, target_user_id=None, target_tenant_id=None, details=None, ip_address=None):
+    def log_admin_audit(self, admin_user_id, action, target_user_id=None, target_organization_id=None, details=None, ip_address=None):
         """Insert into admin_audit_log."""
         self._ensure_users_table()
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO admin_audit_log (admin_user_id, action, target_user_id, target_tenant_id, details, ip_address)
+            INSERT INTO admin_audit_log (admin_user_id, action, target_user_id, target_organization_id, details, ip_address)
             VALUES (%s, %s, %s, %s, %s, %s)
-        """, (admin_user_id, action, target_user_id, target_tenant_id, json.dumps(details or {}), ip_address))
+        """, (admin_user_id, action, target_user_id, target_organization_id, json.dumps(details or {}), ip_address))
         self.conn.commit()
         cursor.close()
 
@@ -3859,13 +3859,13 @@ class Database:
         count = cursor.fetchone()[0]
         cursor.close()
         if count == 0:
-            # Get default tenant_id
-            default_tenant_id = None
+            # Get default organization_id
+            default_org_id = None
             try:
                 cursor2 = self.conn.cursor()
-                cursor2.execute("SELECT id FROM tenants ORDER BY id LIMIT 1")
+                cursor2.execute("SELECT id FROM organizations ORDER BY id LIMIT 1")
                 row = cursor2.fetchone()
-                default_tenant_id = row[0] if row else None
+                default_org_id = row[0] if row else None
                 cursor2.close()
             except Exception:
                 pass
@@ -3877,7 +3877,7 @@ class Database:
                 print(f"[FIRST RUN] Generated admin password for '{username}': {password}")
                 print("[FIRST RUN] Set ADMIN_PASSWORD env var to persist this.")
             hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
-            self.create_user(username, hashed, 'Administrator', 'admin', tenant_id=default_tenant_id)
+            self.create_user(username, hashed, 'Administrator', 'admin', organization_id=default_org_id)
             # Promote to superadmin
             try:
                 cursor3 = self.conn.cursor()
@@ -3951,13 +3951,13 @@ class Database:
                 display_order INT DEFAULT 100
             )
         """)
-        # RLS: Add tenant_id to core discovery tables
+        # RLS: Add organization_id to core discovery tables
         for core_tbl in ['identities', 'role_assignments', 'entra_role_assignments',
                          'credentials', 'graph_api_permissions', 'sp_ownership',
                          'sp_app_roles', 'identity_roles', 'role_activity_log',
                          'ca_policies', 'ca_identity_coverage', 'drift_reports']:
             try:
-                cursor.execute(f"ALTER TABLE {core_tbl} ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+                cursor.execute(f"ALTER TABLE {core_tbl} ADD COLUMN IF NOT EXISTS organization_id INTEGER")
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()
@@ -4051,7 +4051,7 @@ class Database:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_snapshots_run ON compliance_snapshots(run_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_snapshots_fw ON compliance_snapshots(framework_key)")
-        cursor.execute("ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -4060,14 +4060,14 @@ class Database:
         self._ensure_compliance_snapshots_table()
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO compliance_snapshots (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, metrics, tenant_id)
+            INSERT INTO compliance_snapshots (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, metrics, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (run_id, framework_key) DO UPDATE SET
                 score = EXCLUDED.score, pass_count = EXCLUDED.pass_count,
                 warn_count = EXCLUDED.warn_count, fail_count = EXCLUDED.fail_count,
                 total_controls = EXCLUDED.total_controls, metrics = EXCLUDED.metrics
             RETURNING id
-        """, (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, json.dumps(metrics), self._tenant_id))
+        """, (run_id, framework_key, framework_name, score, pass_count, warn_count, fail_count, total_controls, json.dumps(metrics), self._organization_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
@@ -4129,7 +4129,7 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS agirs_scores (
                     id SERIAL PRIMARY KEY,
-                    tenant_id INTEGER NOT NULL,
+                    organization_id INTEGER NOT NULL,
                     run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
                     agirs_score NUMERIC(5,2),
                     hiri_score NUMERIC(5,2),
@@ -4144,7 +4144,7 @@ class Database:
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_agirs_scores_tenant ON agirs_scores(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_agirs_scores_org ON agirs_scores(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_agirs_scores_run ON agirs_scores(run_id)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS blast_radius_score NUMERIC(7,2) DEFAULT 0")
             self.conn.commit()
@@ -4161,13 +4161,13 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO agirs_scores (
-                tenant_id, run_id, agirs_score, hiri_score, nhiri_score, gei_score,
+                organization_id, run_id, agirs_score, hiri_score, nhiri_score, gei_score,
                 hiri_breakdown, nhiri_breakdown, gei_breakdown,
                 dangerous_identities, human_count, nhi_count
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
-            self._tenant_id,
+            self._organization_id,
             run_id,
             scores_dict.get('agirs_score'),
             scores_dict.get('hiri_score'),
@@ -4186,7 +4186,7 @@ class Database:
         return row[0] if row else None
 
     def get_latest_agirs_scores(self):
-        """Return the latest AGIRS scores for the current tenant (+ previous for delta)."""
+        """Return the latest AGIRS scores for the current organization (+ previous for delta)."""
         self._ensure_agirs_scores_table()
         cursor = self.conn.cursor()
         cursor.execute("""
@@ -4264,7 +4264,7 @@ class Database:
                 risk_score INTEGER DEFAULT 0,
                 risk_reasons JSONB DEFAULT '[]',
                 tags JSONB DEFAULT '{}',
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(discovery_run_id, resource_id)
             )
@@ -4336,7 +4336,7 @@ class Database:
                 risk_score INTEGER DEFAULT 0,
                 risk_reasons JSONB DEFAULT '[]',
                 tags JSONB DEFAULT '{}',
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(discovery_run_id, resource_id)
             )
@@ -4382,7 +4382,7 @@ class Database:
                 key_rotation_stale, sas_policy_enabled, sas_expiration_period,
                 risk_level, risk_score, risk_reasons,
                 risk_components, blast_radius_score, critical_overrides,
-                tags, tenant_id
+                tags, organization_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
@@ -4447,7 +4447,7 @@ class Database:
             json.dumps(data.get('risk_components', {})),
             data.get('blast_radius_score', 0),
             json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})), data.get('tenant_id') or self._tenant_id
+            json.dumps(data.get('tags', {})), data.get('organization_id') or self._organization_id
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -4473,7 +4473,7 @@ class Database:
                 secrets_detail, keys_detail, certs_detail,
                 risk_level, risk_score, risk_reasons,
                 risk_components, blast_radius_score, critical_overrides,
-                tags, tenant_id
+                tags, organization_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
@@ -4544,7 +4544,7 @@ class Database:
             json.dumps(data.get('risk_components', {})),
             data.get('blast_radius_score', 0),
             json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})), data.get('tenant_id') or self._tenant_id
+            json.dumps(data.get('tags', {})), data.get('organization_id') or self._organization_id
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -4572,7 +4572,7 @@ class Database:
                 privileged_identity_count INTEGER DEFAULT 0,
                 dependency_count INTEGER DEFAULT 0,
                 network_exposure_score INTEGER DEFAULT 0,
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(discovery_run_id, resource_id)
             )
@@ -4591,7 +4591,7 @@ class Database:
             INSERT INTO resource_risk_history
                 (discovery_run_id, resource_id, resource_type, risk_score, risk_level,
                  risk_components, critical_overrides, blast_radius_score,
-                 privileged_identity_count, dependency_count, network_exposure_score, tenant_id)
+                 privileged_identity_count, dependency_count, network_exposure_score, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (discovery_run_id, resource_id)
             DO UPDATE SET risk_score = EXCLUDED.risk_score,
@@ -4612,7 +4612,7 @@ class Database:
             data.get('privileged_identity_count', 0),
             data.get('dependency_count', 0),
             data.get('network_exposure_score', 0),
-            self._tenant_id,
+            self._organization_id,
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -4667,7 +4667,7 @@ class Database:
                 severity VARCHAR(20) NOT NULL DEFAULT 'low',
                 is_critical_override BOOLEAN NOT NULL DEFAULT false,
                 metadata JSONB DEFAULT '{}',
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(discovery_run_id, resource_id, finding_key)
             )
@@ -4681,19 +4681,19 @@ class Database:
         Database._resource_findings_ensured = True
 
     def save_resource_findings(self, run_id: int, resource_id: str, resource_type: str,
-                                findings: list, tenant_id: int = None):
+                                findings: list, organization_id: int = None):
         """Upsert findings extracted from risk_components for a resource."""
         self._ensure_resource_findings_table()
         if not findings:
             return
         cursor = self.conn.cursor()
-        tid = tenant_id or self._tenant_id
+        tid = organization_id or self._organization_id
         for f in findings:
             cursor.execute("""
                 INSERT INTO resource_findings
                     (discovery_run_id, resource_id, resource_type, component,
                      finding_key, finding_title, points, severity,
-                     is_critical_override, metadata, tenant_id)
+                     is_critical_override, metadata, organization_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (discovery_run_id, resource_id, finding_key)
                 DO UPDATE SET points = EXCLUDED.points,
@@ -4830,7 +4830,7 @@ class Database:
                 risk_score INTEGER DEFAULT 0,
                 risk_reasons JSONB DEFAULT '[]',
                 approval_status TEXT DEFAULT 'unknown',
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(discovery_run_id, app_id)
             )
@@ -4861,7 +4861,7 @@ class Database:
                 redirect_uris, redirect_uri_count,
                 has_localhost_redirect, has_http_redirect,
                 risk_level, risk_score, risk_reasons,
-                approval_status, tenant_id
+                approval_status, organization_id
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
@@ -4936,7 +4936,7 @@ class Database:
             data.get('risk_score', 0),
             json.dumps(data.get('risk_reasons', [])),
             data.get('approval_status', 'unknown'),
-            data.get('tenant_id') or self._tenant_id,
+            data.get('organization_id') or self._organization_id,
         ))
         db_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -5075,8 +5075,8 @@ class Database:
              'Identities accumulate roles beyond operational need, violating least privilege.',
              'privilege', 'Cap role assignments per identity; run role-mining to consolidate.', 60),
             ('external_trust_exposure', 'External Trust Exposure',
-             'Guest accounts and multi-tenant apps extend trust boundaries beyond the organization.',
-             'trust', 'Review guest accounts quarterly; restrict multi-tenant app registrations.', 70),
+             'Guest accounts and multi-organization apps extend trust boundaries beyond the organization.',
+             'trust', 'Review guest accounts quarterly; restrict multi-organization app registrations.', 70),
         ]
         for code, title, desc, cat, rec, order in causes:
             cursor.execute("""
@@ -5479,7 +5479,7 @@ class Database:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_views_user ON saved_views(user_id)")
-        cursor.execute("ALTER TABLE saved_views ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE saved_views ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -5622,12 +5622,12 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_status ON access_review_campaigns(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_created_by ON access_review_campaigns(created_by)")
         # V2 columns on campaigns
-        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS campaign_type VARCHAR(100) DEFAULT 'general'")
         cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS scope_clouds TEXT[]")
         cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS scope_description VARCHAR(500)")
         cursor.execute("ALTER TABLE access_review_campaigns ADD COLUMN IF NOT EXISTS risk_focus VARCHAR(100)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON access_review_campaigns(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_org ON access_review_campaigns(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_type ON access_review_campaigns(campaign_type)")
 
         cursor.execute("""
@@ -5684,8 +5684,8 @@ class Database:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_campaign ON campaign_audit_log(campaign_id)")
-        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-        cursor.execute("ALTER TABLE campaign_audit_log ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE campaign_reviews ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        cursor.execute("ALTER TABLE campaign_audit_log ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -5746,17 +5746,17 @@ class Database:
 
     def create_campaign(self, name: str, description: str, scope_filters: dict, deadline: str, created_by: int,
                         campaign_type: str = 'general', scope_clouds: list = None,
-                        scope_description: str = None, risk_focus: str = None, tenant_id: int = None) -> dict:
+                        scope_description: str = None, risk_focus: str = None, organization_id: int = None) -> dict:
         """Create a new access review campaign with V2 fields."""
         self._ensure_access_review_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO access_review_campaigns (name, description, scope_filters, deadline, created_by,
-                campaign_type, scope_clouds, scope_description, risk_focus, tenant_id)
+                campaign_type, scope_clouds, scope_description, risk_focus, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (name, description, json.dumps(scope_filters) if scope_filters else '{}', deadline, created_by,
-              campaign_type, scope_clouds, scope_description, risk_focus, tenant_id))
+              campaign_type, scope_clouds, scope_description, risk_focus, organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -6217,8 +6217,8 @@ class Database:
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON identity_group_members(group_id, identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_members_identity ON identity_group_members(identity_id)")
-        cursor.execute("ALTER TABLE identity_groups ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-        cursor.execute("ALTER TABLE identity_group_members ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE identity_groups ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        cursor.execute("ALTER TABLE identity_group_members ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -6575,23 +6575,23 @@ class Database:
         return auto + custom
 
     def deduplicate_auto_groups(self):
-        """Clean up auto groups and ensure every tenant has them.
+        """Clean up auto groups and ensure every organization has them.
 
-        1. Deletes orphan groups with NULL tenant_id
-        2. Removes duplicates per (name, tenant_id)
-        3. Seeds auto groups for any tenant that doesn't have them
+        1. Deletes orphan groups with NULL organization_id
+        2. Removes duplicates per (name, organization_id)
+        3. Seeds auto groups for any organization that doesn't have them
         """
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor()
         try:
-            # Delete auto groups with NULL tenant_id (created by old startup seeder)
-            cursor.execute("DELETE FROM identity_groups WHERE group_type = 'auto' AND tenant_id IS NULL")
-            # Delete duplicate auto groups per tenant, keeping the lowest id
+            # Delete auto groups with NULL organization_id (created by old startup seeder)
+            cursor.execute("DELETE FROM identity_groups WHERE group_type = 'auto' AND organization_id IS NULL")
+            # Delete duplicate auto groups per organization, keeping the lowest id
             cursor.execute("""
                 DELETE FROM identity_groups
                 WHERE id IN (
                     SELECT id FROM (
-                        SELECT id, ROW_NUMBER() OVER (PARTITION BY name, tenant_id ORDER BY id) AS rn
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY name, organization_id ORDER BY id) AS rn
                         FROM identity_groups
                         WHERE group_type = 'auto'
                     ) ranked
@@ -6599,12 +6599,12 @@ class Database:
                 )
             """)
             self.conn.commit()
-            # Seed auto groups for all tenants that don't have them yet
-            cursor.execute("SELECT id FROM tenants WHERE enabled = true")
-            tenant_ids = [r[0] for r in cursor.fetchall()]
+            # Seed auto groups for all organizations that don't have them yet
+            cursor.execute("SELECT id FROM organizations WHERE enabled = true")
+            organization_ids = [r[0] for r in cursor.fetchall()]
             cursor.close()
-            for tid in tenant_ids:
-                self.seed_auto_groups_for_tenant(tid)
+            for tid in organization_ids:
+                self.seed_auto_groups_for_organization(tid)
         except Exception:
             self.conn.rollback()
             try:
@@ -6612,18 +6612,18 @@ class Database:
             except Exception:
                 pass
 
-    def seed_auto_groups_for_tenant(self, tenant_id):
-        """Create default auto groups for a specific tenant if they don't exist.
+    def seed_auto_groups_for_organization(self, organization_id):
+        """Create default auto groups for a specific organization if they don't exist.
 
-        Called after discovery completes to ensure each tenant has their own
-        auto-groups with the correct tenant_id for RLS visibility.
+        Called after discovery completes to ensure each organization has their own
+        auto-groups with the correct organization_id for RLS visibility.
         """
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor()
         # Ensure unique index exists for idempotent inserts
         cursor.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_groups_auto_name_tenant
-            ON identity_groups (name, tenant_id) WHERE group_type = 'auto'
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_groups_auto_name_org
+            ON identity_groups (name, organization_id) WHERE group_type = 'auto'
         """)
         self.conn.commit()
 
@@ -6635,10 +6635,10 @@ class Database:
         ]
         for name, color, criteria in auto_groups:
             cursor.execute("""
-                INSERT INTO identity_groups (name, color, group_type, auto_criteria, tenant_id)
+                INSERT INTO identity_groups (name, color, group_type, auto_criteria, organization_id)
                 VALUES (%s, %s, 'auto', %s, %s)
-                ON CONFLICT (name, tenant_id) WHERE group_type = 'auto' DO NOTHING
-            """, (name, color, json.dumps(criteria), tenant_id))
+                ON CONFLICT (name, organization_id) WHERE group_type = 'auto' DO NOTHING
+            """, (name, color, json.dumps(criteria), organization_id))
         self.conn.commit()
         cursor.close()
 
@@ -6672,7 +6672,7 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_identity ON anomalies(identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_created ON anomalies(created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_resolved ON anomalies(resolved)")
-        cursor.execute("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -6686,14 +6686,14 @@ class Database:
             cursor.execute("""
                 INSERT INTO anomalies
                     (discovery_run_id, anomaly_type, severity, identity_id, identity_name,
-                     title, description, details, tenant_id)
+                     title, description, details, organization_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 run_id, a['anomaly_type'], a.get('severity', 'medium'),
                 a.get('identity_id'), a.get('identity_name'),
                 a['title'], a['description'],
                 json.dumps(a['details']) if a.get('details') else None,
-                self._tenant_id,
+                self._organization_id,
             ))
         self.conn.commit()
         cursor.close()
@@ -6883,22 +6883,22 @@ class Database:
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix)")
-        # P0 tenant isolation: add tenant_id column
-        cursor.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id)")
+        # P0 organization isolation: add organization_id column
+        cursor.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS organization_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_org ON api_keys(organization_id)")
         self.conn.commit()
         cursor.close()
 
-    def create_api_key(self, key_prefix, key_hash, name, description, role, created_by, expires_at=None, tenant_id=None):
+    def create_api_key(self, key_prefix, key_hash, name, description, role, created_by, expires_at=None, organization_id=None):
         """Insert a new API key. Returns dict (never includes key_hash)."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO api_keys (key_prefix, key_hash, name, description, role, created_by, expires_at, tenant_id)
+            INSERT INTO api_keys (key_prefix, key_hash, name, description, role, created_by, expires_at, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, key_prefix, name, description, role, enabled, created_by,
-                      created_at, last_used_at, expires_at, usage_count, tenant_id
-        """, (key_prefix, key_hash, name, description, role, created_by, expires_at, tenant_id))
+                      created_at, last_used_at, expires_at, usage_count, organization_id
+        """, (key_prefix, key_hash, name, description, role, created_by, expires_at, organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -6907,20 +6907,20 @@ class Database:
                 row[ts] = row[ts].isoformat()
         return row
 
-    def get_api_keys(self, tenant_id=None):
-        """List API keys scoped by tenant. Never returns key_hash."""
+    def get_api_keys(self, organization_id=None):
+        """List API keys scoped by organization. Never returns key_hash."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
                 SELECT ak.id, ak.key_prefix, ak.name, ak.description, ak.role,
                        ak.enabled, ak.created_by, u.display_name as created_by_name,
                        ak.created_at, ak.last_used_at, ak.expires_at, ak.usage_count
                 FROM api_keys ak
                 LEFT JOIN users u ON u.id = ak.created_by
-                WHERE ak.tenant_id = %s
+                WHERE ak.organization_id = %s
                 ORDER BY ak.id
-            """, (tenant_id,))
+            """, (organization_id,))
         else:
             cursor.execute("""
                 SELECT ak.id, ak.key_prefix, ak.name, ak.description, ak.role,
@@ -6938,16 +6938,16 @@ class Database:
                     r[ts] = r[ts].isoformat()
         return rows
 
-    def get_api_key_by_id(self, key_id, tenant_id=None):
-        """Get single API key by id, optionally scoped by tenant. Never returns key_hash."""
+    def get_api_key_by_id(self, key_id, organization_id=None):
+        """Get single API key by id, optionally scoped by organization. Never returns key_hash."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
                 SELECT id, key_prefix, name, description, role, enabled, created_by,
                        created_at, last_used_at, expires_at, usage_count
-                FROM api_keys WHERE id = %s AND tenant_id = %s
-            """, (key_id, tenant_id))
+                FROM api_keys WHERE id = %s AND organization_id = %s
+            """, (key_id, organization_id))
         else:
             cursor.execute("""
                 SELECT id, key_prefix, name, description, role, enabled, created_by,
@@ -6981,13 +6981,13 @@ class Database:
         # Keep expires_at as datetime for comparison in middleware
         return result
 
-    def update_api_key(self, key_id, tenant_id=None, **kwargs):
+    def update_api_key(self, key_id, organization_id=None, **kwargs):
         """Update API key fields. Allowed: name, description, role, enabled."""
         self._ensure_api_keys_table()
         allowed = {'name', 'description', 'role', 'enabled'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
-            return self.get_api_key_by_id(key_id, tenant_id=tenant_id)
+            return self.get_api_key_by_id(key_id, organization_id=organization_id)
         set_parts = []
         params = []
         for k, v in updates.items():
@@ -6995,9 +6995,9 @@ class Database:
             params.append(v)
         where = "id = %s"
         params.append(key_id)
-        if tenant_id is not None:
-            where += " AND tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id is not None:
+            where += " AND organization_id = %s"
+            params.append(organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE api_keys SET {', '.join(set_parts)}
@@ -7016,12 +7016,12 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def delete_api_key(self, key_id, tenant_id=None):
-        """Delete API key, scoped by tenant. Returns True if deleted."""
+    def delete_api_key(self, key_id, organization_id=None):
+        """Delete API key, scoped by organization. Returns True if deleted."""
         self._ensure_api_keys_table()
         cursor = self.conn.cursor()
-        if tenant_id is not None:
-            cursor.execute("DELETE FROM api_keys WHERE id = %s AND tenant_id = %s", (key_id, tenant_id))
+        if organization_id is not None:
+            cursor.execute("DELETE FROM api_keys WHERE id = %s AND organization_id = %s", (key_id, organization_id))
         else:
             cursor.execute("DELETE FROM api_keys WHERE id = %s", (key_id,))
         deleted = cursor.rowcount > 0
@@ -7086,8 +7086,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_status ON soar_actions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_created ON soar_actions(created_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_identity ON soar_actions(identity_id)")
-        cursor.execute("ALTER TABLE soar_playbooks ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-        cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE soar_playbooks ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
 
@@ -7095,7 +7095,7 @@ class Database:
         """List all SOAR playbooks."""
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM soar_playbooks WHERE tenant_id = %s ORDER BY created_at DESC", (self._tenant_id,))
+        cursor.execute("SELECT * FROM soar_playbooks WHERE organization_id = %s ORDER BY created_at DESC", (self._organization_id,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -7108,7 +7108,7 @@ class Database:
         """Get single SOAR playbook by ID."""
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM soar_playbooks WHERE id = %s AND tenant_id = %s", (playbook_id, self._tenant_id))
+        cursor.execute("SELECT * FROM soar_playbooks WHERE id = %s AND organization_id = %s", (playbook_id, self._organization_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -7126,11 +7126,11 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO soar_playbooks (name, description, trigger_type, trigger_conditions,
-                action_type, action_config, integration, cooldown_minutes, created_by, tenant_id)
+                action_type, action_config, integration, cooldown_minutes, created_by, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (name, description, trigger_type, json.dumps(trigger_conditions),
-              action_type, json.dumps(action_config), integration, cooldown_minutes, created_by, self._tenant_id))
+              action_type, json.dumps(action_config), integration, cooldown_minutes, created_by, self._organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -7157,11 +7157,11 @@ class Database:
                 params.append(v)
         set_parts.append("updated_at = NOW()")
         params.append(playbook_id)
-        params.append(self._tenant_id)
+        params.append(self._organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE soar_playbooks SET {', '.join(set_parts)}
-            WHERE id = %s AND tenant_id = %s RETURNING *
+            WHERE id = %s AND organization_id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -7178,7 +7178,7 @@ class Database:
         """Delete a SOAR playbook. Returns True if deleted."""
         self._ensure_soar_tables()
         cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM soar_playbooks WHERE id = %s AND tenant_id = %s", (playbook_id, self._tenant_id))
+        cursor.execute("DELETE FROM soar_playbooks WHERE id = %s AND organization_id = %s", (playbook_id, self._organization_id))
         deleted = cursor.rowcount > 0
         self.conn.commit()
         cursor.close()
@@ -7189,8 +7189,8 @@ class Database:
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
-            "SELECT * FROM soar_playbooks WHERE enabled = true AND trigger_type = %s AND tenant_id = %s ORDER BY id",
-            (trigger_type, self._tenant_id)
+            "SELECT * FROM soar_playbooks WHERE enabled = true AND trigger_type = %s AND organization_id = %s ORDER BY id",
+            (trigger_type, self._organization_id)
         )
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
@@ -7214,12 +7214,12 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO soar_actions (playbook_id, identity_id, anomaly_id, trigger_event,
-                action_type, integration, status, tenant_id)
+                action_type, integration, status, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
             RETURNING id
         """, (playbook_id, identity_id, anomaly_id,
               json.dumps(trigger_event) if trigger_event else None,
-              action_type, integration, self._tenant_id))
+              action_type, integration, self._organization_id))
         action_id = cursor.fetchone()[0]
         self.conn.commit()
         cursor.close()
@@ -7246,8 +7246,8 @@ class Database:
     def get_soar_actions(self, limit=50, offset=0, playbook_id=None, status=None, identity_id=None):
         """Get SOAR action history with optional filters."""
         self._ensure_soar_tables()
-        where_parts = ["sa.tenant_id = %s"]
-        params = [self._tenant_id]
+        where_parts = ["sa.organization_id = %s"]
+        params = [self._organization_id]
         if playbook_id is not None:
             where_parts.append("sa.playbook_id = %s")
             params.append(playbook_id)
@@ -7288,14 +7288,14 @@ class Database:
                 COUNT(*) FILTER (WHERE status = 'pending') as pending_count,
                 COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as recent_24h
             FROM soar_actions
-            WHERE tenant_id = %s
-        """, (self._tenant_id,))
+            WHERE organization_id = %s
+        """, (self._organization_id,))
         stats = dict(cursor.fetchone())
         stats['success_rate'] = round(stats['success_count'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
         cursor.execute("""
             SELECT integration, COUNT(*) as count
-            FROM soar_actions WHERE tenant_id = %s GROUP BY integration ORDER BY count DESC
-        """, (self._tenant_id,))
+            FROM soar_actions WHERE organization_id = %s GROUP BY integration ORDER BY count DESC
+        """, (self._organization_id,))
         stats['by_integration'] = {r['integration']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return stats
@@ -7320,12 +7320,12 @@ class Database:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_prefs_user
             ON dashboard_preferences(user_id)
         """)
-        cursor.execute("ALTER TABLE dashboard_preferences ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-        # Composite unique index for multi-tenant isolation
-        cursor.execute("DROP INDEX IF EXISTS idx_dashboard_prefs_user_tenant")
+        cursor.execute("ALTER TABLE dashboard_preferences ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        # Composite unique index for multi-organization isolation
+        cursor.execute("DROP INDEX IF EXISTS idx_dashboard_prefs_user_org")
         cursor.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_prefs_user_tenant
-            ON dashboard_preferences(user_id, tenant_id)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_prefs_user_org
+            ON dashboard_preferences(user_id, organization_id)
         """)
         self.conn.commit()
         cursor.close()
@@ -7335,8 +7335,8 @@ class Database:
         self._ensure_dashboard_preferences_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
-            "SELECT * FROM dashboard_preferences WHERE user_id = %s AND tenant_id = %s",
-            (user_id, self._tenant_id)
+            "SELECT * FROM dashboard_preferences WHERE user_id = %s AND organization_id = %s",
+            (user_id, self._organization_id)
         )
         row = cursor.fetchone()
         cursor.close()
@@ -7353,13 +7353,13 @@ class Database:
         self._ensure_dashboard_preferences_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO dashboard_preferences (user_id, preferences, tenant_id)
+            INSERT INTO dashboard_preferences (user_id, preferences, organization_id)
             VALUES (%s, %s, %s)
-            ON CONFLICT (user_id, tenant_id) DO UPDATE SET
+            ON CONFLICT (user_id, organization_id) DO UPDATE SET
                 preferences = EXCLUDED.preferences,
                 updated_at = NOW()
             RETURNING *
-        """, (user_id, json.dumps(preferences), self._tenant_id))
+        """, (user_id, json.dumps(preferences), self._organization_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -7373,8 +7373,8 @@ class Database:
         self._ensure_dashboard_preferences_table()
         cursor = self.conn.cursor()
         cursor.execute(
-            "DELETE FROM dashboard_preferences WHERE user_id = %s AND tenant_id = %s",
-            (user_id, self._tenant_id)
+            "DELETE FROM dashboard_preferences WHERE user_id = %s AND organization_id = %s",
+            (user_id, self._organization_id)
         )
         deleted = cursor.rowcount > 0
         self.conn.commit()
@@ -7382,20 +7382,178 @@ class Database:
         return deleted
 
     # ========================================================================
-    # Phase 45: Multi-Tenant Foundation
+    # Phase 45: Multi-Organization Foundation
     # ========================================================================
 
-    _tenants_ensured = False
+    _organizations_ensured = False
+    _migration_018_ensured = False
 
-    def _ensure_tenants_table(self):
-        """Create tenants table and run multi-tenant migration (idempotent, runs once per process)."""
-        if Database._tenants_ensured:
+    def _run_migration_018_org_rename(self):
+        """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
+        Idempotent — checks column/table existence before each ALTER. Runs as admin (BYPASSRLS)."""
+        if Database._migration_018_ensured:
             return
         cursor = self.conn.cursor()
 
-        # 1. Create tenants table
+        # 1. Rename tenants table → organizations
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tenants (
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'tenants') THEN
+                    ALTER TABLE tenants RENAME TO organizations;
+                END IF;
+            END $$
+        """)
+        self.conn.commit()
+
+        # 2. Rename tenant_id → organization_id on all tables
+        tables_with_org_id = [
+            'users', 'discovery_runs', 'settings', 'activity_log', 'webhooks',
+            'webhook_deliveries', 'custom_risk_rules', 'notifications', 'identities',
+            'role_assignments', 'entra_role_assignments', 'credentials',
+            'graph_api_permissions', 'sp_app_roles', 'pim_eligible_assignments',
+            'pim_activations', 'drift_reports', 'saved_views',
+            'access_review_campaigns', 'campaign_reviews', 'campaign_audit_log',
+            'identity_groups', 'identity_group_members', 'anomalies', 'api_keys',
+            'soar_playbooks', 'soar_actions', 'dashboard_preferences',
+            'compliance_snapshots', 'agirs_scores', 'azure_storage_accounts',
+            'azure_key_vaults', 'resource_risk_history', 'resource_findings',
+            'app_registrations', 'copilot_conversations', 'cloud_connections',
+            'cloud_subscriptions', 'billing_events', 'invoices',
+            'identity_subscription_access', 'sa_attestations', 'governance_decisions',
+            'remediation_actions', 'sso_auth_codes', 'ca_policies',
+            'ca_identity_coverage', 'sp_ownership', 'role_activity_log',
+            'workload_signin_events', 'workload_activity_stats', 'workload_anomaly_events',
+            'rbac_hygiene_scans', 'human_identities', 'identity_links',
+            'orphaned_findings', 'scan_schedules',
+        ]
+        for tbl in tables_with_org_id:
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = '{tbl}' AND column_name = 'tenant_id'
+                    ) THEN
+                        ALTER TABLE {tbl} RENAME COLUMN tenant_id TO organization_id;
+                    END IF;
+                END $$
+            """)
+        self.conn.commit()
+
+        # 3. Rename entra_tenant_id → azure_directory_id on cloud_connections
+        cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'cloud_connections' AND column_name = 'entra_tenant_id'
+                ) THEN
+                    ALTER TABLE cloud_connections RENAME COLUMN entra_tenant_id TO azure_directory_id;
+                END IF;
+            END $$
+        """)
+        self.conn.commit()
+
+        # 4. Drop old RLS policies and create new ones
+        for tbl in tables_with_org_id:
+            for suffix in ['sel', 'ins', 'upd', 'del']:
+                cursor.execute(f"DROP POLICY IF EXISTS tenant_strict_{suffix} ON {tbl}")
+                cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON {tbl}")
+            # Create new policies (only if table has organization_id and RLS enabled)
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = '{tbl}' AND column_name = 'organization_id'
+                    ) THEN
+                        CREATE POLICY org_strict_sel ON {tbl} FOR SELECT
+                            USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                        CREATE POLICY org_strict_ins ON {tbl} FOR INSERT
+                            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer);
+                        CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE
+                            USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                        CREATE POLICY org_strict_del ON {tbl} FOR DELETE
+                            USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                    END IF;
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        self.conn.commit()
+
+        # 5. Drop old triggers and create new ones
+        for tbl in tables_with_org_id:
+            cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_tenant_id ON {tbl}")
+            cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}")
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
+                    BEGIN
+                        IF NEW.organization_id IS NULL THEN
+                            NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
+                        END IF;
+                        IF NEW.organization_id IS NULL THEN
+                            RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $fn$ LANGUAGE plpgsql;
+
+                    CREATE TRIGGER trg_auto_organization_id
+                        BEFORE INSERT ON {tbl}
+                        FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+        self.conn.commit()
+
+        # 6. Rename settings key
+        cursor.execute("UPDATE settings SET key = 'azure_directory_id' WHERE key = 'azure_tenant_id'")
+        self.conn.commit()
+
+        # 7. Rename indexes (best-effort, skip if already renamed)
+        for tbl in tables_with_org_id:
+            old_idx = f"idx_{tbl}_tenant"
+            new_idx = f"idx_{tbl}_org"
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{old_idx}') THEN
+                        ALTER INDEX {old_idx} RENAME TO {new_idx};
+                    END IF;
+                END $$
+            """)
+        self.conn.commit()
+
+        # 8. Update unique constraint on cloud_connections
+        cursor.execute("""
+            DO $$ BEGIN
+                ALTER TABLE cloud_connections DROP CONSTRAINT IF EXISTS cloud_connections_organization_id_cloud_entra_organization_key;
+                ALTER TABLE cloud_connections DROP CONSTRAINT IF EXISTS cloud_connections_tenant_id_cloud_entra_tenant_id_key;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'cloud_connections_org_cloud_dir_key'
+                ) THEN
+                    ALTER TABLE cloud_connections
+                        ADD CONSTRAINT cloud_connections_org_cloud_dir_key
+                        UNIQUE (organization_id, cloud, azure_directory_id);
+                END IF;
+            EXCEPTION WHEN undefined_table THEN NULL;
+            END $$
+        """)
+        self.conn.commit()
+
+        cursor.close()
+        Database._migration_018_ensured = True
+
+    def _ensure_organizations_table(self):
+        """Create organizations table and run multi-organization migration (idempotent, runs once per process)."""
+        if Database._organizations_ensured:
+            return
+
+        # Run migration 018 first (renames tenants→organizations if needed)
+        self._run_migration_018_org_rename()
+
+        cursor = self.conn.cursor()
+
+        # 1. Create organizations table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS organizations (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
                 slug VARCHAR(100) UNIQUE NOT NULL,
@@ -7406,73 +7564,73 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_slug ON organizations(slug)")
         # Phase 77: Add license columns
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_activated_at TIMESTAMPTZ")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS license_expires_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS license_activated_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS license_expires_at TIMESTAMPTZ")
         # Phase 78: Add logo_url column
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS logo_url TEXT")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS logo_url TEXT")
         # Subscription term: 0=monthly, 1/3/5 = year commitments
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_term INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS subscription_term INTEGER NOT NULL DEFAULT 0")
         # Phase 85: Tenant onboarding metadata
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS primary_cloud VARCHAR(20)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS industry VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS compliance_framework VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS onboarding_stage VARCHAR(20) NOT NULL DEFAULT 'active'")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS primary_cloud VARCHAR(20)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS industry VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS compliance_framework VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS onboarding_stage VARCHAR(20) NOT NULL DEFAULT 'active'")
         # Billing columns
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS platform_fee_cents INTEGER NOT NULL DEFAULT 20000")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMPTZ")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_status VARCHAR(20) NOT NULL DEFAULT 'active'")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS platform_fee_cents INTEGER NOT NULL DEFAULT 20000")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_status VARCHAR(20) NOT NULL DEFAULT 'active'")
         # Tax configuration
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_label VARCHAR(50) NOT NULL DEFAULT 'Tax'")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_id VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_exempt BOOLEAN NOT NULL DEFAULT false")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_notes TEXT")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS payment_terms INTEGER NOT NULL DEFAULT 30")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS tax_label VARCHAR(50) NOT NULL DEFAULT 'Tax'")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS tax_id VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS tax_exempt BOOLEAN NOT NULL DEFAULT false")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS tax_notes TEXT")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS payment_terms INTEGER NOT NULL DEFAULT 30")
         # Billing address
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_company VARCHAR(255)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_address_line1 VARCHAR(255)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_address_line2 VARCHAR(255)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_city VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_state VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_postal_code VARCHAR(20)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_country VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_email VARCHAR(255)")
-        # Backfill: free/trial tenants get 0 platform fee
-        cursor.execute("UPDATE tenants SET platform_fee_cents = 0 WHERE plan IN ('free', 'trial') AND platform_fee_cents != 0")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_company VARCHAR(255)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_address_line1 VARCHAR(255)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_address_line2 VARCHAR(255)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_city VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_state VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_postal_code VARCHAR(20)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_country VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_email VARCHAR(255)")
+        # Backfill: free/trial organizations get 0 platform fee
+        cursor.execute("UPDATE organizations SET platform_fee_cents = 0 WHERE plan IN ('free', 'trial') AND platform_fee_cents != 0")
         # Phase 78: Migrate growth→pro plan + API key role renames
-        cursor.execute("UPDATE tenants SET plan = 'pro' WHERE plan = 'growth'")
+        cursor.execute("UPDATE organizations SET plan = 'pro' WHERE plan = 'growth'")
         cursor.execute("UPDATE api_keys SET role = 'reader' WHERE role = 'auditor'")
         cursor.execute("UPDATE api_keys SET role = 'compliance' WHERE role = 'viewer'")
         self.conn.commit()
 
         # 2. Rename any existing "Default Organization" → "Acme Organization"
-        cursor.execute("UPDATE tenants SET name = 'Acme Organization' WHERE slug = 'default' AND name = 'Default Organization'")
+        cursor.execute("UPDATE organizations SET name = 'Acme Organization' WHERE slug = 'default' AND name = 'Default Organization'")
         self.conn.commit()
 
-        # 3. Create default tenant if none exist
-        cursor.execute("SELECT COUNT(*) FROM tenants")
-        tenant_count = cursor.fetchone()[0]
+        # 3. Create default organization if none exist
+        cursor.execute("SELECT COUNT(*) FROM organizations")
+        org_count = cursor.fetchone()[0]
 
-        default_tenant_id = None
-        if tenant_count == 0:
+        default_org_id = None
+        if org_count == 0:
             cursor.execute("""
-                INSERT INTO tenants (name, slug, plan)
+                INSERT INTO organizations (name, slug, plan)
                 VALUES ('Acme Organization', 'default', 'enterprise')
                 RETURNING id
             """)
-            default_tenant_id = cursor.fetchone()[0]
+            default_org_id = cursor.fetchone()[0]
             self.conn.commit()
         else:
-            cursor.execute("SELECT id FROM tenants ORDER BY id LIMIT 1")
+            cursor.execute("SELECT id FROM organizations ORDER BY id LIMIT 1")
             row = cursor.fetchone()
-            default_tenant_id = row[0] if row else None
+            default_org_id = row[0] if row else None
 
-        # 4. Add tenant_id + is_superadmin + portal_role columns to users
-        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
+        # 4. Add organization_id + is_superadmin + portal_role columns to users
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS organization_id INTEGER REFERENCES organizations(id)")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT false")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS portal_role VARCHAR(20)")
         # Phase 77: Add email/phone to users
@@ -7480,8 +7638,8 @@ class Database:
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50)")
         self.conn.commit()
 
-        if default_tenant_id:
-            cursor.execute("UPDATE users SET tenant_id = %s WHERE tenant_id IS NULL", (default_tenant_id,))
+        if default_org_id:
+            cursor.execute("UPDATE users SET organization_id = %s WHERE organization_id IS NULL", (default_org_id,))
             # Promote user id=1 to superadmin with portal_role
             cursor.execute("UPDATE users SET is_superadmin = true, portal_role = 'superadmin' WHERE id = 1 AND is_superadmin = false")
             # Backfill portal_role for existing superadmins
@@ -7490,28 +7648,28 @@ class Database:
             cursor.execute("UPDATE users SET portal_role = 'poweradmin' WHERE portal_role = 'support'")
             self.conn.commit()
 
-        # 4. Add tenant_id to discovery_runs
-        cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_tenant ON discovery_runs(tenant_id)")
+        # 4. Add organization_id to discovery_runs
+        cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS organization_id INTEGER REFERENCES organizations(id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org ON discovery_runs(organization_id)")
         cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS cloud_connection_id INTEGER")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_connection ON discovery_runs(cloud_connection_id)")
-        if default_tenant_id:
-            cursor.execute("UPDATE discovery_runs SET tenant_id = %s WHERE tenant_id IS NULL", (default_tenant_id,))
+        if default_org_id:
+            cursor.execute("UPDATE discovery_runs SET organization_id = %s WHERE organization_id IS NULL", (default_org_id,))
         self.conn.commit()
 
-        # 5. Add tenant_id to settings + migrate PK
-        cursor.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)")
-        if default_tenant_id:
-            cursor.execute("UPDATE settings SET tenant_id = %s WHERE tenant_id IS NULL", (default_tenant_id,))
+        # 5. Add organization_id to settings + migrate PK
+        cursor.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS organization_id INTEGER REFERENCES organizations(id)")
+        if default_org_id:
+            cursor.execute("UPDATE settings SET organization_id = %s WHERE organization_id IS NULL", (default_org_id,))
         # Migrate PK: drop old single-column PK, add composite unique
         try:
             cursor.execute("ALTER TABLE settings DROP CONSTRAINT IF EXISTS settings_pkey")
             cursor.execute("""
                 DO $$ BEGIN
                     IF NOT EXISTS (
-                        SELECT 1 FROM pg_constraint WHERE conname = 'settings_tenant_key'
+                        SELECT 1 FROM pg_constraint WHERE conname = 'settings_org_key'
                     ) THEN
-                        ALTER TABLE settings ADD CONSTRAINT settings_tenant_key UNIQUE (tenant_id, key);
+                        ALTER TABLE settings ADD CONSTRAINT settings_org_key UNIQUE (organization_id, key);
                     END IF;
                 END $$
             """)
@@ -7520,17 +7678,17 @@ class Database:
             self.conn.rollback()
 
         cursor.close()
-        Database._tenants_ensured = True
+        Database._organizations_ensured = True
 
-    # ── Tenant CRUD ─────────────────────────────────────────────────────
+    # ── Organization CRUD ─────────────────────────────────────────────────────
 
-    def get_tenants(self):
-        """Get all tenants."""
-        self._ensure_tenants_table()
+    def get_organizations(self):
+        """Get all organizations."""
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT t.*, (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id) AS user_count
-            FROM tenants t ORDER BY t.id
+            SELECT o.*, (SELECT COUNT(*) FROM users u WHERE u.organization_id = o.id) AS user_count
+            FROM organizations o ORDER BY o.id
         """)
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
@@ -7540,11 +7698,11 @@ class Database:
                     row[ts] = row[ts].isoformat()
         return rows
 
-    def get_tenant_by_id(self, tenant_id):
-        """Get a single tenant by ID."""
-        self._ensure_tenants_table()
+    def get_organization_by_id(self, organization_id):
+        """Get a single organization by ID."""
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM tenants WHERE id = %s", (tenant_id,))
+        cursor.execute("SELECT * FROM organizations WHERE id = %s", (organization_id,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -7560,12 +7718,12 @@ class Database:
             result['discount_pct'] = float(result['discount_pct'])
         return result
 
-    def get_tenant_config(self, tenant_id):
-        """Get cloud provider and add-on configuration for a tenant."""
-        tenant = self.get_tenant_by_id(tenant_id)
-        if not tenant:
+    def get_organization_config(self, organization_id):
+        """Get cloud provider and add-on configuration for an organization."""
+        org = self.get_organization_by_id(organization_id)
+        if not org:
             return None
-        settings = tenant.get('settings') or {}
+        settings = org.get('settings') or {}
         cloud_providers = settings.get('cloud_providers', {
             'azure': {'enabled': True, 'plan': 'pro'},
             'aws': {'enabled': False, 'plan': None},
@@ -7583,17 +7741,17 @@ class Database:
             'extended_retention': False,
         })
         return {
-            'tenant_id': tenant_id,
-            'tenant_name': tenant.get('name'),
+            'organization_id': organization_id,
+            'org_name': org.get('name'),
             'cloud_providers': cloud_providers,
             'addons': addons,
         }
 
-    def get_tenant_by_slug(self, slug):
-        """Get a tenant by slug."""
-        self._ensure_tenants_table()
+    def get_organization_by_slug(self, slug):
+        """Get an organization by slug."""
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM tenants WHERE slug = %s", (slug,))
+        cursor.execute("SELECT * FROM organizations WHERE slug = %s", (slug,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -7604,13 +7762,13 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def create_tenant(self, name, slug, plan='free', settings=None,
+    def create_organization(self, name, slug, plan='free', settings=None,
                       primary_cloud=None, industry=None, compliance_framework=None):
-        """Create a new tenant."""
-        self._ensure_tenants_table()
+        """Create a new organization."""
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO tenants (name, slug, plan, settings, primary_cloud, industry, compliance_framework)
+            INSERT INTO organizations (name, slug, plan, settings, primary_cloud, industry, compliance_framework)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (name, slug, plan, json.dumps(settings or {}),
@@ -7623,9 +7781,9 @@ class Database:
                 row[ts] = row[ts].isoformat()
         return row
 
-    def update_tenant(self, tenant_id, **kwargs):
-        """Update tenant fields."""
-        self._ensure_tenants_table()
+    def update_organization(self, organization_id, **kwargs):
+        """Update organization fields."""
+        self._ensure_organizations_table()
         allowed = {'name', 'plan', 'enabled', 'settings', 'license_activated_at', 'license_expires_at',
                    'subscription_term', 'primary_cloud', 'industry', 'compliance_framework', 'status',
                    'onboarding_stage', 'platform_fee_cents', 'discount_pct', 'trial_expires_at',
@@ -7634,17 +7792,17 @@ class Database:
                    'billing_city', 'billing_state', 'billing_postal_code', 'billing_country', 'billing_email'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
-            return self.get_tenant_by_id(tenant_id)
+            return self.get_organization_by_id(organization_id)
         set_parts = []
         params = []
         for k, v in updates.items():
             set_parts.append(f"{k} = %s")
             params.append(json.dumps(v) if k == 'settings' else v)
         set_parts.append("updated_at = NOW()")
-        params.append(tenant_id)
+        params.append(organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
-            UPDATE tenants SET {', '.join(set_parts)}
+            UPDATE organizations SET {', '.join(set_parts)}
             WHERE id = %s RETURNING *
         """, params)
         row = cursor.fetchone()
@@ -7658,12 +7816,12 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def delete_tenant(self, tenant_id):
-        """Delete a tenant and all associated data using 7-tier cascade.
+    def delete_organization(self, organization_id):
+        """Delete an organization and all associated data using 7-tier cascade.
 
         Tier 1: Tables with non-CASCADE FK to users (created_by, attested_by, etc.)
         Tier 2: Tables with FK to playbooks/webhooks
-        Tier 3: Standalone tenant-scoped tables (no cross-table FK)
+        Tier 3: Standalone organization-scoped tables (no cross-table FK)
         Tier 4: risk_scores (FK to discovery_runs)
         Tier 5: discovery_runs — CASCADE auto-deletes identities + 11 children,
                  compliance_snapshots, azure_storage_accounts, azure_key_vaults,
@@ -7671,9 +7829,9 @@ class Database:
                  ca_policies
         Tier 6: users — CASCADE auto-deletes refresh_tokens, sso_auth_codes,
                  dashboard_preferences, saved_views
-        Tier 7: settings, activity_log, tenants
+        Tier 7: settings, activity_log, organizations
         """
-        self._ensure_tenants_table()
+        self._ensure_organizations_table()
         cursor = self.conn.cursor()
 
         # Tier 1 — tables with non-CASCADE FK to users
@@ -7685,7 +7843,7 @@ class Database:
         for tbl in tier1_tables:
             try:
                 cursor.execute(f"SAVEPOINT sp_{tbl}")
-                cursor.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s", (tenant_id,))
+                cursor.execute(f"DELETE FROM {tbl} WHERE organization_id = %s", (organization_id,))
                 cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
             except Exception:
                 cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
@@ -7697,12 +7855,12 @@ class Database:
         for tbl in tier2_tables:
             try:
                 cursor.execute(f"SAVEPOINT sp_{tbl}")
-                cursor.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s", (tenant_id,))
+                cursor.execute(f"DELETE FROM {tbl} WHERE organization_id = %s", (organization_id,))
                 cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
             except Exception:
                 cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
 
-        # Tier 3 — standalone tenant-scoped tables
+        # Tier 3 — standalone organization-scoped tables
         tier3_tables = [
             'notifications', 'custom_risk_rules', 'copilot_conversations',
             'remediation_actions', 'ca_policies', 'drift_reports',
@@ -7711,7 +7869,7 @@ class Database:
         for tbl in tier3_tables:
             try:
                 cursor.execute(f"SAVEPOINT sp_{tbl}")
-                cursor.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s", (tenant_id,))
+                cursor.execute(f"DELETE FROM {tbl} WHERE organization_id = %s", (organization_id,))
                 cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
             except Exception:
                 cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
@@ -7721,8 +7879,8 @@ class Database:
             cursor.execute("SAVEPOINT sp_risk_scores")
             cursor.execute("""
                 DELETE FROM risk_scores
-                WHERE run_id IN (SELECT id FROM discovery_runs WHERE tenant_id = %s)
-            """, (tenant_id,))
+                WHERE run_id IN (SELECT id FROM discovery_runs WHERE organization_id = %s)
+            """, (organization_id,))
             cursor.execute("RELEASE SAVEPOINT sp_risk_scores")
         except Exception:
             cursor.execute("ROLLBACK TO SAVEPOINT sp_risk_scores")
@@ -7731,16 +7889,16 @@ class Database:
         #           compliance_snapshots, azure_storage_accounts, azure_key_vaults,
         #           app_registrations, anomalies, drift_reports, identity_subscription_access,
         #           ca_policies)
-        cursor.execute("DELETE FROM discovery_runs WHERE tenant_id = %s", (tenant_id,))
+        cursor.execute("DELETE FROM discovery_runs WHERE organization_id = %s", (organization_id,))
 
         # Tier 6 — users (CASCADE deletes refresh_tokens, sso_auth_codes,
         #           dashboard_preferences, saved_views)
-        cursor.execute("DELETE FROM users WHERE tenant_id = %s", (tenant_id,))
+        cursor.execute("DELETE FROM users WHERE organization_id = %s", (organization_id,))
 
-        # Tier 7 — settings, activity_log, tenants
-        cursor.execute("DELETE FROM settings WHERE tenant_id = %s", (tenant_id,))
-        cursor.execute("DELETE FROM activity_log WHERE tenant_id = %s", (tenant_id,))
-        cursor.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
+        # Tier 7 — settings, activity_log, organizations
+        cursor.execute("DELETE FROM settings WHERE organization_id = %s", (organization_id,))
+        cursor.execute("DELETE FROM activity_log WHERE organization_id = %s", (organization_id,))
+        cursor.execute("DELETE FROM organizations WHERE id = %s", (organization_id,))
         deleted = cursor.rowcount > 0
 
         self.conn.commit()
@@ -7749,16 +7907,16 @@ class Database:
 
     # ── Phase 54: SSO Methods ──────────────────────────────────────────
 
-    def get_user_by_external_id(self, external_id, tenant_id):
-        """Look up an SSO user by their IdP subject ID within a tenant."""
+    def get_user_by_external_id(self, external_id, organization_id):
+        """Look up an SSO user by their IdP subject ID within an organization."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT u.*, t.name AS tenant_name, t.slug AS tenant_slug
+            SELECT u.*, o.name AS org_name, o.slug AS org_slug
             FROM users u
-            LEFT JOIN tenants t ON t.id = u.tenant_id
-            WHERE u.external_id = %s AND u.tenant_id = %s
-        """, (external_id, tenant_id))
+            LEFT JOIN organizations o ON o.id = u.organization_id
+            WHERE u.external_id = %s AND u.organization_id = %s
+        """, (external_id, organization_id))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -7769,17 +7927,17 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def create_sso_user(self, username, display_name, role, tenant_id, external_id):
+    def create_sso_user(self, username, display_name, role, organization_id, external_id):
         """Create SSO user with auth_provider='saml', no usable password."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, tenant_id,
+            INSERT INTO users (username, password_hash, display_name, role, organization_id,
                                auth_provider, external_id)
             VALUES (%s, %s, %s, %s, %s, 'saml', %s)
             RETURNING id, username, display_name, role, enabled, created_at, updated_at,
-                      last_login_at, tenant_id, is_superadmin, portal_role, auth_provider, external_id
-        """, (username, '!sso-managed', display_name, role, tenant_id, external_id))
+                      last_login_at, organization_id, is_superadmin, portal_role, auth_provider, external_id
+        """, (username, '!sso-managed', display_name, role, organization_id, external_id))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -7812,29 +7970,29 @@ class Database:
         self.conn.commit()
         cursor.close()
 
-    def create_sso_auth_code(self, user_id, tenant_id):
+    def create_sso_auth_code(self, user_id, organization_id):
         """Generate and store a one-time SSO auth code. Returns the raw code."""
         import secrets
         self._ensure_users_table()
         code = secrets.token_urlsafe(64)
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO sso_auth_codes (code, user_id, tenant_id, expires_at)
+            INSERT INTO sso_auth_codes (code, user_id, organization_id, expires_at)
             VALUES (%s, %s, %s, NOW() + INTERVAL '60 seconds')
-        """, (code, user_id, tenant_id))
+        """, (code, user_id, organization_id))
         self.conn.commit()
         cursor.close()
         return code
 
     def consume_sso_auth_code(self, code):
-        """Look up code, verify not expired/used, mark used. Returns {user_id, tenant_id} or None."""
+        """Look up code, verify not expired/used, mark used. Returns {user_id, organization_id} or None."""
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             UPDATE sso_auth_codes
             SET used = true
             WHERE code = %s AND used = false AND expires_at > NOW()
-            RETURNING user_id, tenant_id
+            RETURNING user_id, organization_id
         """, (code,))
         row = cursor.fetchone()
         self.conn.commit()
@@ -7864,37 +8022,37 @@ class Database:
                 justification TEXT,
                 attested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 next_due TIMESTAMPTZ,
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_att_identity ON sa_attestations(identity_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_att_tenant ON sa_attestations(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_att_org ON sa_attestations(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_att_attested ON sa_attestations(attested_at DESC)")
         self.conn.commit()
         cursor.close()
         Database._sa_attestations_ensured = True
 
     def create_sa_attestation(self, identity_id, identity_db_id, attested_by,
-                              status, justification, interval_days=90, tenant_id=None):
+                              status, justification, interval_days=90, organization_id=None):
         """Insert a new attestation. Returns the created row."""
         self._ensure_sa_attestations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO sa_attestations
                 (identity_id, identity_db_id, attested_by, status, justification,
-                 attested_at, next_due, tenant_id)
+                 attested_at, next_due, organization_id)
             VALUES (%s, %s, %s, %s, %s, NOW(),
                     NOW() + (%s || ' days')::INTERVAL, %s)
             RETURNING *
         """, (identity_id, identity_db_id, attested_by, status, justification,
-              str(interval_days), tenant_id))
+              str(interval_days), organization_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
         return dict(row) if row else None
 
-    def get_latest_attestation(self, identity_id, tenant_id=None):
+    def get_latest_attestation(self, identity_id, organization_id=None):
         """Return the most recent attestation for an identity, or None."""
         self._ensure_sa_attestations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -7905,16 +8063,16 @@ class Database:
             WHERE sa.identity_id = %s
         """
         params = [identity_id]
-        if tenant_id is not None:
-            sql += " AND sa.tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id is not None:
+            sql += " AND sa.organization_id = %s"
+            params.append(organization_id)
         sql += " ORDER BY sa.attested_at DESC LIMIT 1"
         cursor.execute(sql, params)
         row = cursor.fetchone()
         cursor.close()
         return dict(row) if row else None
 
-    def get_attestations_for_identity(self, identity_id, tenant_id=None):
+    def get_attestations_for_identity(self, identity_id, organization_id=None):
         """Return full attestation history for an identity."""
         self._ensure_sa_attestations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -7925,9 +8083,9 @@ class Database:
             WHERE sa.identity_id = %s
         """
         params = [identity_id]
-        if tenant_id is not None:
-            sql += " AND sa.tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id is not None:
+            sql += " AND sa.organization_id = %s"
+            params.append(organization_id)
         sql += " ORDER BY sa.attested_at DESC"
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -7955,12 +8113,12 @@ class Database:
                 access_snapshot JSONB DEFAULT '[]',
                 decided_by INTEGER NOT NULL REFERENCES users(id),
                 exception_expiry TIMESTAMPTZ,
-                tenant_id INTEGER,
+                organization_id INTEGER,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_identity ON governance_decisions(identity_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_tenant ON governance_decisions(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_org ON governance_decisions(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_gov_dec_created ON governance_decisions(created_at DESC)")
         self.conn.commit()
         cursor.close()
@@ -7968,25 +8126,25 @@ class Database:
 
     def create_governance_decision(self, identity_id, identity_db_id, decision, reason,
                                    risk_score, risk_band, risk_factors, access_snapshot,
-                                   decided_by, exception_expiry=None, tenant_id=None):
+                                   decided_by, exception_expiry=None, organization_id=None):
         self._ensure_governance_decisions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO governance_decisions
                 (identity_id, identity_db_id, decision, reason,
                  risk_score_snapshot, risk_band_snapshot, risk_factors_snapshot,
-                 access_snapshot, decided_by, exception_expiry, tenant_id)
+                 access_snapshot, decided_by, exception_expiry, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (identity_id, identity_db_id, decision, reason,
               risk_score, risk_band, json.dumps(risk_factors),
-              json.dumps(access_snapshot), decided_by, exception_expiry, tenant_id))
+              json.dumps(access_snapshot), decided_by, exception_expiry, organization_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
         return dict(row) if row else None
 
-    def get_latest_governance_decision(self, identity_id, tenant_id=None):
+    def get_latest_governance_decision(self, identity_id, organization_id=None):
         self._ensure_governance_decisions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         sql = """
@@ -7996,9 +8154,9 @@ class Database:
             WHERE gd.identity_id = %s
         """
         params = [identity_id]
-        if tenant_id is not None:
-            sql += " AND gd.tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id is not None:
+            sql += " AND gd.organization_id = %s"
+            params.append(organization_id)
         sql += " ORDER BY gd.created_at DESC LIMIT 1"
         cursor.execute(sql, params)
         row = cursor.fetchone()
@@ -8096,7 +8254,7 @@ class Database:
         cursor.execute("""
             INSERT INTO rbac_hygiene_scans
                 (score, grade, total_assignments, total_findings, summary, findings,
-                 discovery_run_id, tenant_id)
+                 discovery_run_id, organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
@@ -8107,7 +8265,7 @@ class Database:
             _json.dumps(summary),
             _json.dumps(result.get('findings', [])),
             run_id,
-            self._tenant_id or 0,
+            self._organization_id or 0,
         ))
         scan_id = cursor.fetchone()[0]
         self.conn.commit()
@@ -8216,21 +8374,21 @@ class Database:
             CREATE TABLE IF NOT EXISTS copilot_conversations (
                 id SERIAL PRIMARY KEY,
                 user_id INT,
-                tenant_id INT,
+                organization_id INT,
                 title TEXT,
                 messages JSONB DEFAULT '[]'::jsonb,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        # RLS policies for tenant isolation (idempotent)
+        # RLS policies for organization isolation (idempotent)
         cursor.execute("ALTER TABLE copilot_conversations ENABLE ROW LEVEL SECURITY")
         cursor.execute("ALTER TABLE copilot_conversations FORCE ROW LEVEL SECURITY")
         for policy_stmt in [
-            "CREATE POLICY tenant_strict_sel ON copilot_conversations FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-            "CREATE POLICY tenant_strict_ins ON copilot_conversations FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-            "CREATE POLICY tenant_strict_upd ON copilot_conversations FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-            "CREATE POLICY tenant_strict_del ON copilot_conversations FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY org_strict_sel ON copilot_conversations FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY org_strict_ins ON copilot_conversations FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY org_strict_upd ON copilot_conversations FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY org_strict_del ON copilot_conversations FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
         ]:
             cursor.execute("SAVEPOINT rls_policy")
             try:
@@ -8242,13 +8400,13 @@ class Database:
         cursor.close()
         Database._copilot_ensured = True
 
-    def create_copilot_conversation(self, user_id, tenant_id, title, messages=None):
+    def create_copilot_conversation(self, user_id, organization_id, title, messages=None):
         self._ensure_copilot_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO copilot_conversations (user_id, tenant_id, title, messages)
+            INSERT INTO copilot_conversations (user_id, organization_id, title, messages)
             VALUES (%s, %s, %s, %s) RETURNING id, title, messages, created_at, updated_at
-        """, (user_id, tenant_id, title, json.dumps(messages or [])))
+        """, (user_id, organization_id, title, json.dumps(messages or [])))
         row = dict(cursor.fetchone())
         self.conn.commit()
         cursor.close()
@@ -8258,7 +8416,7 @@ class Database:
         self._ensure_copilot_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT id, user_id, tenant_id, title, messages, created_at, updated_at
+            SELECT id, user_id, organization_id, title, messages, created_at, updated_at
             FROM copilot_conversations WHERE id = %s AND user_id = %s
         """, (conv_id, user_id))
         row = cursor.fetchone()
@@ -8310,11 +8468,11 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cloud_connections (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 cloud VARCHAR(20) NOT NULL DEFAULT 'azure',
                 connection_type VARCHAR(30) NOT NULL DEFAULT 'entra',
                 label VARCHAR(255) NOT NULL,
-                entra_tenant_id VARCHAR(100),
+                azure_directory_id VARCHAR(100),
                 client_id VARCHAR(100),
                 status VARCHAR(20) NOT NULL DEFAULT 'pending',
                 display_order INTEGER NOT NULL DEFAULT 0,
@@ -8324,19 +8482,19 @@ class Database:
                 metadata JSONB DEFAULT '{}',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(tenant_id, cloud, entra_tenant_id)
+                UNIQUE(organization_id, cloud, azure_directory_id)
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_tenant ON cloud_connections(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_org ON cloud_connections(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_conn_cloud ON cloud_connections(cloud)")
-        # RLS policies for tenant isolation (idempotent)
+        # RLS policies for organization isolation (idempotent)
         cursor.execute("ALTER TABLE cloud_connections ENABLE ROW LEVEL SECURITY")
         cursor.execute("ALTER TABLE cloud_connections FORCE ROW LEVEL SECURITY")
         for policy_stmt in [
-            "CREATE POLICY tenant_strict_sel ON cloud_connections FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-            "CREATE POLICY tenant_strict_ins ON cloud_connections FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-            "CREATE POLICY tenant_strict_upd ON cloud_connections FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-            "CREATE POLICY tenant_strict_del ON cloud_connections FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+            "CREATE POLICY org_strict_sel ON cloud_connections FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY org_strict_ins ON cloud_connections FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY org_strict_upd ON cloud_connections FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY org_strict_del ON cloud_connections FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
         ]:
             cursor.execute("SAVEPOINT rls_policy")
             try:
@@ -8348,23 +8506,23 @@ class Database:
         cursor.close()
         Database._cloud_connections_ensured = True
 
-    def create_cloud_connection(self, tenant_id, cloud, label, entra_tenant_id=None,
+    def create_cloud_connection(self, organization_id, cloud, label, azure_directory_id=None,
                                  client_id=None, connection_type='entra', metadata=None):
-        """Create a new cloud connection for a tenant."""
+        """Create a new cloud connection for an organization."""
         self._ensure_cloud_connections_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         # Auto-assign display_order
-        cursor.execute("SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order FROM cloud_connections WHERE tenant_id = %s", (tenant_id,))
+        cursor.execute("SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order FROM cloud_connections WHERE organization_id = %s", (organization_id,))
         next_order = cursor.fetchone()['next_order']
         cursor.execute("""
-            INSERT INTO cloud_connections (tenant_id, cloud, connection_type, label, entra_tenant_id,
+            INSERT INTO cloud_connections (organization_id, cloud, connection_type, label, azure_directory_id,
                                            client_id, status, display_order, metadata)
             VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
-            ON CONFLICT (tenant_id, cloud, entra_tenant_id) DO UPDATE
+            ON CONFLICT (organization_id, cloud, azure_directory_id) DO UPDATE
               SET label = EXCLUDED.label, client_id = EXCLUDED.client_id,
                   updated_at = NOW()
             RETURNING *
-        """, (tenant_id, cloud, connection_type, label, entra_tenant_id,
+        """, (organization_id, cloud, connection_type, label, azure_directory_id,
               client_id, next_order, json.dumps(metadata or {})))
         row = cursor.fetchone()
         self.conn.commit()
@@ -8375,8 +8533,8 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def get_cloud_connections(self, tenant_id, cloud=None, include_secrets=False):
-        """Get all cloud connections for a tenant, with computed sub/identity counts.
+    def get_cloud_connections(self, organization_id, cloud=None, include_secrets=False):
+        """Get all cloud connections for an organization, with computed sub/identity counts.
         Set include_secrets=True to keep client_secret in metadata (for scheduler use).
         """
         self._ensure_cloud_connections_table()
@@ -8389,9 +8547,9 @@ class Database:
                 COALESCE((SELECT COUNT(*) FROM cloud_subscriptions cs
                           WHERE cs.cloud_connection_id = cc.id AND cs.monitored = false), 0) AS discovered_count
             FROM cloud_connections cc
-            WHERE cc.tenant_id = %s
+            WHERE cc.organization_id = %s
         """
-        params: list = [tenant_id]
+        params: list = [organization_id]
         if cloud:
             query += " AND cc.cloud = %s"
             params.append(cloud)
@@ -8415,8 +8573,8 @@ class Database:
         """Get a single cloud connection by ID."""
         self._ensure_cloud_connections_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if self._tenant_id is not None:
-            cursor.execute("SELECT * FROM cloud_connections WHERE id = %s AND tenant_id = %s", (connection_id, self._tenant_id))
+        if self._organization_id is not None:
+            cursor.execute("SELECT * FROM cloud_connections WHERE id = %s AND organization_id = %s", (connection_id, self._organization_id))
         else:
             cursor.execute("SELECT * FROM cloud_connections WHERE id = %s", (connection_id,))
         row = cursor.fetchone()
@@ -8433,7 +8591,7 @@ class Database:
         """Update a cloud connection."""
         self._ensure_cloud_connections_table()
         allowed = {'label', 'status', 'display_order', 'last_test_at', 'last_test_status',
-                   'last_discovery_at', 'metadata', 'entra_tenant_id', 'client_id'}
+                   'last_discovery_at', 'metadata', 'azure_directory_id', 'client_id'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_cloud_connection_by_id(connection_id)
@@ -8444,15 +8602,15 @@ class Database:
             params.append(json.dumps(v) if k == 'metadata' else v)
         set_parts.append("updated_at = NOW()")
         params.append(connection_id)
-        if self._tenant_id is not None:
-            params.append(self._tenant_id)
-            tenant_clause = " AND tenant_id = %s"
+        if self._organization_id is not None:
+            params.append(self._organization_id)
+            org_clause = " AND organization_id = %s"
         else:
-            tenant_clause = ""
+            org_clause = ""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE cloud_connections SET {', '.join(set_parts)}
-            WHERE id = %s{tenant_clause} RETURNING *
+            WHERE id = %s{org_clause} RETURNING *
         """, params)
         row = cursor.fetchone()
         self.conn.commit()
@@ -8465,12 +8623,12 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def delete_cloud_connection(self, connection_id, tenant_id=None):
-        """Delete a cloud connection. Optionally verify tenant ownership."""
+    def delete_cloud_connection(self, connection_id, organization_id=None):
+        """Delete a cloud connection. Optionally verify organization ownership."""
         self._ensure_cloud_connections_table()
         cursor = self.conn.cursor()
-        if tenant_id:
-            cursor.execute("DELETE FROM cloud_connections WHERE id = %s AND tenant_id = %s", (connection_id, tenant_id))
+        if organization_id:
+            cursor.execute("DELETE FROM cloud_connections WHERE id = %s AND organization_id = %s", (connection_id, organization_id))
         else:
             cursor.execute("DELETE FROM cloud_connections WHERE id = %s", (connection_id,))
         deleted = cursor.rowcount
@@ -8492,7 +8650,7 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cloud_subscriptions (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 cloud VARCHAR(20) NOT NULL,
                 account_id VARCHAR(255) NOT NULL,
                 account_name VARCHAR(500),
@@ -8501,10 +8659,10 @@ class Database:
                 activated_at TIMESTAMPTZ,
                 activated_by INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(tenant_id, cloud, account_id)
+                UNIQUE(organization_id, cloud, account_id)
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_tenant ON cloud_subscriptions(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_org ON cloud_subscriptions(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_cloud ON cloud_subscriptions(cloud)")
         # Billing columns
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS rate_cents INTEGER NOT NULL DEFAULT 6900")
@@ -8517,19 +8675,19 @@ class Database:
         cursor.close()
         Database._cloud_subscriptions_ensured = True
 
-    def sync_cloud_subscriptions(self, tenant_id=None):
+    def sync_cloud_subscriptions(self, organization_id=None):
         """Backfill cloud_subscriptions from discovery data if empty.
 
         Sources: identity_subscription_access (individual rows) and
         discovery_runs (comma-separated fallback). Only runs when the
-        table has no rows for the given tenant.
+        table has no rows for the given organization.
         """
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor()
 
         # Check if any records already exist
-        if tenant_id is not None and tenant_id > 0:
-            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE tenant_id = %s", (tenant_id,))
+        if organization_id is not None and organization_id > 0:
+            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s", (organization_id,))
         else:
             cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions")
         if cursor.fetchone()[0] > 0:
@@ -8537,17 +8695,17 @@ class Database:
             return  # Already populated
 
         # Source 1: identity_subscription_access (clean individual records)
-        if tenant_id is not None and tenant_id > 0:
+        if organization_id is not None and organization_id > 0:
             cursor.execute("""
-                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.tenant_id
+                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.organization_id
                 FROM identity_subscription_access isa
                 JOIN discovery_runs dr ON dr.id = isa.discovery_run_id
-                WHERE dr.tenant_id = %s
+                WHERE dr.organization_id = %s
                   AND isa.subscription_id IS NOT NULL AND isa.subscription_id != ''
-            """, (tenant_id,))
+            """, (organization_id,))
         else:
             cursor.execute("""
-                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.tenant_id
+                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.organization_id
                 FROM identity_subscription_access isa
                 JOIN discovery_runs dr ON dr.id = isa.discovery_run_id
                 WHERE isa.subscription_id IS NOT NULL AND isa.subscription_id != ''
@@ -8557,15 +8715,15 @@ class Database:
         inserted = set()
         for row in isa_rows:
             sub_id, sub_name, run_tid = row[0], row[1], row[2]
-            effective_tid = run_tid or (tenant_id if tenant_id and tenant_id > 0 else 1)
+            effective_tid = run_tid or (organization_id if organization_id and organization_id > 0 else 1)
             key = (effective_tid, sub_id)
             if key in inserted:
                 continue
             try:
                 cursor.execute("""
-                    INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                    INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
                     VALUES (%s, 'azure', %s, %s, 'discovered')
-                    ON CONFLICT (tenant_id, cloud, account_id) DO NOTHING
+                    ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
                 """, (effective_tid, sub_id, sub_name or sub_id))
                 inserted.add(key)
             except Exception:
@@ -8573,22 +8731,22 @@ class Database:
 
         # Source 2: discovery_runs fallback (comma-separated subscription_ids)
         if not inserted:
-            if tenant_id is not None and tenant_id > 0:
+            if organization_id is not None and organization_id > 0:
                 cursor.execute("""
-                    SELECT DISTINCT subscription_id, subscription_name, tenant_id
+                    SELECT DISTINCT subscription_id, subscription_name, organization_id
                     FROM discovery_runs
-                    WHERE tenant_id = %s AND subscription_id IS NOT NULL AND subscription_id != ''
-                """, (tenant_id,))
+                    WHERE organization_id = %s AND subscription_id IS NOT NULL AND subscription_id != ''
+                """, (organization_id,))
             else:
                 cursor.execute("""
-                    SELECT DISTINCT subscription_id, subscription_name, tenant_id
+                    SELECT DISTINCT subscription_id, subscription_name, organization_id
                     FROM discovery_runs
                     WHERE subscription_id IS NOT NULL AND subscription_id != ''
                 """)
             for row in cursor.fetchall():
                 sub_ids = row[0].split(',')
                 sub_names = (row[1] or '').split(', ')
-                run_tid = row[2] or (tenant_id if tenant_id and tenant_id > 0 else 1)
+                run_tid = row[2] or (organization_id if organization_id and organization_id > 0 else 1)
                 for i, sid in enumerate(sub_ids):
                     sid = sid.strip()
                     if not sid:
@@ -8599,9 +8757,9 @@ class Database:
                         continue
                     try:
                         cursor.execute("""
-                            INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                            INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
                             VALUES (%s, 'azure', %s, %s, 'discovered')
-                            ON CONFLICT (tenant_id, cloud, account_id) DO NOTHING
+                            ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
                         """, (run_tid, sid, sname))
                         inserted.add(key)
                     except Exception:
@@ -8610,7 +8768,7 @@ class Database:
         self.conn.commit()
         cursor.close()
 
-    def insert_discovered_subscriptions(self, tenant_id, cloud, connection_id, subs_list):
+    def insert_discovered_subscriptions(self, organization_id, cloud, connection_id, subs_list):
         """Insert discovered subscriptions for a connection.
         subs_list: list of {'id': sub_id, 'name': display_name}
         Returns count of inserted rows.
@@ -8629,12 +8787,12 @@ class Database:
             try:
                 cursor.execute("""
                     INSERT INTO cloud_subscriptions
-                        (tenant_id, cloud, account_id, account_name, status, cloud_connection_id, rate_cents)
+                        (organization_id, cloud, account_id, account_name, status, cloud_connection_id, rate_cents)
                     VALUES (%s, %s, %s, %s, 'discovered', %s, %s)
-                    ON CONFLICT (tenant_id, cloud, account_id)
+                    ON CONFLICT (organization_id, cloud, account_id)
                     DO UPDATE SET cloud_connection_id = EXCLUDED.cloud_connection_id,
                                   account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
-                """, (tenant_id, cloud, sub_id, sub_name, connection_id, rate))
+                """, (organization_id, cloud, sub_id, sub_name, connection_id, rate))
                 inserted += 1
             except Exception:
                 self.conn.rollback()
@@ -8642,18 +8800,18 @@ class Database:
         cursor.close()
         return inserted
 
-    def get_cloud_subscriptions(self, tenant_id, cloud=None):
-        """List cloud subscriptions for a tenant with connection_label. None = superadmin (all)."""
+    def get_cloud_subscriptions(self, organization_id, cloud=None):
+        """List cloud subscriptions for an organization with connection_label. None = superadmin (all)."""
         self._ensure_cloud_subscriptions_table()
         self._ensure_cloud_connections_table()
-        self.sync_cloud_subscriptions(tenant_id)
+        self.sync_cloud_subscriptions(organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             query = """SELECT cs.*, cc.label AS connection_label
                        FROM cloud_subscriptions cs
                        LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                       WHERE cs.tenant_id = %s"""
-            params: list = [tenant_id]
+                       WHERE cs.organization_id = %s"""
+            params: list = [organization_id]
         else:
             query = """SELECT cs.*, cc.label AS connection_label
                        FROM cloud_subscriptions cs
@@ -8673,12 +8831,12 @@ class Database:
                     r[ts] = r[ts].isoformat()
         return rows
 
-    def get_subscription_stats(self, tenant_id):
+    def get_subscription_stats(self, organization_id):
         """Summary counts for cloud subscriptions. None = superadmin (all)."""
         self._ensure_cloud_subscriptions_table()
-        self.sync_cloud_subscriptions(tenant_id)
+        self.sync_cloud_subscriptions(organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
                 SELECT
                     COUNT(*) as total,
@@ -8686,8 +8844,8 @@ class Database:
                     COUNT(*) FILTER (WHERE monitored = false) as discovered,
                     COUNT(DISTINCT cloud) as clouds
                 FROM cloud_subscriptions
-                WHERE tenant_id = %s
-            """, (tenant_id,))
+                WHERE organization_id = %s
+            """, (organization_id,))
         else:
             cursor.execute("""
                 SELECT
@@ -8701,17 +8859,17 @@ class Database:
         cursor.close()
         return row
 
-    def activate_cloud_subscription(self, sub_id, user_id, tenant_id=None):
-        """Activate a subscription for monitoring, scoped by tenant."""
+    def activate_cloud_subscription(self, sub_id, user_id, organization_id=None):
+        """Activate a subscription for monitoring, scoped by organization."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE id = %s AND tenant_id = %s
+                WHERE id = %s AND organization_id = %s
                 RETURNING *
-            """, (user_id, sub_id, tenant_id))
+            """, (user_id, sub_id, organization_id))
         else:
             cursor.execute("""
                 UPDATE cloud_subscriptions
@@ -8730,17 +8888,17 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
-    def activate_all_cloud_subscriptions(self, user_id, tenant_id=None):
-        """Activate all discovered (unmonitored) subscriptions for a tenant."""
+    def activate_all_cloud_subscriptions(self, user_id, organization_id=None):
+        """Activate all discovered (unmonitored) subscriptions for an organization."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE tenant_id = %s AND monitored = false
+                WHERE organization_id = %s AND monitored = false
                 RETURNING *
-            """, (user_id, tenant_id))
+            """, (user_id, organization_id))
         else:
             cursor.execute("""
                 UPDATE cloud_subscriptions
@@ -8757,17 +8915,17 @@ class Database:
                     r[ts] = r[ts].isoformat()
         return rows
 
-    def deactivate_cloud_subscription(self, sub_id, tenant_id=None):
-        """Stop monitoring a subscription, scoped by tenant."""
+    def deactivate_cloud_subscription(self, sub_id, organization_id=None):
+        """Stop monitoring a subscription, scoped by organization."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if tenant_id is not None:
+        if organization_id is not None:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = false, status = 'inactive'
-                WHERE id = %s AND tenant_id = %s
+                WHERE id = %s AND organization_id = %s
                 RETURNING *
-            """, (sub_id, tenant_id))
+            """, (sub_id, organization_id))
         else:
             cursor.execute("""
                 UPDATE cloud_subscriptions
@@ -8800,7 +8958,7 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS billing_events (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 event_type VARCHAR(50) NOT NULL,
                 field_changed VARCHAR(50),
                 old_value TEXT,
@@ -8810,22 +8968,22 @@ class Database:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_events_tenant ON billing_events(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_events_org ON billing_events(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_billing_events_created ON billing_events(created_at DESC)")
         self.conn.commit()
         cursor.close()
         Database._billing_events_ensured = True
 
-    def log_billing_event(self, tenant_id, event_type, field_changed=None,
+    def log_billing_event(self, organization_id, event_type, field_changed=None,
                           old_value=None, new_value=None, changed_by=None, metadata=None):
         """Insert a billing event and return it."""
         self._ensure_billing_events_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            INSERT INTO billing_events (tenant_id, event_type, field_changed, old_value, new_value, changed_by, metadata)
+            INSERT INTO billing_events (organization_id, event_type, field_changed, old_value, new_value, changed_by, metadata)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
-        """, (tenant_id, event_type, field_changed,
+        """, (organization_id, event_type, field_changed,
               str(old_value) if old_value is not None else None,
               str(new_value) if new_value is not None else None,
               changed_by, json.dumps(metadata or {})))
@@ -8836,20 +8994,20 @@ class Database:
             row['created_at'] = row['created_at'].isoformat()
         return row
 
-    def get_billing_events(self, tenant_id=None, limit=50, offset=0):
-        """Get billing events with tenant name JOIN. Optionally filter by tenant_id."""
+    def get_billing_events(self, organization_id=None, limit=50, offset=0):
+        """Get billing events with organization name JOIN. Optionally filter by org."""
         self._ensure_billing_events_table()
-        self._ensure_tenants_table()
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         query = """
-            SELECT be.*, t.name as tenant_name
+            SELECT be.*, o.name as org_name
             FROM billing_events be
-            JOIN tenants t ON t.id = be.tenant_id
+            JOIN organizations o ON o.id = be.organization_id
         """
         params = []
-        if tenant_id is not None:
-            query += " WHERE be.tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id is not None:
+            query += " WHERE be.organization_id = %s"
+            params.append(organization_id)
         query += " ORDER BY be.created_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
         cursor.execute(query, params)
@@ -8860,14 +9018,14 @@ class Database:
                 r['created_at'] = r['created_at'].isoformat()
         return rows
 
-    def update_cloud_subscription_rate(self, tenant_id, cloud, rate_cents):
-        """Update per-subscription rate for all subs of a given cloud for a tenant."""
+    def update_cloud_subscription_rate(self, organization_id, cloud, rate_cents):
+        """Update per-subscription rate for all subs of a given cloud for an organization."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor()
         cursor.execute("""
             UPDATE cloud_subscriptions SET rate_cents = %s
-            WHERE tenant_id = %s AND cloud = %s
-        """, (rate_cents, tenant_id, cloud))
+            WHERE organization_id = %s AND cloud = %s
+        """, (rate_cents, organization_id, cloud))
         updated = cursor.rowcount
         self.conn.commit()
         cursor.close()
@@ -8880,40 +9038,40 @@ class Database:
     def _ensure_scan_schedules(self):
         _ensure_scan_schedules_table(self.conn)
 
-    def get_scan_schedules(self, tenant_id):
-        """Get all scan schedules for a tenant."""
+    def get_scan_schedules(self, organization_id):
+        """Get all scan schedules for an organization."""
         self._ensure_scan_schedules()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT s.*, c.label as connection_label, c.cloud
             FROM scan_schedules s
             LEFT JOIN cloud_connections c ON c.id = s.connection_id
-            WHERE s.tenant_id = %s
+            WHERE s.organization_id = %s
             ORDER BY s.created_at DESC
-        """, (tenant_id,))
+        """, (organization_id,))
         rows = cursor.fetchall()
         cursor.close()
         return [dict(r) for r in rows]
 
-    def create_scan_schedule(self, tenant_id, connection_id, label, frequency,
+    def create_scan_schedule(self, organization_id, connection_id, label, frequency,
                              cron_expression, next_run_at, created_by):
         """Create a new scan schedule."""
         self._ensure_scan_schedules()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO scan_schedules
-            (tenant_id, connection_id, label, frequency, cron_expression,
+            (organization_id, connection_id, label, frequency, cron_expression,
              next_run_at, created_by)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
-        """, (tenant_id, connection_id, label, frequency, cron_expression,
+        """, (organization_id, connection_id, label, frequency, cron_expression,
               next_run_at, created_by))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
         return dict(row) if row else None
 
-    def update_scan_schedule(self, schedule_id, tenant_id, **kwargs):
+    def update_scan_schedule(self, schedule_id, organization_id, **kwargs):
         """Update a scan schedule."""
         self._ensure_scan_schedules()
         allowed = {'label', 'frequency', 'cron_expression', 'next_run_at', 'enabled', 'connection_id'}
@@ -8921,11 +9079,11 @@ class Database:
         if not updates:
             return None
         set_clause = ', '.join(f'{k} = %s' for k in updates)
-        values = list(updates.values()) + [schedule_id, tenant_id]
+        values = list(updates.values()) + [schedule_id, organization_id]
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             UPDATE scan_schedules SET {set_clause}, updated_at = NOW()
-            WHERE id = %s AND tenant_id = %s
+            WHERE id = %s AND organization_id = %s
             RETURNING *
         """, values)
         row = cursor.fetchone()
@@ -8933,13 +9091,13 @@ class Database:
         cursor.close()
         return dict(row) if row else None
 
-    def delete_scan_schedule(self, schedule_id, tenant_id):
+    def delete_scan_schedule(self, schedule_id, organization_id):
         """Delete a scan schedule."""
         self._ensure_scan_schedules()
         cursor = self.conn.cursor()
         cursor.execute(
-            "DELETE FROM scan_schedules WHERE id = %s AND tenant_id = %s",
-            (schedule_id, tenant_id))
+            "DELETE FROM scan_schedules WHERE id = %s AND organization_id = %s",
+            (schedule_id, organization_id))
         deleted = cursor.rowcount
         self.conn.commit()
         cursor.close()
@@ -8950,9 +9108,9 @@ class Database:
         self._ensure_scan_schedules()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT s.*, t.name as tenant_name
+            SELECT s.*, o.name as org_name
             FROM scan_schedules s
-            JOIN tenants t ON t.id = s.tenant_id
+            JOIN organizations o ON o.id = s.organization_id
             WHERE s.enabled = true AND s.next_run_at <= NOW()
             ORDER BY s.next_run_at ASC
         """)
@@ -9048,7 +9206,7 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                organization_id INTEGER NOT NULL REFERENCES organizations(id),
                 invoice_number VARCHAR(50) UNIQUE NOT NULL,
                 status VARCHAR(20) NOT NULL DEFAULT 'draft',
                 period_start DATE NOT NULL,
@@ -9073,7 +9231,7 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_tenant ON invoices(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_org ON invoices(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoices_number ON invoices(invoice_number)")
         cursor.execute("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)")
@@ -9103,7 +9261,7 @@ class Database:
             seq = 1
         return f'{prefix}-{year}-{seq:04d}'
 
-    def create_invoice(self, tenant_id, invoice_number, period_start, period_end,
+    def create_invoice(self, organization_id, invoice_number, period_start, period_end,
                        subtotal_cents, tax_label, tax_rate, tax_amount_cents,
                        discount_cents, total_cents, line_items, seller_snapshot,
                        buyer_snapshot, due_at, notes, payment_terms, created_by,
@@ -9113,14 +9271,14 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO invoices (
-                tenant_id, invoice_number, period_start, period_end,
+                organization_id, invoice_number, period_start, period_end,
                 subtotal_cents, tax_label, tax_rate, tax_amount_cents,
                 discount_cents, total_cents, line_items, seller_snapshot,
                 buyer_snapshot, issued_at, due_at, notes, payment_terms, created_by,
                 content_hash
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s)
             RETURNING *
-        """, (tenant_id, invoice_number, period_start, period_end,
+        """, (organization_id, invoice_number, period_start, period_end,
               subtotal_cents, tax_label, tax_rate, tax_amount_cents,
               discount_cents, total_cents, json.dumps(line_items), json.dumps(seller_snapshot),
               json.dumps(buyer_snapshot), due_at, notes, payment_terms, created_by,
@@ -9130,21 +9288,21 @@ class Database:
         cursor.close()
         return self._serialize_invoice(row)
 
-    def get_invoices(self, tenant_id=None, status=None, limit=50, offset=0):
-        """Get invoices with tenant name JOIN. Optionally filter by tenant_id and status."""
+    def get_invoices(self, organization_id=None, status=None, limit=50, offset=0):
+        """Get invoices with organization name JOIN. Optionally filter by org and status."""
         self._ensure_invoices_table()
-        self._ensure_tenants_table()
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         query = """
-            SELECT inv.*, t.name as tenant_name
+            SELECT inv.*, o.name as org_name
             FROM invoices inv
-            JOIN tenants t ON t.id = inv.tenant_id
+            JOIN organizations o ON o.id = inv.organization_id
             WHERE 1=1
         """
         params = []
-        if tenant_id is not None:
-            query += " AND inv.tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id is not None:
+            query += " AND inv.organization_id = %s"
+            params.append(organization_id)
         if status:
             query += " AND inv.status = %s"
             params.append(status)
@@ -9156,14 +9314,14 @@ class Database:
         return [self._serialize_invoice(r) for r in rows]
 
     def get_invoice_by_id(self, invoice_id):
-        """Get a single invoice by ID with tenant name."""
+        """Get a single invoice by ID with organization name."""
         self._ensure_invoices_table()
-        self._ensure_tenants_table()
+        self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT inv.*, t.name as tenant_name
+            SELECT inv.*, o.name as org_name
             FROM invoices inv
-            JOIN tenants t ON t.id = inv.tenant_id
+            JOIN organizations o ON o.id = inv.organization_id
             WHERE inv.id = %s
         """, (invoice_id,))
         row = cursor.fetchone()
@@ -9272,7 +9430,7 @@ class Database:
                 cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col} {coltype}")
             except Exception:
                 pass
-        cursor.execute("ALTER TABLE identity_subscription_access ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
+        cursor.execute("ALTER TABLE identity_subscription_access ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         self.conn.commit()
         cursor.close()
         Database._isa_ensured = True
@@ -9285,7 +9443,7 @@ class Database:
             INSERT INTO identity_subscription_access
                 (identity_db_id, identity_id, subscription_id, subscription_name,
                  rbac_role, scope, scope_type, risk_level, discovery_run_id,
-                 tenant_id)
+                 organization_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_db_id, subscription_id, rbac_role, scope) DO UPDATE
             SET risk_level = EXCLUDED.risk_level,
@@ -9299,7 +9457,7 @@ class Database:
             role_assignment.get('scope_type', 'subscription'),
             role_assignment.get('risk_level', 'info'),
             run_id,
-            self._tenant_id,
+            self._organization_id,
         ))
         self.conn.commit()
         cursor.close()
@@ -9417,20 +9575,20 @@ class Database:
                     remediation TEXT,
                     component VARCHAR(30),
                     score_impact INTEGER DEFAULT 0,
-                    tenant_id INTEGER NOT NULL,
+                    organization_id INTEGER NOT NULL,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_identity ON spn_exposure_findings(identity_db_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_run ON spn_exposure_findings(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_tenant ON spn_exposure_findings(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_org ON spn_exposure_findings(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_spn_findings_severity ON spn_exposure_findings(severity)")
             self.conn.commit()
             Database._spn_exposure_ensured = True
         except Exception as e:
             self.conn.rollback()
-            if self._tenant_id:
-                self.set_tenant_context(self._tenant_id)
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
             print(f"  ⚠️ SPN exposure schema error: {e}")
         finally:
             cursor.close()
@@ -9491,21 +9649,21 @@ class Database:
                 "DELETE FROM spn_exposure_findings WHERE identity_db_id = %s AND discovery_run_id = %s",
                 (identity_db_id, run_id))
 
-            tenant_id = self._tenant_id or 1
+            organization_id = self._organization_id or 1
             for f in findings:
                 evidence_json = _json.dumps(f.get('evidence', {}))
                 cursor.execute("""
                     INSERT INTO spn_exposure_findings
                         (identity_db_id, discovery_run_id, finding_type, severity,
                          title, description, evidence, remediation, component,
-                         score_impact, tenant_id)
+                         score_impact, organization_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     identity_db_id, run_id, f.get('finding_type', ''),
                     f.get('severity', 'info'), f.get('title', ''),
                     f.get('description', ''), evidence_json,
                     f.get('remediation', ''), f.get('component', ''),
-                    f.get('score_impact', 0), tenant_id,
+                    f.get('score_impact', 0), organization_id,
                 ))
             self.conn.commit()
         except Exception as e:
@@ -9580,20 +9738,20 @@ class Database:
                     remediation TEXT,
                     component VARCHAR(30),
                     score_impact INTEGER DEFAULT 0,
-                    tenant_id INTEGER NOT NULL,
+                    organization_id INTEGER NOT NULL,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_appreg ON app_reg_exposure_findings(app_reg_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_run ON app_reg_exposure_findings(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_tenant ON app_reg_exposure_findings(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_org ON app_reg_exposure_findings(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_areg_findings_severity ON app_reg_exposure_findings(severity)")
             self.conn.commit()
             Database._app_reg_exposure_ensured = True
         except Exception as e:
             self.conn.rollback()
-            if self._tenant_id:
-                self.set_tenant_context(self._tenant_id)
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
             print(f"  ⚠️ App reg exposure schema error: {e}")
         finally:
             cursor.close()
@@ -9653,21 +9811,21 @@ class Database:
                 "DELETE FROM app_reg_exposure_findings WHERE app_reg_id = %s AND discovery_run_id = %s",
                 (app_reg_id, run_id))
 
-            tenant_id = self._tenant_id or 1
+            organization_id = self._organization_id or 1
             for f in findings:
                 evidence_json = _json.dumps(f.get('evidence', {}))
                 cursor.execute("""
                     INSERT INTO app_reg_exposure_findings
                         (app_reg_id, discovery_run_id, finding_type, severity,
                          title, description, evidence, remediation, component,
-                         score_impact, tenant_id)
+                         score_impact, organization_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     app_reg_id, run_id, f.get('finding_type', ''),
                     f.get('severity', 'info'), f.get('title', ''),
                     f.get('description', ''), evidence_json,
                     f.get('remediation', ''), f.get('component', ''),
-                    f.get('score_impact', 0), tenant_id,
+                    f.get('score_impact', 0), organization_id,
                 ))
             self.conn.commit()
         except Exception as e:
@@ -9708,7 +9866,7 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workload_signin_events (
                     id BIGSERIAL PRIMARY KEY,
-                    tenant_id INTEGER NOT NULL,
+                    organization_id INTEGER NOT NULL,
                     identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
                     identity_id TEXT NOT NULL,
                     sign_in_id TEXT,
@@ -9731,7 +9889,7 @@ class Database:
                     ingested_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_tenant ON workload_signin_events(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_org ON workload_signin_events(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_db ON workload_signin_events(identity_db_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_created ON workload_signin_events(created_datetime)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_id ON workload_signin_events(identity_id)")
@@ -9739,7 +9897,7 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workload_activity_stats (
                     id BIGSERIAL PRIMARY KEY,
-                    tenant_id INTEGER NOT NULL,
+                    organization_id INTEGER NOT NULL,
                     identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
                     identity_id TEXT NOT NULL,
                     period_start DATE NOT NULL,
@@ -9760,13 +9918,13 @@ class Database:
                     UNIQUE(identity_db_id, period_start, period_end)
                 )
             """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_was_tenant ON workload_activity_stats(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_was_org ON workload_activity_stats(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_was_identity_db ON workload_activity_stats(identity_db_id)")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workload_anomaly_events (
                     id BIGSERIAL PRIMARY KEY,
-                    tenant_id INTEGER NOT NULL,
+                    organization_id INTEGER NOT NULL,
                     identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
                     identity_id TEXT NOT NULL,
                     anomaly_type TEXT NOT NULL,
@@ -9783,20 +9941,20 @@ class Database:
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_tenant ON workload_anomaly_events(tenant_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_org ON workload_anomaly_events(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_identity_db ON workload_anomaly_events(identity_db_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_type ON workload_anomaly_events(anomaly_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wae_severity ON workload_anomaly_events(severity)")
 
-            # RLS policies for tenant isolation on all 3 workload tables (idempotent)
+            # RLS policies for organization isolation on all 3 workload tables (idempotent)
             for tbl in ('workload_signin_events', 'workload_activity_stats', 'workload_anomaly_events'):
                 cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
                 cursor.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
                 for policy_stmt in [
-                    f"CREATE POLICY tenant_strict_sel ON {tbl} FOR SELECT USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-                    f"CREATE POLICY tenant_strict_ins ON {tbl} FOR INSERT WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-                    f"CREATE POLICY tenant_strict_upd ON {tbl} FOR UPDATE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
-                    f"CREATE POLICY tenant_strict_del ON {tbl} FOR DELETE USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)",
+                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
                 ]:
                     cursor.execute("SAVEPOINT rls_policy")
                     try:
@@ -9809,8 +9967,8 @@ class Database:
             Database._workload_telemetry_ensured = True
         except Exception as e:
             self.conn.rollback()
-            if self._tenant_id:
-                self.set_tenant_context(self._tenant_id)
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
             print(f"  ⚠️ Workload telemetry tables error: {e}")
         finally:
             cursor.close()
@@ -9828,8 +9986,8 @@ class Database:
             return count
         except Exception:
             self.conn.rollback()
-            if self._tenant_id:
-                self.set_tenant_context(self._tenant_id)
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
             return 0
         finally:
             cursor.close()
@@ -9847,8 +10005,8 @@ class Database:
             return count
         except Exception:
             self.conn.rollback()
-            if self._tenant_id:
-                self.set_tenant_context(self._tenant_id)
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
             return 0
         finally:
             cursor.close()
@@ -9856,18 +10014,18 @@ class Database:
 
     # ─── ICE: Identity Correlation CRUD ──────────────────────────────────
 
-    def save_human_identity(self, tenant_id, display_name, employee_id=None,
+    def save_human_identity(self, organization_id, display_name, employee_id=None,
                             department=None, manager_id=None):
         """Create or update a human identity. Returns id."""
         _ensure_human_identities_table(self.conn)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("""
-                INSERT INTO human_identities (tenant_id, display_name, employee_id, department, manager_id)
+                INSERT INTO human_identities (organization_id, display_name, employee_id, department, manager_id)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING id
-            """, (tenant_id, display_name, employee_id, department, manager_id))
+            """, (organization_id, display_name, employee_id, department, manager_id))
             row = cursor.fetchone()
             if row:
                 self.conn.commit()
@@ -9875,12 +10033,12 @@ class Database:
             # Find existing by employee_id or display_name
             if employee_id:
                 cursor.execute(
-                    "SELECT id FROM human_identities WHERE tenant_id = %s AND employee_id = %s LIMIT 1",
-                    (tenant_id, employee_id))
+                    "SELECT id FROM human_identities WHERE organization_id = %s AND employee_id = %s LIMIT 1",
+                    (organization_id, employee_id))
             else:
                 cursor.execute(
-                    "SELECT id FROM human_identities WHERE tenant_id = %s AND display_name = %s LIMIT 1",
-                    (tenant_id, display_name))
+                    "SELECT id FROM human_identities WHERE organization_id = %s AND display_name = %s LIMIT 1",
+                    (organization_id, display_name))
             existing = cursor.fetchone()
             if existing:
                 cursor.execute("""
@@ -9894,7 +10052,7 @@ class Database:
         finally:
             cursor.close()
 
-    def save_identity_link(self, tenant_id, human_identity_id, identity_db_id,
+    def save_identity_link(self, organization_id, human_identity_id, identity_db_id,
                            account_type, account_upn, account_object_id,
                            account_enabled, link_method, link_confidence):
         """Create or update an identity link. Returns id."""
@@ -9903,11 +10061,11 @@ class Database:
         try:
             cursor.execute("""
                 INSERT INTO identity_links (
-                    tenant_id, human_identity_id, identity_db_id, account_type,
+                    organization_id, human_identity_id, identity_db_id, account_type,
                     account_upn, account_object_id, account_enabled,
                     link_method, link_confidence
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tenant_id, account_object_id) DO UPDATE SET
+                ON CONFLICT (organization_id, account_object_id) DO UPDATE SET
                     human_identity_id = EXCLUDED.human_identity_id,
                     identity_db_id = EXCLUDED.identity_db_id,
                     account_type = EXCLUDED.account_type,
@@ -9916,7 +10074,7 @@ class Database:
                     link_method = EXCLUDED.link_method,
                     link_confidence = EXCLUDED.link_confidence
                 RETURNING id
-            """, (tenant_id, human_identity_id, identity_db_id, account_type,
+            """, (organization_id, human_identity_id, identity_db_id, account_type,
                   account_upn, account_object_id, account_enabled,
                   link_method, link_confidence))
             row = cursor.fetchone()
@@ -9925,13 +10083,13 @@ class Database:
         finally:
             cursor.close()
 
-    def get_human_identities(self, tenant_id, limit=50, offset=0, search=None):
+    def get_human_identities(self, organization_id, limit=50, offset=0, search=None):
         """List human identities with linked account counts."""
         _ensure_human_identities_table(self.conn)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         try:
-            where = "WHERE h.tenant_id = %s"
-            params = [tenant_id]
+            where = "WHERE h.organization_id = %s"
+            params = [organization_id]
             if search:
                 where += " AND (h.display_name ILIKE %s OR h.employee_id ILIKE %s)"
                 params += [f'%{search}%', f'%{search}%']
@@ -9991,7 +10149,7 @@ class Database:
         try:
             cursor.execute("""
                 INSERT INTO orphaned_privileged_findings (
-                    tenant_id, discovery_run_id, human_identity_id,
+                    organization_id, discovery_run_id, human_identity_id,
                     regular_link_id, privileged_link_id,
                     regular_upn, regular_object_id,
                     privileged_upn, privileged_object_id,
@@ -10004,7 +10162,7 @@ class Database:
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
-                ON CONFLICT (tenant_id, privileged_object_id) WHERE status = 'open'
+                ON CONFLICT (organization_id, privileged_object_id) WHERE status = 'open'
                 DO UPDATE SET
                     discovery_run_id = EXCLUDED.discovery_run_id,
                     severity = EXCLUDED.severity,
@@ -10019,7 +10177,7 @@ class Database:
                     updated_at = NOW()
                 RETURNING id
             """, (
-                finding_dict['tenant_id'],
+                finding_dict['organization_id'],
                 finding_dict.get('discovery_run_id'),
                 finding_dict.get('human_identity_id'),
                 finding_dict.get('regular_link_id'),
@@ -10046,14 +10204,14 @@ class Database:
         finally:
             cursor.close()
 
-    def get_orphaned_findings(self, tenant_id, limit=50, offset=0,
+    def get_orphaned_findings(self, organization_id, limit=50, offset=0,
                               status=None, severity=None):
         """List orphaned privileged account findings."""
         _ensure_orphaned_findings_table(self.conn)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         try:
-            where = "WHERE f.tenant_id = %s"
-            params = [tenant_id]
+            where = "WHERE f.organization_id = %s"
+            params = [organization_id]
             if status:
                 where += " AND f.status = %s"
                 params.append(status)
@@ -10586,11 +10744,11 @@ def _ensure_rbac_hygiene_table(conn):
             summary JSONB NOT NULL DEFAULT '{}',
             findings JSONB NOT NULL DEFAULT '[]',
             discovery_run_id BIGINT REFERENCES discovery_runs(id) ON DELETE CASCADE,
-            tenant_id INTEGER NOT NULL,
+            organization_id INTEGER NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rbac_hygiene_tenant ON rbac_hygiene_scans(tenant_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rbac_hygiene_org ON rbac_hygiene_scans(organization_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_rbac_hygiene_created ON rbac_hygiene_scans(created_at DESC)")
     conn.commit()
     cursor.close()
@@ -10611,7 +10769,7 @@ def _ensure_human_identities_table(conn):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS human_identities (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 display_name VARCHAR(500),
                 employee_id VARCHAR(255),
                 department VARCHAR(255),
@@ -10623,7 +10781,7 @@ def _ensure_human_identities_table(conn):
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_human_identities_tenant ON human_identities(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_human_identities_org ON human_identities(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_human_identities_employee ON human_identities(employee_id)")
         conn.commit()
     except Exception as e:
@@ -10647,7 +10805,7 @@ def _ensure_identity_links_table(conn):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS identity_links (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 human_identity_id INTEGER NOT NULL REFERENCES human_identities(id) ON DELETE CASCADE,
                 identity_db_id INTEGER REFERENCES identities(id) ON DELETE SET NULL,
                 account_type VARCHAR(50) NOT NULL,
@@ -10661,10 +10819,10 @@ def _ensure_identity_links_table(conn):
                 verified BOOLEAN DEFAULT FALSE,
                 verified_at TIMESTAMPTZ,
                 verified_by VARCHAR(255),
-                UNIQUE(tenant_id, account_object_id)
+                UNIQUE(organization_id, account_object_id)
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_tenant ON identity_links(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_org ON identity_links(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_human ON identity_links(human_identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_identity ON identity_links(identity_db_id)")
         conn.commit()
@@ -10689,7 +10847,7 @@ def _ensure_orphaned_findings_table(conn):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS orphaned_privileged_findings (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
                 human_identity_id INTEGER REFERENCES human_identities(id) ON DELETE CASCADE,
                 regular_link_id INTEGER REFERENCES identity_links(id) ON DELETE SET NULL,
@@ -10721,12 +10879,12 @@ def _ensure_orphaned_findings_table(conn):
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_tenant ON orphaned_privileged_findings(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_org ON orphaned_privileged_findings(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_status ON orphaned_privileged_findings(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_orphaned_findings_severity ON orphaned_privileged_findings(severity)")
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_orphaned_findings_open_unique
-            ON orphaned_privileged_findings(tenant_id, privileged_object_id)
+            ON orphaned_privileged_findings(organization_id, privileged_object_id)
             WHERE status = 'open'
         """)
         conn.commit()
@@ -10755,7 +10913,7 @@ def _ensure_scan_schedules_table(conn):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS scan_schedules (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
                 connection_id INTEGER,
                 label VARCHAR(100),
                 frequency VARCHAR(20) NOT NULL DEFAULT 'daily',
@@ -10769,15 +10927,15 @@ def _ensure_scan_schedules_table(conn):
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scan_schedules_tenant ON scan_schedules(tenant_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scan_schedules_org ON scan_schedules(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_scan_schedules_next ON scan_schedules(next_run_at) WHERE enabled = true")
         cursor.execute("ALTER TABLE scan_schedules ENABLE ROW LEVEL SECURITY")
         # RLS policy
         cursor.execute("""
             DO $$ BEGIN
-                CREATE POLICY tenant_strict_scan_schedules ON scan_schedules
-                    USING (tenant_id = current_setting('app.current_tenant_id', true)::integer)
-                    WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::integer);
+                CREATE POLICY org_strict_scan_schedules ON scan_schedules
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+                    WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer);
             EXCEPTION WHEN duplicate_object THEN NULL;
             END $$
         """)
@@ -10798,15 +10956,15 @@ _stripe_columns_ensured = False
 
 
 def _ensure_stripe_columns(conn):
-    """Add Stripe-related columns to tenants and cloud_subscriptions."""
+    """Add Stripe-related columns to organizations and cloud_subscriptions."""
     global _stripe_columns_ensured
     if _stripe_columns_ensured:
         return
     cursor = conn.cursor()
     try:
-        # Stripe customer ID on tenants
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(100)")
-        cursor.execute("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(100)")
+        # Stripe customer ID on organizations
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(100)")
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(100)")
         # Stripe price item ID on cloud_subscriptions
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_item_id VARCHAR(100)")
         conn.commit()

@@ -10,17 +10,17 @@ export const EXPORT_SCHEMA_VERSION = '1.0';
 export interface ExportMetadata {
   snapshot_id: number | null;
   timestamp: string;
-  tenant_id: number | null;
-  tenant_name: string | null;
+  organization_id: number | null;
+  org_name: string | null;
   schema_version: string;
 }
 
-export function buildExportMeta(snapshotId: number | null, tenantId: number | null, tenantName: string | null): ExportMetadata {
+export function buildExportMeta(snapshotId: number | null, orgId: number | null, orgName: string | null): ExportMetadata {
   return {
     snapshot_id: snapshotId,
     timestamp: new Date().toISOString(),
-    tenant_id: tenantId,
-    tenant_name: tenantName,
+    organization_id: orgId,
+    org_name: orgName,
     schema_version: EXPORT_SCHEMA_VERSION,
   };
 }
@@ -59,8 +59,8 @@ export function downloadCSV(data: Record<string, unknown>[], columns: CsvColumn[
       `# AuditGraph Export`,
       `# Snapshot ID: ${meta.snapshot_id ?? 'N/A'}`,
       `# Timestamp: ${meta.timestamp}`,
-      `# Tenant ID: ${meta.tenant_id ?? 'N/A'}`,
-      `# Tenant: ${meta.tenant_name ?? 'N/A'}`,
+      `# Organization ID: ${meta.organization_id ?? 'N/A'}`,
+      `# Organization: ${meta.org_name ?? 'N/A'}`,
       `# Schema Version: ${meta.schema_version}`,
       `#`,
     ];

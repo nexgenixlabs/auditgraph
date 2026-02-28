@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useTenant } from '../contexts/TenantContext';
+import { useOrganization } from '../contexts/TenantContext';
 import { api, ApiError } from '../services/apiClient';
 
 export default function ForgotPassword() {
   const navigate = useNavigate();
-  const { tenantSlug, resolvedTenant } = useTenant();
+  const { orgSlug, resolvedOrganization } = useOrganization();
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
@@ -17,7 +17,7 @@ export default function ForgotPassword() {
     setLoading(true);
     try {
       const body: Record<string, string> = { email };
-      const slug = tenantSlug || resolvedTenant?.slug;
+      const slug = orgSlug || resolvedOrganization?.slug;
       if (slug) body.tenant_slug = slug;
 
       await api.post('/auth/forgot-password', body);

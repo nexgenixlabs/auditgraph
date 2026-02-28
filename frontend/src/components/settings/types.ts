@@ -14,7 +14,7 @@ export interface SettingsData {
   report_schedule_enabled: string;
   report_schedule_frequency: string;
   report_email_to: string;
-  azure_tenant_id: string;
+  azure_directory_id: string;
   azure_client_id: string;
   azure_client_secret: string;
   aws_access_key_id: string;
@@ -65,7 +65,7 @@ export interface CloudProviderConfig {
   plan: string | null;
 }
 
-export interface TenantCloudConfig {
+export interface OrgCloudConfig {
   cloud_providers: Record<string, CloudProviderConfig>;
   addons: Record<string, boolean>;
 }
@@ -75,7 +75,7 @@ export interface CloudConnection {
   cloud: string;
   label: string;
   status: string;
-  entra_tenant_id: string | null;
+  azure_directory_id: string | null;
   client_id: string | null;
   last_test_status: string | null;
   last_discovery_at: string | null;
@@ -119,8 +119,8 @@ export interface UserData {
   enabled: boolean;
   last_login_at: string | null;
   created_at: string | null;
-  tenant_id?: number;
-  tenant_name?: string;
+  organization_id?: number;
+  org_name?: string;
   is_superadmin?: boolean;
 }
 

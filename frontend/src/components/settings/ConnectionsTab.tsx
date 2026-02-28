@@ -3,7 +3,7 @@ import { maskCredential } from '../../utils/maskCredential';
 import type {
   SettingsData,
   StatusData,
-  TenantCloudConfig,
+  OrgCloudConfig,
   CloudConnection,
   ConnectionTestResult,
 } from './types';
@@ -11,10 +11,10 @@ import type {
 export interface ConnectionsTabProps {
   settings: SettingsData | null;
   status: StatusData | null;
-  cloudConfig: TenantCloudConfig | null;
+  cloudConfig: OrgCloudConfig | null;
   cloudConnections: CloudConnection[];
   isAdmin: boolean;
-  tenantStage: string;
+  orgStage: string;
   primaryCloud: string | null;
   addingCloud: boolean;
   setAddingCloud: (v: boolean) => void;
@@ -28,8 +28,8 @@ export interface ConnectionsTabProps {
   setWizardCloud: (v: string) => void;
   wizardLabel: string;
   setWizardLabel: (v: string) => void;
-  wizardEntraTenantId: string;
-  setWizardEntraTenantId: (v: string) => void;
+  wizardAzureDirectoryId: string;
+  setWizardAzureDirectoryId: (v: string) => void;
   wizardClientId: string;
   setWizardClientId: (v: string) => void;
   wizardClientSecret: string;
@@ -62,7 +62,7 @@ export function ConnectionsTab({
   cloudConfig,
   cloudConnections,
   isAdmin,
-  tenantStage,
+  orgStage,
   primaryCloud,
   addingCloud,
   setAddingCloud,
@@ -76,8 +76,8 @@ export function ConnectionsTab({
   setWizardCloud,
   wizardLabel,
   setWizardLabel,
-  wizardEntraTenantId,
-  setWizardEntraTenantId,
+  wizardAzureDirectoryId,
+  setWizardAzureDirectoryId,
   wizardClientId,
   setWizardClientId,
   wizardClientSecret,
@@ -159,8 +159,8 @@ export function ConnectionsTab({
                               <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
                             )}
                           </div>
-                          {conn.entra_tenant_id && (
-                            <div className="text-[10px] text-gray-400 font-mono">{conn.entra_tenant_id.slice(0, 8)}...</div>
+                          {conn.azure_directory_id && (
+                            <div className="text-[10px] text-gray-400 font-mono">{conn.azure_directory_id.slice(0, 8)}...</div>
                           )}
                           <div className="text-[10px] text-gray-500 mt-0.5">
                             {conn.sub_count || 0} active subs
@@ -301,8 +301,8 @@ export function ConnectionsTab({
                             <div>
                               <label className="block text-xs font-medium text-gray-700 mb-1">Entra Directory ID</label>
                               <input
-                                value={wizardEntraTenantId}
-                                onChange={e => setWizardEntraTenantId(e.target.value)}
+                                value={wizardAzureDirectoryId}
+                                onChange={e => setWizardAzureDirectoryId(e.target.value)}
                                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
                               />
@@ -369,7 +369,7 @@ export function ConnectionsTab({
                           <button
                             onClick={() => setWizardStep(2)}
                             disabled={!wizardLabel || (wizardCloud === 'azure'
-                              ? (!wizardEntraTenantId || !wizardClientId || !wizardClientSecret)
+                              ? (!wizardAzureDirectoryId || !wizardClientId || !wizardClientSecret)
                               : (!wizardClientId || !wizardClientSecret))}
                             className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
                           >
@@ -389,7 +389,7 @@ export function ConnectionsTab({
                           <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
                           <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
                           {wizardCloud === 'azure' && (
-                            <div className="flex justify-between"><span className="text-gray-500">Directory</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                            <div className="flex justify-between"><span className="text-gray-500">Directory</span><span className="font-mono text-gray-700">{wizardAzureDirectoryId.slice(0, 12)}...</span></div>
                           )}
                           {wizardCloud === 'aws' && (
                             <div className="flex justify-between"><span className="text-gray-500">Region</span><span className="font-semibold text-gray-800">{wizardRegion}</span></div>
@@ -440,7 +440,7 @@ export function ConnectionsTab({
                           <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
                           <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
                           {wizardCloud === 'azure' && (
-                            <div className="flex justify-between"><span className="text-gray-500">Directory ID</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
+                            <div className="flex justify-between"><span className="text-gray-500">Directory ID</span><span className="font-mono text-gray-700">{wizardAzureDirectoryId.slice(0, 12)}...</span></div>
                           )}
                           {wizardCloud === 'aws' && (
                             <div className="flex justify-between"><span className="text-gray-500">Region</span><span className="font-semibold text-gray-800">{wizardRegion}</span></div>
@@ -469,7 +469,7 @@ export function ConnectionsTab({
               </div>
             )}
 
-            {tenantStage === 'locked' && (
+            {orgStage === 'locked' && (
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
                 <svg className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -492,7 +492,7 @@ export function ConnectionsTab({
               <div className="space-y-5">
                 {/* Azure */}
                 {cloudConfig?.cloud_providers?.azure?.enabled ? (() => {
-                  const hasCredentials = !!(settings?.azure_tenant_id || settings?.azure_client_id);
+                  const hasCredentials = !!(settings?.azure_directory_id || settings?.azure_client_id);
                   const showForm = hasCredentials || addingCloud;
                   return showForm ? (
                   <div className="space-y-3">
@@ -513,8 +513,8 @@ export function ConnectionsTab({
                       <label className="block text-sm font-medium text-gray-700 mb-1">Entra Directory ID</label>
                       <input
                         type="text"
-                        value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_tenant_id || '') : (settings?.azure_tenant_id || '')}
-                        onChange={e => update('azure_tenant_id' as keyof SettingsData, e.target.value)}
+                        value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_directory_id || '') : (settings?.azure_directory_id || '')}
+                        onChange={e => update('azure_directory_id' as keyof SettingsData, e.target.value)}
                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                         className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       />
@@ -553,9 +553,9 @@ export function ConnectionsTab({
                     <div className="flex items-center gap-3 pt-1">
                       <button
                         onClick={handleTestConnection}
-                        disabled={testingConnection || !settings?.azure_tenant_id || !settings?.azure_client_id || !settings?.azure_client_secret}
+                        disabled={testingConnection || !settings?.azure_directory_id || !settings?.azure_client_id || !settings?.azure_client_secret}
                         className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
-                          testingConnection || !settings?.azure_tenant_id || !settings?.azure_client_id || !settings?.azure_client_secret
+                          testingConnection || !settings?.azure_directory_id || !settings?.azure_client_id || !settings?.azure_client_secret
                             ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                             : 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100'
                         }`}
@@ -592,7 +592,7 @@ export function ConnectionsTab({
                       </div>
                     )}
 
-                    {tenantStage === 'locked' && connectionTestResult?.status === 'success' && (
+                    {orgStage === 'locked' && connectionTestResult?.status === 'success' && (
                       <button
                         type="button"
                         onClick={handleSaveAndUnlock}
@@ -616,7 +616,7 @@ export function ConnectionsTab({
                       </button>
                     )}
 
-                    {tenantStage !== 'locked' && (
+                    {orgStage !== 'locked' && (
                       <p className="text-xs text-gray-400">
                         Credentials are saved with the global &quot;Save Settings&quot; button below.
                       </p>

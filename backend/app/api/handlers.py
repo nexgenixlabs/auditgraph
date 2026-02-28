@@ -153,34 +153,34 @@ def _get_agirs_factor_sql(factor: str) -> str:
 
 
 def _db() -> Database:
-    """Create a Database connection with RLS tenant context from JWT.
+    """Create a Database connection with RLS organization context from JWT.
 
-    - Normal tenant user (tid=5): sets context, RLS filters to tenant 5
+    - Normal org user (tid=5): sets context, RLS filters to org 5
     - Sentinel (tid=-1): sets context, RLS matches nothing (safe)
     - Superadmin (tid=None): no context set, RLS NULL bypass → all rows
     """
-    tid = _tenant_id()
-    return Database(tenant_id=tid)
+    tid = _org_id()
+    return Database(organization_id=tid)
 
 
-def _tenant_id():
-    """Get tenant_id from current authenticated user context.
+def _org_id():
+    """Get organization_id from current authenticated user context.
 
     Returns:
-        int: The user's tenant_id if assigned.
-        -1:  Sentinel for non-superadmin users without a tenant (matches nothing in DB).
-        None: Only for superadmins without a tenant override (permits unscoped queries).
+        int: The user's organization_id if assigned.
+        -1:  Sentinel for non-superadmin users without an org (matches nothing in DB).
+        None: Only for superadmins without an org override (permits unscoped queries).
     """
     user = getattr(g, 'current_user', None)
     if not user:
         return -1  # No auth context — return sentinel, never allow unscoped
-    tid = user.get('tenant_id')
+    tid = user.get('organization_id')
     if tid:
         return tid
-    # User has no tenant_id assigned
+    # User has no organization_id assigned
     if user.get('is_superadmin'):
         return None  # Superadmins intentionally see all data
-    # Non-superadmin with no tenant — sentinel prevents cross-tenant leakage
+    # Non-superadmin with no org — sentinel prevents cross-org leakage
     return -1
 
 
@@ -191,11 +191,11 @@ def _current_user_id():
 
 
 def _log(db, action_type, description, metadata=None):
-    """Log activity with auto-injected user/tenant context."""
+    """Log activity with auto-injected user/org context."""
     user = getattr(g, 'current_user', None)
     uid = user.get('id') if user else None
-    tid = user.get('tenant_id') if user else None
-    db.log_activity(action_type, description, metadata, user_id=uid, tenant_id=tid)
+    tid = user.get('organization_id') if user else None
+    db.log_activity(action_type, description, metadata, user_id=uid, organization_id=tid)
 
 
 def _connection_id():
@@ -204,7 +204,7 @@ def _connection_id():
     return int(val) if val else None
 
 
-def _latest_run_ids(cursor, tenant_id=None, connection_id=None):
+def _latest_run_ids(cursor, organization_id=None, connection_id=None):
     """Get latest completed discovery run IDs — one per ACTIVE cloud_connection_id.
 
     Returns a list of run_ids. Only includes runs whose cloud_connection_id
@@ -221,23 +221,23 @@ def _latest_run_ids(cursor, tenant_id=None, connection_id=None):
     if connection_id:
         cursor.execute("""
             SELECT MAX(id) AS id FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s AND cloud_connection_id = %s
-        """, (tenant_id, connection_id))
+            WHERE status = 'completed' AND organization_id = %s AND cloud_connection_id = %s
+        """, (organization_id, connection_id))
         row = cursor.fetchone()
         run_id = _extract_id(row) if row else None
         return [run_id] if run_id else []
 
-    if tenant_id is not None:
+    if organization_id is not None:
         # Only include runs whose cloud_connection_id still exists
         cursor.execute("""
             SELECT DISTINCT ON (dr.cloud_connection_id)
                 dr.id
             FROM discovery_runs dr
             JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
-            WHERE dr.status = 'completed' AND dr.tenant_id = %s
+            WHERE dr.status = 'completed' AND dr.organization_id = %s
               AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
             ORDER BY dr.cloud_connection_id, dr.id DESC
-        """, (tenant_id,))
+        """, (organization_id,))
         rows = cursor.fetchall()
         result = [_extract_id(r) for r in rows]
         if result:
@@ -245,9 +245,9 @@ def _latest_run_ids(cursor, tenant_id=None, connection_id=None):
         # Fallback: no runs with cloud_connection_id — use absolute latest
         cursor.execute("""
             SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s
+            WHERE status = 'completed' AND organization_id = %s
             ORDER BY id DESC LIMIT 1
-        """, (tenant_id,))
+        """, (organization_id,))
         row = cursor.fetchone()
         return [_extract_id(row)] if row else []
 
@@ -269,9 +269,9 @@ def _latest_run_ids(cursor, tenant_id=None, connection_id=None):
     return [_extract_id(r) for r in rows]
 
 
-def _previous_run_ids(cursor, tenant_id=None, connection_id=None):
+def _previous_run_ids(cursor, organization_id=None, connection_id=None):
     """Get PREVIOUS completed discovery run IDs — second-most-recent per connection."""
-    latest_ids = _latest_run_ids(cursor, tenant_id, connection_id)
+    latest_ids = _latest_run_ids(cursor, organization_id, connection_id)
     if not latest_ids:
         return []
 
@@ -283,32 +283,32 @@ def _previous_run_ids(cursor, tenant_id=None, connection_id=None):
     if connection_id:
         cursor.execute("""
             SELECT MAX(id) AS id FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s AND cloud_connection_id = %s
+            WHERE status = 'completed' AND organization_id = %s AND cloud_connection_id = %s
               AND id != ALL(%s)
-        """, (tenant_id, connection_id, latest_ids))
+        """, (organization_id, connection_id, latest_ids))
         row = cursor.fetchone()
         run_id = _extract_id(row) if row else None
         return [run_id] if run_id else []
 
-    if tenant_id is not None:
+    if organization_id is not None:
         cursor.execute("""
             SELECT DISTINCT ON (dr.cloud_connection_id) dr.id
             FROM discovery_runs dr
             JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
-            WHERE dr.status = 'completed' AND dr.tenant_id = %s
+            WHERE dr.status = 'completed' AND dr.organization_id = %s
               AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
               AND dr.id != ALL(%s)
             ORDER BY dr.cloud_connection_id, dr.id DESC
-        """, (tenant_id, latest_ids))
+        """, (organization_id, latest_ids))
         rows = cursor.fetchall()
         return [_extract_id(r) for r in rows]
 
     return []
 
 
-def _latest_run_query(cursor, tenant_id=None, connection_id=None):
+def _latest_run_query(cursor, organization_id=None, connection_id=None):
     """Backward-compat wrapper — returns single run_id or None."""
-    ids = _latest_run_ids(cursor, tenant_id, connection_id)
+    ids = _latest_run_ids(cursor, organization_id, connection_id)
     return ids[0] if ids else None
 
 
@@ -346,10 +346,10 @@ def get_stats():
     cursor = db.conn.cursor()
 
     try:
-        tid = _tenant_id()
+        tid = _org_id()
 
         if tid:
-            cursor.execute("SELECT COUNT(*) FROM discovery_runs WHERE tenant_id = %s", (tid,))
+            cursor.execute("SELECT COUNT(*) FROM discovery_runs WHERE organization_id = %s", (tid,))
         else:
             cursor.execute("SELECT COUNT(*) FROM discovery_runs")
         total_runs = cursor.fetchone()[0] or 0
@@ -591,7 +591,7 @@ def get_identities():
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
 
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
@@ -721,7 +721,7 @@ def get_identity_details(identity_id: str):
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "Identity not found"}), 404
 
@@ -837,7 +837,7 @@ def get_identity_details(identity_id: str):
         trend = None
         if current_run_id:
             try:
-                tid = _tenant_id()
+                tid = _org_id()
                 if tid:
                     cursor.execute(
                         """
@@ -846,7 +846,7 @@ def get_identity_details(identity_id: str):
                         WHERE identity_id = %s
                           AND discovery_run_id = (
                               SELECT MAX(id) FROM discovery_runs
-                              WHERE status = 'completed' AND id < %s AND tenant_id = %s
+                              WHERE status = 'completed' AND id < %s AND organization_id = %s
                           )
                         LIMIT 1
                         """,
@@ -860,11 +860,11 @@ def get_identity_details(identity_id: str):
                         WHERE identity_id = %s
                           AND discovery_run_id = (
                               SELECT MAX(id) FROM discovery_runs
-                              WHERE status = 'completed' AND id < %s AND tenant_id = %s
+                              WHERE status = 'completed' AND id < %s AND organization_id = %s
                           )
                         LIMIT 1
                         """,
-                        (identity_id, current_run_id, _tenant_id()),
+                        (identity_id, current_run_id, _org_id()),
                     )
                 prev = cursor.fetchone()
                 if prev:
@@ -971,7 +971,7 @@ def get_risks():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -1019,11 +1019,11 @@ def get_discovery_runs():
             """
             SELECT id, status, started_at, completed_at, total_identities, critical_count, high_count, medium_count
             FROM discovery_runs
-            WHERE tenant_id = %s
+            WHERE organization_id = %s
             ORDER BY id DESC
             LIMIT 50
             """,
-            (_tenant_id(),),
+            (_org_id(),),
         )
         rows = cursor.fetchall()
 
@@ -1063,11 +1063,11 @@ def get_snapshots():
                    total_identities, critical_count, high_count, medium_count, low_count,
                    cloud_connection_id
             FROM discovery_runs
-            WHERE tenant_id = %s AND status = 'completed'
+            WHERE organization_id = %s AND status = 'completed'
             ORDER BY completed_at DESC
             LIMIT 100
             """,
-            (_tenant_id(),),
+            (_org_id(),),
         )
         rows = cursor.fetchall()
 
@@ -1109,7 +1109,7 @@ def get_snapshot_state():
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
     conn_id = _connection_id()
-    tid = _tenant_id()
+    tid = _org_id()
     db = _db()
     cursor = db.conn.cursor()
     try:
@@ -1120,7 +1120,7 @@ def get_snapshot_state():
                        started_at, completed_at, total_identities,
                        critical_count, high_count, medium_count, low_count
                 FROM discovery_runs
-                WHERE tenant_id = %s AND status = 'completed'
+                WHERE organization_id = %s AND status = 'completed'
                   AND cloud_connection_id = %s
                   AND completed_at <= %s
                 ORDER BY completed_at DESC
@@ -1132,7 +1132,7 @@ def get_snapshot_state():
                        started_at, completed_at, total_identities,
                        critical_count, high_count, medium_count, low_count
                 FROM discovery_runs
-                WHERE tenant_id = %s AND status = 'completed'
+                WHERE organization_id = %s AND status = 'completed'
                   AND completed_at <= %s
                 ORDER BY completed_at DESC
                 LIMIT 1
@@ -1259,7 +1259,7 @@ def get_snapshot_compare():
         return jsonify({"error": "'from' date must be before 'to' date"}), 400
 
     conn_id = _connection_id()
-    tid = _tenant_id()
+    tid = _org_id()
     db = _db()
     cursor = db.conn.cursor()
     try:
@@ -1269,7 +1269,7 @@ def get_snapshot_compare():
                 cursor.execute("""
                     SELECT id, completed_at, total_identities
                     FROM discovery_runs
-                    WHERE tenant_id = %s AND status = 'completed'
+                    WHERE organization_id = %s AND status = 'completed'
                       AND cloud_connection_id = %s AND completed_at <= %s
                     ORDER BY completed_at DESC LIMIT 1
                 """, (tid, conn_id, dt))
@@ -1277,7 +1277,7 @@ def get_snapshot_compare():
                 cursor.execute("""
                     SELECT id, completed_at, total_identities
                     FROM discovery_runs
-                    WHERE tenant_id = %s AND status = 'completed'
+                    WHERE organization_id = %s AND status = 'completed'
                       AND completed_at <= %s
                     ORDER BY completed_at DESC LIMIT 1
                 """, (tid, dt))
@@ -1409,14 +1409,14 @@ def get_drift_report(run_id: int):
             })
             return jsonify(report)
 
-        # Fall back to live computation: find the previous run (tenant-scoped)
+        # Fall back to live computation: find the previous run (org-scoped)
         cursor = db.conn.cursor()
         cursor.execute("""
             SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND id < %s AND tenant_id = %s
+            WHERE status = 'completed' AND id < %s AND organization_id = %s
             ORDER BY id DESC
             LIMIT 1
-        """, (run_id, _tenant_id()))
+        """, (run_id, _org_id()))
         prev_row = cursor.fetchone()
         cursor.close()
 
@@ -1496,7 +1496,7 @@ def get_trends():
         conn_id = _connection_id()
 
         conn_filter = "AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0"
-        params = [_tenant_id()]
+        params = [_org_id()]
         if conn_id:
             conn_filter += " AND dr.cloud_connection_id = %s"
             params.append(conn_id)
@@ -1534,7 +1534,7 @@ def get_trends():
                     WHERE i.discovery_run_id = dr.id
                 ), 0) as avg_risk_score
             FROM discovery_runs dr
-            WHERE dr.status = 'completed' AND dr.tenant_id = %s
+            WHERE dr.status = 'completed' AND dr.organization_id = %s
               {conn_filter}
             ORDER BY dr.id DESC
             LIMIT %s
@@ -1578,7 +1578,7 @@ def get_trends_velocity():
         conn_id = _connection_id()
 
         conn_filter = "AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0"
-        params = [_tenant_id()]
+        params = [_org_id()]
         if conn_id:
             conn_filter += " AND cloud_connection_id = %s"
             params.append(conn_id)
@@ -1586,7 +1586,7 @@ def get_trends_velocity():
 
         cursor.execute(f"""
             SELECT id, completed_at FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s
+            WHERE status = 'completed' AND organization_id = %s
               {conn_filter}
             ORDER BY id DESC LIMIT %s
         """, tuple(params))
@@ -1730,7 +1730,7 @@ def get_batch_risk_history():
 
         conn_id = _connection_id()
         conn_filter = "AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0"
-        params = [_tenant_id()]
+        params = [_org_id()]
         if conn_id:
             conn_filter += " AND cloud_connection_id = %s"
             params.append(conn_id)
@@ -1738,7 +1738,7 @@ def get_batch_risk_history():
 
         cursor.execute(f"""
             SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND tenant_id = %s
+            WHERE status = 'completed' AND organization_id = %s
               {conn_filter}
             ORDER BY id DESC LIMIT %s
         """, tuple(params))
@@ -1771,11 +1771,11 @@ def get_app_settings():
     """Return all settings plus connection/scheduler status."""
     db = _db()
     try:
-        settings = db.get_settings(tenant_id=_tenant_id())
+        settings = db.get_settings(organization_id=_org_id())
 
         # SECURITY: Do NOT backfill env var credential VALUES into settings dict.
-        # That would leak one tenant's credentials to every other tenant.
-        # Settings dict only contains this tenant's own DB-stored values.
+        # That would leak one org's credentials to every other org.
+        # Settings dict only contains this org's own DB-stored values.
 
         # Mask secrets for API response
         if settings.get('azure_client_secret'):
@@ -1783,11 +1783,11 @@ def get_app_settings():
         if settings.get('copilot_api_key'):
             settings['copilot_api_key'] = '********'
 
-        # Check Azure credential configuration — tenant's own DB settings only.
+        # Check Azure credential configuration — org's own DB settings only.
         # Do NOT fall back to env vars; those are the system/admin credentials,
-        # not this tenant's connection.
+        # not this org's connection.
         azure_configured = all([
-            settings.get('azure_tenant_id'),
+            settings.get('azure_directory_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
         ])
@@ -1824,7 +1824,7 @@ def save_app_settings():
         'notify_permission_changes', 'notify_risk_changes', 'notify_credential_changes',
         'notify_weekly_digest',
         'report_schedule_enabled', 'report_schedule_frequency', 'report_email_to',
-        'azure_tenant_id', 'azure_client_id', 'azure_client_secret',
+        'azure_directory_id', 'azure_client_id', 'azure_client_secret',
         'aws_access_key_id', 'aws_secret_access_key', 'aws_region',
         'gcp_project_id', 'gcp_service_account_json',
         'onboarding_completed',
@@ -1907,26 +1907,26 @@ def save_app_settings():
 
     db = _db()
     try:
-        tid = _tenant_id()
-        db.save_settings(updates, tenant_id=tid)
+        tid = _org_id()
+        db.save_settings(updates, organization_id=tid)
 
-        # Sync org_name to tenant name so it propagates to JWT, TopBar, admin tables
+        # Sync org_name to organization name so it propagates to JWT, TopBar, admin tables
         if 'org_name' in updates and tid:
             new_name = updates['org_name'].strip()
             if new_name:
-                db.update_tenant(tid, name=new_name)
+                db.update_organization(tid, name=new_name)
 
         # Advance onboarding stage when cloud credentials are saved
-        cloud_keys = {'azure_tenant_id', 'azure_client_id', 'azure_client_secret'}
+        cloud_keys = {'azure_directory_id', 'azure_client_id', 'azure_client_secret'}
         if tid and cloud_keys & set(updates.keys()):
             try:
-                tenant = db.get_tenant_by_id(tid)
-                if tenant and tenant.get('onboarding_stage') == 'locked':
-                    db.update_tenant(tid, onboarding_stage='authenticating')
+                org = db.get_organization_by_id(tid)
+                if org and org.get('onboarding_stage') == 'locked':
+                    db.update_organization(tid, onboarding_stage='authenticating')
             except Exception:
                 pass
 
-        settings = db.get_settings(tenant_id=tid)
+        settings = db.get_settings(organization_id=tid)
         _log(db,'settings_updated', f'Settings updated: {", ".join(updates.keys())}', {
             'updated_keys': list(updates.keys()),
             'values': updates,
@@ -1968,8 +1968,8 @@ def trigger_discovery():
     import threading
     from app.scheduler import trigger_manual_discovery
 
-    tid = _tenant_id()
-    tname = g.current_user.get('tenant_name') if hasattr(g, 'current_user') and g.current_user else None
+    tid = _org_id()
+    tname = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
 
     # Optional: scan only a specific connection
     conn_id = None
@@ -1982,7 +1982,7 @@ def trigger_discovery():
 
     def _run():
         try:
-            trigger_manual_discovery(db_tenant_id=tid, tenant_name=tname,
+            trigger_manual_discovery(db_org_id=tid, org_name=tname,
                                      connection_id=conn_id)
         except Exception as e:
             logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
@@ -2030,7 +2030,7 @@ def get_identity_remediations(identity_id: str):
 
     try:
         # Get identity data
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.id, i.identity_id, i.display_name, i.risk_level,
                    i.risk_reasons, i.activity_status, i.credential_status,
@@ -2086,7 +2086,7 @@ def get_report_data():
     db = _db()
     try:
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.close()
         data = db.get_report_data(run_ids=run_ids if run_ids else None)
         if data is None:
@@ -2101,7 +2101,7 @@ def get_report_data():
 
 
 def get_activity():
-    """Get activity log entries with optional filtering, tenant-scoped."""
+    """Get activity log entries with optional filtering, org-scoped."""
     db = _db()
     try:
         limit = request.args.get('limit', 50, type=int)
@@ -2113,15 +2113,15 @@ def get_activity():
         # Phase 46: Tenant-scoped activity log
         current_user = getattr(g, 'current_user', None)
         is_super = current_user.get('is_superadmin') if current_user else False
-        tid = _tenant_id()
+        tid = _org_id()
 
-        # Superadmins with no override see all; with override see that tenant
-        if is_super and not (current_user or {}).get('tenant_id_override'):
+        # Superadmins with no override see all; with override see that org
+        if is_super and not (current_user or {}).get('organization_id_override'):
             filter_tid = None
         else:
             filter_tid = tid
 
-        entries = db.get_activity_log(limit=limit, offset=offset, action_type=action_type, tenant_id=filter_tid)
+        entries = db.get_activity_log(limit=limit, offset=offset, action_type=action_type, organization_id=filter_tid)
 
         # Exclude admin portal events from client-facing activity log
         if filter_tid is not None:
@@ -2966,7 +2966,7 @@ def preview_risk_rule():
 
         # Get latest run identities
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"affected_count": 0, "affected": []})
 
@@ -3040,7 +3040,7 @@ def get_notifications_list():
         notifications = db.get_notifications(
             limit=limit, offset=offset, read=read,
             severity=severity, category=category,
-            tenant_id=_tenant_id()
+            organization_id=_org_id()
         )
         return jsonify({
             "notifications": notifications,
@@ -3056,7 +3056,7 @@ def get_notification_stats_handler():
     """GET /api/notifications/stats — unread count and breakdowns."""
     db = _db()
     try:
-        stats = db.get_notification_stats(tenant_id=_tenant_id())
+        stats = db.get_notification_stats(organization_id=_org_id())
         return jsonify(stats)
     finally:
         db.close()
@@ -3070,9 +3070,9 @@ def mark_notification_handler(notification_id):
         if not existing:
             return jsonify({"error": "Notification not found"}), 404
 
-        # Tenant isolation: verify notification belongs to this tenant
-        tid = _tenant_id()
-        if tid is not None and existing.get('tenant_id') != tid:
+        # Tenant isolation: verify notification belongs to this org
+        tid = _org_id()
+        if tid is not None and existing.get('organization_id') != tid:
             return jsonify({"error": "Notification not found"}), 404
 
         data = request.get_json(silent=True) or {}
@@ -3093,7 +3093,7 @@ def mark_all_notifications_read_handler():
     """POST /api/notifications/mark-all-read — bulk mark all as read."""
     db = _db()
     try:
-        count = db.mark_all_notifications_read(tenant_id=_tenant_id())
+        count = db.mark_all_notifications_read(organization_id=_org_id())
         return jsonify({"status": "ok", "marked_read": count})
     finally:
         db.close()
@@ -3320,7 +3320,7 @@ def get_overview_insights():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -3560,7 +3560,7 @@ def get_attack_surface_score():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -3968,17 +3968,17 @@ def get_attack_surface_score():
             pass
 
         confidence = 'High' if data_completeness_pct >= 90 else ('Medium' if data_completeness_pct >= 60 else 'Low')
-        tid = _tenant_id()
-        org_name = db.get_setting('org_name', tenant_id=tid) if tid else None
-        org_logo = db.get_setting('org_logo', tenant_id=tid) if tid else None
-        # Resolve tenant name from tenants table as fallback
-        tenant_name = None
+        tid = _org_id()
+        org_name = db.get_setting('org_name', organization_id=tid) if tid else None
+        org_logo = db.get_setting('org_logo', organization_id=tid) if tid else None
+        # Resolve org name from organizations table as fallback
+        org_name = None
         if tid:
             try:
-                cursor.execute("SELECT name FROM tenants WHERE id = %s", (tid,))
+                cursor.execute("SELECT name FROM organizations WHERE id = %s", (tid,))
                 tn_row = cursor.fetchone()
                 if tn_row:
-                    tenant_name = tn_row[0]
+                    org_name = tn_row[0]
             except Exception:
                 pass
         data_integrity = {
@@ -3987,9 +3987,9 @@ def get_attack_surface_score():
             "total_scanned": r[0] or 0,
             "data_completeness_pct": data_completeness_pct,
             "scan_duration_seconds": scan_duration_seconds,
-            "tenant_id": tid,
-            "tenant_name": tenant_name,
-            "organization_name": org_name or tenant_name,
+            "organization_id": tid,
+            "org_name": org_name,
+            "organization_name": org_name or org_name,
             "organization_logo": org_logo,
         }
 
@@ -4026,11 +4026,11 @@ def get_attack_surface_score():
             parts.append(f"{tenant_scope} identities have tenant-wide scope — apply least privilege.")
         ciso_summary = ' '.join(parts)
 
-        # Compute industry_avg as posture equivalent of the tenant's mean identity risk score
+        # Compute industry_avg as posture equivalent of the org's mean identity risk score
         # avg_risk_score is 0-100 (higher = riskier), posture = 100 - attack_surface_score
-        # Industry avg is the mean posture across all scored identities in this tenant
+        # Industry avg is the mean posture across all scored identities in this org
         industry_avg_posture = max(0, min(100, round(100 - avg_risk_score))) if avg_risk_score > 0 else None
-        posture_target_setting = db.get_setting('posture_target', tenant_id=tid) if tid else None
+        posture_target_setting = db.get_setting('posture_target', organization_id=tid) if tid else None
 
         return jsonify({
             "score": score,
@@ -4476,7 +4476,7 @@ def get_dashboard_compliance():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -4581,9 +4581,9 @@ def get_compliance_trends_handler():
             cursor = db.conn.cursor()
             cursor.execute("""
                 SELECT id FROM discovery_runs
-                WHERE status = 'completed' AND tenant_id = %s
+                WHERE status = 'completed' AND organization_id = %s
                 ORDER BY id DESC LIMIT %s
-            """, (_tenant_id(), limit))
+            """, (_org_id(), limit))
             run_ids = [r[0] for r in cursor.fetchall()]
             cursor.close()
 
@@ -4654,7 +4654,7 @@ def get_compliance_gap_analysis():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -4790,7 +4790,7 @@ def get_compliance_intelligence():
     cursor = db.conn.cursor()
     rc_cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -5038,7 +5038,7 @@ def get_dashboard_posture():
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -5067,7 +5067,7 @@ def get_dashboard_posture():
         }
 
         # Previous run comparison — query second-most-recent completed runs
-        prev_ids = _previous_run_ids(cursor, _tenant_id(), _connection_id())
+        prev_ids = _previous_run_ids(cursor, _org_id(), _connection_id())
         previous_run = None
         if prev_ids:
             cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (prev_ids,))
@@ -5179,12 +5179,12 @@ def get_dashboard_posture():
 def get_trust_dashboard():
     """
     Trust & Federation data for the Dashboard Trust tab.
-    Returns: external identity breakdown, trust path summary, cross-tenant access.
+    Returns: external identity breakdown, trust path summary, cross-org access.
     """
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -5273,7 +5273,7 @@ def get_credential_intelligence():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({"error": "No completed discovery runs found"}), 404
 
@@ -5372,7 +5372,7 @@ def get_identity_summary():
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({
                 "run_id": None,
@@ -5449,7 +5449,7 @@ def get_identity_summary():
 
         # Also check cloud_subscriptions table for accurate count
         # Only include subscriptions whose cloud_connection still exists
-        tid = _tenant_id()
+        tid = _org_id()
         conn_id = _connection_id()
         if tid:
             if conn_id:
@@ -5457,7 +5457,7 @@ def get_identity_summary():
                     SELECT COUNT(DISTINCT cs.account_id)
                     FROM cloud_subscriptions cs
                     JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                    WHERE cs.tenant_id = %s AND cs.cloud = 'azure'
+                    WHERE cs.organization_id = %s AND cs.cloud = 'azure'
                       AND cs.cloud_connection_id = %s
                       AND cs.status IN ('active', 'discovered')
                 """, (tid, conn_id))
@@ -5466,7 +5466,7 @@ def get_identity_summary():
                     SELECT COUNT(DISTINCT cs.account_id)
                     FROM cloud_subscriptions cs
                     JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                    WHERE cs.tenant_id = %s AND cs.cloud = 'azure'
+                    WHERE cs.organization_id = %s AND cs.cloud = 'azure'
                       AND cs.status IN ('active', 'discovered')
                 """, (tid,))
             cs_count = cursor.fetchone()[0] or 0
@@ -5476,7 +5476,7 @@ def get_identity_summary():
                     SELECT DISTINCT cs.account_id
                     FROM cloud_subscriptions cs
                     JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                    WHERE cs.tenant_id = %s AND cs.cloud = 'azure'
+                    WHERE cs.organization_id = %s AND cs.cloud = 'azure'
                       AND cs.cloud_connection_id = %s
                       AND cs.status IN ('active', 'discovered')
                     ORDER BY cs.account_id
@@ -5486,7 +5486,7 @@ def get_identity_summary():
                     SELECT DISTINCT cs.account_id
                     FROM cloud_subscriptions cs
                     JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                    WHERE cs.tenant_id = %s AND cs.cloud = 'azure'
+                    WHERE cs.organization_id = %s AND cs.cloud = 'azure'
                       AND cs.status IN ('active', 'discovered')
                     ORDER BY cs.account_id
                 """, (tid,))
@@ -5603,7 +5603,7 @@ def get_identity_graph_data(identity_id):
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT id, identity_id, display_name, identity_category, risk_level,
                    COALESCE(risk_score, 0), activity_status,
@@ -6097,8 +6097,8 @@ def get_identity_pim_data(identity_id):
     cursor = db.conn.cursor()
 
     try:
-        # Resolve identity_db_id from identity_id (tenant-scoped)
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        # Resolve identity_db_id from identity_id (org-scoped)
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.id FROM identities i
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -6140,7 +6140,7 @@ def get_dashboard_ca_summary():
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
 
         if not run_ids:
             return jsonify({
@@ -6315,8 +6315,8 @@ def _execute_remediation(action_type: str, identity: dict, playbook: dict, db) -
     }
 
     # Check if Azure credentials are configured for real execution
-    settings = db.get_settings(tenant_id=_tenant_id())
-    azure_configured = all(settings.get(k) for k in ('azure_tenant_id', 'azure_client_id', 'azure_client_secret'))
+    settings = db.get_settings(organization_id=_org_id())
+    azure_configured = all(settings.get(k) for k in ('azure_directory_id', 'azure_client_id', 'azure_client_secret'))
 
     if action_type == 'flag_for_review':
         # Internal action — always executes
@@ -6629,9 +6629,9 @@ def auth_login():
     data = request.get_json(silent=True) or {}
     username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
-    tenant_slug = str(data.get('tenant_slug', '')).strip() or None  # Phase 53
+    org_slug = str(data.get('org_slug', '')).strip() or None  # Phase 53
     # Phase 1B: Derive portal from host header (not client-supplied body)
-    from app.api.auth import _derive_portal, _derive_tenant_slug
+    from app.api.auth import _derive_portal, _derive_org_slug
     portal = _derive_portal()
 
     if not username or not password:
@@ -6681,7 +6681,7 @@ def auth_login():
                 pass
             return jsonify({'error': 'Invalid credentials'}), 401
 
-        # Portal access enforcement — runs regardless of tenant_slug
+        # Portal access enforcement — runs regardless of org_slug
         if portal == 'client':
             # Block admin-portal users from client portal login
             if user.get('is_superadmin') or user.get('portal_role') in ('superadmin', 'poweradmin', 'billing', 'reader'):
@@ -6693,13 +6693,13 @@ def auth_login():
                 return jsonify({'error': 'Access denied. This portal is for platform administrators only.'}), 403
 
         # Phase 53: Tenant-scoped login enforcement
-        if tenant_slug:
-            target_tenant = db.get_tenant_by_slug(tenant_slug)
-            if not target_tenant:
+        if org_slug:
+            target_org = db.get_organization_by_slug(org_slug)
+            if not target_org:
                 return jsonify({'error': 'Organization not found'}), 404
-            if not target_tenant.get('enabled'):
+            if not target_org.get('enabled'):
                 return jsonify({'error': 'Organization is disabled'}), 403
-            if not user.get('is_superadmin') and user.get('tenant_id') != target_tenant['id']:
+            if not user.get('is_superadmin') and user.get('organization_id') != target_org['id']:
                 return jsonify({'error': 'You do not belong to this organization'}), 403
 
         # Do all DB writes while connection 1 is still open
@@ -6715,18 +6715,18 @@ def auth_login():
             db.log_activity(action_type, f'User "{username}" logged in ({portal} portal)',
                             {'user_id': user['id'], 'role': user['role'], 'ip': request.remote_addr,
                              'user_agent': request.headers.get('User-Agent', '')[:200],
-                             'tenant_name': user.get('tenant_name', ''),
+                             'org_name': user.get('org_name', ''),
                              'portal': portal},
-                            user_id=user['id'], tenant_id=user.get('tenant_id'))
+                            user_id=user['id'], organization_id=user.get('organization_id'))
         except Exception:
             pass
     finally:
         db.close()
 
     # Generate tokens AFTER closing connection 1 (generate_refresh_token opens its own connection)
-    # Phase 1B: Pass portal + tenant_slug for portal-scoped tokens
-    effective_slug = tenant_slug or _derive_tenant_slug()
-    access_token = generate_access_token(user, portal=portal, tenant_slug=effective_slug)
+    # Phase 1B: Pass portal + org_slug for portal-scoped tokens
+    effective_slug = org_slug or _derive_org_slug()
+    access_token = generate_access_token(user, portal=portal, org_slug=effective_slug)
     refresh_token = generate_refresh_token(user, portal=portal)
 
     return jsonify({
@@ -6737,8 +6737,8 @@ def auth_login():
             'username': user['username'],
             'display_name': user['display_name'],
             'role': user['role'],
-            'tenant_id': user.get('tenant_id'),
-            'tenant_name': user.get('tenant_name'),
+            'organization_id': user.get('organization_id'),
+            'org_name': user.get('org_name'),
             'is_superadmin': user.get('is_superadmin', False),
             'portal_role': user.get('portal_role'),
             'force_password_change': user.get('force_password_change', False),
@@ -6787,21 +6787,21 @@ def auth_refresh():
         # Phase 1B: Preserve portal context from stored refresh token
         portal = token_record.get('portal', 'client')
 
-        # Look up tenant slug for audience claim if client portal
+        # Look up org slug for audience claim if client portal
         slug = None
-        if portal == 'client' and user.get('tenant_id'):
+        if portal == 'client' and user.get('organization_id'):
             try:
-                tenant = db.get_tenant_by_id(user['tenant_id'])
-                if tenant:
-                    slug = tenant.get('slug')
+                org = db.get_organization_by_id(user['organization_id'])
+                if org:
+                    slug = org.get('slug')
             except Exception:
                 pass
     finally:
         db.close()
 
     # Generate tokens AFTER closing connection 1
-    # Phase 1B: Pass portal + tenant_slug for portal-scoped tokens
-    access_token = generate_access_token(user, portal=portal, tenant_slug=slug)
+    # Phase 1B: Pass portal + org_slug for portal-scoped tokens
+    access_token = generate_access_token(user, portal=portal, org_slug=slug)
     new_refresh = generate_refresh_token(user, portal=portal)
 
     return jsonify({
@@ -6812,8 +6812,8 @@ def auth_refresh():
             'username': user['username'],
             'display_name': user['display_name'],
             'role': user['role'],
-            'tenant_id': user.get('tenant_id'),
-            'tenant_name': user.get('tenant_name'),
+            'organization_id': user.get('organization_id'),
+            'org_name': user.get('org_name'),
             'is_superadmin': user.get('is_superadmin', False),
             'portal_role': user.get('portal_role'),
             'force_password_change': user.get('force_password_change', False),
@@ -6901,7 +6901,7 @@ def forgot_password_handler():
     """POST /api/auth/forgot-password — initiate password reset (public)."""
     data = request.get_json(silent=True) or {}
     email = str(data.get('email', '')).strip().lower()
-    tenant_slug = str(data.get('tenant_slug', '')).strip() or None
+    org_slug = str(data.get('org_slug', '')).strip() or None
 
     # Always return success to prevent email enumeration
     success_msg = 'If an account exists with this email, a password reset link has been sent.'
@@ -6911,14 +6911,14 @@ def forgot_password_handler():
 
     db = Database()  # Bypass RLS — pre-auth public endpoint
     try:
-        # Resolve tenant_id from slug if provided
-        tenant_id = None
-        if tenant_slug:
-            tenant = db.get_tenant_by_slug(tenant_slug)
-            if tenant:
-                tenant_id = tenant['id']
+        # Resolve organization_id from slug if provided
+        organization_id = None
+        if org_slug:
+            org = db.get_organization_by_slug(org_slug)
+            if org:
+                organization_id = org['id']
 
-        user = db.get_user_by_email(email, tenant_id=tenant_id)
+        user = db.get_user_by_email(email, organization_id=organization_id)
         if not user:
             return jsonify({'message': success_msg})
 
@@ -7039,7 +7039,7 @@ def admin_reset_user_password(user_id):
         try:
             db.log_admin_audit(current_user['id'], 'admin_password_reset',
                                target_user_id=user_id,
-                               target_tenant_id=target.get('tenant_id'),
+                               target_organization_id=target.get('organization_id'),
                                details={'target_username': target['username']},
                                ip_address=request.remote_addr)
         except Exception:
@@ -7061,20 +7061,20 @@ def admin_reset_user_password(user_id):
 
 
 def get_users_list():
-    """GET /api/users — list users, scoped by tenant."""
+    """GET /api/users — list users, scoped by org."""
     db = _db()
     try:
         current_user = getattr(g, 'current_user', None)
         is_super = current_user.get('is_superadmin') if current_user else False
 
         if is_super:
-            filter_tid = request.args.get('tenant_id', type=int)
+            filter_tid = request.args.get('organization_id', type=int)
         else:
-            filter_tid = _tenant_id()
+            filter_tid = _org_id()
         # Portal users have their own endpoint (/api/portal-users) — always exclude here
         exclude_portal = True
 
-        users = db.get_users(tenant_id=filter_tid, exclude_portal=exclude_portal)
+        users = db.get_users(organization_id=filter_tid, exclude_portal=exclude_portal)
         return jsonify({'users': users})
     finally:
         db.close()
@@ -7132,17 +7132,17 @@ def create_user_handler():
             if 'portal_role' in data and (data['portal_role'] is None or data['portal_role'] in VALID_PORTAL_ROLES):
                 portal_role_val = data['portal_role']
 
-        # Portal users (admin console operators) have no tenant — they're platform-level
+        # Portal users (admin console operators) have no org — they're platform-level
         if portal_role_val:
-            tenant_id = None
-        elif current_user and current_user.get('is_superadmin') and 'tenant_id' in data:
-            tenant_id = data.get('tenant_id')
+            organization_id = None
+        elif current_user and current_user.get('is_superadmin') and 'organization_id' in data:
+            organization_id = data.get('organization_id')
         else:
-            tenant_id = current_user.get('tenant_id') if current_user else None
+            organization_id = current_user.get('organization_id') if current_user else None
 
         email_val = str(data.get('email', '')).strip() or None
         phone_val = str(data.get('phone', '')).strip() or None
-        user = db.create_user(username, hashed, display_name, role, created_by, tenant_id=tenant_id,
+        user = db.create_user(username, hashed, display_name, role, created_by, organization_id=organization_id,
                               is_superadmin=is_superadmin_flag, portal_role=portal_role_val,
                               email=email_val, phone=phone_val)
 
@@ -7207,13 +7207,13 @@ def update_user_handler(user_id):
             else:
                 updates['password_hash'] = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-        # Phase 46: tenant_id + is_superadmin (superadmin only)
+        # Phase 46: organization_id + is_superadmin (superadmin only)
         current_user = getattr(g, 'current_user', None)
-        if 'tenant_id' in data:
+        if 'organization_id' in data:
             if not current_user or not current_user.get('is_superadmin'):
-                errors.append('Only superadmins can reassign tenant')
+                errors.append('Only superadmins can reassign org')
             else:
-                updates['tenant_id'] = int(data['tenant_id']) if data['tenant_id'] is not None else None
+                updates['organization_id'] = int(data['organization_id']) if data['organization_id'] is not None else None
 
         if 'is_superadmin' in data:
             if not current_user or not current_user.get('is_superadmin'):
@@ -7275,10 +7275,10 @@ def delete_user_handler(user_id):
         if current_user and current_user['id'] == user_id:
             return jsonify({'error': 'Cannot delete your own account'}), 400
 
-        # Phase 46: Non-superadmins cannot delete users from another tenant
+        # Phase 46: Non-superadmins cannot delete users from another org
         if current_user and not current_user.get('is_superadmin'):
-            if existing.get('tenant_id') != current_user.get('tenant_id'):
-                return jsonify({'error': 'Cannot delete users from another tenant'}), 403
+            if existing.get('organization_id') != current_user.get('organization_id'):
+                return jsonify({'error': 'Cannot delete users from another org'}), 403
 
         if existing['role'] == 'admin' and db.count_admins() <= 1:
             return jsonify({'error': 'Cannot delete the last admin user'}), 400
@@ -7326,7 +7326,7 @@ def _resolve_export_run_ids(cursor, tid, conn_id):
 
             query = """
                 SELECT id FROM discovery_runs
-                WHERE tenant_id = %s AND status = 'completed'
+                WHERE organization_id = %s AND status = 'completed'
                   AND completed_at >= %s AND completed_at <= %s
             """
             params = [tid, from_dt, to_dt]
@@ -7379,7 +7379,7 @@ def _export_identities():
         risk_filter = request.args.get('risk_level')
         category_filter = request.args.get('identity_category')
 
-        run_ids, date_range = _resolve_export_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids, date_range = _resolve_export_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
@@ -7514,7 +7514,7 @@ def _export_compliance():
     db = _db()
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
@@ -7606,9 +7606,9 @@ def _export_drift():
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT id FROM discovery_runs WHERE status = 'completed' AND tenant_id = %s
+            SELECT id FROM discovery_runs WHERE status = 'completed' AND organization_id = %s
             ORDER BY id DESC LIMIT 1
-        """, (_tenant_id(),))
+        """, (_org_id(),))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -7753,8 +7753,8 @@ def _export_evidence_package():
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
         # Get organization name
-        tid = _tenant_id()
-        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+        tid = _org_id()
+        org_name = db.get_setting('org_name', organization_id=tid) if tid else 'Organization'
 
         # Privileged access: identities with critical/high risk
         privileged = []
@@ -7855,8 +7855,8 @@ def _export_sensitive_data():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tid = _tenant_id()
-        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+        tid = _org_id()
+        org_name = db.get_setting('org_name', organization_id=tid) if tid else 'Organization'
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, tid, _connection_id())
         if not run_ids:
@@ -7969,9 +7969,9 @@ def _export_evidence_json():
     """
     db = _db()
     try:
-        tid = _tenant_id()
+        tid = _org_id()
         conn_id = _connection_id()
-        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+        org_name = db.get_setting('org_name', organization_id=tid) if tid else 'Organization'
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, tid, conn_id)
         if not run_ids:
@@ -8041,7 +8041,7 @@ def _export_evidence_json():
             cursor.execute("""
                 SELECT id, run_id, created_at, summary
                 FROM drift_reports
-                WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1
+                WHERE organization_id = %s ORDER BY created_at DESC LIMIT 1
             """, (tid,))
             drift_row = cursor.fetchone()
             if drift_row:
@@ -8060,7 +8060,7 @@ def _export_evidence_json():
             cursor.execute("""
                 SELECT status, COUNT(*) as cnt
                 FROM remediation_actions
-                WHERE tenant_id = %s
+                WHERE organization_id = %s
                 GROUP BY status
             """, (tid,))
             remediation_section = {row['status']: row['cnt'] for row in cursor.fetchall()}
@@ -8123,7 +8123,7 @@ def _export_evidence_json():
                 'generated_at': now,
                 'generator': 'AuditGraph Identity Risk Platform',
                 'version': '3.4.0',
-                'tenant_id': tid,
+                'organization_id': tid,
                 'connection_id': conn_id,
                 'discovery_runs': len(runs),
             },
@@ -8162,7 +8162,7 @@ def export_evidence_zip():
     db = _db()
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
-        tid = _tenant_id()
+        tid = _org_id()
         conn_id = _connection_id()
         run_ids = _latest_run_ids(cursor, tid, conn_id)
         if not run_ids:
@@ -8170,7 +8170,7 @@ def export_evidence_zip():
             db.close()
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
-        org_name = db.get_setting('org_name', tenant_id=tid) if tid else 'Organization'
+        org_name = db.get_setting('org_name', organization_id=tid) if tid else 'Organization'
         generated_at = datetime.utcnow()
 
         # Determine date range text
@@ -8187,7 +8187,7 @@ def export_evidence_zip():
                 # Get all runs in date range
                 cursor.execute("""
                     SELECT id FROM discovery_runs
-                    WHERE tenant_id = %s AND status = 'completed'
+                    WHERE organization_id = %s AND status = 'completed'
                       AND completed_at >= %s AND completed_at <= %s
                     ORDER BY completed_at DESC
                 """, (tid, from_dt, to_dt))
@@ -8378,7 +8378,7 @@ def export_evidence_zip():
                        u.display_name as user_name
                 FROM activity_log al
                 LEFT JOIN users u ON u.id = al.user_id
-                WHERE al.tenant_id = %s
+                WHERE al.organization_id = %s
                   AND al.created_at >= NOW() - INTERVAL '30 days'
                 ORDER BY al.created_at DESC
                 LIMIT 1000
@@ -8734,7 +8734,7 @@ def get_identity_lifecycle(identity_id):
     db = _db()
     try:
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
                    i.enabled, i.activity_status, i.credential_status, i.credential_count,
@@ -8870,12 +8870,12 @@ def create_access_review():
         scope_clouds = body.get('scope_clouds')
         scope_description = body.get('scope_description', '')
         risk_focus = body.get('risk_focus')
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
 
         campaign = db.create_campaign(name, description, scope, deadline, user['id'],
                                       campaign_type=campaign_type, scope_clouds=scope_clouds,
                                       scope_description=scope_description, risk_focus=risk_focus,
-                                      tenant_id=tenant_id)
+                                      organization_id=organization_id)
         review_count = db.populate_campaign_reviews(campaign['id'], scope, user['id'], deadline=deadline)
 
         # Audit log
@@ -9127,7 +9127,7 @@ def get_groups_list():
 
         # Recompute auto-group member counts with Microsoft filter + multi-run
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if run_ids:
             for grp in groups:
                 if grp.get('group_type') == 'auto' and grp.get('auto_criteria'):
@@ -9339,7 +9339,7 @@ def query_identities():
 
     cursor = db.conn.cursor()
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
@@ -9562,11 +9562,11 @@ def get_dashboard_anomalies():
 # ── Phase 42: API Key Management ─────────────────────────────────
 
 def get_api_keys_list():
-    """GET /api/api-keys — list all API keys (admin only). Scoped by tenant."""
-    tid = _tenant_id()
+    """GET /api/api-keys — list all API keys (admin only). Scoped by org."""
+    tid = _org_id()
     db = _db()
     try:
-        keys = db.get_api_keys(tenant_id=tid)
+        keys = db.get_api_keys(organization_id=tid)
         return jsonify({'api_keys': keys})
     finally:
         db.close()
@@ -9600,7 +9600,7 @@ def create_api_key_handler():
 
     current_user = getattr(g, 'current_user', None)
     created_by = current_user['id'] if current_user else None
-    tid = _tenant_id()
+    tid = _org_id()
 
     db = _db()
     try:
@@ -9612,7 +9612,7 @@ def create_api_key_handler():
             role=role,
             created_by=created_by,
             expires_at=expires_at,
-            tenant_id=tid,
+            organization_id=tid,
         )
 
         try:
@@ -9633,12 +9633,12 @@ def create_api_key_handler():
 
 
 def update_api_key_handler(key_id):
-    """PUT /api/api-keys/<id> — update an API key (admin only). Scoped by tenant."""
+    """PUT /api/api-keys/<id> — update an API key (admin only). Scoped by org."""
     data = request.get_json(silent=True) or {}
-    tid = _tenant_id()
+    tid = _org_id()
     db = _db()
     try:
-        existing = db.get_api_key_by_id(key_id, tenant_id=tid)
+        existing = db.get_api_key_by_id(key_id, organization_id=tid)
         if not existing:
             return jsonify({'error': 'API key not found'}), 404
 
@@ -9670,7 +9670,7 @@ def update_api_key_handler(key_id):
         if not updates:
             return jsonify({'api_key': existing, 'message': 'No changes'})
 
-        api_key = db.update_api_key(key_id, tenant_id=tid, **updates)
+        api_key = db.update_api_key(key_id, organization_id=tid, **updates)
 
         try:
             _log(db,'api_key_updated',
@@ -9685,15 +9685,15 @@ def update_api_key_handler(key_id):
 
 
 def delete_api_key_handler(key_id):
-    """DELETE /api/api-keys/<id> — delete an API key (admin only). Scoped by tenant."""
-    tid = _tenant_id()
+    """DELETE /api/api-keys/<id> — delete an API key (admin only). Scoped by org."""
+    tid = _org_id()
     db = _db()
     try:
-        existing = db.get_api_key_by_id(key_id, tenant_id=tid)
+        existing = db.get_api_key_by_id(key_id, organization_id=tid)
         if not existing:
             return jsonify({'error': 'API key not found'}), 404
 
-        db.delete_api_key(key_id, tenant_id=tid)
+        db.delete_api_key(key_id, organization_id=tid)
 
         current_user = getattr(g, 'current_user', None)
         try:
@@ -10034,18 +10034,18 @@ def reset_dashboard_preferences_handler():
 # Phase 45: Multi-Tenant Management Handlers
 # ===================================================================
 
-def get_tenants_list():
-    """GET /api/tenants — list all tenants (superadmin only)."""
+def get_organizations_list():
+    """GET /api/organizations — list all organizations (superadmin only)."""
     db = _db()
     try:
-        tenants = db.get_tenants()
-        return jsonify({'tenants': tenants})
+        organizations = db.get_organizations()
+        return jsonify({'organizations': organizations})
     finally:
         db.close()
 
 
-def create_tenant_handler():
-    """POST /api/tenants — create a new tenant (superadmin only)."""
+def create_organization_handler():
+    """POST /api/organizations — create a new organization (superadmin only)."""
     data = request.get_json(silent=True) or {}
     name = str(data.get('name', '')).strip()
     slug = str(data.get('slug', '')).strip().lower()
@@ -10071,14 +10071,14 @@ def create_tenant_handler():
     if primary_cloud and primary_cloud not in ('azure', 'aws', 'gcp'):
         return jsonify({'error': 'primary_cloud must be azure, aws, or gcp'}), 400
 
-    # Use admin DB (no RLS) — creates user in a different tenant than caller's context
+    # Use admin DB (no RLS) — creates user in a different org than caller's context
     db = Database()
     try:
-        existing = db.get_tenant_by_slug(slug)
+        existing = db.get_organization_by_slug(slug)
         if existing:
             return jsonify({'error': f'Tenant slug "{slug}" already exists'}), 409
 
-        tenant = db.create_tenant(name, slug, plan,
+        org = db.create_organization(name, slug, plan,
                                   primary_cloud=primary_cloud,
                                   industry=industry,
                                   compliance_framework=compliance_framework)
@@ -10088,20 +10088,20 @@ def create_tenant_handler():
         if term in (1, 3, 5):
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
-            db.update_tenant(tenant['id'],
+            db.update_organization(org['id'],
                              subscription_term=term,
                              license_activated_at=now.isoformat(),
                              license_expires_at=now.replace(year=now.year + term).isoformat())
-            tenant = db.get_tenant_by_id(tenant['id'])
+            org = db.get_organization_by_id(org['id'])
 
         try:
-            _log(db,'tenant_created',
+            _log(db,'org_created',
                 f'Tenant "{name}" created (slug: {slug}, plan: {plan})',
-                {'tenant_id': tenant['id'], 'slug': slug, 'plan': plan})
+                {'organization_id': org['id'], 'slug': slug, 'plan': plan})
         except Exception:
             pass
 
-        # Phase 84: Optional root user creation during tenant onboarding
+        # Phase 84: Optional root user creation during org onboarding
         root_username = str(data.get('root_username', '')).strip().lower()
         root_email = str(data.get('root_email', '')).strip().lower()
         root_password = str(data.get('root_password', ''))
@@ -10124,13 +10124,13 @@ def create_tenant_handler():
             root_user = db.create_user(
                 root_username, hashed, root_username,
                 role='admin', created_by=created_by,
-                tenant_id=tenant['id'], is_root_user=True,
+                organization_id=org['id'], is_root_user=True,
                 force_password_change=True,
                 email=root_email or None
             )
 
-            # Mark tenant as provisioned + set onboarding stage + auto-enable primary cloud
-            settings = tenant.get('settings') or {}
+            # Mark org as provisioned + set onboarding stage + auto-enable primary cloud
+            settings = org.get('settings') or {}
             if isinstance(settings, str):
                 try:
                     settings = json.loads(settings)
@@ -10144,13 +10144,13 @@ def create_tenant_handler():
                 cp = settings.get('cloud_providers', {})
                 cp[primary_cloud] = {'enabled': True, 'plan': plan if plan in ('pro', 'enterprise') else 'pro'}
                 settings['cloud_providers'] = cp
-            db.update_tenant(tenant['id'], settings=settings)
-            tenant = db.get_tenant_by_id(tenant['id'])
+            db.update_organization(org['id'], settings=settings)
+            org = db.get_organization_by_id(org['id'])
 
             try:
                 admin_id = current_user['id'] if current_user else None
-                db.log_admin_audit(admin_id, 'tenant_root_user_created',
-                                   target_user_id=root_user['id'], target_tenant_id=tenant['id'],
+                db.log_admin_audit(admin_id, 'org_root_user_created',
+                                   target_user_id=root_user['id'], target_organization_id=org['id'],
                                    details={'root_username': root_username},
                                    ip_address=request.remote_addr)
             except Exception:
@@ -10166,7 +10166,7 @@ def create_tenant_handler():
             except Exception as e:
                 logger.warning(f"Failed to send welcome email: {e}")
 
-        result = {'tenant': tenant, 'message': 'Tenant created'}
+        result = {'organization': org, 'message': 'Organization created'}
         if root_user:
             result['root_user'] = {k: v for k, v in root_user.items() if k != 'password_hash'}
         return jsonify(result), 201
@@ -10174,12 +10174,12 @@ def create_tenant_handler():
         db.close()
 
 
-def update_tenant_handler(tenant_id):
-    """PUT /api/tenants/<id> — update tenant details (superadmin only)."""
+def update_organization_handler(organization_id):
+    """PUT /api/organizations/<id> — update organization details (superadmin only)."""
     data = request.get_json(silent=True) or {}
     db = _db()
     try:
-        existing = db.get_tenant_by_id(tenant_id)
+        existing = db.get_organization_by_id(organization_id)
         if not existing:
             return jsonify({'error': 'Tenant not found'}), 404
 
@@ -10217,7 +10217,7 @@ def update_tenant_handler(tenant_id):
             elif term == 0:
                 # Monthly — no fixed expiry
                 updates['license_expires_at'] = None
-        # Phase 85: Additional tenant metadata fields
+        # Phase 85: Additional org metadata fields
         if 'primary_cloud' in data:
             pc = str(data['primary_cloud']).strip().lower()
             if pc and pc not in ('azure', 'aws', 'gcp'):
@@ -10234,49 +10234,49 @@ def update_tenant_handler(tenant_id):
             updates['status'] = st
 
         if not updates:
-            return jsonify({'tenant': existing, 'message': 'No changes'})
+            return jsonify({'organization': existing, 'message': 'No changes'})
 
-        tenant = db.update_tenant(tenant_id, **updates)
+        org = db.update_organization(organization_id, **updates)
         try:
-            _log(db,'tenant_updated',
+            _log(db,'org_updated',
                 f'Tenant "{existing["name"]}" updated: {", ".join(updates.keys())}',
-                {'tenant_id': tenant_id, 'updates': list(updates.keys())})
+                {'organization_id': organization_id, 'updates': list(updates.keys())})
         except Exception:
             pass
         try:
             user = getattr(g, 'current_user', None)
             user_id = user.get('id') if user else None
-            db.log_admin_audit(user_id, 'tenant_updated', target_tenant_id=tenant_id,
+            db.log_admin_audit(user_id, 'org_updated', target_organization_id=organization_id,
                                details={'fields_changed': list(updates.keys())},
                                ip_address=request.remote_addr)
         except Exception:
             pass
-        return jsonify({'tenant': tenant, 'message': 'Tenant updated'})
+        return jsonify({'organization': org, 'message': 'Organization updated'})
     finally:
         db.close()
 
 
-def delete_tenant_handler(tenant_id):
-    """DELETE /api/tenants/<id> — delete a tenant (superadmin only)."""
-    # Use admin DB (no RLS) so cascade can delete across tenant boundaries
+def delete_organization_handler(organization_id):
+    """DELETE /api/organizations/<id> — delete an organization (superadmin only)."""
+    # Use admin DB (no RLS) so cascade can delete across org boundaries
     db = Database()
     try:
-        existing = db.get_tenant_by_id(tenant_id)
+        existing = db.get_organization_by_id(organization_id)
         if not existing:
             return jsonify({'error': 'Tenant not found'}), 404
         if existing.get('slug') == 'default':
-            return jsonify({'error': 'Cannot delete the default tenant'}), 400
+            return jsonify({'error': 'Cannot delete the default organization'}), 400
 
         try:
-            db.delete_tenant(tenant_id)
+            db.delete_organization(organization_id)
         except Exception as e:
-            logger.error(f"Failed to delete tenant {tenant_id}: {e}", exc_info=True)
-            return jsonify({'error': 'Failed to delete tenant'}), 500
+            logger.error(f"Failed to delete organization {organization_id}: {e}", exc_info=True)
+            return jsonify({'error': 'Failed to delete organization'}), 500
 
         try:
-            _log(db,'tenant_deleted',
+            _log(db,'org_deleted',
                 f'Tenant "{existing["name"]}" deleted',
-                {'tenant_id': tenant_id, 'slug': existing.get('slug')})
+                {'organization_id': organization_id, 'slug': existing.get('slug')})
         except Exception:
             pass
         return jsonify({'message': f'Tenant "{existing["name"]}" deleted'})
@@ -10284,24 +10284,24 @@ def delete_tenant_handler(tenant_id):
         db.close()
 
 
-def get_current_tenant_handler():
-    """GET /api/tenant — get current user's tenant info."""
-    tid = _tenant_id()
+def get_current_organization_handler():
+    """GET /api/organization — get current user's organization info."""
+    tid = _org_id()
     if not tid:
-        return jsonify({'tenant': None})
+        return jsonify({'organization': None})
     db = _db()
     try:
-        tenant = db.get_tenant_by_id(tid)
-        return jsonify({'tenant': tenant})
+        org = db.get_organization_by_id(tid)
+        return jsonify({'organization': org})
     finally:
         db.close()
 
 
-def get_tenant_config():
-    """GET /api/tenant/config — cloud provider & add-on config for sidebar."""
-    tid = _tenant_id()
+def get_organization_config():
+    """GET /api/organization/config — cloud provider & add-on config for sidebar."""
+    tid = _org_id()
     if not tid:
-        # Superadmin without tenant context — default Azure-only
+        # Superadmin without org context — default Azure-only
         return jsonify({
             'cloud_providers': {
                 'azure': {'enabled': True, 'plan': 'pro'},
@@ -10314,7 +10314,7 @@ def get_tenant_config():
         })
     db = _db()
     try:
-        cfg = db.get_tenant_config(tid)
+        cfg = db.get_organization_config(tid)
         if not cfg:
             return jsonify({'error': 'Tenant not found'}), 404
         return jsonify(cfg)
@@ -10322,19 +10322,19 @@ def get_tenant_config():
         db.close()
 
 
-def get_tenant_entitlements():
-    """GET /api/tenant/entitlements — plan limits and feature gates for the current tenant."""
-    tid = _tenant_id()
+def get_organization_entitlements():
+    """GET /api/organization/entitlements — plan limits and feature gates for the current organization."""
+    tid = _org_id()
     from app.pricing import PLAN_LIMITS
     db = _db()
     try:
         admin_db = Database()
         try:
-            tenant = admin_db.get_tenant_by_id(tid) if tid else None
+            org = admin_db.get_organization_by_id(tid) if tid else None
         finally:
             admin_db.close()
 
-        plan = (tenant or {}).get('plan', 'free')
+        plan = (org or {}).get('plan', 'free')
         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get('free', {}))
 
         # Get current usage
@@ -10356,7 +10356,7 @@ def get_tenant_entitlements():
                 'active_subscriptions': active_subs,
             },
             'blocked_features': blocked,
-            'subscription_term': (tenant or {}).get('subscription_term', 0),
+            'subscription_term': (org or {}).get('subscription_term', 0),
         })
     finally:
         db.close()
@@ -10365,42 +10365,42 @@ def get_tenant_entitlements():
 # ── Phase 85: Tenant Branding & Onboarding Stage ─────────────────
 
 
-def get_tenant_branding():
-    """GET /api/auth/tenant-branding?slug=<slug> — public branding info for login page."""
+def get_organization_branding():
+    """GET /api/auth/org-branding?slug=<slug> — public branding info for login page."""
     slug = request.args.get('slug', '').strip().lower()
     if not slug:
         return jsonify({'error': 'slug parameter required'}), 400
     db = Database()  # Public endpoint — bypass RLS
     try:
-        tenant = db.get_tenant_by_slug(slug)
-        if not tenant:
+        org = db.get_organization_by_slug(slug)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
-        settings = tenant.get('settings') or {}
+        settings = org.get('settings') or {}
         if isinstance(settings, str):
             try:
                 settings = json.loads(settings)
             except Exception:
                 settings = {}
         return jsonify({
-            'company_name': tenant.get('name'),
-            'slug': tenant.get('slug'),
-            'logo_url': tenant.get('logo_url') or settings.get('logo_url'),
+            'company_name': org.get('name'),
+            'slug': org.get('slug'),
+            'logo_url': org.get('logo_url') or settings.get('logo_url'),
         })
     finally:
         db.close()
 
 
-def get_tenant_stage():
-    """GET /api/tenant/stage — onboarding stage for current tenant."""
-    tid = _tenant_id()
+def get_organization_stage():
+    """GET /api/organization/stage — onboarding stage for current org."""
+    tid = _org_id()
     if not tid:
-        return jsonify({'stage': 'active', 'primary_cloud': None, 'tenant_name': None})
+        return jsonify({'stage': 'active', 'primary_cloud': None, 'org_name': None})
     db = _db()
     try:
-        tenant = db.get_tenant_by_id(tid)
-        if not tenant:
-            return jsonify({'stage': 'active', 'primary_cloud': None, 'tenant_name': None})
-        settings = tenant.get('settings') or {}
+        org = db.get_organization_by_id(tid)
+        if not org:
+            return jsonify({'stage': 'active', 'primary_cloud': None, 'org_name': None})
+        settings = org.get('settings') or {}
         if isinstance(settings, str):
             try:
                 settings = json.loads(settings)
@@ -10409,41 +10409,41 @@ def get_tenant_stage():
         stage = settings.get('onboarding_stage', 'active')
         return jsonify({
             'stage': stage,
-            'primary_cloud': tenant.get('primary_cloud'),
-            'tenant_name': tenant.get('name'),
+            'primary_cloud': org.get('primary_cloud'),
+            'org_name': org.get('name'),
         })
     finally:
         db.close()
 
 
-def update_tenant_stage():
-    """POST /api/tenant/stage — update onboarding stage (admin only)."""
+def update_organization_stage():
+    """POST /api/organization/stage — update onboarding stage (admin only)."""
     data = request.get_json(silent=True) or {}
     stage = str(data.get('stage', '')).strip().lower()
     if stage not in ('password_change', 'locked', 'authenticating', 'active'):
         return jsonify({'error': 'stage must be password_change, locked, authenticating, or active'}), 400
 
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid:
-        return jsonify({'error': 'No tenant context'}), 400
+        return jsonify({'error': 'No org context'}), 400
 
     db = _db()
     try:
-        tenant = db.get_tenant_by_id(tid)
-        if not tenant:
+        org = db.get_organization_by_id(tid)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
-        settings = tenant.get('settings') or {}
+        settings = org.get('settings') or {}
         if isinstance(settings, str):
             try:
                 settings = json.loads(settings)
             except Exception:
                 settings = {}
         settings['onboarding_stage'] = stage
-        db.update_tenant(tid, settings=settings)
+        db.update_organization(tid, settings=settings)
         try:
-            _log(db, 'tenant_stage_updated',
+            _log(db, 'org_stage_updated',
                  f'Onboarding stage changed to "{stage}"',
-                 {'tenant_id': tid, 'stage': stage})
+                 {'organization_id': tid, 'stage': stage})
         except Exception:
             pass
         return jsonify({'stage': stage, 'message': 'Stage updated'})
@@ -10453,39 +10453,39 @@ def update_tenant_stage():
 
 # ── Phase 47: Cross-Tenant Analytics ─────────────────────────────
 
-def get_cross_tenant_analytics():
-    """GET /api/analytics/tenants — per-tenant metrics + global aggregates (superadmin only)."""
+def get_cross_org_analytics():
+    """GET /api/analytics/organizations — per-org metrics + global aggregates (superadmin only)."""
     db = _db()
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("""
             WITH latest_runs AS (
-                SELECT DISTINCT ON (tenant_id)
-                    id, tenant_id, completed_at, total_identities,
+                SELECT DISTINCT ON (organization_id)
+                    id, organization_id, completed_at, total_identities,
                     critical_count, high_count, medium_count, low_count
                 FROM discovery_runs
                 WHERE status = 'completed'
-                ORDER BY tenant_id, id DESC
+                ORDER BY organization_id, id DESC
             ),
             prev_runs AS (
-                SELECT DISTINCT ON (tenant_id)
-                    tenant_id, total_identities AS prev_total,
+                SELECT DISTINCT ON (organization_id)
+                    organization_id, total_identities AS prev_total,
                     critical_count AS prev_critical, high_count AS prev_high
                 FROM discovery_runs
                 WHERE status = 'completed' AND id NOT IN (SELECT id FROM latest_runs)
-                ORDER BY tenant_id, id DESC
+                ORDER BY organization_id, id DESC
             ),
             run_counts AS (
-                SELECT tenant_id, COUNT(*) AS total_runs
-                FROM discovery_runs GROUP BY tenant_id
+                SELECT organization_id, COUNT(*) AS total_runs
+                FROM discovery_runs GROUP BY organization_id
             ),
             user_counts AS (
-                SELECT tenant_id, COUNT(*) AS user_count
-                FROM users WHERE tenant_id IS NOT NULL GROUP BY tenant_id
+                SELECT organization_id, COUNT(*) AS user_count
+                FROM users WHERE organization_id IS NOT NULL GROUP BY organization_id
             )
             SELECT
-                t.id, t.name, t.slug, t.plan, t.enabled,
-                t.settings, t.license_activated_at, t.license_expires_at, t.subscription_term,
+                o.id, o.name, o.slug, o.plan, o.enabled,
+                o.settings, o.license_activated_at, o.license_expires_at, o.subscription_term,
                 COALESCE(uc.user_count, 0) AS user_count,
                 COALESCE(rc.total_runs, 0) AS total_runs,
                 lr.completed_at AS last_discovery,
@@ -10495,16 +10495,16 @@ def get_cross_tenant_analytics():
                 COALESCE(lr.medium_count, 0) AS medium_count,
                 COALESCE(lr.low_count, 0) AS low_count,
                 pr.prev_total, pr.prev_critical, pr.prev_high
-            FROM tenants t
-            LEFT JOIN latest_runs lr ON lr.tenant_id = t.id
-            LEFT JOIN prev_runs pr ON pr.tenant_id = t.id
-            LEFT JOIN run_counts rc ON rc.tenant_id = t.id
-            LEFT JOIN user_counts uc ON uc.tenant_id = t.id
-            ORDER BY t.id
+            FROM organizations o
+            LEFT JOIN latest_runs lr ON lr.organization_id = o.id
+            LEFT JOIN prev_runs pr ON pr.organization_id = o.id
+            LEFT JOIN run_counts rc ON rc.organization_id = o.id
+            LEFT JOIN user_counts uc ON uc.organization_id = o.id
+            ORDER BY o.id
         """)
         rows = [dict(r) for r in cursor.fetchall()]
 
-        # Compute risk score per tenant + serialize timestamps + extract clouds
+        # Compute risk score per org + serialize timestamps + extract clouds
         for row in rows:
             c = row.get('critical_count') or 0
             h = row.get('high_count') or 0
@@ -10515,14 +10515,14 @@ def get_cross_tenant_analytics():
             for ts in ('license_activated_at', 'license_expires_at'):
                 if row.get(ts):
                     row[ts] = row[ts].isoformat()
-            # Extract enabled clouds from tenant settings JSON
+            # Extract enabled clouds from org settings JSON
             settings = row.pop('settings', None) or {}
             cp = settings.get('cloud_providers', {})
             row['clouds_enabled'] = [k for k in ('azure', 'aws', 'gcp') if cp.get(k, {}).get('enabled')]
 
         # Global aggregates
-        total_tenants = len(rows)
-        active_tenants = sum(1 for r in rows if r.get('total_runs', 0) > 0)
+        total_orgs = len(rows)
+        active_orgs = sum(1 for r in rows if r.get('total_runs', 0) > 0)
         total_identities = sum(r.get('total_identities', 0) for r in rows)
         total_critical = sum(r.get('critical_count', 0) for r in rows)
         total_high = sum(r.get('high_count', 0) for r in rows)
@@ -10530,10 +10530,10 @@ def get_cross_tenant_analytics():
         avg_risk_score = round(sum(scores) / len(scores)) if scores else 0
 
         return jsonify({
-            'tenants': rows,
+            'organizations': rows,
             'global': {
-                'total_tenants': total_tenants,
-                'active_tenants': active_tenants,
+                'total_orgs': total_orgs,
+                'active_orgs': active_orgs,
                 'total_identities': total_identities,
                 'total_critical': total_critical,
                 'total_high': total_high,
@@ -10545,29 +10545,29 @@ def get_cross_tenant_analytics():
         db.close()
 
 
-def get_cross_tenant_trends():
-    """GET /api/analytics/tenants/trends — recent runs per tenant for timeline (superadmin only)."""
+def get_cross_org_trends():
+    """GET /api/analytics/organizations/trends — recent runs per org for timeline (superadmin only)."""
     db = _db()
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("""
-            SELECT dr.tenant_id, t.name AS tenant_name,
+            SELECT dr.organization_id, o.name AS org_name,
                    dr.id, dr.completed_at, dr.total_identities,
                    dr.critical_count, dr.high_count
             FROM discovery_runs dr
-            JOIN tenants t ON t.id = dr.tenant_id
+            JOIN organizations o ON o.id = dr.organization_id
             WHERE dr.status = 'completed'
-            ORDER BY dr.tenant_id, dr.completed_at DESC
+            ORDER BY dr.organization_id, dr.completed_at DESC
             LIMIT 100
         """)
         rows = [dict(r) for r in cursor.fetchall()]
 
-        # Group by tenant
+        # Group by organization
         trends: dict = {}
         for row in rows:
-            tid = str(row['tenant_id'])
+            tid = str(row['organization_id'])
             if tid not in trends:
-                trends[tid] = {'tenant_name': row['tenant_name'], 'runs': []}
+                trends[tid] = {'org_name': row['org_name'], 'runs': []}
             if row.get('completed_at'):
                 row['completed_at'] = row['completed_at'].isoformat()
             trends[tid]['runs'].append({
@@ -10607,23 +10607,23 @@ def get_login_sessions():
             logout_types = ('auth_logout', 'admin_logout')
 
         all_types = login_types + logout_types
-        tenant_id_filter = request.args.get('tenant_id', type=int)
+        organization_id_filter = request.args.get('organization_id', type=int)
 
         # Fetch recent login + logout events with user details
         where_clause = "WHERE a.action_type = ANY(%s)"
         query_params: list = [list(all_types)]
-        if tenant_id_filter:
-            where_clause += " AND a.tenant_id = %s"
-            query_params.append(tenant_id_filter)
+        if organization_id_filter:
+            where_clause += " AND a.organization_id = %s"
+            query_params.append(organization_id_filter)
         query_params.append(limit * 3)
         cursor.execute(f"""
             SELECT a.id, a.action_type, a.description, a.metadata, a.created_at,
-                   a.user_id, a.tenant_id,
+                   a.user_id, a.organization_id,
                    u.username, u.display_name, u.role,
-                   t.name AS tenant_name
+                   o.name AS org_name
             FROM activity_log a
             LEFT JOIN users u ON u.id = a.user_id
-            LEFT JOIN tenants t ON t.id = a.tenant_id
+            LEFT JOIN organizations o ON o.id = a.organization_id
             {where_clause}
             ORDER BY a.created_at DESC
             LIMIT %s
@@ -10678,8 +10678,8 @@ def get_login_sessions():
                 'username': login.get('username') or '',
                 'display_name': login.get('display_name') or login.get('username') or '',
                 'role': login.get('role') or meta.get('role', ''),
-                'tenant_name': login.get('tenant_name') or meta.get('tenant_name', ''),
-                'tenant_id': login.get('tenant_id'),
+                'org_name': login.get('org_name') or meta.get('org_name', ''),
+                'organization_id': login.get('organization_id'),
                 'login_at': login_time,
                 'logout_at': logout_time,
                 'duration_minutes': duration_min,
@@ -10701,14 +10701,14 @@ def get_login_sessions():
 # ── Phase 48: Onboarding Wizard ─────────────────────────────────
 
 def get_onboarding_status():
-    """Check if the current tenant has completed onboarding. Returns checklist progress."""
+    """Check if the current org has completed onboarding. Returns checklist progress."""
     db = _db()
     try:
-        tid = _tenant_id()
-        settings = db.get_settings(tenant_id=tid)
+        tid = _org_id()
+        settings = db.get_settings(organization_id=tid)
         completed = settings.get('onboarding_completed', 'false') == 'true'
         azure_configured = all([
-            settings.get('azure_tenant_id'),
+            settings.get('azure_directory_id'),
             settings.get('azure_client_id'),
             settings.get('azure_client_secret'),
         ])
@@ -10751,7 +10751,7 @@ def get_onboarding_status():
                 # Check if any identity was viewed (proxy for "reviewed")
                 cursor.execute("""
                     SELECT COUNT(*) FROM activity_log
-                    WHERE tenant_id = %s AND action = 'identity_viewed'
+                    WHERE organization_id = %s AND action = 'identity_viewed'
                     LIMIT 1
                 """, (tid,))
                 row = cursor.fetchone()
@@ -10782,11 +10782,11 @@ def test_azure_connection():
     if not data:
         return jsonify({'error': 'Expected JSON body'}), 400
 
-    azure_tenant_id = (data.get('azure_tenant_id') or '').strip()
+    azure_directory_id = (data.get('azure_directory_id') or '').strip()
     azure_client_id = (data.get('azure_client_id') or '').strip()
     azure_client_secret = (data.get('azure_client_secret') or '').strip()
 
-    if not all([azure_tenant_id, azure_client_id, azure_client_secret]):
+    if not all([azure_directory_id, azure_client_id, azure_client_secret]):
         return jsonify({'error': 'All three Azure credential fields are required'}), 400
 
     try:
@@ -10794,7 +10794,7 @@ def test_azure_connection():
         from azure.mgmt.resource import SubscriptionClient
 
         credential = ClientSecretCredential(
-            tenant_id=azure_tenant_id,
+            organization_id=azure_directory_id,
             client_id=azure_client_id,
             client_secret=azure_client_secret,
         )
@@ -10808,24 +10808,24 @@ def test_azure_connection():
                 })
 
         # Auto-advance onboarding stage to 'active' and insert discovered subs
-        tid = _tenant_id()
+        tid = _org_id()
         if tid:
             from app.database import Database
             admin_db = Database()
             try:
-                admin_db.update_tenant(tid, onboarding_stage='active')
+                admin_db.update_organization(tid, onboarding_stage='active')
                 admin_db._ensure_cloud_subscriptions_table()
                 cursor = admin_db.conn.cursor()
                 for s in subs:
                     cursor.execute("""
-                        INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
                         VALUES (%s, 'azure', %s, %s, 'discovered')
-                        ON CONFLICT (tenant_id, cloud, account_id) DO NOTHING
+                        ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
                     """, (tid, s['id'], s['name']))
                 admin_db.conn.commit()
                 cursor.close()
-                # Seed auto identity groups for this tenant
-                admin_db.seed_auto_groups_for_tenant(tid)
+                # Seed auto identity groups for this org
+                admin_db.seed_auto_groups_for_organization(tid)
             finally:
                 admin_db.close()
 
@@ -10846,10 +10846,10 @@ def test_azure_connection():
 # ── Cloud Connections (multi-directory / multi-cloud) ───────────
 
 def get_client_connections():
-    """List all cloud connections for the current tenant.
+    """List all cloud connections for the current organization.
     Auto-creates a 'Primary' connection from settings if none exist yet.
     """
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
     cloud = request.args.get('cloud')
@@ -10860,8 +10860,8 @@ def get_client_connections():
         # Auto-create primary connection from existing settings if none exist
         if not connections and not cloud:
             try:
-                settings = db.get_settings(tenant_id=tid)
-                azure_tid = (settings.get('azure_tenant_id') or '').strip()
+                settings = db.get_settings(organization_id=tid)
+                azure_tid = (settings.get('azure_directory_id') or '').strip()
                 azure_cid = (settings.get('azure_client_id') or '').strip()
                 azure_secret = (settings.get('azure_client_secret') or '').strip()
                 if azure_tid:
@@ -10869,8 +10869,8 @@ def get_client_connections():
                     if azure_secret:
                         meta['client_secret'] = azure_secret
                     conn = db.create_cloud_connection(
-                        tenant_id=tid, cloud='azure', label='Primary',
-                        entra_tenant_id=azure_tid, client_id=azure_cid,
+                        organization_id=tid, cloud='azure', label='Primary',
+                        azure_directory_id=azure_tid, client_id=azure_cid,
                         connection_type='entra',
                         metadata=meta,
                     )
@@ -10883,7 +10883,7 @@ def get_client_connections():
                     cursor.execute("""
                         UPDATE cloud_subscriptions
                         SET cloud_connection_id = %s
-                        WHERE tenant_id = %s AND cloud_connection_id IS NULL
+                        WHERE organization_id = %s AND cloud_connection_id IS NULL
                     """, (conn['id'], tid))
                     db.conn.commit()
                     cursor.close()
@@ -10897,10 +10897,10 @@ def get_client_connections():
 
 
 def create_client_connection():
-    """Create a new cloud connection for the current tenant.
+    """Create a new cloud connection for the current organization.
     Stores credentials in metadata and auto-discovers subscriptions.
     """
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
     data = request.get_json()
@@ -10909,7 +10909,7 @@ def create_client_connection():
 
     cloud = (data.get('cloud') or 'azure').strip().lower()
     label = (data.get('label') or '').strip()
-    entra_tenant_id = (data.get('entra_tenant_id') or data.get('azure_tenant_id') or '').strip()
+    azure_directory_id = (data.get('azure_directory_id') or data.get('azure_directory_id') or '').strip()
     client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
     client_secret = (data.get('client_secret') or '').strip()
     connection_type = (data.get('connection_type') or 'entra').strip()
@@ -10917,7 +10917,7 @@ def create_client_connection():
 
     if not label:
         return jsonify({'error': 'Connection label is required'}), 400
-    if cloud == 'azure' and not entra_tenant_id:
+    if cloud == 'azure' and not azure_directory_id:
         return jsonify({'error': 'Entra Directory ID is required for Azure connections'}), 400
 
     # Build metadata — store credentials securely in JSONB
@@ -10928,8 +10928,8 @@ def create_client_connection():
     db = _db()
     try:
         conn = db.create_cloud_connection(
-            tenant_id=tid, cloud=cloud, label=label,
-            entra_tenant_id=entra_tenant_id or None,
+            organization_id=tid, cloud=cloud, label=label,
+            azure_directory_id=azure_directory_id or None,
             client_id=client_id or None,
             connection_type=connection_type,
             metadata=metadata,
@@ -10942,12 +10942,12 @@ def create_client_connection():
         # Auto-discover subscriptions/accounts for verified connections
         discovered_count = 0
         discovered_subs = []
-        if cloud == 'azure' and status == 'connected' and client_secret and entra_tenant_id and client_id:
+        if cloud == 'azure' and status == 'connected' and client_secret and azure_directory_id and client_id:
             try:
                 from azure.identity import ClientSecretCredential
                 from azure.mgmt.resource import SubscriptionClient
                 credential = ClientSecretCredential(
-                    tenant_id=entra_tenant_id,
+                    organization_id=azure_directory_id,
                     client_id=client_id,
                     client_secret=client_secret,
                 )
@@ -10983,8 +10983,8 @@ def create_client_connection():
                         discovered_count = db.insert_discovered_subscriptions(
                             tid, cloud, conn['id'], subs_list)
                         discovered_subs = subs_list
-                        # Store account_id as entra_tenant_id for UNIQUE constraint compatibility
-                        db.update_cloud_connection(conn['id'], entra_tenant_id=account_id)
+                        # Store account_id as azure_directory_id for UNIQUE constraint compatibility
+                        db.update_cloud_connection(conn['id'], azure_directory_id=account_id)
                 except Exception:
                     pass  # Non-fatal
 
@@ -11006,7 +11006,7 @@ def create_client_connection():
 
 def update_client_connection(connection_id):
     """Update a cloud connection."""
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
     data = request.get_json()
@@ -11017,11 +11017,11 @@ def update_client_connection(connection_id):
     try:
         # Verify ownership
         existing = db.get_cloud_connection_by_id(connection_id)
-        if not existing or existing['tenant_id'] != tid:
+        if not existing or existing['organization_id'] != tid:
             return jsonify({'error': 'Connection not found'}), 404
 
         allowed_fields = {}
-        for key in ('label', 'status', 'display_order', 'entra_tenant_id', 'client_id'):
+        for key in ('label', 'status', 'display_order', 'azure_directory_id', 'client_id'):
             if key in data:
                 allowed_fields[key] = data[key]
 
@@ -11035,17 +11035,17 @@ def update_client_connection(connection_id):
 
 def delete_client_connection(connection_id):
     """Delete a cloud connection."""
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
 
     db = _db()
     try:
         existing = db.get_cloud_connection_by_id(connection_id)
-        if not existing or existing['tenant_id'] != tid:
+        if not existing or existing['organization_id'] != tid:
             return jsonify({'error': 'Connection not found'}), 404
 
-        db.delete_cloud_connection(connection_id, tenant_id=tid)
+        db.delete_cloud_connection(connection_id, organization_id=tid)
         _log(db, 'connection_deleted', f'Deleted connection: {existing["label"]}',
              {'connection_id': connection_id, 'cloud': existing['cloud']})
         return jsonify({'deleted': True})
@@ -11055,7 +11055,7 @@ def delete_client_connection(connection_id):
 
 def test_client_connection():
     """Test cloud connection credentials without saving."""
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
 
@@ -11066,11 +11066,11 @@ def test_client_connection():
     cloud = (data.get('cloud') or 'azure').strip().lower()
 
     if cloud == 'azure':
-        entra_tenant_id = (data.get('entra_tenant_id') or data.get('azure_tenant_id') or '').strip()
+        azure_directory_id = (data.get('azure_directory_id') or data.get('azure_directory_id') or '').strip()
         azure_client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
         azure_client_secret = (data.get('client_secret') or data.get('azure_client_secret') or '').strip()
 
-        if not all([entra_tenant_id, azure_client_id, azure_client_secret]):
+        if not all([azure_directory_id, azure_client_id, azure_client_secret]):
             return jsonify({'error': 'Entra Directory ID, Client ID, and Client Secret are required'}), 400
 
         try:
@@ -11078,7 +11078,7 @@ def test_client_connection():
             from azure.mgmt.resource import SubscriptionClient
 
             credential = ClientSecretCredential(
-                tenant_id=entra_tenant_id,
+                organization_id=azure_directory_id,
                 client_id=azure_client_id,
                 client_secret=azure_client_secret,
             )
@@ -11183,14 +11183,14 @@ def test_client_connection():
 
 def discover_client_connection(connection_id):
     """Trigger discovery for a specific cloud connection."""
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
 
     db = _db()
     try:
         existing = db.get_cloud_connection_by_id(connection_id)
-        if not existing or existing['tenant_id'] != tid:
+        if not existing or existing['organization_id'] != tid:
             return jsonify({'error': 'Connection not found'}), 404
 
         if existing['status'] != 'connected':
@@ -11493,7 +11493,7 @@ def get_resources():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
         resource_type = request.args.get('resource_type', '')
@@ -11502,7 +11502,7 @@ def get_resources():
         search = request.args.get('search', '')
 
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'resources': [], 'count': 0, 'total': 0})
@@ -11540,12 +11540,12 @@ def get_resources():
                 WHERE discovery_run_id = ANY(%s)
             """)
             params.append(run_ids)
-            if tenant_id and tenant_id > 0:
-                parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
-                params.append(tenant_id)
-            elif tenant_id is not None:
-                parts[-1] += " AND tenant_id = %s"
-                params.append(tenant_id)
+            if organization_id and organization_id > 0:
+                parts[-1] += " AND (organization_id = %s OR organization_id IS NULL)"
+                params.append(organization_id)
+            elif organization_id is not None:
+                parts[-1] += " AND organization_id = %s"
+                params.append(organization_id)
 
         if resource_type != 'storage_account':
             parts.append("""
@@ -11574,12 +11574,12 @@ def get_resources():
                 WHERE discovery_run_id = ANY(%s)
             """)
             params.append(run_ids)
-            if tenant_id and tenant_id > 0:
-                parts[-1] += " AND (tenant_id = %s OR tenant_id IS NULL)"
-                params.append(tenant_id)
-            elif tenant_id is not None:
-                parts[-1] += " AND tenant_id = %s"
-                params.append(tenant_id)
+            if organization_id and organization_id > 0:
+                parts[-1] += " AND (organization_id = %s OR organization_id IS NULL)"
+                params.append(organization_id)
+            elif organization_id is not None:
+                parts[-1] += " AND organization_id = %s"
+                params.append(organization_id)
 
         if not parts:
             cursor.close()
@@ -11671,10 +11671,10 @@ def get_resource_stats():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         resource_type = request.args.get('resource_type', '')
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -11683,14 +11683,14 @@ def get_resource_stats():
                 'at_risk': 0,
             })
 
-        tenant_filter = ""
+        org_filter = ""
         params = [run_ids]
-        if tenant_id and tenant_id > 0:
-            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
-            params.append(tenant_id)
-        elif tenant_id is not None:
-            tenant_filter = " AND tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id and organization_id > 0:
+            org_filter = " AND (organization_id = %s OR organization_id IS NULL)"
+            params.append(organization_id)
+        elif organization_id is not None:
+            org_filter = " AND organization_id = %s"
+            params.append(organization_id)
 
         include_sa = resource_type != 'key_vault'
         include_kv = resource_type != 'storage_account'
@@ -11707,7 +11707,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE risk_level = 'low') as low,
                        COUNT(*) FILTER (WHERE risk_level = 'info') as info
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = ANY(%s){tenant_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}
             """, params)
             sa = dict(cursor.fetchone())
         else:
@@ -11723,7 +11723,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE risk_level = 'low') as low,
                        COUNT(*) FILTER (WHERE risk_level = 'info') as info
                 FROM azure_key_vaults
-                WHERE discovery_run_id = ANY(%s){tenant_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}
             """, params)
             kv = dict(cursor.fetchone())
         else:
@@ -11745,7 +11745,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE shared_key_access = true AND diagnostic_logging_enabled = true AND (sas_policy_enabled IS NULL OR sas_policy_enabled = false)) as partial,
                        COUNT(*) FILTER (WHERE shared_key_access = true AND (diagnostic_logging_enabled IS NULL OR diagnostic_logging_enabled = false)) as unauditable
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = ANY(%s){tenant_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}
             """, params)
             rotation_row = dict(cursor.fetchone())
             rotation_data = {
@@ -11775,7 +11775,7 @@ def get_resource_stats():
                        COALESCE(SUM(certs_expired), 0) as expired_certs,
                        COALESCE(SUM(certs_expiring_soon), 0) as expiring_certs
                 FROM azure_key_vaults
-                WHERE discovery_run_id = ANY(%s){tenant_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}
             """, params)
             expiry_row = dict(cursor.fetchone())
             expiry_data = {
@@ -11821,27 +11821,27 @@ def get_resource_detail(resource_id):
     db = _db()
     _ensure_resource_tables(db)
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'error': 'No completed discovery run found'}), 404
 
-        tenant_filter = ""
+        org_filter = ""
         params = [run_ids, resource_id]
-        if tenant_id and tenant_id > 0:
-            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
-            params.append(tenant_id)
-        elif tenant_id is not None:
-            tenant_filter = " AND tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id and organization_id > 0:
+            org_filter = " AND (organization_id = %s OR organization_id IS NULL)"
+            params.append(organization_id)
+        elif organization_id is not None:
+            org_filter = " AND organization_id = %s"
+            params.append(organization_id)
 
         # Try storage account first
         cursor.execute(f"""
             SELECT *, 'storage_account' AS resource_type
             FROM azure_storage_accounts
-            WHERE discovery_run_id = ANY(%s) AND resource_id = %s{tenant_filter}
+            WHERE discovery_run_id = ANY(%s) AND resource_id = %s{org_filter}
         """, params)
         row = cursor.fetchone()
 
@@ -11850,7 +11850,7 @@ def get_resource_detail(resource_id):
             cursor.execute(f"""
                 SELECT *, 'key_vault' AS resource_type
                 FROM azure_key_vaults
-                WHERE discovery_run_id = ANY(%s) AND resource_id = %s{tenant_filter}
+                WHERE discovery_run_id = ANY(%s) AND resource_id = %s{org_filter}
             """, params)
             row = cursor.fetchone()
 
@@ -11928,9 +11928,9 @@ def check_resource_integrity():
     db = _db()
     _ensure_resource_tables(db)
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'total': 0, 'consistent': 0, 'drifted': 0, 'errors': 0, 'details': []})
@@ -12003,9 +12003,9 @@ def get_resource_findings(resource_id):
     db = _db()
     _ensure_resource_tables(db)
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         cursor.close()
         if not run_ids:
             return jsonify({'findings': [], 'count': 0})
@@ -12055,14 +12055,14 @@ def get_resource_access(resource_id):
         resource_id = '/' + resource_id
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'resource_id': resource_id, 'rbac_access': [], 'policy_access': [], 'count': 0, 'blast_radius': 0})
 
-        # Note: tenant filtering is already handled via run_ids (which belong to the tenant)
+        # Note: org filtering is already handled via run_ids (which belong to the org)
         params = [run_ids, resource_id, resource_id]
 
         # RBAC access — include enabled/deleted_at/status for ghost detection
@@ -12122,18 +12122,18 @@ def get_resource_access(resource_id):
         # Key Vault access policy cross-reference
         policy_access = []
         kv_params = [run_ids, resource_id]
-        kv_tenant_clause = ""
-        if tenant_id and tenant_id > 0:
-            kv_tenant_clause = "AND (tenant_id = %s OR tenant_id IS NULL)"
-            kv_params.append(tenant_id)
-        elif tenant_id is not None:
-            kv_tenant_clause = "AND tenant_id = %s"
-            kv_params.append(tenant_id)
+        kv_org_clause = ""
+        if organization_id and organization_id > 0:
+            kv_org_clause = "AND (organization_id = %s OR organization_id IS NULL)"
+            kv_params.append(organization_id)
+        elif organization_id is not None:
+            kv_org_clause = "AND organization_id = %s"
+            kv_params.append(organization_id)
         cursor.execute(f"""
             SELECT access_policies
             FROM azure_key_vaults
             WHERE discovery_run_id = ANY(%s) AND resource_id = %s
-            {kv_tenant_clause}
+            {kv_org_clause}
         """, kv_params)
         kv_row = cursor.fetchone()
         policy_identity_ids = set()
@@ -12216,21 +12216,21 @@ def get_resource_expiry_summary():
     """GET /api/resources/expiry-summary — aggregate expiry data across all key vaults."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'secrets': {}, 'keys': {}, 'certs': {}, 'timeline': []})
 
-        tenant_filter = ""
+        org_filter = ""
         params = [run_ids]
-        if tenant_id and tenant_id > 0:
-            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
-            params.append(tenant_id)
-        elif tenant_id is not None:
-            tenant_filter = " AND tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id and organization_id > 0:
+            org_filter = " AND (organization_id = %s OR organization_id IS NULL)"
+            params.append(organization_id)
+        elif organization_id is not None:
+            org_filter = " AND organization_id = %s"
+            params.append(organization_id)
 
         cursor.execute(f"""
             SELECT name, secrets_detail, keys_detail, certs_detail,
@@ -12238,7 +12238,7 @@ def get_resource_expiry_summary():
                    keys_total, keys_expired, keys_expiring_soon,
                    certs_total, certs_expired, certs_expiring_soon
             FROM azure_key_vaults
-            WHERE discovery_run_id = ANY(%s){tenant_filter}
+            WHERE discovery_run_id = ANY(%s){org_filter}
         """, params)
         rows = cursor.fetchall()
         cursor.close()
@@ -12308,21 +12308,21 @@ def get_resource_compliance_summary():
     """GET /api/resources/compliance-summary — aggregate compliance pass/fail across all resources."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'storage': {}, 'key_vault': {}})
 
-        tenant_filter = ""
+        org_filter = ""
         params = [run_ids]
-        if tenant_id and tenant_id > 0:
-            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
-            params.append(tenant_id)
-        elif tenant_id is not None:
-            tenant_filter = " AND tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id and organization_id > 0:
+            org_filter = " AND (organization_id = %s OR organization_id IS NULL)"
+            params.append(organization_id)
+        elif organization_id is not None:
+            org_filter = " AND organization_id = %s"
+            params.append(organization_id)
 
         # Storage compliance
         cursor.execute(f"""
@@ -12340,7 +12340,7 @@ def get_resource_compliance_summary():
                    COUNT(*) FILTER (WHERE sas_policy_enabled = true) as sas_policy_pass,
                    COUNT(*) FILTER (WHERE bypass_settings = 'AzureServices') as bypass_pass
             FROM azure_storage_accounts
-            WHERE discovery_run_id = ANY(%s){tenant_filter}
+            WHERE discovery_run_id = ANY(%s){org_filter}
         """, params)
         sa_row = dict(cursor.fetchone())
         sa_total = sa_row['total']
@@ -12356,7 +12356,7 @@ def get_resource_compliance_summary():
                    COUNT(*) FILTER (WHERE private_endpoint_count > 0) as private_ep_pass,
                    COUNT(*) FILTER (WHERE soft_delete_retention_days >= 90) as retention_pass
             FROM azure_key_vaults
-            WHERE discovery_run_id = ANY(%s){tenant_filter}
+            WHERE discovery_run_id = ANY(%s){org_filter}
         """, params)
         kv_row = dict(cursor.fetchone())
         kv_total = kv_row['total']
@@ -12423,9 +12423,9 @@ def get_data_security_summary():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -12436,14 +12436,14 @@ def get_data_security_summary():
                 'top_risks': [],
             })
 
-        tenant_filter = ""
+        org_filter = ""
         params = [run_ids]
-        if tenant_id and tenant_id > 0:
-            tenant_filter = " AND (tenant_id = %s OR tenant_id IS NULL)"
-            params.append(tenant_id)
-        elif tenant_id is not None:
-            tenant_filter = " AND tenant_id = %s"
-            params.append(tenant_id)
+        if organization_id and organization_id > 0:
+            org_filter = " AND (organization_id = %s OR organization_id IS NULL)"
+            params.append(organization_id)
+        elif organization_id is not None:
+            org_filter = " AND organization_id = %s"
+            params.append(organization_id)
 
         # Fetch all storage accounts with component data
         cursor.execute(f"""
@@ -12453,7 +12453,7 @@ def get_data_security_summary():
                    COALESCE(critical_overrides, '[]'::jsonb) AS critical_overrides,
                    'storage_account' AS resource_type
             FROM azure_storage_accounts
-            WHERE discovery_run_id = ANY(%s){tenant_filter}
+            WHERE discovery_run_id = ANY(%s){org_filter}
         """, params)
         sa_rows = [dict(r) for r in cursor.fetchall()]
 
@@ -12464,7 +12464,7 @@ def get_data_security_summary():
                    COALESCE(critical_overrides, '[]'::jsonb) AS critical_overrides,
                    'key_vault' AS resource_type
             FROM azure_key_vaults
-            WHERE discovery_run_id = ANY(%s){tenant_filter}
+            WHERE discovery_run_id = ANY(%s){org_filter}
         """, params)
         kv_rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
@@ -12597,9 +12597,9 @@ def get_resource_classifications():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -12670,9 +12670,9 @@ def classify_resource(resource_id):
         user = g.current_user.get('display_name', 'unknown') if hasattr(g, 'current_user') and g.current_user else 'unknown'
         resource_type = data.get('resource_type', '')  # optional: 'storage_account' or 'key_vault'
 
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery runs found'}), 404
@@ -12724,9 +12724,9 @@ def declassify_resource(resource_id):
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery runs found'}), 404
@@ -12759,9 +12759,9 @@ def auto_classify_resources():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'classified': 0, 'skipped': 0, 'already_classified': 0, 'patterns_matched': []})
@@ -12834,9 +12834,9 @@ def get_sensitive_access_for_identity(identity_id):
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'identity_id': identity_id, 'sensitive_resources': [], 'blast_radius': {}})
@@ -12953,9 +12953,9 @@ def get_resource_access_map(resource_id):
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'resource': {}, 'identities_with_access': [], 'total_identities': 0})
@@ -13079,9 +13079,9 @@ def get_blast_radius_summary():
     db = _db()
     try:
         _ensure_resource_tables(db)
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -13247,28 +13247,28 @@ def get_blast_radius_summary():
 
 # ─── Phase 53: SaaS Platform ─────────────────────────────────────
 
-def get_tenant_by_slug_public(slug):
-    """GET /api/tenants/by-slug/<slug> — Public (no auth). Returns limited tenant info."""
+def get_organization_by_slug_public(slug):
+    """GET /api/organizations/by-slug/<slug> — Public (no auth). Returns limited organization info."""
     db = Database()  # Public endpoint — bypass RLS
     try:
-        tenant = db.get_tenant_by_slug(slug)
-        if not tenant:
+        org = db.get_organization_by_slug(slug)
+        if not org:
             return jsonify({'error': 'Organization not found'}), 404
         return jsonify({
-            'tenant': {
-                'id': tenant['id'],
-                'name': tenant['name'],
-                'slug': tenant['slug'],
-                'plan': tenant.get('plan', 'free'),
-                'enabled': tenant.get('enabled', True),
+            'organization': {
+                'id': org['id'],
+                'name': org['name'],
+                'slug': org['slug'],
+                'plan': org.get('plan', 'free'),
+                'enabled': org.get('enabled', True),
             }
         })
     finally:
         db.close()
 
 
-def provision_tenant_handler(tenant_id):
-    """POST /api/tenants/<id>/provision — Create admin user for a tenant. Superadmin only."""
+def provision_organization_handler(organization_id):
+    """POST /api/organizations/<id>/provision — Create admin user for an organization. Superadmin only."""
     data = request.get_json(silent=True) or {}
     admin_username = str(data.get('admin_username', '')).strip().lower()
     admin_display_name = str(data.get('admin_display_name', '')).strip()
@@ -13283,8 +13283,8 @@ def provision_tenant_handler(tenant_id):
 
     db = _db()
     try:
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
         existing = db.get_user_by_username(admin_username)
@@ -13295,10 +13295,10 @@ def provision_tenant_handler(tenant_id):
         current_user = getattr(g, 'current_user', None)
         created_by = current_user['id'] if current_user else None
 
-        user = db.create_user(admin_username, hashed, admin_display_name, 'admin', created_by, tenant_id=tenant_id, force_password_change=True)
+        user = db.create_user(admin_username, hashed, admin_display_name, 'admin', created_by, organization_id=organization_id, force_password_change=True)
 
-        # Mark tenant as provisioned
-        settings = tenant.get('settings') or {}
+        # Mark org as provisioned
+        settings = org.get('settings') or {}
         if isinstance(settings, str):
             try:
                 settings = json.loads(settings)
@@ -13306,14 +13306,14 @@ def provision_tenant_handler(tenant_id):
                 settings = {}
         settings['provisioned'] = True
         settings['provisioned_at'] = datetime.utcnow().isoformat()
-        db.update_tenant(tenant_id, settings=settings)
+        db.update_organization(organization_id, settings=settings)
 
-        _log(db, 'tenant_provisioned',
-             f'Tenant "{tenant["name"]}" provisioned with admin user "{admin_username}"',
-             {'tenant_id': tenant_id, 'admin_user_id': user['id']})
+        _log(db, 'org_provisioned',
+             f'Organization provisioned with admin user "{admin_username}"',
+             {'organization_id': organization_id, 'admin_user_id': user['id']})
 
         return jsonify({
-            'tenant': db.get_tenant_by_id(tenant_id),
+            'organization': db.get_organization_by_id(organization_id),
             'admin_user': {k: v for k, v in user.items() if k != 'password_hash'},
             'message': f'Tenant provisioned with admin user "{admin_username}"',
         }), 201
@@ -13321,8 +13321,8 @@ def provision_tenant_handler(tenant_id):
         db.close()
 
 
-def get_user_tenants_handler():
-    """GET /api/auth/tenants — Return tenants accessible to the current user."""
+def get_user_organizations_handler():
+    """GET /api/auth/organizations — Return organizations accessible to the current user."""
     user = getattr(g, 'current_user', None)
     if not user:
         return jsonify({'error': 'Authentication required'}), 401
@@ -13330,19 +13330,19 @@ def get_user_tenants_handler():
     db = _db()
     try:
         if user.get('is_superadmin'):
-            all_tenants = db.get_tenants()
-            tenants = [
+            all_organizations = db.get_organizations()
+            organizations = [
                 {'id': t['id'], 'name': t['name'], 'slug': t['slug'], 'plan': t.get('plan', 'free')}
-                for t in all_tenants if t.get('enabled', True)
+                for t in all_orgs if t.get('enabled', True)
             ]
         else:
-            tid = user.get('tenant_id')
+            tid = user.get('organization_id')
             if tid:
-                t = db.get_tenant_by_id(tid)
-                tenants = [{'id': t['id'], 'name': t['name'], 'slug': t['slug'], 'plan': t.get('plan', 'free')}] if t else []
+                t = db.get_organization_by_id(tid)
+                organizations = [{'id': t['id'], 'name': t['name'], 'slug': t['slug'], 'plan': t.get('plan', 'free')}] if t else []
             else:
-                tenants = []
-        return jsonify({'tenants': tenants})
+                organizations = []
+        return jsonify({'organizations': organizations})
     finally:
         db.close()
 
@@ -13356,18 +13356,18 @@ def _get_base_url():
 
 
 def sso_status():
-    """GET /api/auth/sso-status?tenant_slug=X — public endpoint.
-    Returns whether SSO is enabled for a tenant."""
-    slug = request.args.get('tenant_slug', '').strip()
+    """GET /api/auth/sso-status?org_slug=X — public endpoint.
+    Returns whether SSO is enabled for an organization."""
+    slug = request.args.get('org_slug', '').strip()
     if not slug:
         return jsonify({'sso_enabled': False})
     db = Database()  # Public endpoint — bypass RLS
     try:
-        tenant = db.get_tenant_by_slug(slug)
-        if not tenant or not tenant.get('enabled'):
+        org = db.get_organization_by_slug(slug)
+        if not org or not org.get('enabled'):
             return jsonify({'sso_enabled': False})
-        enabled = db.get_setting('sso_enabled', 'false', tenant_id=tenant['id'])
-        force = db.get_setting('sso_force_sso', 'false', tenant_id=tenant['id'])
+        enabled = db.get_setting('sso_enabled', 'false', organization_id=org['id'])
+        force = db.get_setting('sso_force_sso', 'false', organization_id=org['id'])
         return jsonify({
             'sso_enabled': enabled == 'true',
             'sso_force_sso': force == 'true',
@@ -13377,17 +13377,17 @@ def sso_status():
 
 
 def saml_metadata():
-    """GET /api/auth/saml/metadata?tenant_slug=X — Return SP metadata XML."""
-    from app.api.saml import get_sso_config_for_tenant, get_saml_auth
-    slug = request.args.get('tenant_slug', '').strip()
+    """GET /api/auth/saml/metadata?org_slug=X — Return SP metadata XML."""
+    from app.api.saml import get_sso_config_for_org, get_saml_auth
+    slug = request.args.get('org_slug', '').strip()
     if not slug:
-        return jsonify({'error': 'tenant_slug is required'}), 400
+        return jsonify({'error': 'org_slug is required'}), 400
     db = Database()  # Public endpoint — bypass RLS
     try:
-        tenant = db.get_tenant_by_slug(slug)
-        if not tenant:
+        org = db.get_organization_by_slug(slug)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
-        sso_config = get_sso_config_for_tenant(db, tenant['id'])
+        sso_config = get_sso_config_for_org(db, org['id'])
         if not sso_config:
             # Return metadata even without full config — admin needs SP info to configure IdP
             sso_config = {
@@ -13407,21 +13407,21 @@ def saml_metadata():
 
 
 def saml_login():
-    """GET /api/auth/saml/login?tenant_slug=X — Redirect to IdP."""
-    from app.api.saml import get_sso_config_for_tenant, get_saml_auth
-    slug = request.args.get('tenant_slug', '').strip()
+    """GET /api/auth/saml/login?org_slug=X — Redirect to IdP."""
+    from app.api.saml import get_sso_config_for_org, get_saml_auth
+    slug = request.args.get('org_slug', '').strip()
     if not slug:
-        return jsonify({'error': 'tenant_slug is required'}), 400
+        return jsonify({'error': 'org_slug is required'}), 400
     db = Database()  # Public endpoint — bypass RLS
     try:
-        tenant = db.get_tenant_by_slug(slug)
-        if not tenant:
+        org = db.get_organization_by_slug(slug)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
-        sso_config = get_sso_config_for_tenant(db, tenant['id'])
+        sso_config = get_sso_config_for_org(db, org['id'])
         if not sso_config:
             return jsonify({'error': 'SSO is not configured for this organization'}), 400
         auth = get_saml_auth(sso_config, request, _get_base_url())
-        sso_url = auth.login(return_to=slug)  # RelayState = tenant slug
+        sso_url = auth.login(return_to=slug)  # RelayState = org slug
         from flask import redirect
         return redirect(sso_url)
     finally:
@@ -13431,22 +13431,22 @@ def saml_login():
 def saml_acs():
     """POST /api/auth/saml/acs — Assertion Consumer Service callback from IdP."""
     from app.api.saml import (
-        get_sso_config_for_tenant, get_saml_auth, extract_saml_attributes, map_saml_role,
+        get_sso_config_for_org, get_saml_auth, extract_saml_attributes, map_saml_role,
     )
     from flask import redirect
 
-    # RelayState carries the tenant slug
+    # RelayState carries the org slug
     slug = request.form.get('RelayState', '').strip()
     if not slug:
-        return jsonify({'error': 'Missing RelayState (tenant slug)'}), 400
+        return jsonify({'error': 'Missing RelayState (org slug)'}), 400
 
     db = Database()  # Public SAML callback — bypass RLS
     try:
-        tenant = db.get_tenant_by_slug(slug)
-        if not tenant:
+        org = db.get_organization_by_slug(slug)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
-        sso_config = get_sso_config_for_tenant(db, tenant['id'])
+        sso_config = get_sso_config_for_org(db, org['id'])
         if not sso_config:
             return jsonify({'error': 'SSO not configured'}), 400
 
@@ -13464,12 +13464,12 @@ def saml_acs():
         role = map_saml_role(sso_config, attrs['groups'])
 
         # JIT provision or update user
-        user = db.get_user_by_external_id(attrs['name_id'], tenant['id'])
+        user = db.get_user_by_external_id(attrs['name_id'], org['id'])
 
         if not user:
             # Try to link by username/email
             user = db.get_user_by_username(attrs['email'])
-            if user and user.get('tenant_id') == tenant['id']:
+            if user and user.get('organization_id') == org['id']:
                 # Link existing local account to SSO
                 db.update_sso_user(user['id'], external_id=attrs['name_id'])
                 user['external_id'] = attrs['name_id']
@@ -13485,7 +13485,7 @@ def saml_acs():
                 username=attrs['email'],
                 display_name=attrs['display_name'],
                 role=role,
-                tenant_id=tenant['id'],
+                organization_id=org['id'],
                 external_id=attrs['name_id'],
             )
         else:
@@ -13502,15 +13502,15 @@ def saml_acs():
             return jsonify({'error': 'User account is disabled'}), 403
 
         # Generate one-time auth code
-        code = db.create_sso_auth_code(user['id'], tenant['id'])
+        code = db.create_sso_auth_code(user['id'], org['id'])
 
         # Log the SSO login
         db.log_activity(
             'sso_login',
-            f"SSO login: {attrs['email']} via SAML for {tenant['name']}",
-            {'tenant_id': tenant['id'], 'external_id': attrs['name_id']},
+            f"SSO login: {attrs['email']} via SAML for {org['name']}",
+            {'organization_id': org['id'], 'external_id': attrs['name_id']},
             user_id=user['id'],
-            tenant_id=tenant['id'],
+            organization_id=org['id'],
         )
 
         # Redirect to frontend callback
@@ -13536,20 +13536,20 @@ def saml_token_exchange():
         if not user:
             return jsonify({'error': 'User not found'}), 404
 
-        # Add tenant_name for token generation + look up slug for aud claim
+        # Add org_name for token generation + look up slug for aud claim
         slug = None
-        if user.get('tenant_id') and not user.get('tenant_name'):
-            t = db.get_tenant_by_id(user['tenant_id'])
+        if user.get('organization_id') and not user.get('org_name'):
+            t = db.get_organization_by_id(user['organization_id'])
             if t:
-                user['tenant_name'] = t['name']
+                user['org_name'] = t['name']
                 slug = t.get('slug')
-        elif user.get('tenant_id'):
-            t = db.get_tenant_by_id(user['tenant_id'])
+        elif user.get('organization_id'):
+            t = db.get_organization_by_id(user['organization_id'])
             if t:
                 slug = t.get('slug')
 
-        # Phase 1B: SSO is inherently tenant-only
-        access_token = generate_access_token(user, portal='client', tenant_slug=slug)
+        # Phase 1B: SSO is inherently org-scoped
+        access_token = generate_access_token(user, portal='client', org_slug=slug)
         refresh_token = generate_refresh_token(user, portal='client')
 
         return jsonify({
@@ -13560,8 +13560,8 @@ def saml_token_exchange():
                 'username': user['username'],
                 'display_name': user['display_name'],
                 'role': user['role'],
-                'tenant_id': user.get('tenant_id'),
-                'tenant_name': user.get('tenant_name'),
+                'organization_id': user.get('organization_id'),
+                'org_name': user.get('org_name'),
                 'is_superadmin': user.get('is_superadmin', False),
             },
         })
@@ -13571,20 +13571,20 @@ def saml_token_exchange():
 
 def saml_slo():
     """GET /api/auth/saml/slo — SP-initiated Single Logout."""
-    from app.api.saml import get_sso_config_for_tenant, get_saml_auth
+    from app.api.saml import get_sso_config_for_org, get_saml_auth
     from flask import redirect
 
     user = getattr(g, 'current_user', None)
     if not user:
         return jsonify({'error': 'Not authenticated'}), 401
 
-    tid = user.get('tenant_id')
+    tid = user.get('organization_id')
     if not tid:
-        return jsonify({'error': 'No tenant context'}), 400
+        return jsonify({'error': 'No org context'}), 400
 
     db = _db()
     try:
-        sso_config = get_sso_config_for_tenant(db, tid)
+        sso_config = get_sso_config_for_org(db, tid)
         if not sso_config or not sso_config.get('sso_idp_slo_url'):
             return jsonify({'message': 'SLO not configured, logged out locally'})
 
@@ -13599,14 +13599,14 @@ def saml_slo():
 
 
 def get_sso_settings():
-    """GET /api/settings/sso — Return SSO config for current tenant."""
+    """GET /api/settings/sso — Return SSO config for current org."""
     from app.api.saml import SSO_SETTING_KEYS
-    tid = _tenant_id()
+    tid = _org_id()
     db = _db()
     try:
         config = {}
         for key in SSO_SETTING_KEYS:
-            val = db.get_setting(key, '', tenant_id=tid)
+            val = db.get_setting(key, '', organization_id=tid)
             # Mask the certificate for display (show first/last 20 chars)
             if key == 'sso_idp_x509_cert' and val and len(val) > 50:
                 config[key] = val[:20] + '...' + val[-20:]
@@ -13618,7 +13618,7 @@ def get_sso_settings():
         base_url = _get_base_url()
         config['sp_entity_id'] = f"{base_url}/api/auth/saml/metadata"
         config['sp_acs_url'] = f"{base_url}/api/auth/saml/acs"
-        config['sp_metadata_url'] = f"{base_url}/api/auth/saml/metadata?tenant_slug=default"
+        config['sp_metadata_url'] = f"{base_url}/api/auth/saml/metadata?org_slug=default"
 
         return jsonify(config)
     finally:
@@ -13629,7 +13629,7 @@ def save_sso_settings():
     """POST /api/settings/sso — Save SSO config."""
     from app.api.saml import SSO_SETTING_KEYS
     data = request.get_json(silent=True) or {}
-    tid = _tenant_id()
+    tid = _org_id()
 
     # Filter to valid SSO keys only
     updates = {}
@@ -13643,7 +13643,7 @@ def save_sso_settings():
         db = _db()
         try:
             for field in required:
-                val = updates.get(field) or db.get_setting(field, '', tenant_id=tid)
+                val = updates.get(field) or db.get_setting(field, '', organization_id=tid)
                 if not val:
                     return jsonify({'error': f'{field} is required when enabling SSO'}), 400
         finally:
@@ -13651,7 +13651,7 @@ def save_sso_settings():
 
     db = _db()
     try:
-        db.save_settings(updates, tenant_id=tid)
+        db.save_settings(updates, organization_id=tid)
         _log(db, 'settings_update', f"SSO settings updated (enabled={updates.get('sso_enabled', 'unchanged')})")
         return jsonify({'message': 'SSO settings saved', 'updated_keys': list(updates.keys())})
     finally:
@@ -13688,11 +13688,11 @@ SA_GOV_DEFAULTS = {
 }
 
 
-def _load_sa_gov_policies(db, tenant_id=None):
+def _load_sa_gov_policies(db, organization_id=None):
     """Load SA governance policies from settings, with defaults."""
     policies = dict(SA_GOV_DEFAULTS)
     for key in SA_GOV_DEFAULTS:
-        val = db.get_setting(key, tenant_id=tenant_id)
+        val = db.get_setting(key, organization_id=organization_id)
         if val is not None:
             policies[key] = val
     return policies
@@ -13763,7 +13763,7 @@ def get_sa_governance_stats():
     """GET /api/service-accounts/stats — Governance summary statistics."""
     db = _db()
     cursor = db.conn.cursor()
-    tid = _tenant_id()
+    tid = _org_id()
 
     try:
         # Get latest run
@@ -13861,7 +13861,7 @@ def get_sa_governance_stats():
 def get_sa_governance_list():
     """GET /api/service-accounts/governance — SA list with governance overlay."""
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -14009,7 +14009,7 @@ def get_sa_governance_list():
 def post_sa_attestation(identity_id):
     """POST /api/service-accounts/<identity_id>/attest — Submit attestation."""
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
     user_id = _current_user_id()
 
     try:
@@ -14049,7 +14049,7 @@ def post_sa_attestation(identity_id):
             status=status,
             justification=justification,
             interval_days=interval,
-            tenant_id=tid,
+            organization_id=tid,
         )
 
         _log(db, 'sa_attestation', f"Attested {identity['display_name']}: {status}",
@@ -14068,7 +14068,7 @@ def post_sa_attestation(identity_id):
 def get_sa_governance_settings():
     """GET /api/settings/sa-governance — Return SA governance policy settings."""
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
     try:
         policies = _load_sa_gov_policies(db, tid)
         return jsonify({'settings': policies})
@@ -14079,7 +14079,7 @@ def get_sa_governance_settings():
 def save_sa_governance_settings():
     """POST /api/settings/sa-governance — Save SA governance policy settings (admin only)."""
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
     try:
         data = request.get_json(silent=True) or {}
         updates = {}
@@ -14102,7 +14102,7 @@ def save_sa_governance_settings():
                 updates[key] = val
 
         if updates:
-            db.save_settings(updates, tenant_id=tid)
+            db.save_settings(updates, organization_id=tid)
             _log(db, 'settings_update', f"SA governance settings updated: {list(updates.keys())}")
 
         return jsonify({'message': 'SA governance settings saved', 'updated_keys': list(updates.keys())})
@@ -14119,7 +14119,7 @@ def get_governance_identities():
     credential detail, governance status, and recommended actions."""
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
     db._ensure_governance_decisions_table()
 
     try:
@@ -14344,7 +14344,7 @@ def get_governance_identity_detail(identity_id):
     """GET /api/governance/identities/<identity_id> — Full risk detail with factors, access, credentials."""
     from app.database import _compute_governance_risk, _compute_gov_recommended_action, _GOV_PRIVILEGED_ROLES
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -14506,7 +14506,7 @@ def post_governance_decision(identity_id):
     """POST /api/governance/identities/<identity_id>/decide — Submit governance decision."""
     from app.database import _compute_governance_risk, _GOV_PRIVILEGED_ROLES
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
     user_id = _current_user_id()
 
     try:
@@ -14592,7 +14592,7 @@ def post_governance_decision(identity_id):
             access_snapshot=access_snapshot,
             decided_by=user_id,
             exception_expiry=exp_dt,
-            tenant_id=tid,
+            organization_id=tid,
         )
 
         _log(db, 'governance_decision', f"{decision} on {identity['display_name']}: {reason}",
@@ -14612,7 +14612,7 @@ def get_governance_stats():
     """GET /api/governance/stats — Summary with risk distribution + governance breakdown."""
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
-    tid = _tenant_id()
+    tid = _org_id()
     db._ensure_governance_decisions_table()
 
     try:
@@ -15227,9 +15227,9 @@ def get_spn_stats():
     db = _db()
     try:
         db._ensure_spn_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -15363,7 +15363,7 @@ def get_spn_list():
     db = _db()
     try:
         db._ensure_spn_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
         risk_level = request.args.get('risk_level', '')
@@ -15382,7 +15382,7 @@ def get_spn_list():
         owner_status_filter = request.args.get('owner_status', '')
 
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'spns': [], 'count': 0, 'total': 0})
@@ -15552,9 +15552,9 @@ def get_spn_detail(identity_id):
     db = _db()
     try:
         db._ensure_spn_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery run found'}), 404
@@ -15662,7 +15662,7 @@ def get_storage_stats():
     db = _db()
     try:
         storage = db.get_storage_stats()
-        settings = db.get_settings(tenant_id=_tenant_id())
+        settings = db.get_settings(organization_id=_org_id())
 
         retention = {
             'enabled': settings.get('retention_enabled', 'false') == 'true',
@@ -15684,18 +15684,18 @@ def get_storage_stats():
 
 # ── Tenant Isolation Validation (Phase 3) ─────────────────────────
 
-def validate_tenant_isolation():
+def validate_org_isolation():
     """
-    GET /api/system/tenant-isolation
-    Admin-only endpoint that validates RLS tenant isolation is working.
-    Runs a series of checks to prove cross-tenant data leakage is impossible.
+    GET /api/system/org-isolation
+    Admin-only endpoint that validates RLS org isolation is working.
+    Runs a series of checks to prove cross-org data leakage is impossible.
     """
     from app.database import Database
 
     results = []
     all_pass = True
 
-    # 1. Check RLS policies exist on all tenant-scoped tables
+    # 1. Check RLS policies exist on all org-scoped tables
     admin_db = Database()  # admin connection — bypasses RLS for meta queries
     cursor = admin_db.conn.cursor()
     try:
@@ -15708,19 +15708,19 @@ def validate_tenant_isolation():
         policies = cursor.fetchall()
         policy_tables = set(r[0] for r in policies)
 
-        # Get tables with tenant_id column
+        # Get tables with organization_id column
         cursor.execute("""
             SELECT table_name FROM information_schema.columns
-            WHERE column_name = 'tenant_id' AND table_schema = 'public'
+            WHERE column_name = 'organization_id' AND table_schema = 'public'
         """)
-        tenant_tables = set(r[0] for r in cursor.fetchall())
+        org_tables = set(r[0] for r in cursor.fetchall())
 
         # Tables that should have RLS
-        missing_rls = tenant_tables - policy_tables
+        missing_rls = org_tables - policy_tables
         results.append({
-            'check': 'RLS policies on tenant_id tables',
+            'check': 'RLS policies on organization_id tables',
             'status': 'pass' if not missing_rls else 'warn',
-            'detail': f'{len(policy_tables & tenant_tables)}/{len(tenant_tables)} tables have RLS policies',
+            'detail': f'{len(policy_tables & org_tables)}/{len(org_tables)} tables have RLS policies',
             'missing': list(missing_rls) if missing_rls else None,
         })
         if missing_rls:
@@ -15762,45 +15762,45 @@ def validate_tenant_isolation():
         if bypass_users:
             all_pass = False
 
-        # 4. Data isolation check — count rows per tenant in key tables
+        # 4. Data isolation check — count rows per org in key tables
         isolation_checks = []
         for table in ['discovery_runs', 'settings', 'users', 'activity_log']:
-            if table in tenant_tables:
+            if table in org_tables:
                 cursor.execute(f"""
-                    SELECT tenant_id, COUNT(*) as row_count
+                    SELECT organization_id, COUNT(*) as row_count
                     FROM {table}
-                    WHERE tenant_id IS NOT NULL
-                    GROUP BY tenant_id
-                    ORDER BY tenant_id
+                    WHERE organization_id IS NOT NULL
+                    GROUP BY organization_id
+                    ORDER BY organization_id
                 """)
                 dist = [{
-                    'tenant_id': r[0],
+                    'organization_id': r[0],
                     'row_count': r[1],
                 } for r in cursor.fetchall()]
                 isolation_checks.append({
                     'table': table,
-                    'tenant_distribution': dist,
+                    'org_distribution': dist,
                 })
         results.append({
-            'check': 'Data distribution by tenant',
+            'check': 'Data distribution by organization',
             'status': 'pass',
             'detail': f'Checked {len(isolation_checks)} tables',
             'tables': isolation_checks,
         })
 
-        # 5. Verify NOT NULL constraint on tenant_id
+        # 5. Verify NOT NULL constraint on organization_id
         cursor.execute("""
             SELECT table_name, is_nullable
             FROM information_schema.columns
-            WHERE column_name = 'tenant_id' AND table_schema = 'public'
+            WHERE column_name = 'organization_id' AND table_schema = 'public'
             ORDER BY table_name
         """)
         nullable_tables = [r[0] for r in cursor.fetchall() if r[1] == 'YES']
-        # Some tables intentionally allow NULL (e.g., tenants itself doesn't have tenant_id)
+        # Some tables intentionally allow NULL (e.g., organizations itself doesn't have organization_id)
         results.append({
-            'check': 'tenant_id NOT NULL enforcement',
+            'check': 'organization_id NOT NULL enforcement',
             'status': 'pass' if len(nullable_tables) <= 5 else 'warn',
-            'detail': f'{len(tenant_tables) - len(nullable_tables)}/{len(tenant_tables)} tables enforce NOT NULL',
+            'detail': f'{len(org_tables) - len(nullable_tables)}/{len(org_tables)} tables enforce NOT NULL',
             'nullable': nullable_tables if nullable_tables else None,
         })
 
@@ -15816,7 +15816,7 @@ def validate_tenant_isolation():
         admin_db.close()
 
     return jsonify({
-        'validation': 'tenant_isolation',
+        'validation': 'org_isolation',
         'timestamp': datetime.utcnow().isoformat(),
         'overall': 'pass' if all_pass else 'fail',
         'checks': results,
@@ -15832,9 +15832,9 @@ def get_app_reg_stats():
     db = _db()
     try:
         db._ensure_app_registrations_table()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -15881,12 +15881,12 @@ def get_app_reg_stats():
         """, params)
         cred_row = dict(cursor.fetchone())
 
-        # Multi-tenant
+        # Multi-org
         cursor.execute(f"""
             SELECT COUNT(*) as c {base}
             AND ar.sign_in_audience IN ('AzureADMultipleOrgs', 'AzureADandPersonalMicrosoftAccount')
         """, params)
-        multi_tenant = cursor.fetchone()['c']
+        multi_org = cursor.fetchone()['c']
 
         # Third-party
         cursor.execute(f"SELECT COUNT(*) as c {base} AND ar.is_third_party = true", params)
@@ -15924,9 +15924,9 @@ def get_app_reg_list():
     db = _db()
     try:
         db._ensure_app_registrations_table()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'items': [], 'total': 0})
@@ -16019,9 +16019,9 @@ def get_app_reg_detail(app_id):
     db = _db()
     try:
         db._ensure_app_registrations_table()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery run'}), 404
@@ -16129,7 +16129,7 @@ def run_manual_cleanup():
     """Trigger a manual data cleanup using retention settings."""
     db = _db()
     try:
-        settings = db.get_settings(tenant_id=_tenant_id())
+        settings = db.get_settings(organization_id=_org_id())
         results = {}
 
         discovery_days = int(settings.get('retention_discovery_days', '90'))
@@ -16173,8 +16173,8 @@ def run_manual_cleanup():
 # Phase 78: Tenant Logo Upload/Delete
 # ============================================================
 
-def upload_tenant_logo(tenant_id):
-    """POST /api/tenants/<id>/logo — Upload tenant logo (base64, max 500KB). Superadmin/poweradmin only."""
+def upload_organization_logo(organization_id):
+    """POST /api/organizations/<id>/logo — Upload organization logo (base64, max 500KB). Superadmin/poweradmin only."""
     data = request.get_json(silent=True) or {}
     logo_data = data.get('logo_data', '')
     content_type = str(data.get('content_type', '')).lower()
@@ -16200,38 +16200,38 @@ def upload_tenant_logo(tenant_id):
 
     db = _db()
     try:
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
         cursor = db.conn.cursor()
-        cursor.execute("UPDATE tenants SET logo_url = %s, updated_at = NOW() WHERE id = %s", (logo_url, tenant_id))
+        cursor.execute("UPDATE organizations SET logo_url = %s, updated_at = NOW() WHERE id = %s", (logo_url, organization_id))
         db.conn.commit()
         cursor.close()
 
-        _log(db, 'tenant_logo_uploaded', f'Logo uploaded for tenant "{tenant["name"]}"',
-             {'tenant_id': tenant_id})
+        _log(db, 'org_logo_uploaded', f'Logo uploaded for org "{org["name"]}"',
+             {'organization_id': organization_id})
 
         return jsonify({'message': 'Logo uploaded', 'logo_url': logo_url})
     finally:
         db.close()
 
 
-def delete_tenant_logo(tenant_id):
-    """DELETE /api/tenants/<id>/logo — Remove tenant logo. Superadmin/poweradmin only."""
+def delete_organization_logo(organization_id):
+    """DELETE /api/organizations/<id>/logo — Remove organization logo. Superadmin/poweradmin only."""
     db = _db()
     try:
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
         cursor = db.conn.cursor()
-        cursor.execute("UPDATE tenants SET logo_url = NULL, updated_at = NOW() WHERE id = %s", (tenant_id,))
+        cursor.execute("UPDATE organizations SET logo_url = NULL, updated_at = NOW() WHERE id = %s", (organization_id,))
         db.conn.commit()
         cursor.close()
 
-        _log(db, 'tenant_logo_deleted', f'Logo removed for tenant "{tenant["name"]}"',
-             {'tenant_id': tenant_id})
+        _log(db, 'org_logo_deleted', f'Logo removed for org "{org["name"]}"',
+             {'organization_id': organization_id})
 
         return jsonify({'message': 'Logo removed'})
     finally:
@@ -16281,13 +16281,13 @@ TIER_LIMITS = {
 }
 
 
-def _check_tier_limits(db, tenant_id):
-    """Check if tenant is within tier limits. Returns (ok, error_dict) tuple."""
-    tenant = db.get_tenant_by_id(tenant_id)
-    if not tenant:
+def _check_tier_limits(db, organization_id):
+    """Check if organization is within tier limits. Returns (ok, error_dict) tuple."""
+    org = db.get_organization_by_id(organization_id)
+    if not org:
         return True, None
 
-    plan = tenant.get('plan', 'free')
+    plan = org.get('plan', 'free')
     limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
 
     # Check identity count limit
@@ -16296,10 +16296,10 @@ def _check_tier_limits(db, tenant_id):
         cursor.execute("""
             SELECT COUNT(*) FROM identities i
             JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE dr.tenant_id = %s AND i.discovery_run_id = (
-                SELECT id FROM discovery_runs WHERE tenant_id = %s ORDER BY id DESC LIMIT 1
+            WHERE dr.organization_id = %s AND i.discovery_run_id = (
+                SELECT id FROM discovery_runs WHERE organization_id = %s ORDER BY id DESC LIMIT 1
             )
-        """, (tenant_id, tenant_id))
+        """, (organization_id, organization_id))
         count = cursor.fetchone()[0]
         cursor.close()
         if count >= limits['max_identities']:
@@ -16310,9 +16310,9 @@ def _check_tier_limits(db, tenant_id):
             }
 
     # Check trial expiry
-    if plan == 'trial' and tenant.get('license_activated_at'):
+    if plan == 'trial' and org.get('license_activated_at'):
         from datetime import timedelta
-        activated = tenant['license_activated_at']
+        activated = org['license_activated_at']
         if isinstance(activated, str):
             activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
         if datetime.now(activated.tzinfo if activated.tzinfo else None) > activated + timedelta(days=14):
@@ -16338,7 +16338,7 @@ def copilot_chat():
 
     db = _db()
     try:
-        api_key = db.get_setting('copilot_api_key', '', tenant_id=_tenant_id())
+        api_key = db.get_setting('copilot_api_key', '', organization_id=_org_id())
         if not api_key:
             return jsonify({
                 'error': 'not_configured',
@@ -16348,7 +16348,7 @@ def copilot_chat():
             })
 
         user_id = _current_user_id()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
 
         # Load or create conversation
         conv = None
@@ -16375,7 +16375,7 @@ def copilot_chat():
             db.update_copilot_conversation(conversation_id, user_id, messages_history)
         else:
             title = message[:60] + ('...' if len(message) > 60 else '')
-            conv = db.create_copilot_conversation(user_id, tenant_id, title, messages_history)
+            conv = db.create_copilot_conversation(user_id, organization_id, title, messages_history)
             conversation_id = conv['id']
 
         suggestions = service.get_suggestions(db)
@@ -16406,7 +16406,7 @@ def copilot_suggestions():
     """GET /api/copilot/suggestions — contextual quick-ask chips."""
     db = _db()
     try:
-        api_key = db.get_setting('copilot_api_key', '', tenant_id=_tenant_id())
+        api_key = db.get_setting('copilot_api_key', '', organization_id=_org_id())
         if not api_key:
             return jsonify({'suggestions': [], 'configured': False})
 
@@ -16431,7 +16431,7 @@ def get_exposure_graph():
 
     db = _db()
     cursor = db.conn.cursor()
-    tid = _tenant_id()
+    tid = _org_id()
 
     try:
         run_ids = _latest_run_ids(cursor, tid, _connection_id())
@@ -16570,7 +16570,7 @@ def get_identity_usage(identity_id):
     cursor = db.conn.cursor()
     try:
         # Get identity with activity + credential data
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.id, i.activity_status, i.last_seen_auth, i.last_sign_in,
                    i.credential_count, i.credential_status, i.credential_expiration
@@ -16662,7 +16662,7 @@ def get_identity_timeline(identity_id):
         cursor = db.conn.cursor()
 
         # Resolve identity DB id
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.id FROM identities i
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -16818,7 +16818,7 @@ def get_identity_attack_paths(identity_id):
         cursor = db.conn.cursor()
 
         # Resolve identity
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.id, i.display_name, i.risk_level, i.risk_score,
                    i.identity_category, i.object_id, i.app_id
@@ -17168,7 +17168,7 @@ def get_identity_effective_access(identity_id: str):
     cursor = db.conn.cursor()
 
     try:
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             return jsonify({'error': 'Identity not found'}), 404
 
@@ -17314,11 +17314,11 @@ def get_integration_settings():
     """GET /api/settings/integrations — return webhook URLs (masked) + event config."""
     db = _db()
     try:
-        tid = _tenant_id()
-        slack_url = db.get_setting('slack_webhook_url', '', tenant_id=tid)
-        teams_url = db.get_setting('teams_webhook_url', '', tenant_id=tid)
-        slack_events = db.get_setting('slack_events', '[]', tenant_id=tid)
-        teams_events = db.get_setting('teams_events', '[]', tenant_id=tid)
+        tid = _org_id()
+        slack_url = db.get_setting('slack_webhook_url', '', organization_id=tid)
+        teams_url = db.get_setting('teams_webhook_url', '', organization_id=tid)
+        slack_events = db.get_setting('slack_events', '[]', organization_id=tid)
+        teams_events = db.get_setting('teams_events', '[]', organization_id=tid)
 
         def mask_url(url):
             if not url or len(url) < 20:
@@ -17401,18 +17401,18 @@ def test_integration_webhook():
 
 
 def check_feature_gate(feature_name):
-    """Check if a feature is available for the current tenant's plan."""
+    """Check if a feature is available for the current organization's plan."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
-        if not tenant_id:
+        organization_id = _org_id()
+        if not organization_id:
             return True, None
 
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return True, None
 
-        plan = tenant.get('plan', 'free')
+        plan = org.get('plan', 'free')
         limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
         blocked = limits.get('blocked_features', [])
 
@@ -17432,13 +17432,13 @@ def check_feature_gate(feature_name):
 # ================================================================
 
 def get_subscriptions_list():
-    """GET /api/subscriptions — list cloud subscriptions for current tenant.
+    """GET /api/subscriptions — list cloud subscriptions for current org.
     For admin users, includes billing breakdown.
     """
     db = _db()
     try:
         cloud = request.args.get('cloud')
-        tid = _tenant_id()
+        tid = _org_id()
         subs = db.get_cloud_subscriptions(tid, cloud=cloud)
         result = {'subscriptions': subs}
 
@@ -17449,9 +17449,9 @@ def get_subscriptions_list():
             from app.pricing import calculate_billing
             admin_db = Database()
             try:
-                tenant = admin_db.get_tenant_by_id(tid)
-                if tenant:
-                    result['billing'] = calculate_billing(tenant, subs)
+                org = admin_db.get_organization_by_id(tid)
+                if org:
+                    result['billing'] = calculate_billing(org, subs)
             finally:
                 admin_db.close()
 
@@ -17464,7 +17464,7 @@ def get_subscriptions_stats():
     """GET /api/subscriptions/stats — summary counts."""
     db = _db()
     try:
-        stats = db.get_subscription_stats(_tenant_id())
+        stats = db.get_subscription_stats(_org_id())
         return jsonify(stats)
     finally:
         db.close()
@@ -17479,16 +17479,16 @@ def activate_subscription():
         if not sub_id:
             return jsonify({'error': 'Subscription id is required'}), 400
 
-        tid = _tenant_id()
+        tid = _org_id()
 
         # Check plan limits before activation
         from app.pricing import can_activate_subscription
         admin_db = Database()
         try:
-            tenant = admin_db.get_tenant_by_id(tid)
-            if tenant:
+            org = admin_db.get_organization_by_id(tid)
+            if org:
                 stats = db.get_subscription_stats(tid)
-                allowed, err_msg = can_activate_subscription(tenant, stats.get('active', 0))
+                allowed, err_msg = can_activate_subscription(org, stats.get('active', 0))
                 if not allowed:
                     return jsonify({'error': err_msg, 'upgrade_required': True}), 403
         finally:
@@ -17496,7 +17496,7 @@ def activate_subscription():
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
-        result = db.activate_cloud_subscription(sub_id, user_id, tenant_id=tid)
+        result = db.activate_cloud_subscription(sub_id, user_id, organization_id=tid)
         if not result:
             return jsonify({'error': 'Subscription not found'}), 404
 
@@ -17512,8 +17512,8 @@ def activate_all_subscriptions():
     try:
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
-        tid = _tenant_id()
-        activated = db.activate_all_cloud_subscriptions(user_id, tenant_id=tid)
+        tid = _org_id()
+        activated = db.activate_all_cloud_subscriptions(user_id, organization_id=tid)
         if activated:
             _log(db, 'subscriptions_bulk_activated', f"Bulk activated {len(activated)} subscription(s)", {'count': len(activated)})
         return jsonify({'activated': len(activated), 'subscriptions': activated})
@@ -17525,7 +17525,7 @@ def deactivate_subscription(sub_id):
     """PUT /api/subscriptions/<id>/deactivate — stop monitoring."""
     db = _db()
     try:
-        result = db.deactivate_cloud_subscription(sub_id, tenant_id=_tenant_id())
+        result = db.deactivate_cloud_subscription(sub_id, organization_id=_org_id())
         if not result:
             return jsonify({'error': 'Subscription not found'}), 404
 
@@ -17543,11 +17543,11 @@ def get_subscriptions_distinct():
         cursor.execute("""
             SELECT DISTINCT subscription_id, subscription_name
             FROM discovery_runs
-            WHERE tenant_id = %s
+            WHERE organization_id = %s
               AND subscription_id IS NOT NULL
               AND subscription_id != ''
             ORDER BY subscription_name
-        """, (_tenant_id(),))
+        """, (_org_id(),))
         rows = cursor.fetchall()
         cursor.close()
         return jsonify({'subscriptions': [{'subscription_id': r[0], 'subscription_name': r[1] or r[0]} for r in rows]})
@@ -17563,7 +17563,7 @@ def get_identity_subscriptions(identity_id):
     try:
         # Resolve identity_id to identity_db_id from latest run
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.execute("""
             SELECT i.id FROM identities i
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -17604,19 +17604,19 @@ def get_identity_subscriptions(identity_id):
 # Admin Billing API
 # ================================================================
 
-def get_admin_tenant_billing(tenant_id):
-    """GET /api/admin/tenants/<id>/billing — full billing breakdown for a tenant."""
+def get_admin_organization_billing(organization_id):
+    """GET /api/admin/organizations/<id>/billing — full billing breakdown for an org."""
     from app.pricing import calculate_billing
     db = Database()
     try:
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
-        subs = db.get_cloud_subscriptions(tenant_id)
-        billing = calculate_billing(tenant, subs)
-        events = db.get_billing_events(tenant_id=tenant_id, limit=20)
+        subs = db.get_cloud_subscriptions(organization_id)
+        billing = calculate_billing(org, subs)
+        events = db.get_billing_events(organization_id=organization_id, limit=20)
         return jsonify({
-            'tenant': tenant,
+            'organization': org,
             'billing': billing,
             'subscriptions': subs,
             'recent_events': events,
@@ -17625,8 +17625,8 @@ def get_admin_tenant_billing(tenant_id):
         db.close()
 
 
-def update_admin_tenant_plan(tenant_id):
-    """PUT /api/admin/tenants/<id>/plan — change plan and auto-set platform fee."""
+def update_admin_organization_plan(organization_id):
+    """PUT /api/admin/organizations/<id>/plan — change plan and auto-set platform fee."""
     from app.pricing import get_default_platform_fee
     db = Database()
     try:
@@ -17635,38 +17635,38 @@ def update_admin_tenant_plan(tenant_id):
         if new_plan not in ('free', 'trial', 'pro', 'enterprise'):
             return jsonify({'error': 'Invalid plan. Must be free, trial, pro, or enterprise.'}), 400
 
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
-        old_plan = tenant.get('plan')
+        old_plan = org.get('plan')
 
         # No-op guard: skip if plan hasn't changed
         if old_plan == new_plan:
-            return jsonify({'tenant': tenant, 'message': f'Plan already set to {new_plan}'})
+            return jsonify({'organization': org, 'message': f'Plan already set to {new_plan}'})
 
         new_fee = get_default_platform_fee(new_plan)
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
 
-        updated = db.update_tenant(tenant_id, plan=new_plan, platform_fee_cents=new_fee)
+        updated = db.update_organization(organization_id, plan=new_plan, platform_fee_cents=new_fee)
 
-        db.log_billing_event(tenant_id, 'plan_change', 'plan',
+        db.log_billing_event(organization_id, 'plan_change', 'plan',
                              old_plan, new_plan, user_id,
-                             {'old_fee': tenant.get('platform_fee_cents'), 'new_fee': new_fee})
-        db.log_admin_audit(user_id, 'plan_change', target_tenant_id=tenant_id,
+                             {'old_fee': org.get('platform_fee_cents'), 'new_fee': new_fee})
+        db.log_admin_audit(user_id, 'plan_change', target_organization_id=organization_id,
                            details={'old_plan': old_plan, 'new_plan': new_plan,
-                                    'old_fee': tenant.get('platform_fee_cents'), 'new_fee': new_fee},
+                                    'old_fee': org.get('platform_fee_cents'), 'new_fee': new_fee},
                            ip_address=request.remote_addr)
 
-        return jsonify({'tenant': updated, 'message': f'Plan updated to {new_plan}'})
+        return jsonify({'organization': updated, 'message': f'Plan updated to {new_plan}'})
     finally:
         db.close()
 
 
-def update_admin_tenant_commitment(tenant_id):
-    """PUT /api/admin/tenants/<id>/commitment — set commitment term and auto-set discount."""
+def update_admin_organization_commitment(organization_id):
+    """PUT /api/admin/organizations/<id>/commitment — set commitment term and auto-set discount."""
     from app.pricing import COMMITMENT_DISCOUNTS
     db = Database()
     try:
@@ -17675,11 +17675,11 @@ def update_admin_tenant_commitment(tenant_id):
         if term not in (0, 1, 3, 5):
             return jsonify({'error': 'Invalid term. Must be 0, 1, 3, or 5.'}), 400
 
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
-        old_term = tenant.get('subscription_term', 0)
+        old_term = org.get('subscription_term', 0)
         discount_pct = COMMITMENT_DISCOUNTS.get(term, 0) * 100  # store as percentage
 
         updates = {
@@ -17689,9 +17689,9 @@ def update_admin_tenant_commitment(tenant_id):
 
         # Auto-set license dates for commitment terms
         if term > 0:
-            if not tenant.get('license_activated_at'):
+            if not org.get('license_activated_at'):
                 updates['license_activated_at'] = datetime.now(timezone.utc).isoformat()
-            activated = tenant.get('license_activated_at') or datetime.now(timezone.utc).isoformat()
+            activated = org.get('license_activated_at') or datetime.now(timezone.utc).isoformat()
             if isinstance(activated, str):
                 activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
             # Add years by replacing year (handles leap years gracefully)
@@ -17707,22 +17707,22 @@ def update_admin_tenant_commitment(tenant_id):
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
 
-        updated = db.update_tenant(tenant_id, **updates)
+        updated = db.update_organization(organization_id, **updates)
 
-        db.log_billing_event(tenant_id, 'commitment_change', 'subscription_term',
+        db.log_billing_event(organization_id, 'commitment_change', 'subscription_term',
                              old_term, term, user_id,
-                             {'old_discount': tenant.get('discount_pct'), 'new_discount': discount_pct})
-        db.log_admin_audit(user_id, 'commitment_change', target_tenant_id=tenant_id,
+                             {'old_discount': org.get('discount_pct'), 'new_discount': discount_pct})
+        db.log_admin_audit(user_id, 'commitment_change', target_organization_id=organization_id,
                            details={'old_term': old_term, 'new_term': term, 'discount_pct': discount_pct},
                            ip_address=request.remote_addr)
 
-        return jsonify({'tenant': updated, 'message': f'Commitment updated to {term}-year term'})
+        return jsonify({'organization': updated, 'message': f'Commitment updated to {term}-year term'})
     finally:
         db.close()
 
 
-def update_admin_tenant_platform_fee(tenant_id):
-    """PUT /api/admin/tenants/<id>/platform-fee — enterprise custom fee override."""
+def update_admin_organization_platform_fee(organization_id):
+    """PUT /api/admin/organizations/<id>/platform-fee — enterprise custom fee override."""
     db = Database()
     try:
         data = request.get_json(silent=True) or {}
@@ -17730,29 +17730,29 @@ def update_admin_tenant_platform_fee(tenant_id):
         if not isinstance(fee_cents, int) or fee_cents < 0:
             return jsonify({'error': 'platform_fee_cents must be a non-negative integer'}), 400
 
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
-        old_fee = tenant.get('platform_fee_cents')
+        old_fee = org.get('platform_fee_cents')
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
 
-        updated = db.update_tenant(tenant_id, platform_fee_cents=fee_cents)
+        updated = db.update_organization(organization_id, platform_fee_cents=fee_cents)
 
-        db.log_billing_event(tenant_id, 'platform_fee_override', 'platform_fee_cents',
+        db.log_billing_event(organization_id, 'platform_fee_override', 'platform_fee_cents',
                              old_fee, fee_cents, user_id)
-        db.log_admin_audit(user_id, 'platform_fee_override', target_tenant_id=tenant_id,
+        db.log_admin_audit(user_id, 'platform_fee_override', target_organization_id=organization_id,
                            details={'old_fee': old_fee, 'new_fee': fee_cents},
                            ip_address=request.remote_addr)
 
-        return jsonify({'tenant': updated, 'message': 'Platform fee updated'})
+        return jsonify({'organization': updated, 'message': 'Platform fee updated'})
     finally:
         db.close()
 
 
-def update_admin_cloud_rate(tenant_id, cloud):
-    """PUT /api/admin/tenants/<id>/clouds/<cloud>/rate — override per-sub rate."""
+def update_admin_cloud_rate(organization_id, cloud):
+    """PUT /api/admin/organizations/<id>/clouds/<cloud>/rate — override per-sub rate."""
     db = Database()
     try:
         if cloud not in ('azure', 'aws', 'gcp'):
@@ -17763,19 +17763,19 @@ def update_admin_cloud_rate(tenant_id, cloud):
         if not isinstance(rate_cents, int) or rate_cents < 0:
             return jsonify({'error': 'rate_cents must be a non-negative integer'}), 400
 
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
 
-        updated_count = db.update_cloud_subscription_rate(tenant_id, cloud, rate_cents)
+        updated_count = db.update_cloud_subscription_rate(organization_id, cloud, rate_cents)
 
-        db.log_billing_event(tenant_id, 'rate_override', f'{cloud}_rate_cents',
+        db.log_billing_event(organization_id, 'rate_override', f'{cloud}_rate_cents',
                              None, rate_cents, user_id,
                              {'cloud': cloud, 'updated_subscriptions': updated_count})
-        db.log_admin_audit(user_id, 'rate_override', target_tenant_id=tenant_id,
+        db.log_admin_audit(user_id, 'rate_override', target_organization_id=organization_id,
                            details={'cloud': cloud, 'rate_cents': rate_cents, 'updated_count': updated_count},
                            ip_address=request.remote_addr)
 
@@ -17785,17 +17785,17 @@ def update_admin_cloud_rate(tenant_id, cloud):
 
 
 def get_admin_billing_summary():
-    """GET /api/admin/billing/summary — aggregate billing across all tenants."""
+    """GET /api/admin/billing/summary — aggregate billing across all organizations."""
     from app.pricing import calculate_billing
     db = Database()
     try:
-        tenants = db.get_tenants()
+        organizations = db.get_organizations()
         total_mrr = 0
         by_plan = {}
         by_cloud = {}
-        tenant_billings = []
+        org_billings = []
 
-        for t in tenants:
+        for t in organizations:
             subs = db.get_cloud_subscriptions(t['id'])
             billing = calculate_billing(t, subs)
             net = billing['net_monthly_cents']
@@ -17813,9 +17813,9 @@ def get_admin_billing_summary():
                 by_cloud[cloud_key]['count'] += cloud_data['count']
                 by_cloud[cloud_key]['revenue_cents'] += cloud_data['revenue_cents']
 
-            tenant_billings.append({
-                'tenant_id': t['id'],
-                'tenant_name': t.get('name'),
+            org_billings.append({
+                'organization_id': t['id'],
+                'org_name': t.get('name'),
                 'plan': plan,
                 'active_subs': billing['active_count'],
                 'net_monthly_cents': net,
@@ -17824,16 +17824,16 @@ def get_admin_billing_summary():
                 'discount_pct': billing['discount_pct'],
             })
 
-        active_tenants = sum(1 for t in tenants if t.get('enabled'))
+        active_orgs = sum(1 for t in organizations if t.get('enabled'))
 
         return jsonify({
             'total_mrr_cents': total_mrr,
             'projected_arr_cents': total_mrr * 12,
-            'total_tenants': len(tenants),
-            'active_tenants': active_tenants,
+            'total_orgs': len(orgs),
+            'active_orgs': active_orgs,
             'by_plan': by_plan,
             'by_cloud': by_cloud,
-            'tenants': tenant_billings,
+            'organizations': org_billings,
         })
     finally:
         db.close()
@@ -17843,10 +17843,10 @@ def get_admin_billing_events():
     """GET /api/admin/billing/events — paginated billing event audit trail."""
     db = Database()
     try:
-        tenant_id = request.args.get('tenant_id', type=int)
+        organization_id = request.args.get('organization_id', type=int)
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
-        events = db.get_billing_events(tenant_id=tenant_id, limit=min(limit, 200), offset=offset)
+        events = db.get_billing_events(organization_id=organization_id, limit=min(limit, 200), offset=offset)
         return jsonify({'events': events})
     finally:
         db.close()
@@ -17874,11 +17874,11 @@ def get_admin_action_log():
             parts.append(f"""
                 SELECT a.id, a.action AS action_type, 'admin_audit' AS source,
                        a.admin_user_id, u.username AS admin_username,
-                       a.target_tenant_id, t.name AS target_tenant_name,
+                       a.target_organization_id, o.name AS target_org_name,
                        a.details, a.ip_address, a.created_at
                 FROM admin_audit_log a
                 LEFT JOIN users u ON u.id = a.admin_user_id
-                LEFT JOIN tenants t ON t.id = a.target_tenant_id
+                LEFT JOIN organizations o ON o.id = a.target_organization_id
                 {audit_where}
             """)
 
@@ -17890,7 +17890,7 @@ def get_admin_action_log():
             parts.append(f"""
                 SELECT b.id, b.event_type AS action_type, 'billing' AS source,
                        b.changed_by AS admin_user_id, u.username AS admin_username,
-                       b.tenant_id AS target_tenant_id, t.name AS target_tenant_name,
+                       b.organization_id AS target_organization_id, o.name AS target_org_name,
                        jsonb_build_object('field_changed', b.field_changed,
                                           'old_value', b.old_value,
                                           'new_value', b.new_value,
@@ -17898,7 +17898,7 @@ def get_admin_action_log():
                        NULL AS ip_address, b.created_at
                 FROM billing_events b
                 LEFT JOIN users u ON u.id = b.changed_by
-                LEFT JOIN tenants t ON t.id = b.tenant_id
+                LEFT JOIN organizations o ON o.id = b.organization_id
                 {billing_where}
             """)
 
@@ -17929,24 +17929,24 @@ def get_admin_action_log():
 
 
 def admin_impersonate():
-    """POST /api/admin/impersonate — generate tenant-scoped tokens for admin impersonation.
+    """POST /api/admin/impersonate — generate org-scoped tokens for admin impersonation.
     Phase 1C: 15-min hard cap, impersonated_by claim, audit logging."""
     from app.api.auth import generate_access_token, generate_refresh_token
     user = g.current_user
     data = request.get_json(silent=True) or {}
-    target_tenant_id = data.get('tenant_id')
+    target_organization_id = data.get('organization_id')
     target_role = data.get('role', 'admin')
 
-    if not target_tenant_id:
-        return jsonify({'error': 'tenant_id is required'}), 400
+    if not target_organization_id:
+        return jsonify({'error': 'organization_id is required'}), 400
 
     db = Database()
     try:
-        tenant = db.get_tenant_by_id(int(target_tenant_id))
-        if not tenant:
+        org = db.get_organization_by_id(int(target_organization_id))
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
-        slug = tenant.get('slug')
+        slug = org.get('slug')
 
         # Build synthetic impersonation user
         impersonation_user = {
@@ -17954,8 +17954,8 @@ def admin_impersonate():
             'username': user['username'],
             'display_name': user.get('display_name', user['username']),
             'role': target_role,
-            'tenant_id': tenant['id'],
-            'tenant_name': tenant.get('name'),
+            'organization_id': org['id'],
+            'org_name': org.get('name'),
             'is_superadmin': False,
             'portal_role': None,
             'impersonating': True,
@@ -17967,15 +17967,15 @@ def admin_impersonate():
         try:
             cursor = db.conn.cursor()
             cursor.execute("""
-                INSERT INTO admin_audit_log (admin_user_id, action, target_tenant_id, details, ip_address)
+                INSERT INTO admin_audit_log (admin_user_id, action, target_organization_id, details, ip_address)
                 VALUES (%s, %s, %s, %s, %s)
             """, (
                 user['id'],
                 'impersonation_start',
-                tenant['id'],
+                org['id'],
                 json.dumps({
                     'target_role': target_role,
-                    'tenant_name': tenant.get('name'),
+                    'org_name': org.get('name'),
                     'impersonator': user['username'],
                     'max_duration_min': 15,
                 }),
@@ -17988,14 +17988,14 @@ def admin_impersonate():
     finally:
         db.close()
 
-    access_token = generate_access_token(impersonation_user, portal='client', tenant_slug=slug)
+    access_token = generate_access_token(impersonation_user, portal='client', org_slug=slug)
     refresh_token = generate_refresh_token(impersonation_user, portal='client')
 
     return jsonify({
         'access_token': access_token,
         'refresh_token': refresh_token,
-        'tenant_slug': slug,
-        'tenant_name': tenant.get('name'),
+        'org_slug': slug,
+        'org_name': org.get('name'),
         'impersonation': True,
         'expires_in_minutes': 15,
     })
@@ -18011,15 +18011,15 @@ def admin_end_impersonation():
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            INSERT INTO admin_audit_log (admin_user_id, action, target_tenant_id, details, ip_address)
+            INSERT INTO admin_audit_log (admin_user_id, action, target_organization_id, details, ip_address)
             VALUES (%s, %s, %s, %s, %s)
         """, (
             user.get('impersonator_id', user['id']),
             'impersonation_end',
-            user.get('tenant_id'),
+            user.get('organization_id'),
             json.dumps({
                 'impersonator': user.get('impersonated_by', user.get('impersonator_username')),
-                'tenant_name': user.get('tenant_name'),
+                'org_name': user.get('org_name'),
             }),
             request.remote_addr,
         ))
@@ -18036,22 +18036,22 @@ def admin_end_impersonation():
 def get_client_billing_summary():
     """GET /api/client/billing/summary — read-only billing for client portal."""
     from app.pricing import calculate_billing
-    tid = _tenant_id()
-    # Use admin DB for tenant lookup (tenants table has no RLS)
+    tid = _org_id()
+    # Use admin DB for org lookup (organizations table has no RLS)
     admin_db = Database()
     try:
-        tenant = admin_db.get_tenant_by_id(tid)
-        if not tenant:
+        org = admin_db.get_organization_by_id(tid)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
     finally:
         admin_db.close()
-    # Use tenant-scoped DB for subscriptions
+    # Use org-scoped DB for subscriptions
     db = _db()
     try:
         subs = db.get_cloud_subscriptions(tid)
-        billing = calculate_billing(tenant, subs)
+        billing = calculate_billing(org, subs)
         return jsonify({
-            'plan': tenant.get('plan'),
+            'plan': org.get('plan'),
             'billing': billing,
         })
     finally:
@@ -18061,16 +18061,16 @@ def get_client_billing_summary():
 def get_client_usage_metering():
     """GET /api/client/billing/usage — current usage vs plan limits."""
     from app.pricing import PLAN_LIMITS
-    tid = _tenant_id()
+    tid = _org_id()
     admin_db = Database()
     try:
-        tenant = admin_db.get_tenant_by_id(tid)
-        if not tenant:
+        org = admin_db.get_organization_by_id(tid)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
     finally:
         admin_db.close()
 
-    plan = tenant.get('plan', 'free')
+    plan = org.get('plan', 'free')
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get('free', {}))
     db = _db()
     try:
@@ -18131,13 +18131,13 @@ def update_platform_settings_handler():
 
 # ─── Invoice Handlers ───────────────────────────────────────────────────
 
-def generate_invoice(tenant_id):
-    """POST /api/admin/tenants/<id>/invoices — generate invoice for a billing period."""
+def generate_invoice(organization_id):
+    """POST /api/admin/organizations/<id>/invoices — generate invoice for a billing period."""
     from app.pricing import calculate_invoice, compute_invoice_hash
     db = Database()
     try:
-        tenant = db.get_tenant_by_id(tenant_id)
-        if not tenant:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
         data = request.get_json(silent=True) or {}
@@ -18148,14 +18148,14 @@ def generate_invoice(tenant_id):
         if not period_start or not period_end:
             return jsonify({'error': 'period_start and period_end are required'}), 400
 
-        subs = db.get_cloud_subscriptions(tenant_id)
-        invoice_data = calculate_invoice(tenant, subs)
+        subs = db.get_cloud_subscriptions(organization_id)
+        invoice_data = calculate_invoice(org, subs)
 
         platform_settings = db.get_platform_settings()
         prefix = platform_settings.get('invoice_prefix', 'AG')
         invoice_number = db.get_next_invoice_number(prefix)
 
-        payment_terms = tenant.get('payment_terms', 30)
+        payment_terms = org.get('payment_terms', 30)
         issued_at = datetime.now(timezone.utc)
         due_at = issued_at + timedelta(days=payment_terms)
 
@@ -18167,15 +18167,15 @@ def generate_invoice(tenant_id):
             'tax_id': platform_settings.get('company_tax_id', ''),
         }
         buyer_snapshot = {
-            'company_name': tenant.get('billing_company') or tenant.get('name'),
-            'address_line1': tenant.get('billing_address_line1', ''),
-            'address_line2': tenant.get('billing_address_line2', ''),
-            'city': tenant.get('billing_city', ''),
-            'state': tenant.get('billing_state', ''),
-            'postal_code': tenant.get('billing_postal_code', ''),
-            'country': tenant.get('billing_country', ''),
-            'email': tenant.get('billing_email', ''),
-            'tax_id': tenant.get('tax_id', ''),
+            'company_name': org.get('billing_company') or org.get('name'),
+            'address_line1': org.get('billing_address_line1', ''),
+            'address_line2': org.get('billing_address_line2', ''),
+            'city': org.get('billing_city', ''),
+            'state': org.get('billing_state', ''),
+            'postal_code': org.get('billing_postal_code', ''),
+            'country': org.get('billing_country', ''),
+            'email': org.get('billing_email', ''),
+            'tax_id': org.get('tax_id', ''),
         }
 
         user = getattr(g, 'current_user', None)
@@ -18187,7 +18187,7 @@ def generate_invoice(tenant_id):
 
         hash_data = {
             'invoice_number': invoice_number,
-            'tenant_id': tenant_id,
+            'organization_id': organization_id,
             'period_start': period_start,
             'period_end': period_end,
             'subtotal_cents': invoice_data['subtotal_cents'],
@@ -18201,7 +18201,7 @@ def generate_invoice(tenant_id):
         content_hash = compute_invoice_hash(hash_data)
 
         invoice = db.create_invoice(
-            tenant_id=tenant_id,
+            organization_id=organization_id,
             invoice_number=invoice_number,
             period_start=period_start,
             period_end=period_end,
@@ -18221,7 +18221,7 @@ def generate_invoice(tenant_id):
             content_hash=content_hash,
         )
 
-        db.log_billing_event(tenant_id, 'invoice_generated', 'invoice',
+        db.log_billing_event(organization_id, 'invoice_generated', 'invoice',
                              None, invoice_number, created_by,
                              {'total_cents': invoice_data['total_cents']})
 
@@ -18234,11 +18234,11 @@ def get_admin_invoices():
     """GET /api/admin/invoices — all invoices with optional filters."""
     db = Database()
     try:
-        tenant_id = request.args.get('tenant_id', type=int)
+        organization_id = request.args.get('organization_id', type=int)
         status = request.args.get('status')
         limit = min(request.args.get('limit', 50, type=int), 200)
         offset = request.args.get('offset', 0, type=int)
-        invoices = db.get_invoices(tenant_id=tenant_id, status=status, limit=limit, offset=offset)
+        invoices = db.get_invoices(organization_id=organization_id, status=status, limit=limit, offset=offset)
         return jsonify({'invoices': invoices})
     finally:
         db.close()
@@ -18287,7 +18287,7 @@ def update_invoice_status_handler(invoice_id):
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
-        db.log_billing_event(invoice['tenant_id'], f'invoice_{new_status}', 'invoice',
+        db.log_billing_event(invoice['organization_id'], f'invoice_{new_status}', 'invoice',
                              current, new_status, user_id,
                              {'invoice_number': invoice.get('invoice_number')})
 
@@ -18307,7 +18307,7 @@ def send_invoice_email(invoice_id):
         buyer = invoice.get('buyer_snapshot', {})
         to_email = buyer.get('email', '')
         if not to_email:
-            return jsonify({'error': 'No billing email configured for this tenant'}), 400
+            return jsonify({'error': 'No billing email configured for this org'}), 400
 
         # Mark as sent if still draft
         if invoice['status'] == 'draft':
@@ -18340,7 +18340,7 @@ def send_invoice_email(invoice_id):
 
         user = getattr(g, 'current_user', None)
         user_id = user.get('id') if user else None
-        db.log_billing_event(invoice['tenant_id'], 'invoice_emailed', 'invoice',
+        db.log_billing_event(invoice['organization_id'], 'invoice_emailed', 'invoice',
                              None, to_email, user_id,
                              {'invoice_number': inv_num})
 
@@ -18352,15 +18352,15 @@ def send_invoice_email(invoice_id):
 # ─── Client Invoice Endpoints ────────────────────────────────────────────
 
 def get_client_invoices():
-    """GET /api/client/invoices — invoices for current tenant."""
-    tid = _tenant_id()
+    """GET /api/client/invoices — invoices for current org."""
+    tid = _org_id()
     if not tid or tid == -1:
-        return jsonify({'error': 'No tenant context'}), 403
+        return jsonify({'error': 'No org context'}), 403
     db = Database()
     try:
         limit = min(request.args.get('limit', 50, type=int), 200)
         offset = request.args.get('offset', 0, type=int)
-        invoices = db.get_invoices(tenant_id=tid, limit=limit, offset=offset)
+        invoices = db.get_invoices(organization_id=tid, limit=limit, offset=offset)
         # Only show non-draft invoices to clients
         invoices = [inv for inv in invoices if inv.get('status') != 'draft']
         return jsonify({'invoices': invoices})
@@ -18369,16 +18369,16 @@ def get_client_invoices():
 
 
 def get_client_invoice(invoice_id):
-    """GET /api/client/invoices/<id> — single invoice for current tenant."""
-    tid = _tenant_id()
+    """GET /api/client/invoices/<id> — single invoice for current org."""
+    tid = _org_id()
     if not tid or tid == -1:
-        return jsonify({'error': 'No tenant context'}), 403
+        return jsonify({'error': 'No org context'}), 403
     db = Database()
     try:
         invoice = db.get_invoice_by_id(invoice_id)
         if not invoice:
             return jsonify({'error': 'Invoice not found'}), 404
-        if invoice.get('tenant_id') != tid:
+        if invoice.get('organization_id') != tid:
             return jsonify({'error': 'Access denied'}), 403
         if invoice.get('status') == 'draft':
             return jsonify({'error': 'Invoice not found'}), 404
@@ -18389,15 +18389,15 @@ def get_client_invoice(invoice_id):
 
 def verify_client_invoice(invoice_id):
     """GET /api/client/invoices/<id>/verify — verify invoice integrity for client."""
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
-        return jsonify({'error': 'No tenant context'}), 403
+        return jsonify({'error': 'No org context'}), 403
     db = Database()
     try:
         invoice = db.get_invoice_by_id(invoice_id)
         if not invoice:
             return jsonify({'error': 'Invoice not found'}), 404
-        if invoice.get('tenant_id') != tid:
+        if invoice.get('organization_id') != tid:
             return jsonify({'error': 'Access denied'}), 403
         if invoice.get('status') == 'draft':
             return jsonify({'error': 'Invoice not found'}), 404
@@ -18424,20 +18424,20 @@ def verify_admin_invoice(invoice_id):
 def get_client_billing_preview():
     """GET /api/client/billing/preview — projected charges for current period."""
     from app.pricing import calculate_invoice
-    tid = _tenant_id()
+    tid = _org_id()
     if not tid or tid == -1:
-        return jsonify({'error': 'No tenant context'}), 403
+        return jsonify({'error': 'No org context'}), 403
     admin_db = Database()
     try:
-        tenant = admin_db.get_tenant_by_id(tid)
-        if not tenant:
+        org = admin_db.get_organization_by_id(tid)
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
     finally:
         admin_db.close()
     db = _db()
     try:
         subs = db.get_cloud_subscriptions(tid)
-        invoice_data = calculate_invoice(tenant, subs)
+        invoice_data = calculate_invoice(org, subs)
         now = datetime.now(timezone.utc)
         period_start = now.replace(day=1).strftime('%Y-%m-%d')
         if now.month == 12:
@@ -18455,7 +18455,7 @@ def get_client_billing_preview():
         return jsonify({
             'period_start': period_start,
             'period_end': period_end,
-            'plan': tenant.get('plan', 'free'),
+            'plan': org.get('plan', 'free'),
             'active_subscriptions': len(active_subs),
             'subscriptions_by_cloud': by_cloud,
             'platform_fee_cents': invoice_data.get('platform_fee_cents', 0),
@@ -18605,9 +18605,9 @@ def get_workload_stats():
     try:
         db._ensure_spn_exposure()
         db._ensure_app_reg_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
 
         empty = {
             'total': 0,
@@ -18710,7 +18710,7 @@ def get_workload_stats():
                 (id_total_for_avg + ar_total), 1)
 
         # P2 telemetry stats (if enabled)
-        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
+        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=db._organization_id) == 'true'
         telemetry = None
         if p2_enabled:
             try:
@@ -18791,9 +18791,9 @@ def get_workload_list():
     try:
         db._ensure_spn_exposure()
         db._ensure_app_reg_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'items': [], 'total': 0})
@@ -18979,7 +18979,7 @@ def get_workload_list():
                 items.append(r)
 
         # Enrich with P2 telemetry data if enabled
-        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
+        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=db._organization_id) == 'true'
         if p2_enabled and items:
             try:
                 # Batch-fetch activity stats for identities (not app_regs)
@@ -19062,9 +19062,9 @@ def get_workload_detail(workload_id):
     try:
         db._ensure_spn_exposure()
         db._ensure_app_reg_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'error': 'No discovery data'}), 404
@@ -19154,7 +19154,7 @@ def get_workload_detail(workload_id):
             for f in findings:
                 signal_map[f.get('component', 'general')].append(f.get('title', ''))
 
-            p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
+            p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=db._organization_id) == 'true'
 
             # Build owners list from JSONB column
             ar_owners = []
@@ -19310,7 +19310,7 @@ def get_workload_detail(workload_id):
                     r['created_on'] = r['created_on'].isoformat()
 
             # P2 telemetry enrichment
-            p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', tenant_id=db._tenant_id) == 'true'
+            p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=db._organization_id) == 'true'
             activity_stats_data = None
             anomalies_list = []
             if p2_enabled:
@@ -19410,9 +19410,9 @@ def get_workload_findings():
     try:
         db._ensure_spn_exposure()
         db._ensure_app_reg_exposure()
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'findings': []})
@@ -19456,9 +19456,9 @@ def get_workload_anomalies():
     """GET /api/workload-identities/anomalies — List workload behavioral anomalies."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'anomalies': [], 'total': 0})
@@ -19523,9 +19523,9 @@ def get_workload_anomaly_stats():
     """GET /api/workload-identities/anomalies/stats — Anomaly summary counts."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor, tenant_id, _connection_id())
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -19576,7 +19576,7 @@ def get_correlation_linked_identities():
     """GET /api/correlation/linked — list linked human identities."""
     db = _db()
     try:
-        tid = _tenant_id()
+        tid = _org_id()
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         search = request.args.get('search')
@@ -19603,7 +19603,7 @@ def post_correlation_link():
     db = _db()
     try:
         data = request.get_json(force=True)
-        tid = _tenant_id()
+        tid = _org_id()
         regular_id = data.get('regular_identity_db_id')
         privileged_id = data.get('privileged_identity_db_id')
         if not regular_id or not privileged_id:
@@ -19622,7 +19622,7 @@ def post_correlation_link():
             return jsonify({'error': 'One or both identities not found'}), 404
 
         human_id = db.save_human_identity(
-            tenant_id=tid,
+            organization_id=tid,
             display_name=reg['display_name'],
             employee_id=reg.get('employee_id_entra'),
             department=reg.get('department'),
@@ -19682,7 +19682,7 @@ def get_orphaned_findings_list():
     """GET /api/findings/orphaned-privileged — list orphaned findings."""
     db = _db()
     try:
-        tid = _tenant_id()
+        tid = _org_id()
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         status = request.args.get('status')
@@ -19785,10 +19785,10 @@ def save_correlation_config():
             for key in DEFAULT_CONFIG:
                 if key in data:
                     cursor.execute("""
-                        INSERT INTO settings (key, value, tenant_id)
+                        INSERT INTO settings (key, value, organization_id)
                         VALUES (%s, %s, %s)
-                        ON CONFLICT (key, tenant_id) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-                    """, (key, str(data[key]), _tenant_id()))
+                        ON CONFLICT (key, organization_id) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                    """, (key, str(data[key]), _org_id()))
             db.conn.commit()
         finally:
             cursor.close()
@@ -19804,22 +19804,22 @@ def get_dashboard_identity_correlation():
     """GET /api/dashboard/identity-correlation — summary stats for dashboard."""
     db = _db()
     try:
-        tid = _tenant_id()
+        tid = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         try:
             # Count linked humans
-            cursor.execute("SELECT COUNT(*) as cnt FROM human_identities WHERE tenant_id = %s", (tid,))
+            cursor.execute("SELECT COUNT(*) as cnt FROM human_identities WHERE organization_id = %s", (tid,))
             humans = cursor.fetchone()['cnt']
 
             # Count links
-            cursor.execute("SELECT COUNT(*) as cnt FROM identity_links WHERE tenant_id = %s", (tid,))
+            cursor.execute("SELECT COUNT(*) as cnt FROM identity_links WHERE organization_id = %s", (tid,))
             links = cursor.fetchone()['cnt']
 
             # Count open findings by severity
             cursor.execute("""
                 SELECT severity, COUNT(*) as cnt
                 FROM orphaned_privileged_findings
-                WHERE tenant_id = %s AND status = 'open'
+                WHERE organization_id = %s AND status = 'open'
                 GROUP BY severity
             """, (tid,))
             findings_by_severity = {r['severity']: r['cnt'] for r in cursor.fetchall()}
@@ -19843,7 +19843,7 @@ def get_dashboard_identity_correlation():
                         AND il2.identity_db_id != il1.identity_db_id
                     JOIN identities i1 ON i1.id = il1.identity_db_id
                     JOIN identities i2 ON i2.id = il2.identity_db_id
-                    WHERE hi.tenant_id = %s
+                    WHERE hi.organization_id = %s
                       AND (i1.enabled = FALSE OR i1.deleted_at IS NOT NULL)
                       AND i2.enabled = TRUE AND i2.deleted_at IS NULL
                     ORDER BY hi.id
@@ -19901,7 +19901,7 @@ def get_correlation_accounts():
                 resolved_db_id = int(identity_id)
             except (ValueError, TypeError):
                 # It's a UUID string — look up the db_id from identities table
-                run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+                run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
                 if run_ids:
                     cursor.execute(
                         "SELECT id FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) ORDER BY discovery_run_id DESC LIMIT 1",
@@ -20080,7 +20080,7 @@ def get_dangerous_identities():
         category = request.args.get('category', 'all')
 
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _tenant_id(), _connection_id())
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
             cursor.close()
             return jsonify({'identities': []})
@@ -20283,10 +20283,10 @@ def validate_launch_readiness():
         gate(20, 'Saved Views', g20)
 
         # ── Phase 3 Gates ──────────────────────────────────────────
-        # Gate 21: Multi-tenant foundation
+        # Gate 21: Multi-organization foundation
         def g21():
-            cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='tenants'")
-            return cursor.fetchone()[0] > 0, 'tenants table exists'
+            cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='organizations'")
+            return cursor.fetchone()[0] > 0, 'organizations table exists'
         gate(21, 'Multi-Tenant Foundation', g21)
 
         # Gate 22: JWT auth + RBAC
@@ -20331,7 +20331,7 @@ def validate_launch_readiness():
         gate(32, 'GRC JSON Export', lambda: (True, 'evidence-json endpoint with OSCAL schema'))
 
         # Gate 33: Entitlements API
-        gate(33, 'Entitlements API', lambda: (True, '/api/tenant/entitlements endpoint'))
+        gate(33, 'Entitlements API', lambda: (True, '/api/organization/entitlements endpoint'))
 
         # Gate 34: Usage metering
         gate(34, 'Usage Metering', lambda: (True, '/api/client/billing/usage endpoint'))
@@ -20443,11 +20443,11 @@ def validate_launch_readiness():
 # ──────────────────────────────────────────────────────────
 
 def get_scan_schedules_list():
-    """GET /api/scan-schedules — list all scan schedules for tenant."""
+    """GET /api/scan-schedules — list all scan schedules for org."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
-        schedules = db.get_scan_schedules(tenant_id)
+        organization_id = _org_id()
+        schedules = db.get_scan_schedules(organization_id)
         for s in schedules:
             for k in ('next_run_at', 'last_run_at', 'created_at', 'updated_at'):
                 if s.get(k):
@@ -20461,7 +20461,7 @@ def create_scan_schedule_handler():
     """POST /api/scan-schedules — create a new scan schedule."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         data = request.get_json(silent=True) or {}
 
         connection_id = data.get('connection_id')
@@ -20488,7 +20488,7 @@ def create_scan_schedule_handler():
 
         user = g.current_user
         schedule = db.create_scan_schedule(
-            tenant_id, connection_id, label, frequency, cron_expression,
+            organization_id, connection_id, label, frequency, cron_expression,
             next_run, user['id'])
 
         if schedule:
@@ -20508,10 +20508,10 @@ def update_scan_schedule_handler(schedule_id):
     """PUT /api/scan-schedules/<id> — update a scan schedule."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
+        organization_id = _org_id()
         data = request.get_json(silent=True) or {}
 
-        updated = db.update_scan_schedule(schedule_id, tenant_id, **data)
+        updated = db.update_scan_schedule(schedule_id, organization_id, **data)
         if not updated:
             return jsonify({'error': 'Schedule not found'}), 404
 
@@ -20532,8 +20532,8 @@ def delete_scan_schedule_handler(schedule_id):
     """DELETE /api/scan-schedules/<id> — delete a scan schedule."""
     db = _db()
     try:
-        tenant_id = _tenant_id()
-        deleted = db.delete_scan_schedule(schedule_id, tenant_id)
+        organization_id = _org_id()
+        deleted = db.delete_scan_schedule(schedule_id, organization_id)
         if not deleted:
             return jsonify({'error': 'Schedule not found'}), 404
 
@@ -20615,7 +20615,7 @@ def stripe_webhook_handler():
             amount = event_data.get('amount_paid', 0)
 
             db.log_billing_event(
-                tenant_id=None,
+                organization_id=None,
                 event_type='stripe_payment_succeeded',
                 field_changed='stripe_invoice',
                 old_value=None,
@@ -20629,7 +20629,7 @@ def stripe_webhook_handler():
             customer_id = event_data.get('customer', '')
 
             db.log_billing_event(
-                tenant_id=None,
+                organization_id=None,
                 event_type='stripe_payment_failed',
                 field_changed='stripe_invoice',
                 old_value=None,
@@ -20643,7 +20643,7 @@ def stripe_webhook_handler():
             status = event_data.get('status', '')
 
             db.log_billing_event(
-                tenant_id=None,
+                organization_id=None,
                 event_type='stripe_subscription_updated',
                 field_changed='stripe_subscription_status',
                 old_value=None,
@@ -20657,8 +20657,8 @@ def stripe_webhook_handler():
         db.close()
 
 
-def create_stripe_customer_handler(tenant_id):
-    """POST /api/admin/tenants/<id>/stripe-customer — create Stripe customer for tenant."""
+def create_stripe_customer_handler(organization_id):
+    """POST /api/admin/organizations/<id>/stripe-customer — create Stripe customer for org."""
     stripe_key = os.environ.get('STRIPE_SECRET_KEY', '')
     if not stripe_key:
         return jsonify({'error': 'Stripe not configured. Set STRIPE_SECRET_KEY environment variable.'}), 503
@@ -20666,40 +20666,40 @@ def create_stripe_customer_handler(tenant_id):
     db = Database()
     try:
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM tenants WHERE id = %s", (tenant_id,))
-        tenant = cursor.fetchone()
+        cursor.execute("SELECT * FROM organizations WHERE id = %s", (organization_id,))
+        org = cursor.fetchone()
         cursor.close()
 
-        if not tenant:
+        if not org:
             return jsonify({'error': 'Tenant not found'}), 404
 
-        if tenant.get('stripe_customer_id'):
+        if org.get('stripe_customer_id'):
             return jsonify({
                 'message': 'Stripe customer already exists',
-                'stripe_customer_id': tenant['stripe_customer_id']
+                'stripe_customer_id': org['stripe_customer_id']
             })
 
         try:
             import stripe
             stripe.api_key = stripe_key
             customer = stripe.Customer.create(
-                name=tenant.get('name', ''),
-                email=tenant.get('billing_email') or tenant.get('root_email', ''),
+                name=org.get('name', ''),
+                email=org.get('billing_email') or org.get('root_email', ''),
                 metadata={
-                    'auditgraph_tenant_id': str(tenant_id),
-                    'plan': tenant.get('plan', 'free'),
+                    'auditgraph_organization_id': str(organization_id),
+                    'plan': org.get('plan', 'free'),
                 }
             )
 
             cursor = db.conn.cursor()
             cursor.execute(
-                "UPDATE tenants SET stripe_customer_id = %s WHERE id = %s",
-                (customer.id, tenant_id))
+                "UPDATE organizations SET stripe_customer_id = %s WHERE id = %s",
+                (customer.id, organization_id))
             db.conn.commit()
             cursor.close()
 
             db.log_billing_event(
-                tenant_id, 'stripe_customer_created',
+                organization_id, 'stripe_customer_created',
                 'stripe_customer_id', None, customer.id,
                 changed_by=g.current_user.get('id'),
                 metadata={'stripe_mode': 'live' if stripe_key.startswith('sk_live_') else 'test'})
@@ -20719,10 +20719,10 @@ def create_stripe_customer_handler(tenant_id):
 # Phase 6: Demo Environment / Pilot Setup
 # ──────────────────────────────────────────────────────────
 
-def create_pilot_tenant():
-    """POST /api/admin/pilot-setup — create a pilot tenant with full configuration.
+def create_pilot_organization():
+    """POST /api/admin/pilot-setup — create a pilot organization with full configuration.
 
-    Creates tenant, root user, cloud connection placeholder, and initial settings.
+    Creates org, root user, cloud connection placeholder, and initial settings.
     Designed for the NexGenHealthcare pilot activation flow.
     """
     data = request.get_json(silent=True) or {}
@@ -20749,30 +20749,30 @@ def create_pilot_tenant():
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
         # Check slug uniqueness
-        cursor.execute("SELECT id FROM tenants WHERE slug = %s", (slug,))
+        cursor.execute("SELECT id FROM organizations WHERE slug = %s", (slug,))
         if cursor.fetchone():
             return jsonify({'error': f'Slug "{slug}" already exists'}), 409
 
-        # Create tenant
+        # Create organization
         cursor.execute("""
-            INSERT INTO tenants (name, slug, plan, platform_fee_cents, enabled,
+            INSERT INTO organizations (name, slug, plan, platform_fee_cents, enabled,
                                  billing_status, root_email)
             VALUES (%s, %s, %s, %s, true, 'active', %s)
             RETURNING id
         """, (org_name, slug, plan, 20000, root_email))
-        tenant_id = cursor.fetchone()['id']
+        organization_id = cursor.fetchone()['id']
 
         # Create root user
         pw_hash = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         cursor.execute("""
             INSERT INTO users (username, display_name, password_hash, role,
-                               tenant_id, enabled, created_at)
+                               organization_id, enabled, created_at)
             VALUES (%s, %s, %s, 'admin', %s, true, NOW())
             RETURNING id
-        """, (root_username, org_name + ' Admin', pw_hash, tenant_id))
+        """, (root_username, org_name + ' Admin', pw_hash, organization_id))
         user_id = cursor.fetchone()['id']
 
-        # Create default settings for tenant
+        # Create default settings for org
         for key, value in [
             ('org_name', org_name),
             ('scheduler_enabled', 'true'),
@@ -20780,35 +20780,35 @@ def create_pilot_tenant():
             ('notifications_enabled', 'true'),
         ]:
             cursor.execute("""
-                INSERT INTO settings (key, value, tenant_id)
+                INSERT INTO settings (key, value, organization_id)
                 VALUES (%s, %s, %s)
                 ON CONFLICT DO NOTHING
-            """, (key, value, tenant_id))
+            """, (key, value, organization_id))
 
         db.conn.commit()
         cursor.close()
 
         # Log activity
         try:
-            db.log_activity('pilot_tenant_created',
-                            f'Pilot tenant "{org_name}" created (plan={plan})',
-                            {'tenant_id': tenant_id, 'slug': slug, 'plan': plan,
+            db.log_activity('pilot_org_created',
+                            f'Pilot org "{org_name}" created (plan={plan})',
+                            {'organization_id': organization_id, 'slug': slug, 'plan': plan,
                              'root_username': root_username},
-                            user_id=g.current_user.get('id'), tenant_id=tenant_id)
+                            user_id=g.current_user.get('id'), organization_id=organization_id)
         except Exception:
             pass
 
         return jsonify({
-            'tenant_id': tenant_id,
+            'organization_id': organization_id,
             'user_id': user_id,
             'slug': slug,
             'plan': plan,
             'portal_url': f'https://{slug}.auditgraph.ai',
-            'message': f'Pilot tenant "{org_name}" created successfully',
+            'message': f'Pilot org "{org_name}" created successfully',
         }), 201
     except Exception as e:
         db.conn.rollback()
-        logger.error(f"Pilot tenant creation failed: {e}", exc_info=True)
+        logger.error(f"Pilot org creation failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()

@@ -74,8 +74,8 @@ export function UsersTab({
                       {!u.enabled && (
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
                       )}
-                      {isSuperAdmin && u.tenant_name && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">{u.tenant_name}</span>
+                      {isSuperAdmin && u.org_name && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">{u.org_name}</span>
                       )}
                     </div>
                     <div className="text-xs text-gray-500">

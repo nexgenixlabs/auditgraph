@@ -22,7 +22,7 @@ Discovery Process (executed in order):
 
 Key Features:
     - Async/await pattern for efficient API calls
-    - Pagination support for large tenants (999 items per page)
+    - Pagination support for large directories (999 items per page)
     - Microsoft system SPN filtering (custom SPNs start with 'spn-')
     - Risk calculation combining Azure RBAC and Entra roles
     - Credential expiration tracking
@@ -40,7 +40,7 @@ Risk Level Calculation:
     - LOW/INFO: Properly scoped, active identities
 
 Usage:
-    engine = AzureDiscoveryEngine(tenant_id, client_id, client_secret)
+    engine = AzureDiscoveryEngine(azure_directory_id, client_id, client_secret)
     result = engine.run_discovery()
 
 Dependencies:
@@ -100,7 +100,7 @@ class AzureDiscoveryEngine:
     in PostgreSQL for dashboard display.
 
     Attributes:
-        tenant_id: Azure AD tenant ID
+        azure_directory_id: Azure AD / Entra directory ID
         client_id: Service principal application ID for authentication
         client_secret: Service principal secret for authentication
         db: Database instance for storing discovery results
@@ -109,27 +109,27 @@ class AzureDiscoveryEngine:
         subscription_name: Human-readable subscription name
     """
 
-    def __init__(self, tenant_id: str, client_id: str, client_secret: str,
-                 db_tenant_id=None, cloud_connection_id: int = None):
+    def __init__(self, azure_directory_id: str, client_id: str, client_secret: str,
+                 db_org_id=None, cloud_connection_id: int = None):
         """
         Initialize the discovery engine with Azure credentials.
 
         Args:
-            tenant_id: Azure AD tenant ID
+            azure_directory_id: Azure AD / Entra directory ID
             client_id: Service principal application ID
             client_secret: Service principal client secret
-            db_tenant_id: AuditGraph tenant ID (integer) for RLS context
+            db_org_id: AuditGraph organization ID (integer) for RLS context
             cloud_connection_id: ID from cloud_connections table (for multi-connection support)
         """
-        self.tenant_id = tenant_id
+        self.azure_directory_id = azure_directory_id
         self.client_id = client_id
         self.client_secret = client_secret
-        self.db_tenant_id = db_tenant_id
+        self.db_org_id = db_org_id
         self.cloud_connection_id = cloud_connection_id
-        self.db = Database(tenant_id=db_tenant_id)
-        
+        self.db = Database(organization_id=db_org_id)
+
         self.credential = ClientSecretCredential(
-            tenant_id=tenant_id,
+            tenant_id=azure_directory_id,
             client_id=client_id,
             client_secret=client_secret
         )
@@ -147,7 +147,7 @@ class AzureDiscoveryEngine:
     def _discover_subscriptions(self) -> List[Dict[str, str]]:
         """Auto-discover all Azure subscriptions accessible to the service principal.
 
-        IMPORTANT: Never falls back to env vars in multi-tenant mode — each tenant's
+        IMPORTANT: Never falls back to env vars in multi-org mode — each organization's
         SPN must have RBAC access to their own subscriptions.
         """
         try:
@@ -272,14 +272,14 @@ class AzureDiscoveryEngine:
         # MUST run before exposure scoring so fresh sign-in data is available
         p2_enabled = False
         try:
-            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', tenant_id=self.db._tenant_id) == 'true'
+            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', organization_id=self.db._organization_id) == 'true'
             if p2_enabled:
                 print("\n📊 Ingesting P2 sign-in telemetry...")
                 from app.engines.telemetry.p2_ingestion import P2TelemetryService
                 telemetry = P2TelemetryService(self.credential, self.db)
-                tenant_id = self.db._tenant_id
-                telemetry.ingest_signin_logs(run_id, tenant_id)
-                telemetry.compute_activity_stats(run_id, tenant_id)
+                org_id = self.db._organization_id
+                telemetry.ingest_signin_logs(run_id, org_id)
+                telemetry.compute_activity_stats(run_id, org_id)
                 telemetry.backfill_last_sign_in(run_id)
                 print("  ✓ P2 telemetry ingested — activity stats ready for scoring")
         except Exception as e:
@@ -299,7 +299,7 @@ class AzureDiscoveryEngine:
             if p2_enabled:
                 from app.engines.telemetry.behavioral_engine import BehavioralAnomalyEngine
                 anomaly_engine = BehavioralAnomalyEngine(self.db)
-                anomaly_engine.detect_anomalies(run_id, self.db._tenant_id)
+                anomaly_engine.detect_anomalies(run_id, self.db._organization_id)
         except Exception as e:
             print(f"  ⚠️ Behavioral anomaly detection error: {e}")
 
@@ -311,12 +311,12 @@ class AzureDiscoveryEngine:
         print(f"  ✓ Found {len(key_vaults)} key vaults")
 
         # Save resources to database
-        tenant_id_val = getattr(self, '_tenant_id', None)
+        org_id_val = getattr(self, '_organization_id', None) or self.db_org_id
         for sa in storage_accounts:
-            sa['tenant_id'] = tenant_id_val
+            sa['organization_id'] = org_id_val
             self.db.save_storage_account(run_id, sa)
         for kv in key_vaults:
-            kv['tenant_id'] = tenant_id_val
+            kv['organization_id'] = org_id_val
             self.db.save_key_vault(run_id, kv)
         print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
 
@@ -350,7 +350,7 @@ class AzureDiscoveryEngine:
                 self._discover_app_registrations(spn_app_id_map)
             )
             for ar in app_regs:
-                ar['tenant_id'] = tenant_id_val
+                ar['organization_id'] = org_id_val
                 self.db.save_app_registration(run_id, ar)
             print(f"  ✓ Saved {len(app_regs)} app registrations")
         except Exception as e:
@@ -375,40 +375,40 @@ class AzureDiscoveryEngine:
         try:
             for sub in self.subscriptions:
                 cursor = self.db.conn.cursor()
-                # Use tenant_id from the discovery run
-                cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (run_id,))
+                # Use organization_id from the discovery run
+                cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
                 run_row = cursor.fetchone()
-                run_tenant_id = run_row[0] if run_row and run_row[0] else 1
+                run_org_id = run_row[0] if run_row and run_row[0] else 1
                 if self.cloud_connection_id:
                     cursor.execute("""
-                        INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status, cloud_connection_id)
+                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status, cloud_connection_id)
                         VALUES (%s, 'azure', %s, %s, 'discovered', %s)
-                        ON CONFLICT (tenant_id, cloud, account_id) DO UPDATE
+                        ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
                         SET account_name = EXCLUDED.account_name,
                             cloud_connection_id = COALESCE(EXCLUDED.cloud_connection_id, cloud_subscriptions.cloud_connection_id)
-                    """, (run_tenant_id, sub['id'], sub['name'], self.cloud_connection_id))
+                    """, (run_org_id, sub['id'], sub['name'], self.cloud_connection_id))
                 else:
                     cursor.execute("""
-                        INSERT INTO cloud_subscriptions (tenant_id, cloud, account_id, account_name, status)
+                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
                         VALUES (%s, 'azure', %s, %s, 'discovered')
-                        ON CONFLICT (tenant_id, cloud, account_id) DO UPDATE
+                        ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
                         SET account_name = EXCLUDED.account_name
-                    """, (run_tenant_id, sub['id'], sub['name']))
+                    """, (run_org_id, sub['id'], sub['name']))
                 self.db.conn.commit()
                 cursor.close()
             print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
         except Exception as e:
             print(f"  ⚠️ Subscription sync warning: {e}")
 
-        # Seed auto identity groups for this tenant (Phase 38 + RLS fix)
+        # Seed auto identity groups for this organization (Phase 38 + RLS fix)
         try:
             cursor = self.db.conn.cursor()
-            cursor.execute("SELECT tenant_id FROM discovery_runs WHERE id = %s", (run_id,))
+            cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
             row = cursor.fetchone()
             cursor.close()
             if row and row[0]:
-                self.db.seed_auto_groups_for_tenant(row[0])
-                print(f"  ✓ Auto identity groups seeded for tenant {row[0]}")
+                self.db.seed_auto_groups_for_organization(row[0])
+                print(f"  ✓ Auto identity groups seeded for organization {row[0]}")
         except Exception as e:
             print(f"  ⚠️ Auto groups seed warning: {e}")
 
@@ -495,7 +495,7 @@ class AzureDiscoveryEngine:
                         'publisher_name': sp.publisher_name if hasattr(sp, 'publisher_name') else None,
                         # Multi-cloud normalized fields
                         'cloud': 'azure',
-                        'tenant_id': self.tenant_id,
+                        'azure_directory_id': self.azure_directory_id,
                         'source': 'entra',
                         'permission_plane': 'entra_id',
                     }
@@ -1258,7 +1258,7 @@ class AzureDiscoveryEngine:
                     'last_sign_in': last_sign_in,
                     # Multi-cloud normalized fields
                     'cloud': 'azure',
-                    'tenant_id': self.tenant_id,
+                    'azure_directory_id': self.azure_directory_id,
                     'source': 'entra',
                     'permission_plane': 'entra_id',
                     'is_federated': is_guest,  # Guest users are federated
@@ -1812,7 +1812,7 @@ class AzureDiscoveryEngine:
                             perms = getattr(ap, 'permissions', None)
                             access_policies_list.append({
                                 'object_id': getattr(ap, 'object_id', ''),
-                                'tenant_id': getattr(ap, 'tenant_id', ''),
+                                'azure_directory_id': getattr(ap, 'tenant_id', ''),
                                 'permissions': {
                                     'keys': [str(p) for p in (perms.keys or [])] if perms else [],
                                     'secrets': [str(p) for p in (perms.secrets or [])] if perms else [],
@@ -2698,12 +2698,12 @@ class AzureDiscoveryEngine:
         """Save all identities to database (customer-owned only, Microsoft system apps excluded at discovery)"""
         saved_count = 0
 
-        # Phase 23: Enforce identity count limit based on tenant plan
-        if self.db_tenant_id:
+        # Phase 23: Enforce identity count limit based on organization plan
+        if self.db_org_id:
             try:
                 from app.api.handlers import TIER_LIMITS
                 cursor = self.db.conn.cursor()
-                cursor.execute("SELECT plan FROM tenants WHERE id = %s", (self.db_tenant_id,))
+                cursor.execute("SELECT plan FROM organizations WHERE id = %s", (self.db_org_id,))
                 row = cursor.fetchone()
                 cursor.close()
                 if row:
@@ -2711,7 +2711,7 @@ class AzureDiscoveryEngine:
                     limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
                     max_ids = limits.get('max_identities')
                     if max_ids and len(identities) > max_ids:
-                        logger.warning(f"Tenant {self.db_tenant_id} ({plan} plan): truncating {len(identities)} identities to {max_ids}")
+                        logger.warning(f"Organization {self.db_org_id} ({plan} plan): truncating {len(identities)} identities to {max_ids}")
                         identities = identities[:max_ids]
             except Exception as e:
                 logger.error(f"Entitlement check failed, proceeding without limit: {e}")
@@ -3120,7 +3120,7 @@ class AzureDiscoveryEngine:
                 owner_org_id = getattr(app, 'app_owner_organization_id', None) or ''
 
                 # Third-party check
-                is_third_party = bool(owner_org_id and owner_org_id != self.tenant_id)
+                is_third_party = bool(owner_org_id and owner_org_id != self.azure_directory_id)
 
                 # ── Permissions ──
                 app_perm_count = 0
@@ -3355,7 +3355,7 @@ if __name__ == "__main__":
     load_dotenv()
     
     engine = AzureDiscoveryEngine(
-        tenant_id=os.getenv('AZURE_TENANT_ID'),
+        azure_directory_id=os.getenv('AZURE_TENANT_ID'),
         client_id=os.getenv('AZURE_CLIENT_ID'),
         client_secret=os.getenv('AZURE_CLIENT_SECRET')
     )

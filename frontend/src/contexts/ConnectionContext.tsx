@@ -6,7 +6,7 @@ interface CloudConnection {
   id: number;
   label: string;
   cloud: string;
-  entra_tenant_id: string;
+  azure_directory_id: string;
   status: string;
 }
 

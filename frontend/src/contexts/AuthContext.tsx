@@ -5,8 +5,8 @@ interface User {
   username: string;
   display_name: string;
   role: 'admin' | 'security_admin' | 'compliance' | 'reader';
-  tenant_id?: number;
-  tenant_name?: string;
+  organization_id?: number;
+  org_name?: string;
   is_superadmin?: boolean;
   portal_role?: 'superadmin' | 'poweradmin' | 'billing' | 'reader' | null;
   force_password_change?: boolean;
@@ -34,13 +34,13 @@ interface AuthContextValue {
   canManageRemediation: boolean;
   canViewCompliance: boolean;
   canTriggerScans: boolean;
-  activeTenantId: number | null;
-  activeTenantName: string | null;
-  switchTenant: (tenantId: number | null, tenantName?: string) => void;
+  activeOrgId: number | null;
+  activeOrgName: string | null;
+  switchOrganization: (orgId: number | null, orgName?: string) => void;
   // Phase 1B: Impersonation
   isImpersonating: boolean;
   impersonatorUsername: string | null;
-  impersonate: (tenantId: number) => Promise<void>;
+  impersonate: (orgId: number) => Promise<void>;
   exitImpersonation: () => void;
 }
 
@@ -82,13 +82,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const originalFetchRef = useRef<typeof window.fetch>(window.fetch.bind(window));
   const refreshingRef = useRef<Promise<boolean> | null>(null);
 
-  // Phase 46: Tenant switching for superadmins
-  const [activeTenantId, setActiveTenantId] = useState<number | null>(() => {
-    const stored = localStorage.getItem('active_tenant_id');
+  // Phase 46: Organization switching for superadmins
+  const [activeOrgId, setActiveOrgId] = useState<number | null>(() => {
+    // Migration: move old key to new key
+    const oldStored = localStorage.getItem('active_tenant_id');
+    if (oldStored) {
+      localStorage.setItem('active_org_id', oldStored);
+      localStorage.removeItem('active_tenant_id');
+    }
+    const stored = localStorage.getItem('active_org_id');
     return stored ? parseInt(stored, 10) : null;
   });
-  const [activeTenantName, setActiveTenantName] = useState<string | null>(
-    () => localStorage.getItem('active_tenant_name')
+  const [activeOrgName, setActiveOrgName] = useState<string | null>(
+    () => {
+      // Migration: move old key to new key
+      const oldStored = localStorage.getItem('active_tenant_name');
+      if (oldStored) {
+        localStorage.setItem('active_org_name', oldStored);
+        localStorage.removeItem('active_tenant_name');
+      }
+      return localStorage.getItem('active_org_name');
+    }
   );
 
   // Phase 1B: Impersonation state
@@ -99,15 +113,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     () => localStorage.getItem('impersonator_username')
   );
 
-  const switchTenant = useCallback((tenantId: number | null, tenantName?: string) => {
-    setActiveTenantId(tenantId);
-    setActiveTenantName(tenantName || null);
-    if (tenantId !== null) {
-      localStorage.setItem('active_tenant_id', String(tenantId));
-      localStorage.setItem('active_tenant_name', tenantName || '');
+  const switchOrganization = useCallback((orgId: number | null, orgName?: string) => {
+    setActiveOrgId(orgId);
+    setActiveOrgName(orgName || null);
+    if (orgId !== null) {
+      localStorage.setItem('active_org_id', String(orgId));
+      localStorage.setItem('active_org_name', orgName || '');
     } else {
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
     }
   }, []);
 
@@ -152,10 +166,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (!headers.has('Authorization')) {
             headers.set('Authorization', `Bearer ${token}`);
           }
-          // Phase 46: Attach tenant override header for superadmins (any portal)
-          const activeTid = localStorage.getItem('active_tenant_id');
-          if (activeTid && !headers.has('X-Tenant-Id')) {
-            headers.set('X-Tenant-Id', activeTid);
+          // Phase 46: Attach organization override header for superadmins (any portal)
+          const activeOid = localStorage.getItem('active_org_id');
+          if (activeOid && !headers.has('X-Organization-Id')) {
+            headers.set('X-Organization-Id', activeOid);
           }
           // Phase 1B: Send portal context header in dev mode (no subdomain routing)
           if (!API_BASE && detectPortal() === 'admin') {
@@ -306,18 +320,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('admin_backup_refresh');
     setIsImpersonating(false);
     setImpersonatorUsername(null);
-    // Only clear tenant context if logging out of admin portal
+    // Only clear organization context if logging out of admin portal
     if (portal === 'admin') {
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
-      setActiveTenantId(null);
-      setActiveTenantName(null);
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
+      setActiveOrgId(null);
+      setActiveOrgName(null);
     }
     setUser(null);
   }, []);
 
   // Phase 1B: Impersonation — generate tenant-scoped tokens from admin portal
-  const impersonate = useCallback(async (tenantId: number) => {
+  const impersonate = useCallback(async (orgId: number) => {
     const adminKeys = tokenKeys('admin');
     const adminAccess = localStorage.getItem(adminKeys.access);
     const adminRefresh = localStorage.getItem(adminKeys.refresh);
@@ -333,7 +347,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ...(adminAccess ? { 'Authorization': `Bearer ${adminAccess}` } : {}),
         'X-Portal-Context': 'admin',
       },
-      body: JSON.stringify({ tenant_id: tenantId }),
+      body: JSON.stringify({ organization_id: orgId }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -410,9 +424,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     canManageRemediation: role === 'admin' || role === 'security_admin',
     canTriggerScans: role === 'admin' || role === 'security_admin',
     canViewCompliance: role === 'admin' || role === 'security_admin' || role === 'compliance',
-    activeTenantId,
-    activeTenantName,
-    switchTenant,
+    activeOrgId,
+    activeOrgName,
+    switchOrganization,
     isImpersonating,
     impersonatorUsername,
     impersonate,

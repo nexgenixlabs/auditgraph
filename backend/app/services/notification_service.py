@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class NotificationService:
     """Generates in-app notifications from discovery events."""
 
-    def notify_discovery_completed(self, run_id: int, summary: dict, tenant_id=None):
+    def notify_discovery_completed(self, run_id: int, summary: dict, organization_id=None):
         """Create info notification for completed discovery."""
         db = Database()
         try:
@@ -34,14 +34,14 @@ class NotificationService:
                 description=f'Scanned {total} identities — {critical} critical, {high} high risk',
                 payload=summary,
                 related_run_id=run_id,
-                tenant_id=tenant_id,
+                organization_id=organization_id,
             )
         except Exception as e:
             logger.warning(f"Failed to create discovery notification: {e}")
         finally:
             db.close()
 
-    def notify_new_identities(self, run_id: int, new_identities: list, tenant_id=None):
+    def notify_new_identities(self, run_id: int, new_identities: list, organization_id=None):
         """Create notifications for new identities (aggregate if >5)."""
         if not new_identities:
             return
@@ -62,7 +62,7 @@ class NotificationService:
                         related_identity_id=identity.get('identity_id'),
                         related_identity_name=name,
                         related_run_id=run_id,
-                        tenant_id=tenant_id,
+                        organization_id=organization_id,
                     )
             else:
                 names = [i.get('display_name', '?') for i in new_identities[:5]]
@@ -74,14 +74,14 @@ class NotificationService:
                     description=f'Including {", ".join(names)}' + (f' and {count - 5} more' if count > 5 else ''),
                     payload={'count': count, 'identities': new_identities[:20]},
                     related_run_id=run_id,
-                    tenant_id=tenant_id,
+                    organization_id=organization_id,
                 )
         except Exception as e:
             logger.warning(f"Failed to create new identity notifications: {e}")
         finally:
             db.close()
 
-    def notify_removed_identities(self, run_id: int, removed: list, tenant_id=None):
+    def notify_removed_identities(self, run_id: int, removed: list, organization_id=None):
         """Aggregate notification for removed identities."""
         if not removed:
             return
@@ -97,14 +97,14 @@ class NotificationService:
                 description=f'Removed: {", ".join(names)}' + (f' and {count - 5} more' if count > 5 else ''),
                 payload={'count': count, 'identities': removed[:20]},
                 related_run_id=run_id,
-                tenant_id=tenant_id,
+                organization_id=organization_id,
             )
         except Exception as e:
             logger.warning(f"Failed to create removal notifications: {e}")
         finally:
             db.close()
 
-    def notify_risk_escalations(self, run_id: int, escalations: list, tenant_id=None):
+    def notify_risk_escalations(self, run_id: int, escalations: list, organization_id=None):
         """Create individual notification per risk escalation."""
         if not escalations:
             return
@@ -127,14 +127,14 @@ class NotificationService:
                     related_identity_id=esc.get('identity_id'),
                     related_identity_name=name,
                     related_run_id=run_id,
-                    tenant_id=tenant_id,
+                    organization_id=organization_id,
                 )
         except Exception as e:
             logger.warning(f"Failed to create risk escalation notifications: {e}")
         finally:
             db.close()
 
-    def notify_permission_changes(self, run_id: int, changes: list, tenant_id=None):
+    def notify_permission_changes(self, run_id: int, changes: list, organization_id=None):
         """Aggregate notification for permission/role changes."""
         if not changes:
             return
@@ -150,14 +150,14 @@ class NotificationService:
                 description=f'Affected: {", ".join(names)}' + (f' and {count - 5} more' if count > 5 else ''),
                 payload={'count': count, 'changes': changes[:20]},
                 related_run_id=run_id,
-                tenant_id=tenant_id,
+                organization_id=organization_id,
             )
         except Exception as e:
             logger.warning(f"Failed to create permission change notifications: {e}")
         finally:
             db.close()
 
-    def notify_credential_changes(self, run_id: int, changes: list, tenant_id=None):
+    def notify_credential_changes(self, run_id: int, changes: list, organization_id=None):
         """Create notifications for credential changes (individual if <=5, aggregate otherwise)."""
         if not changes:
             return
@@ -177,7 +177,7 @@ class NotificationService:
                         related_identity_id=change.get('identity_id'),
                         related_identity_name=name,
                         related_run_id=run_id,
-                        tenant_id=tenant_id,
+                        organization_id=organization_id,
                     )
             else:
                 names = [c.get('display_name', '?') for c in changes[:5]]
@@ -189,7 +189,7 @@ class NotificationService:
                     description=f'Affected: {", ".join(names)}' + (f' and {count - 5} more' if count > 5 else ''),
                     payload={'count': count, 'changes': changes[:20]},
                     related_run_id=run_id,
-                    tenant_id=tenant_id,
+                    organization_id=organization_id,
                 )
         except Exception as e:
             logger.warning(f"Failed to create credential change notifications: {e}")

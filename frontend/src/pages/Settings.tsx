@@ -17,7 +17,7 @@ interface CloudProviderConfig {
   plan: string | null;
 }
 
-interface TenantCloudConfig {
+interface OrgCloudConfig {
   cloud_providers: Record<string, CloudProviderConfig>;
   addons: Record<string, boolean>;
 }
@@ -140,7 +140,7 @@ interface SettingsData {
   report_schedule_enabled: string;
   report_schedule_frequency: string;
   report_email_to: string;
-  azure_tenant_id: string;
+  azure_directory_id: string;
   azure_client_id: string;
   azure_client_secret: string;
   aws_access_key_id: string;
@@ -336,7 +336,7 @@ export default function Settings() {
   const [status, setStatus] = useState<StatusData | null>(null);
 
   // Phase 78b: Cloud connections state
-  const [cloudConfig, setCloudConfig] = useState<TenantCloudConfig | null>(null);
+  const [cloudConfig, setCloudConfig] = useState<OrgCloudConfig | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<{ status: 'success' | 'error'; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
   const [maskCredentials, setMaskCredentials] = useState(true);
@@ -346,7 +346,7 @@ export default function Settings() {
   // Cloud connections (multi-directory)
   const [cloudConnections, setCloudConnections] = useState<Array<{
     id: number; cloud: string; label: string; status: string;
-    entra_tenant_id: string | null; client_id: string | null;
+    azure_directory_id: string | null; client_id: string | null;
     last_test_status: string | null; last_discovery_at: string | null;
     created_at: string;
     sub_count?: number;
@@ -356,7 +356,7 @@ export default function Settings() {
   const [wizardStep, setWizardStep] = useState(0);
   const [wizardCloud, setWizardCloud] = useState('azure');
   const [wizardLabel, setWizardLabel] = useState('');
-  const [wizardEntraTenantId, setWizardEntraTenantId] = useState('');
+  const [wizardAzureDirectoryId, setWizardAzureDirectoryId] = useState('');
   const [wizardClientId, setWizardClientId] = useState('');
   const [wizardClientSecret, setWizardClientSecret] = useState('');
   const [wizardRegion, setWizardRegion] = useState('us-east-1');
@@ -365,8 +365,8 @@ export default function Settings() {
   const [wizardSaving, setWizardSaving] = useState(false);
   const [scanningConnId, setScanningConnId] = useState<number | null>(null);
 
-  // Phase 85: Tenant onboarding stage
-  const [tenantStage, setTenantStage] = useState<string>('active');
+  // Phase 85: Organization onboarding stage
+  const [orgStage, setOrgStage] = useState<string>('active');
   const [primaryCloud, setPrimaryCloud] = useState<string | null>(null);
   const [unlocking, setUnlocking] = useState(false);
   const [addingCloud, setAddingCloud] = useState(false);
@@ -380,10 +380,10 @@ export default function Settings() {
 
   useEffect(() => {
     if (user?.is_superadmin) return;
-    fetch('/api/tenant/stage')
+    fetch('/api/organization/stage')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data?.stage) setTenantStage(data.stage);
+        if (data?.stage) setOrgStage(data.stage);
         if (data?.primary_cloud) setPrimaryCloud(data.primary_cloud);
       })
       .catch(() => {});
@@ -407,7 +407,7 @@ export default function Settings() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(wizardCloud === 'aws'
           ? { cloud: 'aws', access_key_id: wizardClientId, secret_access_key: wizardClientSecret, region: wizardRegion }
-          : { cloud: wizardCloud, entra_tenant_id: wizardEntraTenantId, client_id: wizardClientId, client_secret: wizardClientSecret }),
+          : { cloud: wizardCloud, azure_directory_id: wizardAzureDirectoryId, client_id: wizardClientId, client_secret: wizardClientSecret }),
       });
       const data = await res.json();
       setWizardTestResult(data);
@@ -432,7 +432,7 @@ export default function Settings() {
               metadata: { access_key_id: wizardClientId, secret_access_key: wizardClientSecret, region: wizardRegion },
             }
           : {
-              cloud: wizardCloud, label: wizardLabel, entra_tenant_id: wizardEntraTenantId,
+              cloud: wizardCloud, label: wizardLabel, azure_directory_id: wizardAzureDirectoryId,
               client_id: wizardClientId, client_secret: wizardClientSecret,
               connection_type: 'entra', status: 'connected',
             }),
@@ -464,7 +464,7 @@ export default function Settings() {
     setWizardStep(0);
     setWizardCloud('azure');
     setWizardLabel('');
-    setWizardEntraTenantId('');
+    setWizardAzureDirectoryId('');
     setWizardClientId('');
     setWizardClientSecret('');
     setWizardRegion('us-east-1');
@@ -519,7 +519,7 @@ export default function Settings() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          azure_tenant_id: settings.azure_tenant_id,
+          azure_directory_id: settings.azure_directory_id,
           azure_client_id: settings.azure_client_id,
           azure_client_secret: settings.azure_client_secret,
         }),
@@ -529,7 +529,7 @@ export default function Settings() {
         throw new Error(testData.error || testData.message || 'Connection test failed. Please check your credentials.');
       }
       // 3. Update stage to active
-      await fetch('/api/tenant/stage', {
+      await fetch('/api/organization/stage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ stage: 'active' }),
@@ -560,7 +560,7 @@ export default function Settings() {
 
   // Fetch cloud config
   useEffect(() => {
-    fetch('/api/tenant/config')
+    fetch('/api/organization/config')
       .then(r => r.ok ? r.json() : null)
       .then(cfg => {
         if (cfg) setCloudConfig({ cloud_providers: cfg.cloud_providers, addons: cfg.addons });
@@ -577,7 +577,7 @@ export default function Settings() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          azure_tenant_id: settings.azure_tenant_id,
+          azure_directory_id: settings.azure_directory_id,
           azure_client_id: settings.azure_client_id,
           azure_client_secret: settings.azure_client_secret,
         }),
@@ -595,9 +595,9 @@ export default function Settings() {
     }
   }
 
-  // Phase 45: Tenant info
-  const [currentTenant, setCurrentTenant] = useState<any>(null);
-  const [tenants, setTenants] = useState<any[]>([]);
+  // Phase 45: Organization info
+  const [currentOrg, setCurrentOrg] = useState<any>(null);
+  const [orgs, setOrgs] = useState<any[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -627,26 +627,26 @@ export default function Settings() {
     load();
   }, []);
 
-  // Phase 45: Load tenant data
+  // Phase 45: Load organization data
   useEffect(() => {
-    async function loadTenant() {
+    async function loadOrg() {
       try {
-        const res = await fetch('/api/tenant');
+        const res = await fetch('/api/organization');
         if (res.ok) {
           const data = await res.json();
-          setCurrentTenant(data.tenant);
+          setCurrentOrg(data.organization);
         }
       } catch { /* ignore */ }
     }
-    loadTenant();
+    loadOrg();
   }, []);
 
-  // Load tenants list for superadmin user modal
+  // Load organizations list for superadmin user modal
   useEffect(() => {
     if (!isSuperAdmin) return;
     fetch('/api/clients')
-      .then(r => r.ok ? r.json() : { tenants: [] })
-      .then(d => setTenants(d.tenants || []))
+      .then(r => r.ok ? r.json() : { organizations: [] })
+      .then(d => setOrgs(d.organizations || []))
       .catch(() => {});
   }, [isSuperAdmin]);
 
@@ -973,8 +973,8 @@ export default function Settings() {
   };
 
   // User management state
-  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; tenant_id?: number; tenant_name?: string; is_superadmin?: boolean; }
-  interface UserFormData { username: string; display_name: string; password: string; role: string; tenant_id?: number; is_superadmin?: boolean; }
+  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; organization_id?: number; org_name?: string; is_superadmin?: boolean; }
+  interface UserFormData { username: string; display_name: string; password: string; role: string; organization_id?: number; is_superadmin?: boolean; }
 
   const [users, setUsers] = useState<UserData[]>([]);
   const [userModal, setUserModal] = useState(false);
@@ -999,10 +999,10 @@ export default function Settings() {
   function openUserModal(u?: UserData) {
     if (u) {
       setEditingUser(u);
-      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role, tenant_id: u.tenant_id, is_superadmin: u.is_superadmin });
+      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role, organization_id: u.organization_id, is_superadmin: u.is_superadmin });
     } else {
       setEditingUser(null);
-      setUserForm({ username: '', display_name: '', password: '', role: 'compliance', tenant_id: undefined, is_superadmin: false });
+      setUserForm({ username: '', display_name: '', password: '', role: 'compliance', organization_id: undefined, is_superadmin: false });
     }
     setUserError(null);
     setUserModal(true);
@@ -1024,9 +1024,9 @@ export default function Settings() {
       } else if (userForm.password) {
         payload.password = userForm.password;
       }
-      // Phase 46: Include tenant fields for superadmins
+      // Phase 46: Include organization fields for superadmins
       if (isSuperAdmin) {
-        if (userForm.tenant_id !== undefined) payload.tenant_id = userForm.tenant_id;
+        if (userForm.organization_id !== undefined) payload.organization_id = userForm.organization_id;
         payload.is_superadmin = !!userForm.is_superadmin;
       }
       const res = await fetch(url, {
@@ -1772,7 +1772,7 @@ export default function Settings() {
       </div>
 
       {/* Phase 85: Locked stage banner */}
-      {tenantStage === 'locked' && (
+      {orgStage === 'locked' && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3">
           <svg className="w-5 h-5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -1805,7 +1805,7 @@ export default function Settings() {
             <GeneralTab
               settings={settings}
               update={update}
-              currentTenant={currentTenant}
+              currentOrg={currentOrg}
               setError={setError}
               setSuccess={setSuccess}
               currentPassword={currentPassword}
@@ -1829,7 +1829,7 @@ export default function Settings() {
               cloudConfig={cloudConfig}
               cloudConnections={cloudConnections}
               isAdmin={isAdmin}
-              tenantStage={tenantStage}
+              orgStage={orgStage}
               primaryCloud={primaryCloud}
               addingCloud={addingCloud}
               setAddingCloud={setAddingCloud}
@@ -1843,8 +1843,8 @@ export default function Settings() {
               setWizardCloud={setWizardCloud}
               wizardLabel={wizardLabel}
               setWizardLabel={setWizardLabel}
-              wizardEntraTenantId={wizardEntraTenantId}
-              setWizardEntraTenantId={setWizardEntraTenantId}
+              wizardAzureDirectoryId={wizardAzureDirectoryId}
+              setWizardAzureDirectoryId={setWizardAzureDirectoryId}
               wizardClientId={wizardClientId}
               setWizardClientId={setWizardClientId}
               wizardClientSecret={wizardClientSecret}
@@ -2488,18 +2488,18 @@ export default function Settings() {
               </p>
             </div>
 
-            {/* Phase 46: Tenant + Superadmin fields (superadmin only) */}
+            {/* Phase 46: Organization + Superadmin fields (superadmin only) */}
             {isSuperAdmin && (
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tenant</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Organization</label>
                   <select
-                    value={userForm.tenant_id || ''}
-                    onChange={e => setUserForm(prev => ({ ...prev, tenant_id: e.target.value ? Number(e.target.value) : undefined }))}
+                    value={userForm.organization_id || ''}
+                    onChange={e => setUserForm(prev => ({ ...prev, organization_id: e.target.value ? Number(e.target.value) : undefined }))}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
-                    <option value="">-- Select Tenant --</option>
-                    {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    <option value="">-- Select Organization --</option>
+                    {orgs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </div>
                 <div className="flex items-end">

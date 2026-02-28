@@ -12,13 +12,13 @@ import { api } from '../../services/apiClient';
 interface BillingSummary {
   total_mrr_cents: number;
   projected_arr_cents: number;
-  total_tenants: number;
-  active_tenants: number;
+  total_orgs: number;
+  active_orgs: number;
   by_plan: Record<string, { count: number; mrr_cents: number }>;
   by_cloud: Record<string, { count: number; revenue_cents: number }>;
-  tenants: Array<{
-    tenant_id: number;
-    tenant_name: string;
+  organizations: Array<{
+    organization_id: number;
+    org_name: string;
     plan: string;
     active_subs: number;
     net_monthly_cents: number;
@@ -30,8 +30,8 @@ interface BillingSummary {
 
 interface BillingEvent {
   id: number;
-  tenant_id: number;
-  tenant_name: string;
+  organization_id: number;
+  org_name: string;
   event_type: string;
   field_changed: string | null;
   old_value: string | null;
@@ -113,7 +113,7 @@ export default function AdminBilling() {
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [events, setEvents] = useState<BillingEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [expandedTenant, setExpandedTenant] = useState<number | null>(null);
+  const [expandedOrg, setExpandedOrg] = useState<number | null>(null);
   const [expandedBilling, setExpandedBilling] = useState<TenantBillingDetail | null>(null);
   const [expandLoading, setExpandLoading] = useState(false);
   // Invoice state
@@ -211,16 +211,16 @@ export default function AdminBilling() {
     }
   }
 
-  function toggleTenantExpand(tenantId: number) {
-    if (expandedTenant === tenantId) {
-      setExpandedTenant(null);
+  function toggleOrgExpand(orgId: number) {
+    if (expandedOrg === orgId) {
+      setExpandedOrg(null);
       setExpandedBilling(null);
       return;
     }
-    setExpandedTenant(tenantId);
+    setExpandedOrg(orgId);
     setExpandedBilling(null);
     setExpandLoading(true);
-    fetch(`/api/admin/clients/${tenantId}/billing`)
+    fetch(`/api/admin/clients/${orgId}/billing`)
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setExpandedBilling(data); })
       .catch(() => {})
@@ -248,7 +248,7 @@ export default function AdminBilling() {
       {/* Summary cards */}
       <div className="grid grid-cols-6 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-gray-900">{summary?.total_tenants ?? tenants.length}</div>
+          <div className="text-2xl font-bold text-gray-900">{summary?.total_orgs ?? tenants.length}</div>
           <div className="text-xs text-gray-500 mt-1">Total Organizations</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -256,7 +256,7 @@ export default function AdminBilling() {
           <div className="text-xs text-gray-500 mt-1">Total Users</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-gray-900">{summary?.active_tenants ?? tenants.filter(t => t.enabled).length}</div>
+          <div className="text-2xl font-bold text-gray-900">{summary?.active_orgs ?? tenants.filter(t => t.enabled).length}</div>
           <div className="text-xs text-gray-500 mt-1">Active Clients</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -377,17 +377,17 @@ export default function AdminBilling() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {tenants.map(t => {
-              const tb = summary?.tenants?.find(tb => tb.tenant_id === t.id);
+              const tb = summary?.organizations?.find(tb => tb.organization_id === t.id);
               const mrr = tb?.net_monthly_cents ?? 0;
               const activeSubs = tb?.active_subs ?? 0;
               const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
               const ls = licenseLabel(t);
-              const isExpanded = expandedTenant === t.id;
+              const isExpanded = expandedOrg === t.id;
               return (
                 <React.Fragment key={t.id}>
                   <tr
                     className={`hover:bg-gray-50/60 cursor-pointer ${isExpanded ? 'bg-blue-50/40' : ''}`}
-                    onClick={() => toggleTenantExpand(t.id)}
+                    onClick={() => toggleOrgExpand(t.id)}
                   >
                     <td className="px-4 py-2.5 font-medium text-gray-900">
                       <div className="flex items-center gap-1.5">
@@ -520,7 +520,7 @@ export default function AdminBilling() {
                     <td className="px-4 py-2.5">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${badge.bg} ${badge.color}`}>{badge.text}</span>
                     </td>
-                    <td className="px-4 py-2.5 font-medium text-gray-900">{ev.tenant_name}</td>
+                    <td className="px-4 py-2.5 font-medium text-gray-900">{ev.org_name}</td>
                     <td className="px-4 py-2.5 text-gray-600 font-mono">{ev.field_changed || '\u2014'}</td>
                     <td className="px-4 py-2.5">
                       {ev.old_value || ev.new_value ? (
@@ -633,7 +633,7 @@ export default function AdminBilling() {
                 return (
                   <tr key={inv.id} className="hover:bg-gray-50/60">
                     <td className="px-4 py-2.5 font-mono font-medium text-gray-900">{inv.invoice_number}</td>
-                    <td className="px-4 py-2.5 text-gray-700">{inv.tenant_name || `Tenant #${inv.tenant_id}`}</td>
+                    <td className="px-4 py-2.5 text-gray-700">{inv.org_name || `Organization #${inv.organization_id}`}</td>
                     <td className="px-4 py-2.5 text-gray-600">
                       {formatDate(inv.period_start)} — {formatDate(inv.period_end)}
                     </td>

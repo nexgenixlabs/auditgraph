@@ -329,7 +329,7 @@ export default function IdentitiesPage() {
   const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
 
   const { addToast } = useToast();
-  const { user, isAdmin, activeTenantId, activeTenantName } = useAuth();
+  const { user, isAdmin, activeOrgId, activeOrgName } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -1127,13 +1127,13 @@ export default function IdentitiesPage() {
       privilege_tier: `T${getPrivilegeTier(i)}`,
       activity_status: getDormantStatus(i),
     }));
-    const meta = buildExportMeta(snapshots[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(snapshots[0]?.id ?? null, activeOrgId ?? user?.organization_id ?? null, activeOrgName ?? user?.org_name ?? null);
     downloadCSV(data as Record<string, unknown>[], IDENTITY_CSV_COLUMNS, exportFilename('identities', 'csv'), meta);
     addToast(`Exported ${data.length} identities as CSV`, 'success');
   }
 
   function exportAllJSON() {
-    const meta = buildExportMeta(snapshots[0]?.id ?? null, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(snapshots[0]?.id ?? null, activeOrgId ?? user?.organization_id ?? null, activeOrgName ?? user?.org_name ?? null);
     downloadJSON(filtered, exportFilename('identities', 'json'), meta);
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
@@ -1276,7 +1276,7 @@ export default function IdentitiesPage() {
           <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
           <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{snapshots[0]?.id}</span></span>
           <span>Captured: <span className="font-mono font-semibold text-gray-700">{snapshots[0]?.completed_at ? new Date(snapshots[0].completed_at).toLocaleString() : 'In progress'}</span></span>
-          <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Organization: <span className="font-mono font-semibold text-gray-700">{activeOrgId ?? user?.organization_id ?? 'N/A'}</span></span>
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
         </div>
       )}

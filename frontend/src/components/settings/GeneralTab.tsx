@@ -5,7 +5,7 @@ import type { SettingsData } from './types';
 export interface GeneralTabProps {
   settings: SettingsData;
   update: (key: keyof SettingsData, value: string) => void;
-  currentTenant: any;
+  currentOrg: any;
   setError: (error: string) => void;
   setSuccess: (msg: string) => void;
   currentPassword: string;
@@ -23,7 +23,7 @@ export interface GeneralTabProps {
 export function GeneralTab({
   settings,
   update,
-  currentTenant,
+  currentOrg,
   setError,
   setSuccess,
   currentPassword,
@@ -48,8 +48,8 @@ export function GeneralTab({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Organization Logo</label>
             <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-gray-400 transition">
-              {currentTenant?.settings?.logo_url ? (
-                <img src={String(currentTenant.settings.logo_url)} alt="Logo" className="w-16 h-16 mx-auto mb-2 rounded-lg object-cover" />
+              {currentOrg?.settings?.logo_url ? (
+                <img src={String(currentOrg.settings.logo_url)} alt="Logo" className="w-16 h-16 mx-auto mb-2 rounded-lg object-cover" />
               ) : (
                 <svg className="w-12 h-12 mx-auto text-gray-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -67,8 +67,8 @@ export function GeneralTab({
                   const reader = new FileReader();
                   reader.onload = async () => {
                     try {
-                      const tid = currentTenant?.id;
-                      if (!tid) { setError('No tenant context'); return; }
+                      const tid = currentOrg?.id;
+                      if (!tid) { setError('No organization context'); return; }
                       const res = await fetch(`/api/clients/${tid}/logo`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -143,49 +143,49 @@ export function GeneralTab({
         </div>
 
         {/* Subscription Info */}
-        {currentTenant && (
+        {currentOrg && (
           <div className="pt-3 border-t space-y-3">
             <div className="text-sm font-semibold text-gray-800">Plan</div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div className="bg-gray-50 rounded-lg p-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Plan</div>
                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                  (ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).bg
-                } ${(ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).color}`}>
-                  {(ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).label}
+                  (ACCOUNT_TIER_LABELS[currentOrg.plan] || ACCOUNT_TIER_LABELS.free).bg
+                } ${(ACCOUNT_TIER_LABELS[currentOrg.plan] || ACCOUNT_TIER_LABELS.free).color}`}>
+                  {(ACCOUNT_TIER_LABELS[currentOrg.plan] || ACCOUNT_TIER_LABELS.free).label}
                 </span>
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Term</div>
                 <div className="text-sm font-semibold text-gray-800">
-                  {getTermLabel(currentTenant.subscription_term || 0)}
-                  {getTermDiscount(currentTenant.subscription_term || 0) > 0 && (
-                    <span className="ml-1 text-[10px] text-green-600 font-semibold">{getTermDiscount(currentTenant.subscription_term || 0) * 100}% off</span>
+                  {getTermLabel(currentOrg.subscription_term || 0)}
+                  {getTermDiscount(currentOrg.subscription_term || 0) > 0 && (
+                    <span className="ml-1 text-[10px] text-green-600 font-semibold">{getTermDiscount(currentOrg.subscription_term || 0) * 100}% off</span>
                   )}
                 </div>
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Activated</div>
                 <div className="text-sm font-semibold text-gray-800">
-                  {currentTenant.license_activated_at
-                    ? new Date(currentTenant.license_activated_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                  {currentOrg.license_activated_at
+                    ? new Date(currentOrg.license_activated_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
                     : '\u2014'}
                 </div>
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Expires</div>
                 <div className={`text-sm font-semibold ${
-                  currentTenant.license_expires_at
-                    ? (new Date(currentTenant.license_expires_at).getTime() - Date.now()) / 86400000 < 30
+                  currentOrg.license_expires_at
+                    ? (new Date(currentOrg.license_expires_at).getTime() - Date.now()) / 86400000 < 30
                       ? 'text-yellow-600'
-                      : (new Date(currentTenant.license_expires_at).getTime() - Date.now()) < 0
+                      : (new Date(currentOrg.license_expires_at).getTime() - Date.now()) < 0
                         ? 'text-red-600'
                         : 'text-gray-800'
                     : 'text-gray-400'
                 }`}>
-                  {currentTenant.license_expires_at
-                    ? new Date(currentTenant.license_expires_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-                    : currentTenant.subscription_term === 0 ? 'Monthly (no expiry)' : '\u2014'}
+                  {currentOrg.license_expires_at
+                    ? new Date(currentOrg.license_expires_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                    : currentOrg.subscription_term === 0 ? 'Monthly (no expiry)' : '\u2014'}
                 </div>
               </div>
             </div>

@@ -53,12 +53,12 @@ class AWSDiscoveryEngine:
         return "aws"
 
     def __init__(self, access_key_id: str, secret_access_key: str,
-                 region: str = 'us-east-1', db_tenant_id: int = None,
+                 region: str = 'us-east-1', db_org_id: int = None,
                  cloud_connection_id: int = None):
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.region = region
-        self.db_tenant_id = db_tenant_id
+        self.db_org_id = db_org_id
         self.cloud_connection_id = cloud_connection_id
 
         retry_config = Config(retries={'max_attempts': 5, 'mode': 'adaptive'})
@@ -74,7 +74,7 @@ class AWSDiscoveryEngine:
         caller = self.sts.get_caller_identity()
         self.aws_account_id = caller['Account']
 
-        self.db = Database(tenant_id=db_tenant_id)
+        self.db = Database(organization_id=db_org_id)
         self._identities = []
 
     def test_connection(self) -> bool:
@@ -92,7 +92,7 @@ class AWSDiscoveryEngine:
         run_id = self.db.create_discovery_run(
             subscription_id=self.aws_account_id,
             subscription_name=f'AWS Account {self.aws_account_id}',
-            tenant_id=self.db_tenant_id,
+            organization_id=self.db_org_id,
             cloud_connection_id=self.cloud_connection_id,
         )
         logger.info(f"  Created discovery run #{run_id}")
@@ -562,12 +562,12 @@ class AWSDiscoveryEngine:
         """Save all discovered identities to the database."""
         counts = {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
 
-        # Phase 23: Enforce identity count limit based on tenant plan
-        if self.db_tenant_id:
+        # Phase 23: Enforce identity count limit based on organization plan
+        if self.db_org_id:
             try:
                 from app.api.handlers import TIER_LIMITS
                 cursor = self.db.conn.cursor()
-                cursor.execute("SELECT plan FROM tenants WHERE id = %s", (self.db_tenant_id,))
+                cursor.execute("SELECT plan FROM organizations WHERE id = %s", (self.db_org_id,))
                 row = cursor.fetchone()
                 cursor.close()
                 if row:
@@ -575,7 +575,7 @@ class AWSDiscoveryEngine:
                     limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
                     max_ids = limits.get('max_identities')
                     if max_ids and len(self._identities) > max_ids:
-                        logger.warning(f"Tenant {self.db_tenant_id} ({plan} plan): truncating {len(self._identities)} identities to {max_ids}")
+                        logger.warning(f"Organization {self.db_org_id} ({plan} plan): truncating {len(self._identities)} identities to {max_ids}")
                         self._identities = self._identities[:max_ids]
             except Exception as e:
                 logger.error(f"Entitlement check failed, proceeding without limit: {e}")
@@ -646,7 +646,7 @@ class AWSDiscoveryEngine:
         """Ensure the AWS account is tracked in cloud_subscriptions."""
         try:
             self.db.insert_discovered_subscriptions(
-                tenant_id=self.db_tenant_id,
+                organization_id=self.db_org_id,
                 cloud='aws',
                 connection_id=self.cloud_connection_id,
                 subs_list=[{

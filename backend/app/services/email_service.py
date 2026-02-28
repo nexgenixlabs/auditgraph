@@ -524,10 +524,10 @@ class EmailService:
         finally:
             loop.close()
 
-    def send_scheduled_report(self, tenant_id=None) -> bool:
+    def send_scheduled_report(self, organization_id=None) -> bool:
         """Generate and send a scheduled executive summary report email."""
         from app.database import Database
-        db = Database(tenant_id=tenant_id) if tenant_id else Database()
+        db = Database(organization_id=organization_id) if organization_id else Database()
         try:
             report_data = db.get_report_data()
             if report_data is None:

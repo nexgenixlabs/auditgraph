@@ -15,21 +15,21 @@ class BehavioralAnomalyEngine:
     def __init__(self, db):
         self.db = db
 
-    def detect_anomalies(self, run_id, tenant_id):
+    def detect_anomalies(self, run_id, organization_id):
         """Run all detectors and insert results into workload_anomaly_events."""
         total = 0
-        total += self._detect_impossible_travel(run_id, tenant_id)
-        total += self._detect_dormant_reactivation(run_id, tenant_id)
-        total += self._detect_off_hours_spike(run_id, tenant_id)
-        total += self._detect_new_resource_access(run_id, tenant_id)
-        total += self._detect_auth_failure_burst(run_id, tenant_id)
-        total += self._detect_risky_sign_in(run_id, tenant_id)
-        total += self._detect_ca_bypass_attempt(run_id, tenant_id)
-        total += self._detect_volume_anomaly(run_id, tenant_id)
+        total += self._detect_impossible_travel(run_id, organization_id)
+        total += self._detect_dormant_reactivation(run_id, organization_id)
+        total += self._detect_off_hours_spike(run_id, organization_id)
+        total += self._detect_new_resource_access(run_id, organization_id)
+        total += self._detect_auth_failure_burst(run_id, organization_id)
+        total += self._detect_risky_sign_in(run_id, organization_id)
+        total += self._detect_ca_bypass_attempt(run_id, organization_id)
+        total += self._detect_volume_anomaly(run_id, organization_id)
         print(f"  ✓ Behavioral anomaly detection: {total} anomalies found")
         return total
 
-    def _insert_anomaly(self, tenant_id, identity_db_id, identity_id, anomaly_type,
+    def _insert_anomaly(self, organization_id, identity_db_id, identity_id, anomaly_type,
                         severity, title, description, evidence, baseline,
                         detected_value, run_id):
         """Insert a single anomaly event."""
@@ -37,11 +37,11 @@ class BehavioralAnomalyEngine:
         try:
             cursor.execute("""
                 INSERT INTO workload_anomaly_events
-                (tenant_id, identity_db_id, identity_id, anomaly_type, severity,
+                (organization_id, identity_db_id, identity_id, anomaly_type, severity,
                  title, description, evidence, baseline, detected_value, discovery_run_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                tenant_id, identity_db_id, identity_id, anomaly_type, severity,
+                organization_id, identity_db_id, identity_id, anomaly_type, severity,
                 title, description,
                 json.dumps(evidence), json.dumps(baseline), json.dumps(detected_value),
                 run_id,
@@ -55,7 +55,7 @@ class BehavioralAnomalyEngine:
         finally:
             cursor.close()
 
-    def _detect_impossible_travel(self, run_id, tenant_id):
+    def _detect_impossible_travel(self, run_id, organization_id):
         """Same identity, 2 sign-ins from distant locations within 1 hour."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -78,7 +78,7 @@ class BehavioralAnomalyEngine:
             """, (run_id,))
             for row in cursor.fetchall():
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'impossible_travel', 'high',
                     f'Impossible travel: {row[2] or "?"}, {row[3]} → {row[5] or "?"}, {row[6]}',
                     f'Sign-ins from different countries within 1 hour.',
@@ -92,7 +92,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_dormant_reactivation(self, run_id, tenant_id):
+    def _detect_dormant_reactivation(self, run_id, organization_id):
         """Identity with 0 sign-ins in previous period suddenly has activity."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -109,7 +109,7 @@ class BehavioralAnomalyEngine:
             """, (run_id,))
             for row in cursor.fetchall():
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'dormant_reactivation', 'high',
                     f'Dormant identity reactivated — {row[2]} new sign-ins',
                     'Previously inactive workload identity now has sign-in activity.',
@@ -122,7 +122,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_off_hours_spike(self, run_id, tenant_id):
+    def _detect_off_hours_spike(self, run_id, organization_id):
         """off_hours_pct > 60% when previous baseline was < 20%."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -136,7 +136,7 @@ class BehavioralAnomalyEngine:
             """, (run_id,))
             for row in cursor.fetchall():
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'off_hours_spike', 'medium',
                     f'Off-hours activity spike: {row[2]:.0f}% of sign-ins outside business hours',
                     'Unusually high off-hours activity for this workload identity.',
@@ -150,7 +150,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_new_resource_access(self, run_id, tenant_id):
+    def _detect_new_resource_access(self, run_id, organization_id):
         """Accessing resource_id never seen before in prior runs."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -174,7 +174,7 @@ class BehavioralAnomalyEngine:
             for row in cursor.fetchall():
                 names = [n for n in (row[3] or []) if n][:5]
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'new_resource_access', 'medium',
                     f'Accessing {row[2]} previously unseen resources',
                     'Identity is accessing resources it has never accessed before.',
@@ -187,7 +187,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_auth_failure_burst(self, run_id, tenant_id):
+    def _detect_auth_failure_burst(self, run_id, organization_id):
         """>10 failed sign-ins within 1 hour."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -210,7 +210,7 @@ class BehavioralAnomalyEngine:
                     continue
                 seen.add(row[0])
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'auth_failure_burst', 'high',
                     f'Authentication failure burst: {row[2]} failures in 1 hour',
                     'Unusually high number of failed sign-in attempts.',
@@ -224,7 +224,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_risky_sign_in(self, run_id, tenant_id):
+    def _detect_risky_sign_in(self, run_id, organization_id):
         """MS Graph risk_level = 'high' on sign-in event."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -239,7 +239,7 @@ class BehavioralAnomalyEngine:
             """, (run_id,))
             for row in cursor.fetchall():
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'risky_sign_in', 'critical',
                     'High-risk sign-in detected by Microsoft Identity Protection',
                     f'Risk detail: {row[3] or "none"}. IP: {row[4] or "?"}, Location: {row[5] or "?"}, {row[6] or "?"}.',
@@ -253,7 +253,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_ca_bypass_attempt(self, run_id, tenant_id):
+    def _detect_ca_bypass_attempt(self, run_id, organization_id):
         """Multiple sign-ins with conditional_access_status = 'notApplied'."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -268,7 +268,7 @@ class BehavioralAnomalyEngine:
             """, (run_id,))
             for row in cursor.fetchall():
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'ca_bypass_attempt', 'high',
                     f'Conditional Access not applied on {row[2]} sign-ins',
                     'Multiple sign-ins without Conditional Access enforcement.',
@@ -281,7 +281,7 @@ class BehavioralAnomalyEngine:
             cursor.close()
         return count
 
-    def _detect_volume_anomaly(self, run_id, tenant_id):
+    def _detect_volume_anomaly(self, run_id, organization_id):
         """Sign-in volume >3x the 7-day moving average."""
         cursor = self.db.conn.cursor()
         count = 0
@@ -309,7 +309,7 @@ class BehavioralAnomalyEngine:
             """, (run_id, run_id))
             for row in cursor.fetchall():
                 count += self._insert_anomaly(
-                    tenant_id, row[0], row[1],
+                    organization_id, row[0], row[1],
                     'volume_anomaly', 'medium',
                     f'Sign-in volume spike: {row[2]:.1f}/day vs {row[3]:.1f}/day baseline',
                     'Sign-in volume exceeds 3x the historical average.',

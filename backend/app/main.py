@@ -131,13 +131,13 @@ from app.api.handlers import (
     get_dashboard_preferences_handler,
     save_dashboard_preferences_handler,
     reset_dashboard_preferences_handler,
-    get_tenants_list,
-    create_tenant_handler,
-    update_tenant_handler,
-    delete_tenant_handler,
-    get_current_tenant_handler,
-    get_cross_tenant_analytics,
-    get_cross_tenant_trends,
+    get_organizations_list,
+    create_organization_handler,
+    update_organization_handler,
+    delete_organization_handler,
+    get_current_organization_handler,
+    get_cross_org_analytics,
+    get_cross_org_trends,
     get_login_sessions,
     get_onboarding_status,
     test_azure_connection,
@@ -151,9 +151,9 @@ from app.api.handlers import (
     get_resource_expiry_summary,
     get_resource_compliance_summary,
     get_data_security_summary,
-    get_tenant_by_slug_public,
-    provision_tenant_handler,
-    get_user_tenants_handler,
+    get_organization_by_slug_public,
+    provision_organization_handler,
+    get_user_organizations_handler,
     sso_status,
     saml_metadata,
     saml_login,
@@ -182,7 +182,7 @@ from app.api.handlers import (
     get_spn_list,
     get_spn_detail,
     get_storage_stats,
-    validate_tenant_isolation,
+    validate_org_isolation,
     run_manual_cleanup,
     execute_remediation,
     get_remediation_queue_handler,
@@ -190,13 +190,13 @@ from app.api.handlers import (
     get_app_reg_stats,
     get_app_reg_list,
     get_app_reg_detail,
-    get_tenant_config,
-    get_tenant_entitlements,
-    get_tenant_branding,
-    get_tenant_stage,
-    update_tenant_stage,
-    upload_tenant_logo,
-    delete_tenant_logo,
+    get_organization_config,
+    get_organization_entitlements,
+    get_organization_branding,
+    get_organization_stage,
+    update_organization_stage,
+    upload_organization_logo,
+    delete_organization_logo,
     get_scan_modes,
     copilot_chat,
     copilot_conversations_list,
@@ -218,10 +218,10 @@ from app.api.handlers import (
     deactivate_subscription,
     get_subscriptions_distinct,
     get_identity_subscriptions,
-    get_admin_tenant_billing,
-    update_admin_tenant_plan,
-    update_admin_tenant_commitment,
-    update_admin_tenant_platform_fee,
+    get_admin_organization_billing,
+    update_admin_organization_plan,
+    update_admin_organization_commitment,
+    update_admin_organization_platform_fee,
     update_admin_cloud_rate,
     get_admin_billing_summary,
     get_admin_billing_events,
@@ -293,7 +293,7 @@ from app.api.handlers import (
     get_stripe_status,
     stripe_webhook_handler,
     create_stripe_customer_handler,
-    create_pilot_tenant,
+    create_pilot_organization,
     get_password_policy,
 )
 from app.scheduler import start_scheduler, stop_scheduler
@@ -543,78 +543,125 @@ def create_app():
         return reset_dashboard_preferences_handler()
 
     # -----------------------
-    # Tenant Management (Phase 45, updated Phase 70: support role access)
+    # Organization Management (Phase 2C org rename; was Tenant Management Phase 45/70)
     # -----------------------
+    @app.get("/api/organizations")
+    @require_portal_access()
+    def organizations_list():
+        return get_organizations_list()
+
+    @app.post("/api/organizations")
+    @require_portal_role('superadmin', 'poweradmin')
+    def organizations_create():
+        return create_organization_handler()
+
+    @app.put("/api/organizations/<int:organization_id>")
+    @require_portal_role('superadmin', 'poweradmin')
+    def organizations_update(organization_id):
+        return update_organization_handler(organization_id)
+
+    @app.delete("/api/organizations/<int:organization_id>")
+    @require_superadmin()
+    def organizations_delete(organization_id):
+        return delete_organization_handler(organization_id)
+
+    # Backward compat: /api/tenants → /api/organizations
     @app.get("/api/tenants")
     @require_portal_access()
     def tenants_list():
-        return get_tenants_list()
+        return get_organizations_list()
 
     @app.post("/api/tenants")
     @require_portal_role('superadmin', 'poweradmin')
     def tenants_create():
-        return create_tenant_handler()
+        return create_organization_handler()
 
-    @app.put("/api/tenants/<int:tenant_id>")
+    @app.put("/api/tenants/<int:organization_id>")
     @require_portal_role('superadmin', 'poweradmin')
-    def tenants_update(tenant_id):
-        return update_tenant_handler(tenant_id)
+    def tenants_update(organization_id):
+        return update_organization_handler(organization_id)
 
-    @app.delete("/api/tenants/<int:tenant_id>")
+    @app.delete("/api/tenants/<int:organization_id>")
     @require_superadmin()
-    def tenants_delete(tenant_id):
-        return delete_tenant_handler(tenant_id)
+    def tenants_delete(organization_id):
+        return delete_organization_handler(organization_id)
 
     # -----------------------
-    # Client Aliases (Tenant → Client terminology rename)
+    # Client Aliases (backward compat)
     # -----------------------
     @app.get("/api/clients")
     @require_portal_access()
     def clients_list():
-        return get_tenants_list()
+        return get_organizations_list()
 
     @app.post("/api/clients")
     @require_portal_role('superadmin', 'poweradmin')
     def clients_create():
-        return create_tenant_handler()
+        return create_organization_handler()
 
-    @app.put("/api/clients/<int:tenant_id>")
+    @app.put("/api/clients/<int:organization_id>")
     @require_portal_role('superadmin', 'poweradmin')
-    def clients_update(tenant_id):
-        return update_tenant_handler(tenant_id)
+    def clients_update(organization_id):
+        return update_organization_handler(organization_id)
 
-    @app.delete("/api/clients/<int:tenant_id>")
+    @app.delete("/api/clients/<int:organization_id>")
     @require_superadmin()
-    def clients_delete(tenant_id):
-        return delete_tenant_handler(tenant_id)
+    def clients_delete(organization_id):
+        return delete_organization_handler(organization_id)
 
     # -----------------------
-    # Admin Billing API
+    # Admin Billing API (organization routes + backward compat tenant routes)
     # -----------------------
-    @app.get("/api/admin/tenants/<int:tenant_id>/billing")
+    @app.get("/api/admin/organizations/<int:organization_id>/billing")
     @require_portal_access()
-    def admin_tenant_billing(tenant_id):
-        return get_admin_tenant_billing(tenant_id)
+    def admin_organization_billing(organization_id):
+        return get_admin_organization_billing(organization_id)
 
-    @app.put("/api/admin/tenants/<int:tenant_id>/plan")
+    @app.put("/api/admin/organizations/<int:organization_id>/plan")
     @require_portal_role('superadmin', 'poweradmin')
-    def admin_tenant_plan(tenant_id):
-        return update_admin_tenant_plan(tenant_id)
+    def admin_organization_plan(organization_id):
+        return update_admin_organization_plan(organization_id)
 
-    @app.put("/api/admin/tenants/<int:tenant_id>/commitment")
+    @app.put("/api/admin/organizations/<int:organization_id>/commitment")
     @require_portal_role('superadmin', 'poweradmin')
-    def admin_tenant_commitment(tenant_id):
-        return update_admin_tenant_commitment(tenant_id)
+    def admin_organization_commitment(organization_id):
+        return update_admin_organization_commitment(organization_id)
 
-    @app.put("/api/admin/tenants/<int:tenant_id>/platform-fee")
+    @app.put("/api/admin/organizations/<int:organization_id>/platform-fee")
     @require_superadmin()
-    def admin_tenant_platform_fee(tenant_id):
-        return update_admin_tenant_platform_fee(tenant_id)
+    def admin_organization_platform_fee(organization_id):
+        return update_admin_organization_platform_fee(organization_id)
 
-    @app.put("/api/admin/tenants/<int:tenant_id>/clouds/<cloud>/rate")
+    @app.put("/api/admin/organizations/<int:organization_id>/clouds/<cloud>/rate")
     @require_superadmin()
-    def admin_cloud_rate(tenant_id, cloud):
-        return update_admin_cloud_rate(tenant_id, cloud)
+    def admin_org_cloud_rate(organization_id, cloud):
+        return update_admin_cloud_rate(organization_id, cloud)
+
+    # Backward compat: /api/admin/tenants/... billing routes
+    @app.get("/api/admin/tenants/<int:organization_id>/billing")
+    @require_portal_access()
+    def admin_tenant_billing(organization_id):
+        return get_admin_organization_billing(organization_id)
+
+    @app.put("/api/admin/tenants/<int:organization_id>/plan")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_plan(organization_id):
+        return update_admin_organization_plan(organization_id)
+
+    @app.put("/api/admin/tenants/<int:organization_id>/commitment")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_commitment(organization_id):
+        return update_admin_organization_commitment(organization_id)
+
+    @app.put("/api/admin/tenants/<int:organization_id>/platform-fee")
+    @require_superadmin()
+    def admin_tenant_platform_fee(organization_id):
+        return update_admin_organization_platform_fee(organization_id)
+
+    @app.put("/api/admin/tenants/<int:organization_id>/clouds/<cloud>/rate")
+    @require_superadmin()
+    def admin_cloud_rate(organization_id, cloud):
+        return update_admin_cloud_rate(organization_id, cloud)
 
     @app.get("/api/admin/billing/summary")
     @require_portal_access()
@@ -656,31 +703,31 @@ def create_app():
     def client_billing_preview():
         return get_client_billing_preview()
 
-    # Admin Billing Client Aliases
-    @app.get("/api/admin/clients/<int:tenant_id>/billing")
+    # Admin Billing Client Aliases (backward compat)
+    @app.get("/api/admin/clients/<int:organization_id>/billing")
     @require_portal_access()
-    def admin_client_billing(tenant_id):
-        return get_admin_tenant_billing(tenant_id)
+    def admin_client_billing(organization_id):
+        return get_admin_organization_billing(organization_id)
 
-    @app.put("/api/admin/clients/<int:tenant_id>/plan")
+    @app.put("/api/admin/clients/<int:organization_id>/plan")
     @require_portal_role('superadmin', 'poweradmin')
-    def admin_client_plan(tenant_id):
-        return update_admin_tenant_plan(tenant_id)
+    def admin_client_plan(organization_id):
+        return update_admin_organization_plan(organization_id)
 
-    @app.put("/api/admin/clients/<int:tenant_id>/commitment")
+    @app.put("/api/admin/clients/<int:organization_id>/commitment")
     @require_portal_role('superadmin', 'poweradmin')
-    def admin_client_commitment(tenant_id):
-        return update_admin_tenant_commitment(tenant_id)
+    def admin_client_commitment(organization_id):
+        return update_admin_organization_commitment(organization_id)
 
-    @app.put("/api/admin/clients/<int:tenant_id>/platform-fee")
+    @app.put("/api/admin/clients/<int:organization_id>/platform-fee")
     @require_superadmin()
-    def admin_client_platform_fee(tenant_id):
-        return update_admin_tenant_platform_fee(tenant_id)
+    def admin_client_platform_fee(organization_id):
+        return update_admin_organization_platform_fee(organization_id)
 
-    @app.put("/api/admin/clients/<int:tenant_id>/clouds/<cloud>/rate")
+    @app.put("/api/admin/clients/<int:organization_id>/clouds/<cloud>/rate")
     @require_superadmin()
-    def admin_client_cloud_rate(tenant_id, cloud):
-        return update_admin_cloud_rate(tenant_id, cloud)
+    def admin_client_cloud_rate(organization_id, cloud):
+        return update_admin_cloud_rate(organization_id, cloud)
 
     # -----------------------
     # Platform Settings & Invoices
@@ -695,10 +742,16 @@ def create_app():
     def admin_platform_settings_update():
         return update_platform_settings_handler()
 
-    @app.post("/api/admin/tenants/<int:tenant_id>/invoices")
+    @app.post("/api/admin/organizations/<int:organization_id>/invoices")
     @require_portal_role('superadmin', 'poweradmin', 'billing')
-    def admin_generate_invoice(tenant_id):
-        return generate_invoice(tenant_id)
+    def admin_generate_org_invoice(organization_id):
+        return generate_invoice(organization_id)
+
+    # Backward compat: /api/admin/tenants/<id>/invoices
+    @app.post("/api/admin/tenants/<int:organization_id>/invoices")
+    @require_portal_role('superadmin', 'poweradmin', 'billing')
+    def admin_generate_invoice(organization_id):
+        return generate_invoice(organization_id)
 
     @app.get("/api/admin/invoices")
     @require_portal_role('superadmin', 'poweradmin', 'billing')
@@ -741,54 +794,94 @@ def create_app():
     def client_invoice_verify(invoice_id):
         return verify_client_invoice(invoice_id)
 
+    # Organization context (current org config, entitlements, branding, stage)
+    @app.get("/api/organization")
+    def organization_current():
+        return get_current_organization_handler()
+
+    @app.get("/api/organization/config")
+    def organization_config():
+        return get_organization_config()
+
+    @app.get("/api/organization/entitlements")
+    def organization_entitlements():
+        return get_organization_entitlements()
+
+    @app.get("/api/auth/org-branding")
+    def organization_branding():
+        return get_organization_branding()
+
+    @app.get("/api/organization/stage")
+    def organization_stage_get():
+        return get_organization_stage()
+
+    @app.post("/api/organization/stage")
+    @require_role('admin')
+    def organization_stage_update():
+        return update_organization_stage()
+
+    # Backward compat: /api/tenant/... routes
     @app.get("/api/tenant")
     def tenant_current():
-        return get_current_tenant_handler()
+        return get_current_organization_handler()
 
     @app.get("/api/tenant/config")
     def tenant_config():
-        return get_tenant_config()
+        return get_organization_config()
 
     @app.get("/api/tenant/entitlements")
     def tenant_entitlements():
-        return get_tenant_entitlements()
+        return get_organization_entitlements()
 
-    # Phase 85: Tenant branding (public) + onboarding stage
     @app.get("/api/auth/tenant-branding")
     def tenant_branding():
-        return get_tenant_branding()
+        return get_organization_branding()
 
     @app.get("/api/tenant/stage")
     def tenant_stage_get():
-        return get_tenant_stage()
+        return get_organization_stage()
 
     @app.post("/api/tenant/stage")
     @require_role('admin')
     def tenant_stage_update():
-        return update_tenant_stage()
+        return update_organization_stage()
 
-    # Phase 53: SaaS Platform
+    # Organization by-slug, provisioning, user orgs
+    @app.get("/api/organizations/by-slug/<slug>")
+    def organization_by_slug(slug):
+        return get_organization_by_slug_public(slug)
+
+    @app.post("/api/organizations/<int:organization_id>/provision")
+    @require_portal_role('superadmin', 'poweradmin')
+    def organizations_provision(organization_id):
+        return provision_organization_handler(organization_id)
+
+    @app.get("/api/auth/organizations")
+    def auth_organizations():
+        return get_user_organizations_handler()
+
+    # Backward compat: /api/tenants/by-slug, /api/clients/by-slug, provision, auth/tenants
     @app.get("/api/tenants/by-slug/<slug>")
     def tenant_by_slug(slug):
-        return get_tenant_by_slug_public(slug)
+        return get_organization_by_slug_public(slug)
 
     @app.get("/api/clients/by-slug/<slug>")
     def client_by_slug(slug):
-        return get_tenant_by_slug_public(slug)
+        return get_organization_by_slug_public(slug)
 
-    @app.post("/api/tenants/<int:tenant_id>/provision")
+    @app.post("/api/tenants/<int:organization_id>/provision")
     @require_portal_role('superadmin', 'poweradmin')
-    def tenants_provision(tenant_id):
-        return provision_tenant_handler(tenant_id)
+    def tenants_provision(organization_id):
+        return provision_organization_handler(organization_id)
 
-    @app.post("/api/clients/<int:tenant_id>/provision")
+    @app.post("/api/clients/<int:organization_id>/provision")
     @require_portal_role('superadmin', 'poweradmin')
-    def clients_provision(tenant_id):
-        return provision_tenant_handler(tenant_id)
+    def clients_provision(organization_id):
+        return provision_organization_handler(organization_id)
 
     @app.get("/api/auth/tenants")
     def auth_tenants():
-        return get_user_tenants_handler()
+        return get_user_organizations_handler()
 
     # -----------------------
     # Portal Users (Phase 70 - Superadmin only)
@@ -886,28 +979,38 @@ def create_app():
         return get_governance_stats()
 
     # -----------------------
-    # Cross-Tenant Analytics (Phase 47 - all portal roles, used by Overview)
+    # Cross-Organization Analytics (Phase 47 - all portal roles, used by Overview)
     # -----------------------
+    @app.get("/api/analytics/organizations")
+    @require_portal_access()
+    def analytics_organizations():
+        return get_cross_org_analytics()
+
+    @app.get("/api/analytics/organizations/trends")
+    @require_portal_access()
+    def analytics_organizations_trends():
+        return get_cross_org_trends()
+
+    # Backward compat: /api/analytics/tenants + /api/analytics/clients
     @app.get("/api/analytics/tenants")
     @require_portal_access()
     def analytics_tenants():
-        return get_cross_tenant_analytics()
+        return get_cross_org_analytics()
 
     @app.get("/api/analytics/tenants/trends")
     @require_portal_access()
     def analytics_tenants_trends():
-        return get_cross_tenant_trends()
+        return get_cross_org_trends()
 
-    # Client aliases for analytics
     @app.get("/api/analytics/clients")
     @require_portal_access()
     def analytics_clients():
-        return get_cross_tenant_analytics()
+        return get_cross_org_analytics()
 
     @app.get("/api/analytics/clients/trends")
     @require_portal_access()
     def analytics_clients_trends():
-        return get_cross_tenant_trends()
+        return get_cross_org_trends()
 
     @app.get("/api/analytics/login-sessions")
     @require_portal_access()
@@ -1690,10 +1793,16 @@ def create_app():
     def system_cleanup():
         return run_manual_cleanup()
 
+    @app.get("/api/system/org-isolation")
+    @require_role('admin')
+    def system_org_isolation():
+        return validate_org_isolation()
+
+    # Backward compat: /api/system/tenant-isolation
     @app.get("/api/system/tenant-isolation")
     @require_role('admin')
     def system_tenant_isolation():
-        return validate_tenant_isolation()
+        return validate_org_isolation()
 
     @app.get("/api/system/launch-readiness")
     @require_portal_access()
@@ -1715,27 +1824,37 @@ def create_app():
     def remediation_auto_execute():
         return batch_auto_remediate()
 
-    # Phase 78: Tenant logo upload/delete
-    @app.post("/api/tenants/<int:tenant_id>/logo")
+    # Organization logo upload/delete
+    @app.post("/api/organizations/<int:organization_id>/logo")
     @require_portal_role('superadmin', 'poweradmin')
-    def tenant_logo_upload(tenant_id):
-        return upload_tenant_logo(tenant_id)
+    def organization_logo_upload(organization_id):
+        return upload_organization_logo(organization_id)
 
-    @app.delete("/api/tenants/<int:tenant_id>/logo")
+    @app.delete("/api/organizations/<int:organization_id>/logo")
     @require_portal_role('superadmin', 'poweradmin')
-    def tenant_logo_delete(tenant_id):
-        return delete_tenant_logo(tenant_id)
+    def organization_logo_delete(organization_id):
+        return delete_organization_logo(organization_id)
 
-    # Client aliases for logo routes
-    @app.post("/api/clients/<int:tenant_id>/logo")
+    # Backward compat: /api/tenants/<id>/logo + /api/clients/<id>/logo
+    @app.post("/api/tenants/<int:organization_id>/logo")
     @require_portal_role('superadmin', 'poweradmin')
-    def client_logo_upload(tenant_id):
-        return upload_tenant_logo(tenant_id)
+    def tenant_logo_upload(organization_id):
+        return upload_organization_logo(organization_id)
 
-    @app.delete("/api/clients/<int:tenant_id>/logo")
+    @app.delete("/api/tenants/<int:organization_id>/logo")
     @require_portal_role('superadmin', 'poweradmin')
-    def client_logo_delete(tenant_id):
-        return delete_tenant_logo(tenant_id)
+    def tenant_logo_delete(organization_id):
+        return delete_organization_logo(organization_id)
+
+    @app.post("/api/clients/<int:organization_id>/logo")
+    @require_portal_role('superadmin', 'poweradmin')
+    def client_logo_upload(organization_id):
+        return upload_organization_logo(organization_id)
+
+    @app.delete("/api/clients/<int:organization_id>/logo")
+    @require_portal_role('superadmin', 'poweradmin')
+    def client_logo_delete(organization_id):
+        return delete_organization_logo(organization_id)
 
     # Phase 78: Scan modes
     @app.get("/api/scan-modes")
@@ -1863,10 +1982,16 @@ def create_app():
     def billing_stripe_webhook():
         return stripe_webhook_handler()
 
-    @app.post("/api/admin/tenants/<int:tenant_id>/stripe-customer")
+    @app.post("/api/admin/organizations/<int:organization_id>/stripe-customer")
     @require_portal_role('superadmin', 'poweradmin')
-    def admin_create_stripe_customer(tenant_id):
-        return create_stripe_customer_handler(tenant_id)
+    def admin_create_org_stripe_customer(organization_id):
+        return create_stripe_customer_handler(organization_id)
+
+    # Backward compat: /api/admin/tenants/<id>/stripe-customer
+    @app.post("/api/admin/tenants/<int:organization_id>/stripe-customer")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_create_stripe_customer(organization_id):
+        return create_stripe_customer_handler(organization_id)
 
     # -----------------------
     # Phase 6: Pilot Setup
@@ -1874,7 +1999,7 @@ def create_app():
     @app.post("/api/admin/pilot-setup")
     @require_portal_role('superadmin', 'poweradmin')
     def admin_pilot_setup():
-        return create_pilot_tenant()
+        return create_pilot_organization()
 
     # -----------------------
     # Phase 6: Password Policy

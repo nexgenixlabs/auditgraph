@@ -106,7 +106,7 @@ function licenseStatus(t: Tenant): { label: string; color: string } {
 }
 
 export default function AdminTenants() {
-  const { switchTenant, user } = useAuth();
+  const { switchOrganization, user } = useAuth();
   const portalRole = user?.portal_role;
   const isSuperadmin = portalRole === 'superadmin';
   const canWrite = portalRole === 'superadmin' || portalRole === 'poweradmin';
@@ -144,10 +144,10 @@ export default function AdminTenants() {
 
   useEffect(() => { fetchTenants(); }, [fetchTenants]);
 
-  async function handleProvision(tenantId: number) {
+  async function handleProvision(orgId: number) {
     setError(null);
     try {
-      const data = await api.post(`/clients/${tenantId}/provision`, provisionForm);
+      const data = await api.post(`/clients/${orgId}/provision`, provisionForm);
       setSuccess(data.message || 'Tenant provisioned successfully');
       setShowProvision(null);
       setProvisionForm({ admin_username: '', admin_display_name: '', admin_password: '' });
@@ -222,7 +222,7 @@ export default function AdminTenants() {
     reader.readAsDataURL(file);
   }
 
-  async function handleLogoUpload(tenantId: number) {
+  async function handleLogoUpload(orgId: number) {
     if (!logoFile) return;
     setUploadingLogo(true);
     try {
@@ -231,7 +231,7 @@ export default function AdminTenants() {
         reader.onload = () => resolve(reader.result as string);
         reader.readAsDataURL(logoFile);
       });
-      await api.post(`/clients/${tenantId}/logo`, { logo: dataUrl });
+      await api.post(`/clients/${orgId}/logo`, { logo: dataUrl });
       setSuccess('Logo uploaded');
       setLogoFile(null);
       setLogoPreview(null);
@@ -243,9 +243,9 @@ export default function AdminTenants() {
     }
   }
 
-  async function handleLogoDelete(tenantId: number) {
+  async function handleLogoDelete(orgId: number) {
     try {
-      await api.del(`/clients/${tenantId}/logo`);
+      await api.del(`/clients/${orgId}/logo`);
       setSuccess('Logo removed');
       fetchTenants();
     } catch (err: unknown) {

@@ -30,9 +30,9 @@ class IdentityCorrelator:
         if config.get('ice_enabled', 'true') != 'true':
             return {'status': 'disabled', 'humans_created': 0, 'links_created': 0}
 
-        tenant_id = self.db._tenant_id
-        if not tenant_id:
-            return {'status': 'skipped', 'reason': 'no_tenant'}
+        org_id = self.db._organization_id
+        if not org_id:
+            return {'status': 'skipped', 'reason': 'no_organization'}
 
         regular, privileged = self._fetch_users(run_id)
         if not regular and not privileged:
@@ -42,22 +42,22 @@ class IdentityCorrelator:
         total_links = 0
 
         # Method 0: Exact display name match (catches UPN-null disabled accounts)
-        h, l = self._match_by_exact_display_name(tenant_id, regular, privileged)
+        h, l = self._match_by_exact_display_name(org_id, regular, privileged)
         total_humans += h
         total_links += l
 
         # Method 1: Naming convention (highest signal)
-        h, l = self._match_by_naming_convention(tenant_id, regular, privileged, config)
+        h, l = self._match_by_naming_convention(org_id, regular, privileged, config)
         total_humans += h
         total_links += l
 
         # Method 2: Employee ID (rare but very high confidence)
-        h, l = self._match_by_employee_id(tenant_id, regular, privileged, config)
+        h, l = self._match_by_employee_id(org_id, regular, privileged, config)
         total_humans += h
         total_links += l
 
         # Method 3: Display name fuzzy match
-        h, l = self._match_by_display_name(tenant_id, regular, privileged, config)
+        h, l = self._match_by_display_name(org_id, regular, privileged, config)
         total_humans += h
         total_links += l
 
@@ -92,7 +92,7 @@ class IdentityCorrelator:
         runs are included so that correlation can find pairs that no longer
         co-exist in the same run.
         """
-        tenant_id = self.db._tenant_id
+        org_id = self.db._organization_id
         cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("""
@@ -103,10 +103,10 @@ class IdentityCorrelator:
                     i.last_sign_in, i.deleted_at
                 FROM identities i
                 JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-                WHERE dr.tenant_id = %s
+                WHERE dr.organization_id = %s
                   AND i.identity_category IN ('human_user', 'guest')
                 ORDER BY i.object_id, i.discovery_run_id DESC
-            """, (tenant_id,))
+            """, (org_id,))
             users = [dict(r) for r in cursor.fetchall()]
         finally:
             cursor.close()
@@ -153,7 +153,7 @@ class IdentityCorrelator:
 
         return 'regular'
 
-    def _match_by_exact_display_name(self, tenant_id, regular, privileged):
+    def _match_by_exact_display_name(self, org_id, regular, privileged):
         """Match regular ↔ privileged accounts sharing the exact same display_name.
 
         This catches the common case where a disabled account has upn=NULL but
@@ -177,14 +177,14 @@ class IdentityCorrelator:
                     if self._already_linked(reg.get('object_id')):
                         continue
                     h, l = self._create_link_pair(
-                        tenant_id, reg, priv, 'display_name_exact', 85.0)
+                        org_id, reg, priv, 'display_name_exact', 85.0)
                     humans_created += h
                     links_created += l
                     break  # One match per privileged account
 
         return humans_created, links_created
 
-    def _match_by_naming_convention(self, tenant_id, regular, privileged, config):
+    def _match_by_naming_convention(self, org_id, regular, privileged, config):
         """Strip prefix/suffix from privileged UPN, match against regular UPNs."""
         prefixes = [p.strip() for p in config.get('ice_privileged_prefixes', '').split(',') if p.strip()]
         suffixes = [s.strip() for s in config.get('ice_privileged_suffixes', '').split(',') if s.strip()]
@@ -236,13 +236,13 @@ class IdentityCorrelator:
             if match:
                 confidence = 95.0 if regular_map.get(stripped) else 85.0
                 h, l = self._create_link_pair(
-                    tenant_id, match, priv, 'naming_convention', confidence)
+                    org_id, match, priv, 'naming_convention', confidence)
                 humans_created += h
                 links_created += l
 
         return humans_created, links_created
 
-    def _match_by_employee_id(self, tenant_id, regular, privileged, config):
+    def _match_by_employee_id(self, org_id, regular, privileged, config):
         """Match by shared employeeId (rare but high confidence)."""
         eid_map = {}
         for u in regular:
@@ -260,13 +260,13 @@ class IdentityCorrelator:
             if eid and eid in eid_map:
                 match = eid_map[eid]
                 h, l = self._create_link_pair(
-                    tenant_id, match, priv, 'employee_id', 95.0)
+                    org_id, match, priv, 'employee_id', 95.0)
                 humans_created += h
                 links_created += l
 
         return humans_created, links_created
 
-    def _match_by_display_name(self, tenant_id, regular, privileged, config):
+    def _match_by_display_name(self, org_id, regular, privileged, config):
         """Fuzzy match on display names after stripping admin prefixes."""
         threshold = float(config.get('ice_display_name_similarity_threshold', '0.80'))
         admin_prefixes = ['admin - ', 'ep - ', 'priv - ', 'adm - ', 'admin-', 'ep-', 'priv-']
@@ -306,18 +306,18 @@ class IdentityCorrelator:
                 # Only link if not already linked by a higher-confidence method
                 if not self._already_linked(best_match.get('object_id')):
                     h, l = self._create_link_pair(
-                        tenant_id, best_match, priv, 'display_name', 80.0)
+                        org_id, best_match, priv, 'display_name', 80.0)
                     humans_created += h
                     links_created += l
 
         return humans_created, links_created
 
-    def _create_link_pair(self, tenant_id, regular_user, priv_user, method, confidence):
+    def _create_link_pair(self, org_id, regular_user, priv_user, method, confidence):
         """Create a human identity and link both accounts to it."""
         # Derive display name from the regular account
         display_name = regular_user.get('display_name', 'Unknown')
         human_id = self.db.save_human_identity(
-            tenant_id=tenant_id,
+            organization_id=org_id,
             display_name=display_name,
             employee_id=regular_user.get('employee_id_entra'),
             department=regular_user.get('department'),
@@ -331,7 +331,7 @@ class IdentityCorrelator:
 
         # Link regular account
         link_id = self.db.save_identity_link(
-            tenant_id=tenant_id,
+            organization_id=org_id,
             human_identity_id=human_id,
             identity_db_id=regular_user['id'],
             account_type='regular',
@@ -346,7 +346,7 @@ class IdentityCorrelator:
 
         # Link privileged account
         link_id = self.db.save_identity_link(
-            tenant_id=tenant_id,
+            organization_id=org_id,
             human_identity_id=human_id,
             identity_db_id=priv_user['id'],
             account_type='privileged',

@@ -145,7 +145,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         items: [
           ...(isAdmin ? [{ to: '/settings/connections', label: 'Connectors', icon: connectorsIcon }] : []),
           { to: '/activity', label: 'Audit Log', icon: activityIcon },
-          ...(isAdmin ? [{ to: '/settings/general', label: 'Tenant Settings', icon: settingsIcon }] : []),
+          ...(isAdmin ? [{ to: '/settings/general', label: 'Organization Settings', icon: settingsIcon }] : []),
         ],
       },
       ...(isAdmin ? [{

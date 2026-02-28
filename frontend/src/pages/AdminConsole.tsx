@@ -127,7 +127,7 @@ function AdminLogin() {
 
 /* ─── Admin Console (authenticated) ─── */
 export default function AdminConsole() {
-  const { user, loading, logout, activeTenantId, switchTenant } = useAuth();
+  const { user, loading, logout, activeOrgId, switchOrganization } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -163,7 +163,7 @@ export default function AdminConsole() {
   }
 
   function handleBackToDashboard() {
-    switchTenant(null);
+    switchOrganization(null);
     navigate('/');
   }
 
@@ -181,7 +181,7 @@ export default function AdminConsole() {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          {!!activeTenantId && (
+          {!!activeOrgId && (
             <button
               onClick={handleBackToDashboard}
               className="text-xs text-blue-400 hover:text-blue-300 transition"

@@ -496,7 +496,7 @@ function buildEmptyData(): TenantData {
 
 function useCISOData(): { data: TenantData; loading: boolean } {
   const { withConnection, selectedConnectionId } = useConnection();
-  const { activeTenantId } = useAuth();
+  const { activeOrgId } = useAuth();
   const [data, setData] = useState<TenantData>(buildEmptyData);
   const [loading, setLoading] = useState(true);
 
@@ -530,9 +530,9 @@ function useCISOData(): { data: TenantData; loading: boolean } {
         // ── Tenant metadata ──
         if (attack?.data_integrity) {
           const di = attack.data_integrity;
-          d.tenant.id = String(di.tenant_id || '');
-          d.tenant.name = di.tenant_name || di.organization_name || '';
-          d.tenant.organizationName = di.organization_name || di.tenant_name || '';
+          d.tenant.id = String(di.organization_id || di.tenant_id || '');
+          d.tenant.name = di.org_name || di.organization_name || '';
+          d.tenant.organizationName = di.organization_name || di.org_name || '';
           d.tenant.organizationLogo = di.organization_logo || null;
           d.tenant.lastScan = di.last_scan || '';
           d.tenant.scanDuration = di.scan_duration_seconds || 0;
@@ -1040,7 +1040,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
     }
     load();
     return () => { cancelled = true; };
-  }, [selectedConnectionId, activeTenantId]);
+  }, [selectedConnectionId, activeOrgId]);
 
   return { data, loading };
 }

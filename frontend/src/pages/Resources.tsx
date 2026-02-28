@@ -135,7 +135,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
   const navigate = useNavigate();
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
-  const { user, activeTenantId, activeTenantName } = useAuth();
+  const { user, activeOrgId, activeOrgName } = useAuth();
 
   const [resources, setResources] = useState<ResourceRow[]>([]);
   const [stats, setStats] = useState<ResourceStats | null>(null);
@@ -246,14 +246,14 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
   }, [typeFilter, riskFilter, search, initialized, lockedType]);
 
   const handleCSVExport = useCallback(() => {
-    const meta = buildExportMeta(latestSnapshotId, activeTenantId ?? user?.tenant_id ?? null, activeTenantName ?? user?.tenant_name ?? null);
+    const meta = buildExportMeta(latestSnapshotId, activeOrgId ?? user?.organization_id ?? null, activeOrgName ?? user?.org_name ?? null);
     downloadCSV(
       resources as unknown as Record<string, unknown>[],
       RESOURCE_CSV_COLUMNS,
       exportFilename('resources', 'csv'),
       meta
     );
-  }, [resources, latestSnapshotId, activeTenantId, activeTenantName, user]);
+  }, [resources, latestSnapshotId, activeOrgId, activeOrgName, user]);
 
   return (
     <div className="space-y-4">
@@ -278,7 +278,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
         <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50">
           <span className="font-semibold uppercase tracking-wide text-gray-400">Export Metadata</span>
           <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{latestSnapshotId}</span></span>
-          <span>Tenant: <span className="font-mono font-semibold text-gray-700">{activeTenantId ?? user?.tenant_id ?? 'N/A'}</span></span>
+          <span>Organization: <span className="font-mono font-semibold text-gray-700">{activeOrgId ?? user?.organization_id ?? 'N/A'}</span></span>
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
         </div>
       )}

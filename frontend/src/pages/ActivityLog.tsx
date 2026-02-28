@@ -12,7 +12,7 @@ interface ActivityEntry {
   user_id: number | null;
   user_username: string | null;
   user_display_name: string | null;
-  tenant_id: number | null;
+  organization_id: number | null;
 }
 
 // ── Action type display config ─────────────────────────────────

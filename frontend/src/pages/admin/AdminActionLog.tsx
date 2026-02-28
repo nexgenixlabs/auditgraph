@@ -7,8 +7,8 @@ interface ActionEvent {
   source: 'admin_audit' | 'billing';
   admin_user_id: number | null;
   admin_username: string | null;
-  target_tenant_id: number | null;
-  target_tenant_name: string | null;
+  target_organization_id: number | null;
+  target_org_name: string | null;
   details: Record<string, unknown> | null;
   ip_address: string | null;
   created_at: string;
@@ -156,7 +156,7 @@ export default function AdminActionLog() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600">
-                      {ev.target_tenant_name || '\u2014'}
+                      {ev.target_org_name || '\u2014'}
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 max-w-xs truncate" title={JSON.stringify(ev.details)}>
                       {summarizeDetails(ev.details)}

@@ -29,11 +29,11 @@ class OrphanedAccountDetector:
 
         Returns list of anomaly dicts suitable for db.save_anomalies().
         """
-        tenant_id = self.db._tenant_id
-        if not tenant_id:
+        org_id = self.db._organization_id
+        if not org_id:
             return []
 
-        pairs = self._find_orphaned_pairs(tenant_id)
+        pairs = self._find_orphaned_pairs(org_id)
         if not pairs:
             return []
 
@@ -65,7 +65,7 @@ class OrphanedAccountDetector:
 
             # Generate remediation commands
             finding_data = {
-                'tenant_id': tenant_id,
+                'organization_id': org_id,
                 'discovery_run_id': run_id,
                 'human_identity_id': pair['human_identity_id'],
                 'regular_link_id': pair['regular_link_id'],
@@ -117,7 +117,7 @@ class OrphanedAccountDetector:
 
         return anomalies
 
-    def _find_orphaned_pairs(self, tenant_id):
+    def _find_orphaned_pairs(self, org_id):
         """Find linked pairs where regular is disabled and privileged is enabled."""
         cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
         try:
@@ -138,11 +138,11 @@ class OrphanedAccountDetector:
                 JOIN identity_links pl ON pl.human_identity_id = h.id AND pl.account_type = 'privileged'
                 JOIN identities ri ON ri.id = rl.identity_db_id
                 JOIN identities pi ON pi.id = pl.identity_db_id
-                WHERE h.tenant_id = %s
+                WHERE h.organization_id = %s
                   AND ri.enabled = FALSE
                   AND pi.enabled = TRUE
                   AND pi.deleted_at IS NULL
-            """, (tenant_id,))
+            """, (org_id,))
             return [dict(r) for r in cursor.fetchall()]
         except Exception:
             return []

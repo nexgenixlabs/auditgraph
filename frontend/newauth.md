@@ -1224,3 +1224,91 @@ A single-layer failure cannot expose cross-tenant data because each layer indepe
 ```
 - 20 existing auth boundary tests: all pass
 - 8 new source-inspection tests: all pass
+
+---
+
+# Phase 2C — Organization Isolation Refactor + Simulation Suite
+
+**Date**: 2026-02-28
+**Scope**: Full-stack rename of "tenant" → "organization" across DB schema, RLS policies, JWT claims, Python backend, React frontend, and tests
+**Status**: IMPLEMENTED
+
+## Summary
+
+Phase 2C renames the entire SaaS isolation boundary from "tenant" to "organization", disambiguating the SaaS isolation unit (`organization_id`) from cloud provider directories (`azure_directory_id`).
+
+## Naming Map
+
+| Old | New | Scope |
+|-----|-----|-------|
+| `tenants` table | `organizations` | DB |
+| `tenant_id` column (50+ tables) | `organization_id` | DB |
+| `app.current_tenant_id` session var | `app.current_organization_id` | RLS |
+| `tenant_strict_*` policies | `org_strict_*` | RLS |
+| `trg_auto_tenant_id` trigger | `trg_auto_organization_id` | DB |
+| `self._tenant_id` | `self._organization_id` | Python |
+| `Database(tenant_id=N)` | `Database(organization_id=N)` | Python |
+| `_tenant_id()` helper | `_org_id()` | Python |
+| JWT `tenant_id` / `tenant_name` | JWT `org_id` / `org_name` (+ backward compat) | JWT |
+| `X-Tenant-Id` header | `X-Organization-Id` (accepts both) | HTTP |
+| `entra_tenant_id` | `azure_directory_id` | DB/API |
+
+## Exemptions (NOT renamed)
+
+- `ClientSecretCredential(tenant_id=...)` — Azure SDK kwarg
+- `AZURE_TENANT_ID` env var — Azure SDK convention
+- `self.tenant_id` in EmailService.__init__ — Azure Entra directory ID
+- `allow_cross_tenant_replication` — Azure Storage property
+- `scope_type: 'tenant'` — Azure RBAC scope level
+- `tenant_or_org_id` — Azure directory identifier column
+
+## Migration 018
+
+`_run_migration_018_org_rename()` handles:
+1. `ALTER TABLE tenants RENAME TO organizations`
+2. Rename `tenant_id` → `organization_id` on all 50+ tables
+3. Rename `entra_tenant_id` → `azure_directory_id` on cloud_connections
+4. Drop old `tenant_strict_*` RLS policies, create `org_strict_*`
+5. Drop old `trg_auto_tenant_id` triggers, create `trg_auto_organization_id`
+6. Rename settings key `azure_tenant_id` → `azure_directory_id`
+7. Rename indexes
+8. Update unique constraints
+
+All operations are idempotent (check column/table existence before ALTER).
+
+## JWT Backward Compatibility
+
+`generate_access_token()` emits BOTH:
+- New: `org_id`, `org_name`
+- Old: `tenant_id`, `tenant_name` (backward compat)
+
+`auth_middleware()` reads `org_id` first, falls back to `tenant_id`.
+
+## HTTP Header Backward Compatibility
+
+Accepts both `X-Organization-Id` and `X-Tenant-Id` for superadmin override.
+
+## Route Backward Compatibility
+
+All `/api/tenants/*` routes still work, pointing to new handler functions.
+New canonical routes: `/api/organizations/*`, `/api/organization/*`.
+
+## Frontend Changes
+
+- `TenantContext` → `OrganizationContext`, `useTenant()` → `useOrganization()`
+- `activeTenantId` → `activeOrgId` (with localStorage migration)
+- `X-Tenant-Id` → `X-Organization-Id` header
+- All TypeScript interfaces updated
+
+## Test Suite
+
+- `test_auth_boundary.py`: 28 existing tests updated
+- `test_org_isolation.py`: 8 new source-inspection tests:
+  1. RLS policies use `organization_id`
+  2. Session var is `app.current_organization_id`
+  3. Webhook methods use `organization_id`
+  4. SOAR methods use `organization_id`
+  5. Custom risk rules use `organization_id`
+  6. Notification methods use `organization_id`
+  7. Handler helpers use `_org_id()` and `organization_id`
+  8. No `tenant_id` in SQL queries (exemptions only)

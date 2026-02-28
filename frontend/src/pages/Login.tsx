@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { useTenant } from '../contexts/TenantContext';
+import { useOrganization } from '../contexts/TenantContext';
 
-interface TenantOption {
+interface OrgOption {
   id: number;
   name: string;
   slug: string;
@@ -12,14 +12,14 @@ interface TenantOption {
 
 export default function Login() {
   const { login } = useAuth();
-  const { resolvedTenant, isPortal, tenantSlug } = useTenant();
+  const { resolvedOrganization: resolvedOrg, isPortal, orgSlug } = useOrganization();
   const navigate = useNavigate();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showTenantPicker, setShowTenantPicker] = useState(false);
-  const [userTenants, setUserTenants] = useState<TenantOption[]>([]);
+  const [showOrgPicker, setShowOrgPicker] = useState(false);
+  const [userOrgs, setUserOrgs] = useState<OrgOption[]>([]);
 
   // Phase 54: SSO status
   const [ssoEnabled, setSsoEnabled] = useState(false);
@@ -31,11 +31,11 @@ export default function Login() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
 
-  // Phase 85: Tenant branding for login page
+  // Phase 85: Organization branding for login page
   const [branding, setBranding] = useState<{ company_name: string; slug: string; logo_url: string | null } | null>(null);
 
   useEffect(() => {
-    const slug = tenantSlug || resolvedTenant?.slug;
+    const slug = orgSlug || resolvedOrg?.slug;
     if (!slug) return;
     fetch(`/api/auth/sso-status?tenant_slug=${encodeURIComponent(slug)}`)
       .then(r => r.ok ? r.json() : null)
@@ -46,27 +46,27 @@ export default function Login() {
         }
       })
       .catch(() => {});
-    // Phase 85: Fetch tenant branding
-    fetch(`/api/auth/tenant-branding?slug=${encodeURIComponent(slug)}`)
+    // Phase 85: Fetch org branding
+    fetch(`/api/auth/org-branding?slug=${encodeURIComponent(slug)}`)
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data) setBranding(data);
       })
       .catch(() => {});
-  }, [tenantSlug, resolvedTenant]);
+  }, [orgSlug, resolvedOrg]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      // Subdomain mode: scope login to detected tenant
-      // Dev mode: no tenant scoping
-      const userData = await login(username, password, tenantSlug || undefined);
+      // Subdomain mode: scope login to detected org
+      // Dev mode: no org scoping
+      const userData = await login(username, password, orgSlug || undefined);
 
-      // Clear stale admin tenant context on client login
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
+      // Clear stale admin org context on client login
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
 
       // Phase 78: Check if password change is required
       if (userData?.force_password_change) {
@@ -83,23 +83,23 @@ export default function Login() {
           return;
         }
 
-        // Non-superadmin portal login: check tenants
+        // Non-superadmin portal login: check organizations
         try {
-          const res = await fetch('/api/auth/tenants');
+          const res = await fetch('/api/auth/organizations');
           if (res.ok) {
             const data = await res.json();
-            const tenants: TenantOption[] = data.tenants || [];
+            const orgs: OrgOption[] = data.organizations || [];
 
-            if (tenants.length <= 1) {
+            if (orgs.length <= 1) {
               navigate('/');
             } else {
-              setUserTenants(tenants);
-              setShowTenantPicker(true);
+              setUserOrgs(orgs);
+              setShowOrgPicker(true);
             }
             return;
           }
         } catch {
-          // If tenant fetch fails, just navigate normally
+          // If org fetch fails, just navigate normally
         }
       }
 
@@ -135,12 +135,12 @@ export default function Login() {
       if (!res.ok) throw new Error(data.error || 'Failed to change password');
 
       // Re-login with new password
-      const userData = await login(username, newPassword, tenantSlug || undefined);
+      const userData = await login(username, newPassword, orgSlug || undefined);
       setForcePasswordChange(false);
 
-      // Clear stale admin tenant context
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
+      // Clear stale admin org context
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
 
       if (isPortal) {
         const portalRole = userData?.portal_role;
@@ -151,7 +151,7 @@ export default function Login() {
       }
       // Phase 85: Transition onboarding stage to 'locked' after password change
       try {
-        await fetch('/api/tenant/stage', {
+        await fetch('/api/organization/stage', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ stage: 'locked' }),
@@ -165,24 +165,24 @@ export default function Login() {
     }
   }
 
-  function handleTenantSelect(tenant: TenantOption) {
+  function handleOrgSelect(org: OrgOption) {
     // In production, this would redirect to the subdomain
-    // For now, store the selected tenant and navigate
+    // For now, store the selected org and navigate
     const hostname = window.location.hostname;
     const isDev = hostname === 'localhost' || hostname === '127.0.0.1';
 
     if (isDev) {
-      // Dev mode: just navigate to dashboard (tenant already in JWT)
+      // Dev mode: just navigate to dashboard (org already in JWT)
       navigate('/');
     } else {
-      // Production: redirect to tenant subdomain
+      // Production: redirect to org subdomain
       const baseDomain = hostname.split('.').slice(1).join('.') || hostname;
-      window.location.href = `${window.location.protocol}//${tenant.slug}.${baseDomain}`;
+      window.location.href = `${window.location.protocol}//${org.slug}.${baseDomain}`;
     }
   }
 
-  // Tenant picker view (after successful portal login for superadmins)
-  if (showTenantPicker) {
+  // Organization picker view (after successful portal login for superadmins)
+  if (showOrgPicker) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-lg px-4">
@@ -195,10 +195,10 @@ export default function Login() {
           </div>
 
           <div className="space-y-2">
-            {userTenants.map(t => (
+            {userOrgs.map(t => (
               <button
                 key={t.id}
-                onClick={() => handleTenantSelect(t)}
+                onClick={() => handleOrgSelect(t)}
                 className="w-full flex items-center justify-between p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl hover:border-blue-400 hover:shadow-sm transition group"
               >
                 <div className="flex items-center gap-3">
@@ -246,7 +246,7 @@ export default function Login() {
               <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
             ) : (
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-                {(branding?.company_name || resolvedTenant?.name || 'AG').substring(0, 2).toUpperCase()}
+                {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
               </div>
             )}
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Set New Password</h1>
@@ -321,13 +321,13 @@ export default function Login() {
             <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
           ) : (
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              {(branding?.company_name || resolvedTenant?.name || 'AG').substring(0, 2).toUpperCase()}
+              {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
             </div>
           )}
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            {branding?.company_name || resolvedTenant?.name || 'AuditGraph'}
+            {branding?.company_name || resolvedOrg?.name || 'AuditGraph'}
           </h1>
-          {resolvedTenant ? (
+          {resolvedOrg ? (
             <p className="text-sm text-gray-500 mt-1">Sign in to your organization's portal</p>
           ) : (
             <p className="text-sm text-gray-500 mt-1">Welcome</p>
@@ -347,7 +347,7 @@ export default function Login() {
               <button
                 type="button"
                 onClick={() => {
-                  const slug = tenantSlug || resolvedTenant?.slug;
+                  const slug = orgSlug || resolvedOrg?.slug;
                   if (slug) window.location.href = `/api/auth/saml/login?tenant_slug=${encodeURIComponent(slug)}`;
                 }}
                 className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-blue-600 text-blue-600 hover:bg-blue-50 transition flex items-center justify-center gap-2"

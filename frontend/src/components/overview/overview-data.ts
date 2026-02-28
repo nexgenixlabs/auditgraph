@@ -265,7 +265,7 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
   return {
     insufficientData,
     tenant: {
-      id: di.tenant_id || 'unknown', name: di.tenant_name || 'Tenant',
+      id: di.organization_id || di.tenant_id || 'unknown', name: di.org_name || di.tenant_name || 'Organization',
       cloud: [azureSubs > 0 && 'Azure', awsAccounts > 0 && 'AWS', gcpProjects > 0 && 'GCP'].filter(Boolean).join(' + ') || 'Azure',
       subscriptions: subs,
       lastScan: di.last_scan || lr.completed_at || new Date().toISOString(),
@@ -276,7 +276,7 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
       dataCompleteness: Math.round(di.data_completeness_pct || 100),
       lastUpdatedAgo: di.last_scan ? getTimeAgo(di.last_scan) : 'unknown',
       isolationGuarantee: 'Isolated dataset \u2022 No cross-tenant visibility',
-      organizationName: settings?.settings?.org_name || di.organization_name || di.tenant_name || 'Tenant',
+      organizationName: settings?.settings?.org_name || di.organization_name || di.org_name || 'Organization',
       organizationLogo: di.organization_logo || null,
     },
     scoringMethodology: {

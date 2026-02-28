@@ -44,8 +44,8 @@ interface LoginSession {
   username: string;
   display_name: string;
   role: string;
-  tenant_name: string;
-  tenant_id: number | null;
+  org_name: string;
+  organization_id: number | null;
   login_at: string | null;
   logout_at: string | null;
   duration_minutes: number | null;
@@ -61,13 +61,13 @@ export default function AdminMonitoring() {
   const [system, setSystem] = useState<SystemMetrics | null>(null);
   const [sessions, setSessions] = useState<LoginSession[]>([]);
   const [portalFilter, setPortalFilter] = useState<'' | 'admin' | 'client'>('admin');
-  const [tenantFilter, setTenantFilter] = useState<number | ''>('');
+  const [orgFilter, setOrgFilter] = useState<number | ''>('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const sessionParams = new URLSearchParams({ limit: '50' });
     if (portalFilter) sessionParams.set('portal', portalFilter);
-    if (tenantFilter) sessionParams.set('tenant_id', String(tenantFilter));
+    if (orgFilter) sessionParams.set('organization_id', String(orgFilter));
     Promise.all([
       api.get('/analytics/clients').catch(() => ({ tenants: [] })),
       api.get('/health').catch(() => null),
@@ -79,7 +79,7 @@ export default function AdminMonitoring() {
       if (systemData?.api) setSystem(systemData.api);
       setSessions(sessionData.sessions || []);
     }).finally(() => setLoading(false));
-  }, [portalFilter, tenantFilter]);
+  }, [portalFilter, orgFilter]);
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading monitoring data...</div>;
 
@@ -96,8 +96,8 @@ export default function AdminMonitoring() {
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-500 font-medium">Tenant:</label>
           <select
-            value={tenantFilter}
-            onChange={e => setTenantFilter(e.target.value ? parseInt(e.target.value) : '')}
+            value={orgFilter}
+            onChange={e => setOrgFilter(e.target.value ? parseInt(e.target.value) : '')}
             className="text-xs border border-gray-200 rounded px-2 py-1.5"
           >
             <option value="">All Tenants</option>
@@ -235,7 +235,7 @@ export default function AdminMonitoring() {
       <div className="bg-white border border-gray-200 rounded-lg p-4">
         <h3 className="text-sm font-semibold text-gray-800 mb-3">Snapshot Freshness</h3>
         <div className="space-y-2">
-          {(tenantFilter ? metrics.filter(t => t.id === tenantFilter) : metrics).map(t => {
+          {(orgFilter ? metrics.filter(t => t.id === orgFilter) : metrics).map(t => {
             const hours = t.last_discovery ? (Date.now() - new Date(t.last_discovery).getTime()) / 3600000 : Infinity;
             const stale = hours > 24;
             const critical = hours > 72;
@@ -333,7 +333,7 @@ export default function AdminMonitoring() {
                       s.portal === 'admin' ? 'bg-gray-900 text-white' : 'bg-blue-100 text-blue-700'
                     }`}>{s.portal === 'admin' ? 'Admin' : 'Client'}</span>
                   </td>
-                  <td className="px-4 py-2.5 text-xs text-gray-600">{s.tenant_name || '\u2014'}</td>
+                  <td className="px-4 py-2.5 text-xs text-gray-600">{s.org_name || '\u2014'}</td>
                   <td className="px-4 py-2.5 text-xs text-gray-700 font-mono">{s.login_at ? fmtDateTime(s.login_at) : '\u2014'}</td>
                   <td className="px-4 py-2.5 text-xs text-gray-700 font-mono">{s.logout_at ? fmtDateTime(s.logout_at) : '\u2014'}</td>
                   <td className="px-4 py-2.5 text-xs text-gray-600">

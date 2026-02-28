@@ -1,7 +1,7 @@
 """
 Phase 1C+1D: Auth Boundary Tests
 
-Tests cryptographic isolation between admin and tenant portals,
+Tests cryptographic isolation between admin and client portals,
 impersonation expiry, refresh token rotation, kid headers, and ver claims.
 """
 import os
@@ -20,22 +20,22 @@ os.environ.setdefault('DB_NAME', 'auditgraph')
 
 # Set distinct keys for portal isolation tests
 ADMIN_KEY = 'admin-test-key-1c'
-TENANT_KEY = 'tenant-test-key-1c'
+CLIENT_KEY = 'tenant-test-key-1c'
 os.environ['ADMIN_JWT_SECRET'] = ADMIN_KEY
-os.environ['TENANT_JWT_SECRET'] = TENANT_KEY
+os.environ['CLIENT_JWT_SECRET'] = CLIENT_KEY
 
 from app.api.auth import (
     generate_access_token,
     generate_refresh_token,
     hash_refresh_token,
     ADMIN_JWT_SECRET,
-    TENANT_JWT_SECRET,
+    CLIENT_JWT_SECRET,
     JWT_ALGORITHM,
     ADMIN_TOKEN_EXPIRY,
-    TENANT_TOKEN_EXPIRY,
+    CLIENT_TOKEN_EXPIRY,
     TOKEN_SCHEMA_VERSION,
     ADMIN_KEY_ID,
-    TENANT_KEY_ID,
+    CLIENT_KEY_ID,
 )
 
 
@@ -47,36 +47,36 @@ def _make_admin_user():
         'username': 'techadmin',
         'role': 'admin',
         'display_name': 'Tech Admin',
-        'tenant_id': None,
-        'tenant_name': None,
+        'organization_id': None,
+        'org_name': None,
         'is_superadmin': True,
         'portal_role': 'superadmin',
         'force_password_change': False,
     }
 
 
-def _make_tenant_user(tenant_id=5, tenant_name='Acme Corp'):
+def _make_org_user(organization_id=5, org_name='Acme Corp'):
     return {
         'id': 42,
         'username': 'jdoe',
         'role': 'admin',
         'display_name': 'Jane Doe',
-        'tenant_id': tenant_id,
-        'tenant_name': tenant_name,
+        'organization_id': organization_id,
+        'org_name': org_name,
         'is_superadmin': False,
         'portal_role': None,
         'force_password_change': False,
     }
 
 
-def _make_impersonation_user(tenant_id=5, tenant_name='Acme Corp'):
+def _make_impersonation_user(organization_id=5, org_name='Acme Corp'):
     return {
         'id': 1,
         'username': 'techadmin',
         'role': 'admin',
         'display_name': 'Tech Admin',
-        'tenant_id': tenant_id,
-        'tenant_name': tenant_name,
+        'organization_id': organization_id,
+        'org_name': org_name,
         'is_superadmin': False,
         'portal_role': None,
         'impersonating': True,
@@ -85,28 +85,28 @@ def _make_impersonation_user(tenant_id=5, tenant_name='Acme Corp'):
     }
 
 
-# ── Test 1: Admin token fails on tenant route ──
+# ── Test 1: Admin token fails on client route ──
 
-def test_admin_token_fails_tenant_decode():
-    """Admin token signed with ADMIN_KEY cannot be decoded with TENANT_KEY."""
+def test_admin_token_fails_client_decode():
+    """Admin token signed with ADMIN_KEY cannot be decoded with CLIENT_KEY."""
     user = _make_admin_user()
     token = generate_access_token(user, portal='admin')
 
-    # Decoding with tenant key must fail
+    # Decoding with client key must fail
     try:
-        jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+        jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                    audience='auditgraph-tenant')
         assert False, "Should have raised InvalidTokenError"
     except jwt.InvalidTokenError:
         pass  # Expected
 
 
-def test_admin_token_wrong_audience_for_tenant():
-    """Admin token has aud=auditgraph-platform, tenant expects auditgraph-tenant."""
+def test_admin_token_wrong_audience_for_client():
+    """Admin token has aud=auditgraph-platform, client expects auditgraph-tenant."""
     user = _make_admin_user()
     token = generate_access_token(user, portal='admin')
 
-    # Even if we use ADMIN key, audience check for tenant should fail
+    # Even if we use ADMIN key, audience check for client should fail
     try:
         jwt.decode(token, ADMIN_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                    audience='auditgraph-tenant')
@@ -115,12 +115,12 @@ def test_admin_token_wrong_audience_for_tenant():
         pass  # Expected
 
 
-# ── Test 2: Tenant token fails on admin route ──
+# ── Test 2: Client token fails on admin route ──
 
-def test_tenant_token_fails_admin_decode():
-    """Tenant token signed with TENANT_KEY cannot be decoded with ADMIN_KEY."""
-    user = _make_tenant_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+def test_client_token_fails_admin_decode():
+    """Client token signed with CLIENT_KEY cannot be decoded with ADMIN_KEY."""
+    user = _make_org_user()
+    token = generate_access_token(user, portal='client', org_slug='acme')
 
     # Decoding with admin key must fail
     try:
@@ -131,14 +131,14 @@ def test_tenant_token_fails_admin_decode():
         pass  # Expected
 
 
-def test_tenant_token_wrong_audience_for_admin():
-    """Tenant token has aud=auditgraph-tenant, admin expects auditgraph-platform."""
-    user = _make_tenant_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+def test_client_token_wrong_audience_for_admin():
+    """Client token has aud=auditgraph-tenant, admin expects auditgraph-platform."""
+    user = _make_org_user()
+    token = generate_access_token(user, portal='client', org_slug='acme')
 
     # Even with TENANT key, audience check for admin should fail
     try:
-        jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+        jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                    audience='auditgraph-platform')
         assert False, "Should have raised InvalidAudienceError"
     except jwt.InvalidAudienceError:
@@ -161,18 +161,18 @@ def test_admin_token_decodes_with_correct_key():
     assert payload['type'] == 'access'
 
 
-def test_tenant_token_decodes_with_correct_key():
-    """Tenant token decodes fine with TENANT_KEY + correct audience."""
-    user = _make_tenant_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+def test_client_token_decodes_with_correct_key():
+    """Client token decodes fine with CLIENT_KEY + correct audience."""
+    user = _make_org_user()
+    token = generate_access_token(user, portal='client', org_slug='acme')
 
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
     assert payload['sub'] == '42'
     assert payload['iss'] == 'acme.auditgraph.ai'
     assert payload['aud'] == 'auditgraph-tenant'
     assert payload['portal'] == 'client'
-    assert payload['tenant_id'] == 5
+    assert payload['org_id'] == 5
 
 
 # ── Test 4: Impersonation auto-expires ──
@@ -180,9 +180,9 @@ def test_tenant_token_decodes_with_correct_key():
 def test_impersonation_has_15min_cap():
     """Impersonation tokens have impersonation_exp claim capped at 15 minutes."""
     user = _make_impersonation_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    token = generate_access_token(user, portal='client', org_slug='acme')
 
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
 
     assert payload['impersonating'] is True
@@ -196,16 +196,16 @@ def test_impersonation_has_15min_cap():
     assert imp_exp > now, "impersonation_exp should be in the future"
     assert imp_exp <= now + 15 * 60 + 5, "impersonation_exp should be at most 15 min from now"
 
-    # Token exp should be clamped to impersonation_exp (15min < TENANT_TOKEN_EXPIRY 60min)
+    # Token exp should be clamped to impersonation_exp (15min < CLIENT_TOKEN_EXPIRY 60min)
     assert payload['exp'] <= imp_exp + 1
 
 
 def test_impersonation_exp_is_respected():
     """A token with impersonation_exp in the past should be detectable."""
     user = _make_impersonation_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    token = generate_access_token(user, portal='client', org_slug='acme')
 
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
 
     # Manually check: if impersonation_exp were in the past, middleware would reject
@@ -234,42 +234,42 @@ def test_admin_token_ttl():
     assert ttl == ADMIN_TOKEN_EXPIRY.total_seconds()
 
 
-def test_tenant_token_ttl():
-    """Tenant tokens have 60-minute TTL."""
-    user = _make_tenant_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+def test_client_token_ttl():
+    """Client tokens have 60-minute TTL."""
+    user = _make_org_user()
+    token = generate_access_token(user, portal='client', org_slug='acme')
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
     ttl = payload['exp'] - payload['iat']
-    assert ttl == TENANT_TOKEN_EXPIRY.total_seconds()
+    assert ttl == CLIENT_TOKEN_EXPIRY.total_seconds()
 
 
-def test_tenant_token_without_slug_uses_app_iss():
-    """Tenant token without slug uses app.auditgraph.ai as issuer."""
-    user = _make_tenant_user()
+def test_client_token_without_slug_uses_app_iss():
+    """Client token without slug uses app.auditgraph.ai as issuer."""
+    user = _make_org_user()
     token = generate_access_token(user, portal='client')
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
     assert payload['iss'] == 'app.auditgraph.ai'
 
 
-def test_cross_tenant_token_different_iss():
-    """Tokens for different tenant slugs have different iss claims."""
-    user1 = _make_tenant_user(tenant_id=5, tenant_name='Acme')
-    user2 = _make_tenant_user(tenant_id=6, tenant_name='Globex')
+def test_cross_org_token_different_iss():
+    """Tokens for different org slugs have different iss claims."""
+    user1 = _make_org_user(organization_id=5, org_name='Acme')
+    user2 = _make_org_user(organization_id=6, org_name='Globex')
 
-    token1 = generate_access_token(user1, portal='client', tenant_slug='acme')
-    token2 = generate_access_token(user2, portal='client', tenant_slug='globex')
+    token1 = generate_access_token(user1, portal='client', org_slug='acme')
+    token2 = generate_access_token(user2, portal='client', org_slug='globex')
 
-    p1 = jwt.decode(token1, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    p1 = jwt.decode(token1, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                      audience='auditgraph-tenant')
-    p2 = jwt.decode(token2, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    p2 = jwt.decode(token2, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                      audience='auditgraph-tenant')
 
     assert p1['iss'] == 'acme.auditgraph.ai'
     assert p2['iss'] == 'globex.auditgraph.ai'
     assert p1['iss'] != p2['iss']
-    assert p1['tenant_id'] != p2['tenant_id']
+    assert p1['org_id'] != p2['org_id']
 
 
 # ── Test 7: Key isolation ──
@@ -277,8 +277,8 @@ def test_cross_tenant_token_different_iss():
 def test_keys_are_distinct():
     """ADMIN and TENANT keys must be distinct when explicitly set."""
     assert ADMIN_JWT_SECRET == ADMIN_KEY
-    assert TENANT_JWT_SECRET == TENANT_KEY
-    assert ADMIN_JWT_SECRET != TENANT_JWT_SECRET
+    assert CLIENT_JWT_SECRET == CLIENT_KEY
+    assert ADMIN_JWT_SECRET != CLIENT_JWT_SECRET
 
 
 # ── Test 8: JWT kid header (Phase 1D) ──
@@ -292,12 +292,12 @@ def test_admin_token_has_kid_header():
     assert header['kid'] == 'admin-v1'
 
 
-def test_tenant_token_has_kid_header():
-    """Tenant token has kid='tenant-v1' in JWT header."""
-    user = _make_tenant_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+def test_client_token_has_kid_header():
+    """Client token has kid='tenant-v1' in JWT header."""
+    user = _make_org_user()
+    token = generate_access_token(user, portal='client', org_slug='acme')
     header = jwt.get_unverified_header(token)
-    assert header['kid'] == TENANT_KEY_ID
+    assert header['kid'] == CLIENT_KEY_ID
     assert header['kid'] == 'tenant-v1'
 
 
@@ -313,11 +313,11 @@ def test_admin_token_has_ver_claim():
     assert payload['ver'] == 1
 
 
-def test_tenant_token_has_ver_claim():
-    """Tenant token contains ver claim matching TOKEN_SCHEMA_VERSION."""
-    user = _make_tenant_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+def test_client_token_has_ver_claim():
+    """Client token contains ver claim matching TOKEN_SCHEMA_VERSION."""
+    user = _make_org_user()
+    token = generate_access_token(user, portal='client', org_slug='acme')
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
     assert payload['ver'] == TOKEN_SCHEMA_VERSION
     assert payload['ver'] == 1
@@ -326,10 +326,10 @@ def test_tenant_token_has_ver_claim():
 def test_impersonation_token_has_kid_and_ver():
     """Impersonation token carries both kid and ver correctly."""
     user = _make_impersonation_user()
-    token = generate_access_token(user, portal='client', tenant_slug='acme')
+    token = generate_access_token(user, portal='client', org_slug='acme')
     header = jwt.get_unverified_header(token)
-    assert header['kid'] == TENANT_KEY_ID
-    payload = jwt.decode(token, TENANT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
+    assert header['kid'] == CLIENT_KEY_ID
+    payload = jwt.decode(token, CLIENT_JWT_SECRET, algorithms=[JWT_ALGORITHM],
                          audience='auditgraph-tenant')
     assert payload['ver'] == TOKEN_SCHEMA_VERSION
     assert payload['impersonating'] is True
@@ -350,7 +350,7 @@ def test_refresh_token_hash_is_deterministic():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Phase 2B: Tenant Isolation Source-Inspection Tests
+# Phase 2B: Organization Isolation Source-Inspection Tests
 # ══════════════════════════════════════════════════════════════════════
 
 import inspect
@@ -362,10 +362,10 @@ def _get_method_source(cls, method_name):
     return inspect.getsource(method)
 
 
-# ── Test 11: Webhook methods must reference tenant_id ──
+# ── Test 11: Webhook methods must reference organization_id ──
 
-def test_webhook_methods_use_tenant_id():
-    """All webhook DB methods must reference tenant_id in their SQL."""
+def test_webhook_methods_use_organization_id():
+    """All webhook DB methods must reference organization_id in their SQL."""
     from app.database import Database
     methods = [
         'get_webhooks', 'get_webhook', 'update_webhook',
@@ -374,13 +374,13 @@ def test_webhook_methods_use_tenant_id():
     ]
     for name in methods:
         src = _get_method_source(Database, name)
-        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+        assert 'organization_id' in src, f"Database.{name}() missing organization_id filter"
 
 
-# ── Test 12: Custom risk rule methods must reference tenant_id ──
+# ── Test 12: Custom risk rule methods must reference organization_id ──
 
-def test_custom_risk_rule_methods_use_tenant_id():
-    """All custom risk rule DB methods must reference tenant_id."""
+def test_custom_risk_rule_methods_use_organization_id():
+    """All custom risk rule DB methods must reference organization_id."""
     from app.database import Database
     methods = [
         'get_custom_risk_rules', 'get_custom_risk_rule',
@@ -389,13 +389,13 @@ def test_custom_risk_rule_methods_use_tenant_id():
     ]
     for name in methods:
         src = _get_method_source(Database, name)
-        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+        assert 'organization_id' in src, f"Database.{name}() missing organization_id filter"
 
 
-# ── Test 13: Notification methods must reference tenant_id ──
+# ── Test 13: Notification methods must reference organization_id ──
 
-def test_notification_methods_use_tenant_id():
-    """Notification single-record ops must reference tenant_id."""
+def test_notification_methods_use_organization_id():
+    """Notification single-record ops must reference organization_id."""
     from app.database import Database
     methods = [
         'get_notification', 'mark_notification_read',
@@ -404,13 +404,13 @@ def test_notification_methods_use_tenant_id():
     ]
     for name in methods:
         src = _get_method_source(Database, name)
-        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+        assert 'organization_id' in src, f"Database.{name}() missing organization_id filter"
 
 
-# ── Test 14: SOAR methods must reference tenant_id ──
+# ── Test 14: SOAR methods must reference organization_id ──
 
-def test_soar_methods_use_tenant_id():
-    """SOAR read/update/delete/stats methods must reference tenant_id."""
+def test_soar_methods_use_organization_id():
+    """SOAR read/update/delete/stats methods must reference organization_id."""
     from app.database import Database
     methods = [
         'get_soar_playbooks', 'get_soar_playbook',
@@ -420,13 +420,13 @@ def test_soar_methods_use_tenant_id():
     ]
     for name in methods:
         src = _get_method_source(Database, name)
-        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+        assert 'organization_id' in src, f"Database.{name}() missing organization_id filter"
 
 
-# ── Test 15: Dashboard preferences must reference tenant_id ──
+# ── Test 15: Dashboard preferences must reference organization_id ──
 
-def test_dashboard_prefs_use_tenant_id():
-    """Dashboard preference methods must reference tenant_id."""
+def test_dashboard_prefs_use_organization_id():
+    """Dashboard preference methods must reference organization_id."""
     from app.database import Database
     methods = [
         'get_dashboard_preferences', 'save_dashboard_preferences',
@@ -434,20 +434,20 @@ def test_dashboard_prefs_use_tenant_id():
     ]
     for name in methods:
         src = _get_method_source(Database, name)
-        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+        assert 'organization_id' in src, f"Database.{name}() missing organization_id filter"
 
 
-# ── Test 16: Cloud connection single-record ops must reference tenant_id ──
+# ── Test 16: Cloud connection single-record ops must reference organization_id ──
 
-def test_cloud_connection_methods_use_tenant_id():
-    """Cloud connection by-ID methods must reference tenant_id."""
+def test_cloud_connection_methods_use_organization_id():
+    """Cloud connection by-ID methods must reference organization_id."""
     from app.database import Database
     methods = [
         'get_cloud_connection_by_id', 'update_cloud_connection',
     ]
     for name in methods:
         src = _get_method_source(Database, name)
-        assert 'tenant_id' in src, f"Database.{name}() missing tenant_id filter"
+        assert 'organization_id' in src, f"Database.{name}() missing organization_id filter"
 
 
 # ── Test 17: Client connection handlers must use _db() not Database() ──
@@ -462,17 +462,17 @@ def test_handler_connection_methods_use_db_helper():
     ]:
         func = getattr(handlers, func_name)
         src = inspect.getsource(func)
-        # Should use _db() not Database() for tenant-scoped operations
+        # Should use _db() not Database() for org-scoped operations
         # Database() (raw admin bypass) should not appear
-        assert '_db()' in src, f"{func_name}() should use _db() for tenant scoping"
+        assert '_db()' in src, f"{func_name}() should use _db() for org scoping"
 
 
-# ── Test 18: Notification dispatcher throttle is tenant-scoped ──
+# ── Test 18: Notification dispatcher throttle is org-scoped ──
 
 def test_notification_dispatcher_throttle_is_tenant_scoped():
-    """Throttle key must include tenant_id."""
+    """Throttle key must include organization_id."""
     from app.services.notification_dispatcher import NotificationDispatcher
     src = inspect.getsource(NotificationDispatcher._is_throttled)
-    assert 'tenant_id' in src, "_is_throttled must accept tenant_id parameter"
+    assert 'organization_id' in src, "_is_throttled must accept tenant_id parameter"
     dispatch_src = inspect.getsource(NotificationDispatcher.dispatch)
-    assert 'tenant_id' in dispatch_src, "dispatch must extract tenant_id"
+    assert 'organization_id' in dispatch_src, "dispatch must extract organization_id"

@@ -24,7 +24,7 @@ interface SnapshotInfo {
 export default function Reports() {
   const { addToast } = useToast();
   const { withConnection } = useConnection();
-  const { user, activeTenantId, activeTenantName } = useAuth();
+  const { user, activeOrgId, activeOrgName } = useAuth();
   const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,8 +37,8 @@ export default function Reports() {
     TYPE_MAP[typeParam || ''] || 'full'
   );
 
-  const tenantId = activeTenantId ?? user?.tenant_id ?? null;
-  const tenantName = activeTenantName ?? user?.tenant_name ?? null;
+  const orgId = activeOrgId ?? user?.organization_id ?? null;
+  const orgName = activeOrgName ?? user?.org_name ?? null;
 
   // Sync report type when URL param changes
   useEffect(() => {
@@ -130,7 +130,7 @@ export default function Reports() {
         <span className="font-semibold uppercase tracking-wide text-gray-400">Report Metadata</span>
         <span>Snapshot: <span className="font-mono font-semibold text-gray-700">{latestSnapshot ? `#${latestSnapshot.id}` : 'Loading...'}</span></span>
         <span>Captured: <span className="font-mono font-semibold text-gray-700">{latestSnapshot?.completed_at ? new Date(latestSnapshot.completed_at).toLocaleString() : '...'}</span></span>
-        <span>Tenant: <span className="font-mono font-semibold text-gray-700">{tenantId ?? 'N/A'}{tenantName ? ` (${tenantName})` : ''}</span></span>
+        <span>Organization: <span className="font-mono font-semibold text-gray-700">{orgId ?? 'N/A'}{orgName ? ` (${orgName})` : ''}</span></span>
         <span>Schema: <span className="font-mono font-semibold text-gray-700">v{EXPORT_SCHEMA_VERSION}</span></span>
       </div>
 

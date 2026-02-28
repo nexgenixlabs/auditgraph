@@ -1,6 +1,6 @@
 """
 Phase 31 + Phase 1B–1D: JWT Authentication Middleware & Helpers
-- Dual JWT signing keys (admin vs tenant portal)
+- Dual JWT signing keys (admin vs client portal)
 - Host-derived portal detection
 - iss/aud standard claims
 - Portal-aware middleware with cryptographic isolation
@@ -23,21 +23,21 @@ logger = logging.getLogger(__name__)
 _is_dev = os.getenv('FLASK_ENV') == 'development'
 _jwt_fallback = os.getenv('JWT_SECRET') if _is_dev else None
 ADMIN_JWT_SECRET = os.getenv('ADMIN_JWT_SECRET') or _jwt_fallback
-TENANT_JWT_SECRET = os.getenv('TENANT_JWT_SECRET') or _jwt_fallback
-if not ADMIN_JWT_SECRET or not TENANT_JWT_SECRET:
+CLIENT_JWT_SECRET = os.getenv('CLIENT_JWT_SECRET') or _jwt_fallback
+if not ADMIN_JWT_SECRET or not CLIENT_JWT_SECRET:
     if _is_dev:
-        raise RuntimeError("FATAL: ADMIN_JWT_SECRET + TENANT_JWT_SECRET (or JWT_SECRET) required.")
-    raise RuntimeError("FATAL: ADMIN_JWT_SECRET and TENANT_JWT_SECRET are required in production.")
+        raise RuntimeError("FATAL: ADMIN_JWT_SECRET + CLIENT_JWT_SECRET (or JWT_SECRET) required.")
+    raise RuntimeError("FATAL: ADMIN_JWT_SECRET and CLIENT_JWT_SECRET are required in production.")
 JWT_ALGORITHM = 'HS256'
 
 # Phase 1D: Token schema version and key IDs for key rotation prep
 TOKEN_SCHEMA_VERSION = 1
 ADMIN_KEY_ID = 'admin-v1'
-TENANT_KEY_ID = 'tenant-v1'
+CLIENT_KEY_ID = 'tenant-v1'
 
 # Phase 1B: Portal-specific TTLs
 ADMIN_TOKEN_EXPIRY = timedelta(minutes=30)
-TENANT_TOKEN_EXPIRY = timedelta(minutes=60)
+CLIENT_TOKEN_EXPIRY = timedelta(minutes=60)
 REFRESH_TOKEN_EXPIRY = timedelta(days=7)
 
 # Phase 76: Valid portal roles for admin console access
@@ -52,7 +52,8 @@ PUBLIC_PATHS = {
     '/api/auth/forgot-password',
     '/api/auth/reset-password',
     '/api/auth/validate-reset-token',
-    '/api/auth/tenant-branding',
+    '/api/auth/org-branding',
+    '/api/auth/tenant-branding',  # backward compat
     '/api/auth/password-policy',
     '/api/billing/stripe-webhook',
 }
@@ -73,8 +74,8 @@ def _derive_portal() -> str:
     return 'client'
 
 
-def _derive_tenant_slug() -> str | None:
-    """Extract tenant slug from subdomain. aglabs.auditgraph.ai -> 'aglabs'."""
+def _derive_org_slug() -> str | None:
+    """Extract organization slug from subdomain. aglabs.auditgraph.ai -> 'aglabs'."""
     host = request.host.split(':')[0]
     parts = host.split('.')
     if len(parts) >= 3 and parts[0] not in ('app', 'api', 'admin', 'www'):
@@ -84,7 +85,7 @@ def _derive_tenant_slug() -> str | None:
 
 # ── Token generation ──
 
-def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str | None = None) -> str:
+def generate_access_token(user: dict, portal: str = 'client', org_slug: str | None = None) -> str:
     """Generate a JWT access token with portal-specific key, iss, aud, and TTL.
     Phase 1C: iss = origin domain, aud = logical audience."""
     if portal == 'admin':
@@ -93,18 +94,21 @@ def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str |
         secret = ADMIN_JWT_SECRET
         expiry = ADMIN_TOKEN_EXPIRY
     else:
-        iss = f'{tenant_slug}.auditgraph.ai' if tenant_slug else 'app.auditgraph.ai'
+        iss = f'{org_slug}.auditgraph.ai' if org_slug else 'app.auditgraph.ai'
         aud = 'auditgraph-tenant'
-        secret = TENANT_JWT_SECRET
-        expiry = TENANT_TOKEN_EXPIRY
+        secret = CLIENT_JWT_SECRET
+        expiry = CLIENT_TOKEN_EXPIRY
 
     payload = {
         'sub': str(user['id']),
         'username': user['username'],
         'role': user['role'],
         'display_name': user['display_name'],
-        'tenant_id': user.get('tenant_id'),
-        'tenant_name': user.get('tenant_name'),
+        # Phase 2C: Emit both new + old JWT claims for backward compat
+        'org_id': user.get('organization_id'),
+        'org_name': user.get('org_name'),
+        'tenant_id': user.get('organization_id'),   # backward compat
+        'tenant_name': user.get('org_name'),         # backward compat
         'is_superadmin': user.get('is_superadmin', False),
         'portal_role': user.get('portal_role'),
         'force_password_change': user.get('force_password_change', False),
@@ -130,7 +134,7 @@ def generate_access_token(user: dict, portal: str = 'client', tenant_slug: str |
         payload['impersonation_exp'] = int(imp_exp.timestamp())
 
     # Phase 1D: kid header for key rotation prep
-    kid = ADMIN_KEY_ID if portal == 'admin' else TENANT_KEY_ID
+    kid = ADMIN_KEY_ID if portal == 'admin' else CLIENT_KEY_ID
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={'kid': kid})
 
 
@@ -169,14 +173,14 @@ def _authenticate_api_key(raw_key: str):
 
         db.increment_api_key_usage(row['id'])
 
-        # Look up creator's tenant info
-        creator_tenant_id = None
-        creator_tenant_name = None
+        # Look up creator's organization info
+        creator_org_id = None
+        creator_org_name = None
         if row['created_by']:
             creator = db.get_user_by_id(row['created_by'])
             if creator:
-                creator_tenant_id = creator.get('tenant_id')
-                creator_tenant_name = creator.get('tenant_name')
+                creator_org_id = creator.get('organization_id')
+                creator_org_name = creator.get('org_name')
 
         g.current_user = {
             'id': row['created_by'] or 0,
@@ -184,8 +188,8 @@ def _authenticate_api_key(raw_key: str):
             'role': row['role'],
             'display_name': f'API Key: {row["name"]}',
             'api_key_id': row['id'],
-            'tenant_id': creator_tenant_id,
-            'tenant_name': creator_tenant_name,
+            'organization_id': creator_org_id,
+            'org_name': creator_org_name,
             'is_superadmin': False,
         }
     finally:
@@ -199,8 +203,10 @@ def auth_middleware():
     if request.path in PUBLIC_PATHS:
         return None
 
-    # Phase 53: Public tenant lookup by slug (no auth required)
-    if request.path.startswith('/api/tenants/by-slug/') or request.path.startswith('/api/clients/by-slug/'):
+    # Phase 53: Public organization lookup by slug (no auth required)
+    if (request.path.startswith('/api/organizations/by-slug/') or
+        request.path.startswith('/api/tenants/by-slug/') or
+        request.path.startswith('/api/clients/by-slug/')):
         return None
 
     # Phase 54: SAML SSO public endpoints
@@ -238,7 +244,7 @@ def auth_middleware():
             return jsonify({'error': 'Missing or invalid Authorization header'}), 401
 
         token = auth_header[7:]
-        secret = ADMIN_JWT_SECRET if portal == 'admin' else TENANT_JWT_SECRET
+        secret = ADMIN_JWT_SECRET if portal == 'admin' else CLIENT_JWT_SECRET
 
         try:
             # Phase 1C: aud = logical audience name (not domain)
@@ -250,27 +256,27 @@ def auth_middleware():
                                      audience='auditgraph-tenant')
                 # Phase 1C: Verify iss matches host slug (iss = origin domain)
                 token_iss = payload.get('iss', '')
-                host_slug = _derive_tenant_slug()
+                host_slug = _derive_org_slug()
                 if host_slug and token_iss != f'{host_slug}.auditgraph.ai':
                     return jsonify({'error': 'Token issuer mismatch'}), 403
-                # Phase 1C+1D: Verify token.tenant_id matches resolved slug's tenant
-                # Phase 1D: Superadmins no longer exempt — cross-tenant only via impersonation
+                # Phase 1C+1D: Verify token org_id matches resolved slug's organization
+                # Phase 1D: Superadmins no longer exempt — cross-org only via impersonation
                 if host_slug:
-                    token_tid = payload.get('tenant_id')
+                    token_tid = payload.get('org_id') or payload.get('tenant_id')
                     if token_tid is not None:
                         try:
                             _db = Database()
                             _cur = _db.conn.cursor()
-                            _cur.execute("SELECT id FROM tenants WHERE slug = %s", (host_slug,))
+                            _cur.execute("SELECT id FROM organizations WHERE slug = %s", (host_slug,))
                             _row = _cur.fetchone()
                             _cur.close()
                             _db.close()
                             if _row and _row[0] != token_tid:
-                                return jsonify({'error': 'Token tenant mismatch'}), 403
+                                return jsonify({'error': 'Token organization mismatch'}), 403
                         except Exception as e:
                             # Phase 1D: Fail-closed — slug lookup failure blocks request
-                            logger.error(f"Tenant slug lookup failed for slug={host_slug}: {e}")
-                            return jsonify({'error': 'Tenant verification failed'}), 500
+                            logger.error(f"Organization slug lookup failed for slug={host_slug}: {e}")
+                            return jsonify({'error': 'Organization verification failed'}), 500
 
             if payload.get('type') != 'access':
                 return jsonify({'error': 'Invalid token type'}), 401
@@ -284,8 +290,9 @@ def auth_middleware():
                 'username': payload['username'],
                 'role': payload['role'],
                 'display_name': payload['display_name'],
-                'tenant_id': payload.get('tenant_id'),
-                'tenant_name': payload.get('tenant_name'),
+                # Phase 2C: Read org_id first, fall back to tenant_id for backward compat
+                'organization_id': payload.get('org_id') or payload.get('tenant_id'),
+                'org_name': payload.get('org_name') or payload.get('tenant_name'),
                 'is_superadmin': payload.get('is_superadmin', False),
                 'portal_role': payload.get('portal_role'),
                 'portal': portal,
@@ -309,42 +316,42 @@ def auth_middleware():
             return jsonify({'error': 'Invalid token'}), 401
         # NO except Exception: pass — fail-closed
 
-    # Phase 46: Superadmin tenant override via X-Tenant-Id header
-    override_tid = request.headers.get('X-Tenant-Id')
-    if override_tid and g.current_user.get('is_superadmin'):
+    # Phase 46: Superadmin org override via X-Organization-Id header (accepts X-Tenant-Id for backward compat)
+    override_oid = request.headers.get('X-Organization-Id') or request.headers.get('X-Tenant-Id')
+    if override_oid and g.current_user.get('is_superadmin'):
         try:
-            g.current_user['tenant_id'] = int(override_tid)
-            g.current_user['tenant_id_override'] = True
-            # Phase 1D: Log cross-tenant admin actions
-            logger.info(f"Superadmin cross-tenant override: user_id={g.current_user['id']} -> tenant_id={override_tid}")
+            g.current_user['organization_id'] = int(override_oid)
+            g.current_user['org_id_override'] = True
+            # Phase 1D: Log cross-org admin actions
+            logger.info(f"Superadmin cross-org override: user_id={g.current_user['id']} -> organization_id={override_oid}")
             try:
                 _log_db = Database()
                 _log_cur = _log_db.conn.cursor()
                 _log_cur.execute(
-                    """INSERT INTO activity_log (action, description, user_id, tenant_id, metadata, created_at)
+                    """INSERT INTO activity_log (action, description, user_id, organization_id, metadata, created_at)
                        VALUES (%s, %s, %s, %s, %s, NOW())""",
-                    ('cross_tenant_admin_action',
-                     f'Superadmin {g.current_user["username"]} overrode tenant context to tenant_id={override_tid}',
+                    ('cross_org_admin_action',
+                     f'Superadmin {g.current_user["username"]} overrode org context to organization_id={override_oid}',
                      g.current_user['id'],
-                     int(override_tid),
+                     int(override_oid),
                      '{}')
                 )
                 _log_db.conn.commit()
                 _log_cur.close()
                 _log_db.close()
             except Exception as e:
-                logger.warning(f"Failed to log cross-tenant admin action: {e}")
+                logger.warning(f"Failed to log cross-org admin action: {e}")
         except (ValueError, TypeError):
             pass
 
     # Phase 23: Trial expiry check — only fires on client portal
     if portal == 'client' and not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
-        tenant_id = g.current_user.get('tenant_id')
-        if tenant_id:
+        org_id = g.current_user.get('organization_id')
+        if org_id:
             try:
                 tdb = Database()
                 tcur = tdb.conn.cursor()
-                tcur.execute("SELECT plan, license_activated_at FROM tenants WHERE id = %s", (tenant_id,))
+                tcur.execute("SELECT plan, license_activated_at FROM organizations WHERE id = %s", (org_id,))
                 trow = tcur.fetchone()
                 tcur.close()
                 tdb.close()
@@ -451,12 +458,12 @@ def require_feature(feature_name):
                     db = Database()
                     cursor = db.conn.cursor()
                     cursor.execute(
-                        """INSERT INTO activity_log (action, description, user_id, tenant_id, metadata, created_at)
+                        """INSERT INTO activity_log (action, description, user_id, organization_id, metadata, created_at)
                            VALUES (%s, %s, %s, %s, %s, NOW())""",
                         ('entitlement_blocked',
                          f'Feature "{feature_name}" blocked for {err.get("current_plan", "free")} plan',
                          user.get('id'),
-                         user.get('tenant_id'),
+                         user.get('organization_id'),
                          '{}')
                     )
                     db.conn.commit()
