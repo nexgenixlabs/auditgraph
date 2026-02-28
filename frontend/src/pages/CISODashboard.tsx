@@ -919,14 +919,17 @@ function useCISOData(): { data: TenantData; loading: boolean } {
         // Changes from stats + drift
         const latestRun = stats?.latest_run || {};
         const prevRun = stats?.previous_run || {};
+        const prevTotal = prevRun.total_identities || 0;
+        const newCount = drift?.new_identities_count || stats?.new_identities_count || 0;
+        const removedCount = drift?.removed_identities_count || stats?.removed_identities_count || 0;
         d.riskMovement.changes = [
           { label: 'Critical Identities', before: prevRun.critical_count || 0, after: latestRun.critical_count || 0, direction: (latestRun.critical_count || 0) > (prevRun.critical_count || 0) ? 'up' : (latestRun.critical_count || 0) < (prevRun.critical_count || 0) ? 'down' : 'flat' },
           { label: 'High-Risk Identities', before: prevRun.high_count || 0, after: latestRun.high_count || 0, direction: (latestRun.high_count || 0) > (prevRun.high_count || 0) ? 'up' : (latestRun.high_count || 0) < (prevRun.high_count || 0) ? 'down' : 'flat' },
-          { label: 'Ghost Accounts', before: 0, after: ghostTotal, direction: ghostTotal > 0 ? 'up' : 'flat' },
-          { label: 'Zombie Personas', before: 0, after: zombieTotal, direction: zombieTotal > 0 ? 'up' : 'flat' },
-          { label: 'Total Identities', before: prevRun.total_identities || 0, after: latestRun.total_identities || 0, direction: (latestRun.total_identities || 0) > (prevRun.total_identities || 0) ? 'up' : (latestRun.total_identities || 0) < (prevRun.total_identities || 0) ? 'down' : 'flat' },
-          { label: 'New Identities', before: 0, after: drift?.new_identities_count || 0, direction: (drift?.new_identities_count || 0) > 0 ? 'up' : 'flat' },
-          { label: 'Removed', before: 0, after: drift?.removed_identities_count || 0, direction: (drift?.removed_identities_count || 0) > 0 ? 'down' : 'flat' },
+          { label: 'Ghost Accounts', before: ghostTotal, after: ghostTotal, direction: 'flat' },
+          { label: 'Zombie Personas', before: zombieTotal, after: zombieTotal, direction: 'flat' },
+          { label: 'Total Identities', before: prevTotal, after: latestRun.total_identities || 0, direction: (latestRun.total_identities || 0) > prevTotal ? 'up' : (latestRun.total_identities || 0) < prevTotal ? 'down' : 'flat' },
+          { label: 'New Identities', before: prevTotal, after: prevTotal + newCount, direction: newCount > 0 ? 'up' : 'flat' },
+          { label: 'Removed', before: prevTotal, after: prevTotal - removedCount, direction: removedCount > 0 ? 'down' : 'flat' },
         ];
         // Most changed pillar
         const worstPillar = [...d.pillars].sort((a, b) => b.score - a.score)[0];

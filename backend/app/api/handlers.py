@@ -512,6 +512,25 @@ def get_stats():
         except Exception:
             pass
 
+        # New/removed identity counts from latest drift report
+        new_identities_count = 0
+        removed_identities_count = 0
+        try:
+            cursor.execute("""
+                SELECT
+                    COALESCE(jsonb_array_length(changes->'new_identities'), 0),
+                    COALESCE(jsonb_array_length(changes->'removed_identities'), 0)
+                FROM drift_reports
+                WHERE current_run_id = ANY(%s)
+                ORDER BY created_at DESC LIMIT 1
+            """, (run_ids,))
+            drift_row = cursor.fetchone()
+            if drift_row:
+                new_identities_count = drift_row[0] or 0
+                removed_identities_count = drift_row[1] or 0
+        except Exception:
+            pass
+
         result = {
             "latest_run": latest,
             "previous_run": previous_run,
@@ -520,6 +539,8 @@ def get_stats():
             "zombie_count": zombie_count,
             "disabled_count": disabled_count,
             "deleted_count": deleted_count,
+            "new_identities_count": new_identities_count,
+            "removed_identities_count": removed_identities_count,
         }
         if workload_exposure:
             result["workload_exposure"] = workload_exposure
@@ -3589,6 +3610,8 @@ def get_attack_surface_score():
 
                 -- P4: Usage dormancy
                 COUNT(*) FILTER (WHERE activity_status IN ('stale', 'never_used')) as dormant_count,
+                COUNT(*) FILTER (WHERE activity_status IN ('stale', 'never_used', 'inactive')
+                    AND COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_system', 'managed_identity_user')) as dormant_nhi_count,
 
                 -- P5: Ownership (SPNs without owners)
                 COUNT(*) FILTER (WHERE COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_user')
@@ -3637,17 +3660,18 @@ def get_attack_surface_score():
         guest_with_roles = r[8] or 0
         federated_count = r[9] or 0
         dormant_count = r[10] or 0
-        unowned_spns = r[11] or 0
-        total_spns = max(r[12] or 1, 1)
-        tenant_scope = r[13] or 0
-        human_count = r[14] or 0
-        sp_count = r[15] or 0
-        mi_system_count = r[16] or 0
-        mi_user_count = r[17] or 0
-        nhi_guest_count = r[18] or 0
-        healthy_creds = r[19] or 0
-        has_risk_score = r[20] or 0
-        avg_risk_score = float(r[21] or 0)
+        dormant_nhi_count = r[11] or 0
+        unowned_spns = r[12] or 0
+        total_spns = max(r[13] or 1, 1)
+        tenant_scope = r[14] or 0
+        human_count = r[15] or 0
+        sp_count = r[16] or 0
+        mi_system_count = r[17] or 0
+        mi_user_count = r[18] or 0
+        nhi_guest_count = r[19] or 0
+        healthy_creds = r[20] or 0
+        has_risk_score = r[21] or 0
+        avg_risk_score = float(r[22] or 0)
 
         # P1: Effective Privilege — target < 1% at T0
         priv_pct = (t0t1_count / total_excl) * 100
@@ -4012,7 +4036,7 @@ def get_attack_surface_score():
                 "effective_privilege": {"score": round(p1, 1), "weight": 30, "detail": {"t0": t0_count, "t0t1": t0t1_count, "total": total_excl}},
                 "credential_risk": {"score": round(p2, 1), "weight": 20, "detail": {"expired": expired_creds, "expiring": expiring_creds, "with_creds": has_creds, "healthy": healthy_creds}},
                 "trust_federation": {"score": round(p3, 1), "weight": 20, "detail": {"guests": guest_count, "guest_with_roles": guest_with_roles, "federated": federated_count}},
-                "usage_dormancy": {"score": round(p4, 1), "weight": 10, "detail": {"dormant": dormant_count, "total": total_excl}},
+                "usage_dormancy": {"score": round(p4, 1), "weight": 10, "detail": {"dormant": dormant_count, "dormant_nhi": dormant_nhi_count, "total": total_excl}},
                 "ownership_governance": {"score": round(p5, 1), "weight": 10, "detail": {"unowned_spns": unowned_spns, "total_spns": total_spns}},
                 "external_exposure": {"score": round(p6, 1), "weight": 10, "detail": {"tenant_scope": tenant_scope, "total": total_excl}},
             },
