@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES, ENTERPRISE_BUNDLES,
-  CLOUD_LABELS, ACCOUNT_TIER_LABELS,
+  CLOUD_LABELS, ACCOUNT_TIER_LABELS, PLATFORM_FEE_CENTS,
   SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
   SUB_RATES_CENTS,
   formatCents,
@@ -128,6 +128,7 @@ export default function AdminTenants() {
   const [configForm, setConfigForm] = useState<CloudConfig>(DEFAULT_CLOUD_CONFIG);
   const [configTerm, setConfigTerm] = useState(0);
   const [configSaving, setConfigSaving] = useState(false);
+  const [planConfirm, setPlanConfirm] = useState<{ tenant: Tenant; newPlan: string } | null>(null);
   const [taxBillingForm, setTaxBillingForm] = useState<TaxBillingForm>(DEFAULT_TAX_BILLING);
   const [tenantBilling, setTenantBilling] = useState<{
     billing: { platform_fee_cents: number; subscription_total_cents: number; net_monthly_cents: number; active_count: number; subscriptions_by_cloud: Record<string, { count: number; revenue_cents: number }> };
@@ -163,9 +164,16 @@ export default function AdminTenants() {
     } catch { /* ignore */ }
   }
 
-  async function changePlan(t: Tenant, plan: string) {
+  function changePlan(t: Tenant, plan: string) {
+    if (plan === t.plan) return;
+    setPlanConfirm({ tenant: t, newPlan: plan });
+  }
+
+  async function confirmPlanChange() {
+    if (!planConfirm) return;
     try {
-      await api.put(`/admin/clients/${t.id}/plan`, { plan });
+      await api.put(`/admin/clients/${planConfirm.tenant.id}/plan`, { plan: planConfirm.newPlan });
+      setPlanConfirm(null);
       fetchTenants();
     } catch { /* ignore */ }
   }
@@ -430,6 +438,73 @@ export default function AdminTenants() {
           </div>
         </div>
       )}
+
+      {/* Plan change confirmation modal */}
+      {planConfirm && (() => {
+        const oldPlan = planConfirm.tenant.plan;
+        const newPlan = planConfirm.newPlan;
+        const oldFee = PLATFORM_FEE_CENTS[oldPlan] ?? 0;
+        const newFee = PLATFORM_FEE_CENTS[newPlan] ?? 0;
+        const feeDelta = newFee - oldFee;
+        const isDowngrade = (['pro', 'enterprise'].includes(oldPlan)) && (['free', 'trial'].includes(newPlan));
+        const oldLabel = ACCOUNT_TIER_LABELS[oldPlan]?.label || oldPlan;
+        const newLabel = ACCOUNT_TIER_LABELS[newPlan]?.label || newPlan;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-md p-6">
+              <h3 className="text-sm font-bold text-gray-900 mb-4">Confirm Plan Change</h3>
+              <div className="flex items-center justify-center gap-3 mb-4">
+                <span className={`px-3 py-1 rounded-lg text-xs font-bold ${
+                  ACCOUNT_TIER_LABELS[oldPlan]?.bg || 'bg-gray-100'
+                } ${ACCOUNT_TIER_LABELS[oldPlan]?.color || 'text-gray-700'}`}>{oldLabel}</span>
+                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                </svg>
+                <span className={`px-3 py-1 rounded-lg text-xs font-bold ${
+                  ACCOUNT_TIER_LABELS[newPlan]?.bg || 'bg-gray-100'
+                } ${ACCOUNT_TIER_LABELS[newPlan]?.color || 'text-gray-700'}`}>{newLabel}</span>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3 mb-4 space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Current platform fee</span>
+                  <span className="font-semibold text-gray-700">{formatCents(oldFee)}/mo</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">New platform fee</span>
+                  <span className="font-semibold text-gray-900">{formatCents(newFee)}/mo</span>
+                </div>
+                <div className="border-t border-gray-200 pt-1.5 flex justify-between">
+                  <span className="text-gray-500">Delta</span>
+                  <span className={`font-bold ${feeDelta > 0 ? 'text-blue-600' : feeDelta < 0 ? 'text-green-600' : 'text-gray-500'}`}>
+                    {feeDelta > 0 ? '+' : ''}{formatCents(feeDelta)}/mo
+                  </span>
+                </div>
+              </div>
+              {isDowngrade && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-xs text-red-700">
+                  Downgrading from <strong>{oldLabel}</strong> to <strong>{newLabel}</strong> will reduce platform features. The tenant will lose access to paid capabilities immediately.
+                </div>
+              )}
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => setPlanConfirm(null)}
+                  className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmPlanChange}
+                  className={`px-4 py-2 text-white text-sm font-semibold rounded-lg ${
+                    isDowngrade ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
+                >
+                  {isDowngrade ? 'Confirm Downgrade' : 'Confirm Change'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Edit tenant modal */}
       {showEdit && (

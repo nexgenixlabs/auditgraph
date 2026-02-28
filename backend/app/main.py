@@ -225,6 +225,7 @@ from app.api.handlers import (
     update_admin_cloud_rate,
     get_admin_billing_summary,
     get_admin_billing_events,
+    get_admin_action_log,
     get_client_billing_summary,
     get_client_usage_metering,
     get_platform_settings,
@@ -615,6 +616,11 @@ def create_app():
     @require_portal_access()
     def admin_billing_events():
         return get_admin_billing_events()
+
+    @app.get("/api/admin/action-log")
+    @require_portal_access()
+    def admin_action_log():
+        return get_admin_action_log()
 
     @app.get("/api/client/billing/summary")
     @require_role('admin', 'security_admin')

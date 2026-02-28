@@ -22,6 +22,9 @@ interface BillingSummary {
     plan: string;
     active_subs: number;
     net_monthly_cents: number;
+    platform_fee_cents: number;
+    subscription_total_cents: number;
+    discount_pct: number;
   }>;
 }
 
@@ -366,6 +369,9 @@ export default function AdminBilling() {
               <th className="px-4 py-2.5">Activated</th>
               <th className="px-4 py-2.5">Expires</th>
               <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5 text-right">Platform Fee</th>
+              <th className="px-4 py-2.5 text-right">Sub Revenue</th>
+              <th className="px-4 py-2.5 text-right">Discount</th>
               <th className="px-4 py-2.5 text-right">MRR</th>
             </tr>
           </thead>
@@ -411,11 +417,20 @@ export default function AdminBilling() {
                         {t.enabled ? 'Active' : 'Disabled'}
                       </span>
                     </td>
+                    <td className="px-4 py-2.5 text-right text-gray-700">{formatCents(tb?.platform_fee_cents ?? 0)}</td>
+                    <td className="px-4 py-2.5 text-right text-gray-700">{formatCents(tb?.subscription_total_cents ?? 0)}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      {(tb?.discount_pct ?? 0) > 0 ? (
+                        <span className="text-green-600 font-semibold">-{tb!.discount_pct}%</span>
+                      ) : (
+                        <span className="text-gray-400">&mdash;</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatCents(mrr)}</td>
                   </tr>
                   {isExpanded && (
                     <tr>
-                      <td colSpan={10} className="px-4 py-3 bg-gray-50/80 border-t border-b border-gray-200">
+                      <td colSpan={13} className="px-4 py-3 bg-gray-50/80 border-t border-b border-gray-200">
                         {expandLoading ? (
                           <div className="text-xs text-gray-400 py-2">Loading billing breakdown...</div>
                         ) : expandedBilling ? (

@@ -10209,6 +10209,14 @@ def update_tenant_handler(tenant_id):
                 {'tenant_id': tenant_id, 'updates': list(updates.keys())})
         except Exception:
             pass
+        try:
+            user = getattr(g, 'current_user', None)
+            user_id = user.get('id') if user else None
+            db.log_admin_audit(user_id, 'tenant_updated', target_tenant_id=tenant_id,
+                               details={'fields_changed': list(updates.keys())},
+                               ip_address=request.remote_addr)
+        except Exception:
+            pass
         return jsonify({'tenant': tenant, 'message': 'Tenant updated'})
     finally:
         db.close()
@@ -10565,9 +10573,16 @@ def get_login_sessions():
             logout_types = ('auth_logout', 'admin_logout')
 
         all_types = login_types + logout_types
+        tenant_id_filter = request.args.get('tenant_id', type=int)
 
         # Fetch recent login + logout events with user details
-        cursor.execute("""
+        where_clause = "WHERE a.action_type = ANY(%s)"
+        query_params: list = [list(all_types)]
+        if tenant_id_filter:
+            where_clause += " AND a.tenant_id = %s"
+            query_params.append(tenant_id_filter)
+        query_params.append(limit * 3)
+        cursor.execute(f"""
             SELECT a.id, a.action_type, a.description, a.metadata, a.created_at,
                    a.user_id, a.tenant_id,
                    u.username, u.display_name, u.role,
@@ -10575,10 +10590,10 @@ def get_login_sessions():
             FROM activity_log a
             LEFT JOIN users u ON u.id = a.user_id
             LEFT JOIN tenants t ON t.id = a.tenant_id
-            WHERE a.action_type = ANY(%s)
+            {where_clause}
             ORDER BY a.created_at DESC
             LIMIT %s
-        """, [list(all_types), limit * 3])  # fetch extra to pair logouts with logins
+        """, query_params)  # fetch extra to pair logouts with logins
         rows = [dict(r) for r in cursor.fetchall()]
 
         # Serialize timestamps
@@ -17524,6 +17539,10 @@ def update_admin_tenant_plan(tenant_id):
         db.log_billing_event(tenant_id, 'plan_change', 'plan',
                              old_plan, new_plan, user_id,
                              {'old_fee': tenant.get('platform_fee_cents'), 'new_fee': new_fee})
+        db.log_admin_audit(user_id, 'plan_change', target_tenant_id=tenant_id,
+                           details={'old_plan': old_plan, 'new_plan': new_plan,
+                                    'old_fee': tenant.get('platform_fee_cents'), 'new_fee': new_fee},
+                           ip_address=request.remote_addr)
 
         return jsonify({'tenant': updated, 'message': f'Plan updated to {new_plan}'})
     finally:
@@ -17577,6 +17596,9 @@ def update_admin_tenant_commitment(tenant_id):
         db.log_billing_event(tenant_id, 'commitment_change', 'subscription_term',
                              old_term, term, user_id,
                              {'old_discount': tenant.get('discount_pct'), 'new_discount': discount_pct})
+        db.log_admin_audit(user_id, 'commitment_change', target_tenant_id=tenant_id,
+                           details={'old_term': old_term, 'new_term': term, 'discount_pct': discount_pct},
+                           ip_address=request.remote_addr)
 
         return jsonify({'tenant': updated, 'message': f'Commitment updated to {term}-year term'})
     finally:
@@ -17604,6 +17626,9 @@ def update_admin_tenant_platform_fee(tenant_id):
 
         db.log_billing_event(tenant_id, 'platform_fee_override', 'platform_fee_cents',
                              old_fee, fee_cents, user_id)
+        db.log_admin_audit(user_id, 'platform_fee_override', target_tenant_id=tenant_id,
+                           details={'old_fee': old_fee, 'new_fee': fee_cents},
+                           ip_address=request.remote_addr)
 
         return jsonify({'tenant': updated, 'message': 'Platform fee updated'})
     finally:
@@ -17634,6 +17659,9 @@ def update_admin_cloud_rate(tenant_id, cloud):
         db.log_billing_event(tenant_id, 'rate_override', f'{cloud}_rate_cents',
                              None, rate_cents, user_id,
                              {'cloud': cloud, 'updated_subscriptions': updated_count})
+        db.log_admin_audit(user_id, 'rate_override', target_tenant_id=tenant_id,
+                           details={'cloud': cloud, 'rate_cents': rate_cents, 'updated_count': updated_count},
+                           ip_address=request.remote_addr)
 
         return jsonify({'updated': updated_count, 'message': f'{cloud} rate updated to {rate_cents} cents'})
     finally:
@@ -17675,6 +17703,9 @@ def get_admin_billing_summary():
                 'plan': plan,
                 'active_subs': billing['active_count'],
                 'net_monthly_cents': net,
+                'platform_fee_cents': billing['platform_fee_cents'],
+                'subscription_total_cents': billing['subscription_total_cents'],
+                'discount_pct': billing['discount_pct'],
             })
 
         active_tenants = sum(1 for t in tenants if t.get('enabled'))
@@ -17701,6 +17732,82 @@ def get_admin_billing_events():
         offset = request.args.get('offset', 0, type=int)
         events = db.get_billing_events(tenant_id=tenant_id, limit=min(limit, 200), offset=offset)
         return jsonify({'events': events})
+    finally:
+        db.close()
+
+
+def get_admin_action_log():
+    """GET /api/admin/action-log — unified admin audit + billing events."""
+    db = Database()
+    try:
+        source = request.args.get('source', 'all')  # admin_audit | billing | all
+        action = request.args.get('action', '')
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        parts = []
+        params = []
+
+        if source in ('all', 'admin_audit'):
+            audit_where = ''
+            if action:
+                audit_where = 'WHERE a.action = %s'
+                params.append(action)
+            parts.append(f"""
+                SELECT a.id, a.action AS action_type, 'admin_audit' AS source,
+                       a.admin_user_id, u.username AS admin_username,
+                       a.target_tenant_id, t.name AS target_tenant_name,
+                       a.details, a.ip_address, a.created_at
+                FROM admin_audit_log a
+                LEFT JOIN users u ON u.id = a.admin_user_id
+                LEFT JOIN tenants t ON t.id = a.target_tenant_id
+                {audit_where}
+            """)
+
+        if source in ('all', 'billing'):
+            billing_where = ''
+            if action:
+                billing_where = 'WHERE b.event_type = %s'
+                params.append(action)
+            parts.append(f"""
+                SELECT b.id, b.event_type AS action_type, 'billing' AS source,
+                       b.changed_by AS admin_user_id, u.username AS admin_username,
+                       b.tenant_id AS target_tenant_id, t.name AS target_tenant_name,
+                       jsonb_build_object('field_changed', b.field_changed,
+                                          'old_value', b.old_value,
+                                          'new_value', b.new_value,
+                                          'metadata', b.metadata) AS details,
+                       NULL AS ip_address, b.created_at
+                FROM billing_events b
+                LEFT JOIN users u ON u.id = b.changed_by
+                LEFT JOIN tenants t ON t.id = b.tenant_id
+                {billing_where}
+            """)
+
+        if not parts:
+            return jsonify({'events': [], 'limit': limit, 'offset': offset})
+
+        query = ' UNION ALL '.join(parts)
+        query += ' ORDER BY created_at DESC LIMIT %s OFFSET %s'
+        params.extend([limit, offset])
+
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        for row in rows:
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+            if row.get('details') and not isinstance(row['details'], dict):
+                import json as _json
+                try:
+                    row['details'] = _json.loads(row['details']) if isinstance(row['details'], str) else row['details']
+                except Exception:
+                    pass
+
+        cursor.close()
+        return jsonify({'events': rows, 'limit': limit, 'offset': offset})
     finally:
         db.close()
 

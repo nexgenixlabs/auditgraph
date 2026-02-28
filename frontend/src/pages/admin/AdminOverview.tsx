@@ -240,7 +240,7 @@ export default function AdminOverview() {
               <th className="px-4 py-2.5">Term</th>
               <th className="px-4 py-2.5">Cloud Providers</th>
               <th className="px-4 py-2.5">Status</th>
-              <th className="px-4 py-2.5">Last Scan</th>
+              <th className="px-4 py-2.5">Last Snapshot</th>
               <th className="px-4 py-2.5">License Activated</th>
               <th className="px-4 py-2.5">License Expiry</th>
             </tr>

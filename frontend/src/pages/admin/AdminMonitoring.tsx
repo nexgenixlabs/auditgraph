@@ -61,21 +61,25 @@ export default function AdminMonitoring() {
   const [system, setSystem] = useState<SystemMetrics | null>(null);
   const [sessions, setSessions] = useState<LoginSession[]>([]);
   const [portalFilter, setPortalFilter] = useState<'' | 'admin' | 'client'>('admin');
+  const [tenantFilter, setTenantFilter] = useState<number | ''>('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const sessionParams = new URLSearchParams({ limit: '50' });
+    if (portalFilter) sessionParams.set('portal', portalFilter);
+    if (tenantFilter) sessionParams.set('tenant_id', String(tenantFilter));
     Promise.all([
       api.get('/analytics/clients').catch(() => ({ tenants: [] })),
       api.get('/health').catch(() => null),
       api.get('/system/health').catch(() => null),
-      api.get(`/analytics/login-sessions?limit=50${portalFilter ? `&portal=${portalFilter}` : ''}`).catch(() => ({ sessions: [] })),
+      api.get(`/analytics/login-sessions?${sessionParams}`).catch(() => ({ sessions: [] })),
     ]).then(([analytics, healthData, systemData, sessionData]: any[]) => {
       setMetrics(analytics.tenants || []);
       setHealth(healthData);
       if (systemData?.api) setSystem(systemData.api);
       setSessions(sessionData.sessions || []);
     }).finally(() => setLoading(false));
-  }, [portalFilter]);
+  }, [portalFilter, tenantFilter]);
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading monitoring data...</div>;
 
@@ -84,9 +88,24 @@ export default function AdminMonitoring() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h2 className="text-xl font-bold text-gray-900">Platform Monitoring</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Infrastructure health, snapshot status, and login activity</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-gray-900">Platform Monitoring</h2>
+          <p className="text-sm text-gray-500 mt-0.5">Infrastructure health, snapshot status, and login activity</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-500 font-medium">Tenant:</label>
+          <select
+            value={tenantFilter}
+            onChange={e => setTenantFilter(e.target.value ? parseInt(e.target.value) : '')}
+            className="text-xs border border-gray-200 rounded px-2 py-1.5"
+          >
+            <option value="">All Tenants</option>
+            {metrics.map(t => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Platform Health Cards */}
@@ -216,7 +235,7 @@ export default function AdminMonitoring() {
       <div className="bg-white border border-gray-200 rounded-lg p-4">
         <h3 className="text-sm font-semibold text-gray-800 mb-3">Snapshot Freshness</h3>
         <div className="space-y-2">
-          {metrics.map(t => {
+          {(tenantFilter ? metrics.filter(t => t.id === tenantFilter) : metrics).map(t => {
             const hours = t.last_discovery ? (Date.now() - new Date(t.last_discovery).getTime()) / 3600000 : Infinity;
             const stale = hours > 24;
             const critical = hours > 72;

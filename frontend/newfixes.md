@@ -396,3 +396,160 @@ Also removed `PostureScore` re-export from `components/dashboard/index.ts`.
 - **No broken imports**: all deleted files verified to have zero importers
 - **No logic changes**: only deletions of confirmed-dead code
 - **No rendering changes**: no component that was actually rendered was touched
+
+---
+
+# Phase 19 — Admin Governance Hardening
+
+**Date**: 2026-02-27
+
+---
+
+## Summary
+
+Enterprise trust, auditability, and billing transparency improvements for the admin portal (`/admin`). Adds confirmation modals for revenue-impacting changes, a unified Admin Action Log page, enhanced billing columns, and tenant-scoped monitoring.
+
+**Files modified**: 8 | **Files created**: 1
+
+---
+
+## Task 1 — Replace "Last Scan" → "Last Snapshot"
+
+| File | Line | Old | New |
+|------|------|-----|-----|
+| `pages/admin/AdminOverview.tsx` | 243 | `Last Scan` | `Last Snapshot` |
+
+Only remaining user-facing instance. `AdminSLA.tsx` internal `scan_stats` variable is acceptable (UI already says "Snapshots").
+
+---
+
+## Task 2 — Admin Audit Logging on All Mutations
+
+Added `db.log_admin_audit()` calls after existing `db.log_billing_event()` calls in `backend/app/api/handlers.py`.
+
+| Handler | Action String | Details Logged |
+|---------|---------------|----------------|
+| `update_admin_tenant_plan` | `plan_change` | `{old_plan, new_plan, old_fee, new_fee}` |
+| `update_admin_tenant_commitment` | `commitment_change` | `{old_term, new_term, discount_pct}` |
+| `update_admin_tenant_platform_fee` | `platform_fee_override` | `{old_fee, new_fee}` |
+| `update_admin_cloud_rate` | `rate_override` | `{cloud, rate_cents, updated_count}` |
+| `update_tenant_handler` | `tenant_updated` | `{fields_changed: [...]}` |
+
+All calls include `ip_address=request.remote_addr` for compliance traceability.
+
+---
+
+## Task 3 — Plan Change Confirmation Modal
+
+**File**: `frontend/src/pages/admin/AdminTenants.tsx`
+
+### Changes:
+- Added `PLATFORM_FEE_CENTS` to imports from `constants/pricing.ts`
+- Added state: `planConfirm: {tenant, newPlan} | null`
+- `changePlan()` → sets `planConfirm` state (no longer calls API directly)
+- New `confirmPlanChange()` → calls `api.put()`, clears state, refreshes
+
+### Modal Features:
+- Current plan badge → arrow → New plan badge
+- Platform fee delta using `PLATFORM_FEE_CENTS` (`{free:0, trial:0, pro:20000, enterprise:50000}`)
+- Fee delta display with color coding (blue=increase, green=decrease)
+- Downgrade warning (red) when going from pro/enterprise → free/trial
+- Cancel + Confirm buttons (red "Confirm Downgrade" for downgrades)
+- Backdrop blur overlay (`bg-black/40 backdrop-blur-sm`)
+
+---
+
+## Task 4 — Enhanced Billing Table Columns
+
+### Backend: `backend/app/api/handlers.py`
+In `get_admin_billing_summary()`, expanded `tenant_billings.append()` to include:
+- `platform_fee_cents`
+- `subscription_total_cents`
+- `discount_pct`
+
+### Frontend: `frontend/src/pages/admin/AdminBilling.tsx`
+- Updated `BillingSummary.tenants` interface with 3 new fields
+- Added 3 columns to Organization Licenses table header: **Platform Fee**, **Sub Revenue**, **Discount**
+- Body cells: `formatCents(tb.platform_fee_cents)`, `formatCents(tb.subscription_total_cents)`, discount as `-X%` or em-dash
+- Updated expanded row `colSpan` from 10 → 13
+
+---
+
+## Task 5 — Unified Admin Action Log Page
+
+### Backend: `backend/app/api/handlers.py`
+New handler `get_admin_action_log()`:
+- `UNION ALL` query across `admin_audit_log` + `billing_events`
+- JOINs `users` (admin username) + `tenants` (target tenant name)
+- Filters: `source` (admin_audit|billing|all), `action` (specific type)
+- Pagination: `limit` (max 200), `offset`
+- Returns `{events: [...], limit, offset}`
+
+### Backend: `backend/app/main.py`
+- Registered route: `GET /api/admin/action-log` → `require_portal_access()`
+- Added import for `get_admin_action_log`
+
+### Frontend: `frontend/src/pages/admin/AdminActionLog.tsx` (NEW — 165 lines)
+- Fetches unified log from `/api/admin/action-log`
+- Table columns: Timestamp, Admin User, Action, Source, Target Tenant, Details, IP
+- Filter buttons: All / Admin / Billing source filter
+- Pagination via "Load More" button
+- Action badge colors:
+  - `plan_change` = blue
+  - `password_reset` = red
+  - `platform_fee_override` / `rate_override` = orange / cyan
+  - `commitment_change` = purple
+  - `invoice_*` = green
+  - `tenant_updated` = gray
+- Source badges: Admin (purple) / Billing (green)
+- `summarizeDetails()` extracts human-readable summary from JSONB details
+
+### AdminConsole Integration:
+- `frontend/src/pages/admin/index.ts` — added `AdminActionLog` export
+- `frontend/src/pages/AdminConsole.tsx`:
+  - Added import for `AdminActionLog`
+  - Added nav item: `action-log` with clipboard icon, `allowedRoles: ['superadmin', 'poweradmin', 'reader']`
+  - Added route: `<Route path="action-log" element={<AdminActionLog />} />`
+
+---
+
+## Task 6 — Monitoring Tenant Filter
+
+### Backend: `backend/app/api/handlers.py`
+In `get_login_sessions()`:
+- Added `tenant_id = request.args.get('tenant_id', type=int)` parameter
+- Conditionally appends `AND a.tenant_id = %s` to WHERE clause
+
+### Frontend: `frontend/src/pages/admin/AdminMonitoring.tsx`
+- Added state: `tenantFilter: number | ''`
+- Added tenant dropdown in header (populated from existing `metrics` tenant list)
+- Snapshot freshness section filtered client-side: `tenantFilter ? metrics.filter(t => t.id === tenantFilter) : metrics`
+- Login sessions API call includes `tenant_id` query param when filter is set
+- `tenantFilter` added to `useEffect` dependency array
+
+---
+
+## Complete File List
+
+### Modified (8 files):
+1. `frontend/src/pages/admin/AdminOverview.tsx` — "Last Scan" → "Last Snapshot"
+2. `backend/app/api/handlers.py` — audit logging + billing summary expansion + action log handler + login session filter
+3. `backend/app/main.py` — action-log route registration + import
+4. `frontend/src/pages/admin/AdminTenants.tsx` — plan confirmation modal
+5. `frontend/src/pages/admin/AdminBilling.tsx` — 3 new billing columns
+6. `frontend/src/pages/admin/AdminMonitoring.tsx` — tenant filter dropdown
+7. `frontend/src/pages/AdminConsole.tsx` — action-log nav + route
+8. `frontend/src/pages/admin/index.ts` — AdminActionLog export
+
+### Created (1 file):
+1. `frontend/src/pages/admin/AdminActionLog.tsx` — unified action log page
+
+---
+
+## Confirmation
+
+- **`npx tsc --noEmit`**: zero errors
+- **`grep "Last Scan" frontend/src/`**: zero results
+- **No logic changes to existing features** — all additions are additive
+- **No new database tables** — uses existing `admin_audit_log` + `billing_events` tables
+- **No new dependencies** — all imports from existing project modules
