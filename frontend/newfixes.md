@@ -399,7 +399,7 @@ Also removed `PostureScore` re-export from `components/dashboard/index.ts`.
 
 ---
 
-# Phase 19 — Admin Governance Hardening
+# Phase 19A — Admin Governance Hardening
 
 **Date**: 2026-02-27
 
@@ -556,7 +556,7 @@ In `get_login_sessions()`:
 
 ---
 
-# Phase 20 — Authentication & Authorization Isolation Audit
+# Phase 19B — Authentication & Authorization Isolation Audit
 
 **Date**: 2026-02-27
 **Type**: Security audit (no code changes)
