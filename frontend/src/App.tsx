@@ -56,13 +56,11 @@ import WorkloadIdentities from './pages/WorkloadIdentities';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import RbacHygiene from './pages/RbacHygiene';
-import Invoices from './pages/Invoices';
 import AccessGraph from './pages/AccessGraph';
 import EffectiveAccessExplorer from './pages/EffectiveAccessExplorer';
 import SensitiveDataAccess from './pages/SensitiveDataAccess';
 import CISODashboard from './pages/CISODashboard';
 import RemediationCenter from './pages/RemediationCenter';
-import CloudIntegrationGuide from './pages/CloudIntegrationGuide';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
 import Documentation from './pages/Documentation';
@@ -262,7 +260,6 @@ function AppContent() {
                       : <ErrorBoundary><Dashboard /></ErrorBoundary>
                   } />
                   <Route path="/remediation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationCenter /></ErrorBoundary>} />
-                  <Route path="/integration-guide" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><CloudIntegrationGuide /></ErrorBoundary>} />
                   <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
@@ -291,7 +288,6 @@ function AppContent() {
                   <Route path="/key-vaults" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><KeyVaultSecurity /></ErrorBoundary>} />
                   <Route path="/storage-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><StorageSecurity /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
-                  <Route path="/invoices" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Invoices /></ErrorBoundary>} />
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><Settings /></ErrorBoundary>
