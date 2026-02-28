@@ -6,6 +6,7 @@ from app.entitlements.service import (
     enforce_subscription_limit,
     get_org_entitlements,
     track_usage,
+    invalidate_entitlement_cache,
 )
 from app.entitlements.decorator import require_entitlement
 
@@ -16,5 +17,6 @@ __all__ = [
     'enforce_subscription_limit',
     'get_org_entitlements',
     'track_usage',
+    'invalidate_entitlement_cache',
     'require_entitlement',
 ]

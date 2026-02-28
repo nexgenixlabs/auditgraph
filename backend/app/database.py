@@ -7389,6 +7389,7 @@ class Database:
     _organizations_ensured = False
     _migration_018_ensured = False
     _migration_019_ensured = False
+    _migration_020_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -7785,8 +7786,87 @@ class Database:
         Database._migration_019_ensured = True
 
     def _ensure_entitlements_tables(self):
-        """Ensure entitlements tables exist (calls migration 019). Idempotent."""
+        """Ensure entitlements tables exist (calls migrations 019+020). Idempotent."""
         self._run_migration_019_entitlements()
+        self._run_migration_020_entitlement_hardening()
+
+    # ── Migration 020: Entitlement Hardening ───────────────────────────────────
+
+    def _run_migration_020_entitlement_hardening(self):
+        """Phase 3A.1: Usage counters table + enforcement_mode column.
+        Idempotent — uses IF NOT EXISTS / ADD COLUMN IF NOT EXISTS. Runs as admin (BYPASSRLS)."""
+        if Database._migration_020_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # 1. Add enforcement_mode to organizations
+        cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS enforcement_mode VARCHAR(20) NOT NULL DEFAULT 'strict'")
+        self.conn.commit()
+
+        # 2. Create organization_usage_counters table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS organization_usage_counters (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                resource_type VARCHAR(50) NOT NULL,
+                current_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(organization_id, resource_type)
+            )
+        """)
+        self.conn.commit()
+
+        # 3. RLS policies + auto-fill trigger
+        tbl = 'organization_usage_counters'
+        cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+        for suffix in ('sel', 'ins', 'upd', 'del'):
+            cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON {tbl}")
+        cursor.execute(f"""
+            DO $$ BEGIN
+                CREATE POLICY org_strict_sel ON {tbl} FOR SELECT
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_ins ON {tbl} FOR INSERT
+                    WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+                CREATE POLICY org_strict_del ON {tbl} FOR DELETE
+                    USING (organization_id = current_setting('app.current_organization_id', true)::integer);
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """)
+        cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}")
+        cursor.execute(f"""
+            DO $$ BEGIN
+                CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
+                BEGIN
+                    IF NEW.organization_id IS NULL THEN
+                        NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
+                    END IF;
+                    IF NEW.organization_id IS NULL THEN
+                        RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $fn$ LANGUAGE plpgsql;
+
+                CREATE TRIGGER trg_auto_organization_id
+                    BEFORE INSERT ON {tbl}
+                    FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """)
+        self.conn.commit()
+
+        # 4. Grant app user access
+        try:
+            cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {tbl} TO auditgraph_app")
+            cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE {tbl}_id_seq TO auditgraph_app")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
+        cursor.close()
+        Database._migration_020_ensured = True
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 

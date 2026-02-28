@@ -344,6 +344,26 @@ def auth_middleware():
         except (ValueError, TypeError):
             pass
 
+    # Phase 3A.1: Global plan_status enforcement — suspended/cancelled orgs blocked
+    if not g.current_user.get('is_superadmin'):
+        _ps_org_id = g.current_user.get('organization_id')
+        if _ps_org_id:
+            try:
+                _ps_db = Database()
+                _ps_cur = _ps_db.conn.cursor()
+                _ps_cur.execute("SELECT plan_status FROM organizations WHERE id = %s", (_ps_org_id,))
+                _ps_row = _ps_cur.fetchone()
+                _ps_cur.close()
+                _ps_db.close()
+                if _ps_row and _ps_row[0] in ('suspended', 'cancelled'):
+                    return jsonify({
+                        'error': f'Organization account is {_ps_row[0]}. Contact support to restore access.',
+                        'plan_status': _ps_row[0],
+                        'account_blocked': True,
+                    }), 403
+            except Exception:
+                pass  # Don't block on lookup failure
+
     # Phase 23: Trial expiry check — only fires on client portal
     if portal == 'client' and not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
         org_id = g.current_user.get('organization_id')

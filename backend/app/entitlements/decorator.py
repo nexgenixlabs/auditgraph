@@ -1,15 +1,18 @@
 """Route decorator for entitlement enforcement."""
 
+import logging
 from functools import wraps
 from flask import g, jsonify
 
 from app.database import Database
 
+logger = logging.getLogger(__name__)
+
 
 def require_entitlement(feature_key):
     """Decorator that gates a route behind a plan feature.
 
-    - Superadmins bypass all gates.
+    - Superadmins bypass all gates (logged for audit trail).
     - Logs 'entitlement_blocked' to activity_log on denial.
     - Uses the entitlements engine (per-org overrides, trial expiry, plan check).
     """
@@ -20,8 +23,12 @@ def require_entitlement(feature_key):
             if not user:
                 return jsonify({'error': 'Authentication required'}), 401
 
-            # Superadmins bypass all feature gates
+            # Superadmins bypass all feature gates — log for audit trail
             if user.get('is_superadmin'):
+                logger.info(
+                    f"[entitlement_bypass] superadmin user_id={user.get('id')} "
+                    f"bypassed gate for feature={feature_key}"
+                )
                 return f(*args, **kwargs)
 
             organization_id = user.get('organization_id')

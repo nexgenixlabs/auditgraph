@@ -1407,46 +1407,44 @@ Request arrives
 
 ---
 
-## Phase 2E — RLS Transaction Scope Hardening
+    ## Phase 2E — RLS Transaction Scope Hardening
 
-**Date**: 2026-02-28
-**Scope**: Convert session-level RLS context to transaction-scoped context
-**Status**: IMPLEMENTED — zero behavior change, future-proofed against connection pooling
+    **Date**: 2026-02-28
+    **Scope**: Convert session-level RLS context to transaction-scoped context
+    **Status**: IMPLEMENTED — zero behavior change, future-proofed against connection pooling
 
-### Change
+    ### Change
 
-**File**: `backend/app/database.py`, method `set_organization_context()` (lines 91–104)
+    **File**: `backend/app/database.py`, method `set_organization_context()` (lines 91–104)
 
-```python
-# Before (Phase 2D finding):
-set_config('app.current_organization_id', %s, FALSE)   # session-level
+    ```python
+    # Before (Phase 2D finding):
+    set_config('app.current_organization_id', %s, FALSE)   # session-level
 
-# After (Phase 2E hardening):
-set_config('app.current_organization_id', %s, TRUE)    # transaction-scoped
-```
+    # After (Phase 2E hardening):
+    set_config('app.current_organization_id', %s, TRUE)    # transaction-scoped
+    ```
 
-### Why This Is Safe (No Behavior Change)
+    ### Why This Is Safe (No Behavior Change)
 
-1. **psycopg2 `autocommit` is `False` by default** — every connection starts in an implicit transaction. Confirmed: no `autocommit=True` anywhere in the codebase.
-2. **`is_local=TRUE` scopes the variable to the current transaction** — it auto-resets on COMMIT or ROLLBACK.
-3. **Each request creates a fresh `Database()` → fresh connection → fresh implicit transaction** — the variable is set at the start of the transaction and all queries run within that same transaction.
-4. **`db.close()` in 290 `finally:` blocks** still closes the connection, which also destroys any transaction state.
+    1. **psycopg2 `autocommit` is `False` by default** — every connection starts in an implicit transaction. Confirmed: no `autocommit=True` anywhere in the codebase.
+    2. **`is_local=TRUE` scopes the variable to the current transaction** — it auto-resets on COMMIT or ROLLBACK.
+    3. **Each request creates a fresh `Database()` → fresh connection → fresh implicit transaction** — the variable is set at the start of the transaction and all queries run within that same transaction.
+    4. **`db.close()` in 290 `finally:` blocks** still closes the connection, which also destroys any transaction state.
 
-### What This Prevents
+    ### What This Prevents
 
-If connection pooling (pgbouncer, psycopg pool, SQLAlchemy) is ever introduced:
-- **Before (is_local=FALSE)**: Org context would persist on the pooled connection and leak to the next request → **cross-tenant data exposure**
-- **After (is_local=TRUE)**: Org context auto-resets when the transaction ends → **safe even with pooling**
+    If connection pooling (pgbouncer, psycopg pool, SQLAlchemy) is ever introduced:
+    - **Before (is_local=FALSE)**: Org context would persist on the pooled connection and leak to the next request → **cross-tenant data exposure**
+    - **After (is_local=TRUE)**: Org context auto-resets when the transaction ends → **safe even with pooling**
 
-### Verification
+    ### Verification
 
-- [x] `set_config` uses `is_local=TRUE` (confirmed via source inspection)
-- [x] `autocommit` is not set anywhere (psycopg2 default = False)
-- [x] 36/36 tests pass (`test_auth_boundary.py` + `test_org_isolation.py`)
-- [x] TypeScript compiles clean (`npx tsc --noEmit`)
-- [x] Python imports work (`from app.database import Database`)
-
----
+    - [x] `set_config` uses `is_local=TRUE` (confirmed via source inspection)
+    - [x] `autocommit` is not set anywhere (psycopg2 default = False)
+    - [x] 36/36 tests pass (`test_auth_boundary.py` + `test_org_isolation.py`)
+    - [x] TypeScript compiles clean (`npx tsc --noEmit`)
+    - [x] Python imports work (`from app.database import Database`)
 
 ## Phase 3A — Organization Entitlement Engine Foundation
 
@@ -1514,3 +1512,80 @@ Replaces the ad-hoc `TIER_LIMITS` dict + `check_feature_gate()` with a database-
 - [x] 44/44 tests pass (`test_auth_boundary.py` + `test_org_isolation.py` + `test_entitlements.py`)
 - [x] Python imports work (`from app.entitlements.service import is_feature_enabled`)
 - [x] All SOAR write routes protected (`grep require_feature main.py | grep soar` → 5 hits)
+
+---
+
+## Phase 3A.1 — Entitlement Hardening & Enforcement Stabilization
+
+### Overview
+
+Hardens the Phase 3A entitlement engine with atomic usage counters, enforcement modes, global plan_status blocking, in-memory caching, and superadmin bypass audit logging.
+
+### Schema (Migration 020)
+
+- **`organizations`** table gains: `enforcement_mode` VARCHAR(20) DEFAULT 'strict' — controls how limit violations are handled (`strict` | `allow_overage` | `monitor_only`)
+- **`organization_usage_counters`** — atomic counter table (organization_id, resource_type, current_count, updated_at). UNIQUE(organization_id, resource_type). RLS-enabled with auto-fill trigger.
+
+### Enforcement Modes
+
+| Mode | Feature gate | Subscription limit | Behavior |
+|------|-------------|-------------------|----------|
+| `strict` | Blocks with 403 | Blocks activation | Default — hard enforcement |
+| `allow_overage` | Allows (logged) | Allows (logged) | Soft enforcement — lets org exceed limits but logs for billing |
+| `monitor_only` | Allows (logged) | Allows (logged) | Observation only — no blocking, all usage logged |
+
+### In-Memory Entitlement Cache
+
+- TTL = 60 seconds per entry, keyed by `(org_id, feature_key)`
+- Thread-safe (`threading.Lock`)
+- `invalidate_entitlement_cache(org_id=None, feature_key=None)` — flush single entry, all entries for an org, or entire cache
+- Avoids repeated DB queries for the same feature check within a request burst
+
+### Global plan_status Enforcement
+
+Added to `auth_middleware()` before the trial expiry check:
+- Non-superadmin users with `plan_status` = `suspended` or `cancelled` receive HTTP 403 with `account_blocked: true`
+- Superadmins are exempt (can still manage suspended orgs)
+- Fail-open on DB lookup errors (don't block on transient failures)
+
+### Superadmin Bypass Logging
+
+`require_entitlement` decorator now logs `[entitlement_bypass]` via Python logger when a superadmin bypasses a feature gate, including user_id and feature_key for audit trail.
+
+### Atomic Usage Counters
+
+`track_usage()` now atomically updates `organization_usage_counters` via UPSERT:
+- `action='activated'` / `action='added'` → delta +1
+- `action='deactivated'` / `action='removed'` → delta -1
+- `enforce_subscription_limit()` reads from counters first, falls back to live `COUNT(*)` if no counter row exists
+- `GREATEST(0, ...)` prevents negative counts
+
+### Tests (8 new tests, 16 total in test_entitlements.py)
+
+| # | Test | What it verifies |
+|---|------|-----------------|
+| 9 | `test_suspended_org_blocked_globally` | auth.py source contains plan_status/suspended/cancelled/account_blocked |
+| 10 | `test_counter_increments_on_activation` | track_usage('activated') UPSERTs counter with delta=+1 |
+| 11 | `test_counter_decrements_on_deactivation` | track_usage('deactivated') UPSERTs counter with delta=-1 |
+| 12 | `test_allow_overage_allows_but_logs` | enforcement_mode='allow_overage' allows blocked feature |
+| 13 | `test_monitor_only_allows_without_block` | enforcement_mode='monitor_only' allows blocked feature |
+| 14 | `test_cache_hit_avoids_duplicate_db_query` | Second call uses cache, no new DB cursor |
+| 15 | `test_cache_invalidation_works` | After invalidation, DB is queried again |
+| 16 | `test_superadmin_bypass_logging` | Decorator source contains entitlement_bypass + logger |
+
+### Files Changed
+
+| File | Action |
+|------|--------|
+| `backend/app/database.py` | Migration 020 + `_run_migration_020_entitlement_hardening()` |
+| `backend/app/entitlements/service.py` | Cache, counters, enforcement_mode, atomic track_usage |
+| `backend/app/entitlements/decorator.py` | Superadmin bypass logging |
+| `backend/app/entitlements/__init__.py` | Export `invalidate_entitlement_cache` |
+| `backend/app/api/auth.py` | Global plan_status enforcement in auth_middleware |
+| `backend/tests/test_entitlements.py` | 8 new tests (16 total) |
+
+### Verification
+
+- [x] 52/52 tests pass (`test_auth_boundary.py` + `test_org_isolation.py` + `test_entitlements.py`)
+- [x] Python imports work (`from app.entitlements.service import invalidate_entitlement_cache`)
+- [x] auth_middleware checks plan_status before all API requests
