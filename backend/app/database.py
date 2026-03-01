@@ -7439,6 +7439,9 @@ class Database:
                     IF EXISTS (
                         SELECT 1 FROM information_schema.columns
                         WHERE table_name = '{tbl}' AND column_name = 'tenant_id'
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = '{tbl}' AND column_name = 'organization_id'
                     ) THEN
                         ALTER TABLE {tbl} RENAME COLUMN tenant_id TO organization_id;
                     END IF;
@@ -7459,11 +7462,22 @@ class Database:
         """)
         self.conn.commit()
 
-        # 4. Drop old RLS policies and create new ones
+        # 4. Drop old RLS policies and create new ones (skip tables that don't exist yet)
         for tbl in tables_with_org_id:
-            for suffix in ['sel', 'ins', 'upd', 'del']:
-                cursor.execute(f"DROP POLICY IF EXISTS tenant_strict_{suffix} ON {tbl}")
-                cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON {tbl}")
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{tbl}') THEN
+                        EXECUTE 'DROP POLICY IF EXISTS tenant_strict_sel ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS tenant_strict_ins ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS tenant_strict_upd ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS tenant_strict_del ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS org_strict_sel ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS org_strict_ins ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS org_strict_upd ON {tbl}';
+                        EXECUTE 'DROP POLICY IF EXISTS org_strict_del ON {tbl}';
+                    END IF;
+                END $$
+            """)
             # Create new policies (only if table has organization_id and RLS enabled)
             cursor.execute(f"""
                 DO $$ BEGIN
@@ -7485,27 +7499,35 @@ class Database:
             """)
         self.conn.commit()
 
-        # 5. Drop old triggers and create new ones
+        # 5. Drop old triggers and create new ones (skip tables that don't exist yet)
         for tbl in tables_with_org_id:
-            cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_tenant_id ON {tbl}")
-            cursor.execute(f"DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}")
             cursor.execute(f"""
                 DO $$ BEGIN
-                    CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
-                    BEGIN
-                        IF NEW.organization_id IS NULL THEN
-                            NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
-                        END IF;
-                        IF NEW.organization_id IS NULL THEN
-                            RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
-                        END IF;
-                        RETURN NEW;
-                    END;
-                    $fn$ LANGUAGE plpgsql;
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{tbl}') THEN
+                        EXECUTE 'DROP TRIGGER IF EXISTS trg_auto_tenant_id ON {tbl}';
+                        EXECUTE 'DROP TRIGGER IF EXISTS trg_auto_organization_id ON {tbl}';
+                    END IF;
+                END $$
+            """)
+            cursor.execute(f"""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{tbl}') THEN
+                        CREATE OR REPLACE FUNCTION fn_auto_organization_id_{tbl}() RETURNS trigger AS $fn$
+                        BEGIN
+                            IF NEW.organization_id IS NULL THEN
+                                NEW.organization_id := current_setting('app.current_organization_id', true)::integer;
+                            END IF;
+                            IF NEW.organization_id IS NULL THEN
+                                RAISE EXCEPTION 'organization_id cannot be NULL on {tbl}';
+                            END IF;
+                            RETURN NEW;
+                        END;
+                        $fn$ LANGUAGE plpgsql;
 
-                    CREATE TRIGGER trg_auto_organization_id
-                        BEFORE INSERT ON {tbl}
-                        FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+                        CREATE TRIGGER trg_auto_organization_id
+                            BEFORE INSERT ON {tbl}
+                            FOR EACH ROW EXECUTE FUNCTION fn_auto_organization_id_{tbl}();
+                    END IF;
                 EXCEPTION WHEN duplicate_object THEN NULL;
                 END $$
             """)
@@ -7515,13 +7537,14 @@ class Database:
         cursor.execute("UPDATE settings SET key = 'azure_directory_id' WHERE key = 'azure_tenant_id'")
         self.conn.commit()
 
-        # 7. Rename indexes (best-effort, skip if already renamed)
+        # 7. Rename indexes (best-effort, skip if already renamed or new already exists)
         for tbl in tables_with_org_id:
             old_idx = f"idx_{tbl}_tenant"
             new_idx = f"idx_{tbl}_org"
             cursor.execute(f"""
                 DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{old_idx}') THEN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{old_idx}')
+                    AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{new_idx}') THEN
                         ALTER INDEX {old_idx} RENAME TO {new_idx};
                     END IF;
                 END $$
