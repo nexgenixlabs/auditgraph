@@ -570,6 +570,9 @@ def get_identities():
         privilege_tier: Filter by privilege tier (T0, T1, T2, T3)
         agirs_factor: AGIRS sub-metric filter (h1_ghost, h2_dormant_priv, h3_over_priv,
                        h4_ext_guest, n1_orphaned, n2_dormant, n3_zombie, n4_expired)
+        credential_status: Filter by credential status (expired, expiring_soon, healthy, no_credentials)
+        has_owner: boolean — filter by ownership (true/false)
+        metric: Direct canonical metric filter from metric_queries registry
     """
     db = _db()
     risk_filter = request.args.get("risk_level")
@@ -664,6 +667,36 @@ def get_identities():
                 placeholders = ','.join(['%s'] * len(tiers))
                 query += f" AND COALESCE(i.tier, 'T3') IN ({placeholders})"
                 params.extend(tiers)
+
+        # FIX1B: Credential status drill-down filter (matches dashboard posture counts)
+        credential_status_filter = request.args.get("credential_status")
+        if credential_status_filter:
+            from app.api.metric_queries import get_metric_where, METRIC_REGISTRY
+            cred_map = {
+                'expired': 'credential_expired',
+                'expiring_soon': 'credential_expiring',
+                'healthy': 'credential_healthy',
+                'no_credentials': 'no_credentials',
+            }
+            metric_key = cred_map.get(credential_status_filter)
+            if metric_key and metric_key in METRIC_REGISTRY:
+                query += get_metric_where(metric_key)
+
+        # FIX1B: Owner status drill-down filter (matches dashboard unowned count)
+        owner_filter = request.args.get("has_owner")
+        if owner_filter:
+            if owner_filter.lower() == 'false':
+                from app.api.metric_queries import get_metric_where
+                query += get_metric_where('unowned_nhi')
+            elif owner_filter.lower() == 'true':
+                query += " AND COALESCE(i.owner_count, 0) > 0"
+
+        # FIX1B: Direct canonical metric filter — uses same WHERE as dashboard count
+        metric_filter = request.args.get("metric")
+        if metric_filter:
+            from app.api.metric_queries import get_metric_where, METRIC_REGISTRY
+            if metric_filter in METRIC_REGISTRY:
+                query += get_metric_where(metric_filter)
 
         subscription_filter = request.args.get("subscription_id")
         if subscription_filter:
@@ -5093,58 +5126,30 @@ def get_dashboard_posture():
                 "avg_risk_score": float(ppf[4]) if ppf and ppf[4] else 0,
             }
 
-        # Credential health breakdown
-        cursor.execute(
-            f"""
-            SELECT
-                COUNT(*) FILTER (WHERE i.credential_expiration IS NOT NULL
-                    AND i.credential_expiration < NOW()) as expired,
-                COUNT(*) FILTER (WHERE i.credential_expiration IS NOT NULL
-                    AND i.credential_expiration >= NOW()
-                    AND i.credential_expiration < NOW() + INTERVAL '30 days') as expiring_soon,
-                COUNT(*) FILTER (WHERE i.credential_expiration IS NOT NULL
-                    AND i.credential_expiration >= NOW() + INTERVAL '30 days') as healthy,
-                COUNT(*) FILTER (WHERE i.credential_count = 0
-                    OR i.credential_count IS NULL) as no_credentials
-            FROM identities i
-            WHERE i.discovery_run_id = ANY(%s)
-            {HIDE_MICROSOFT_SQL}
-            """,
-            (run_ids,),
-        )
-        cred_row = cursor.fetchone()
+        # FIX1B: Credential health, dormant, no-owner — use canonical metric queries
+        from app.api.metric_queries import get_metric_count_sql
+        _mparams = {'run_ids': run_ids}
+
+        cursor.execute(get_metric_count_sql('credential_expired'), _mparams)
+        expired = cursor.fetchone()[0] or 0
+        cursor.execute(get_metric_count_sql('credential_expiring'), _mparams)
+        expiring_soon = cursor.fetchone()[0] or 0
+        cursor.execute(get_metric_count_sql('credential_healthy'), _mparams)
+        healthy = cursor.fetchone()[0] or 0
+        cursor.execute(get_metric_count_sql('no_credentials'), _mparams)
+        no_credentials = cursor.fetchone()[0] or 0
+
         credential_health = {
-            "expired": cred_row[0] or 0,
-            "expiring_soon": cred_row[1] or 0,
-            "healthy": cred_row[2] or 0,
-            "no_credentials": cred_row[3] or 0,
+            "expired": expired,
+            "expiring_soon": expiring_soon,
+            "healthy": healthy,
+            "no_credentials": no_credentials,
         }
 
-        # Dormant identities (stale + never_used — matches all other endpoints)
-        cursor.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM identities i
-            WHERE i.discovery_run_id = ANY(%s)
-              AND i.activity_status IN ('stale', 'never_used')
-            {HIDE_MICROSOFT_SQL}
-            """,
-            (run_ids,),
-        )
+        cursor.execute(get_metric_count_sql('dormant'), _mparams)
         dormant_count = cursor.fetchone()[0] or 0
 
-        # No-owner count
-        cursor.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM identities i
-            WHERE i.discovery_run_id = ANY(%s)
-              AND (i.owner_count = 0 OR i.owner_count IS NULL)
-              AND COALESCE(i.identity_category, '') NOT IN ('human_user', 'guest', 'microsoft_internal')
-            {HIDE_MICROSOFT_SQL}
-            """,
-            (run_ids,),
-        )
+        cursor.execute(get_metric_count_sql('unowned_nhi'), _mparams)
         no_owner_count = cursor.fetchone()[0] or 0
 
         # Posture score: % of identities at low/info risk

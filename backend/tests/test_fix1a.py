@@ -11,22 +11,26 @@ import os
 # ── STEP 1: Count Reconciliation ────────────────────────────────────────────
 
 def test_dormant_count_uses_stale_and_never_used():
-    """Dashboard posture dormant count includes both 'stale' and 'never_used'."""
+    """Dashboard posture dormant count includes both 'stale' and 'never_used' (via canonical query)."""
     import app.api.handlers
     source = inspect.getsource(app.api.handlers.get_dashboard_posture)
-    # Must NOT use only '= stale' — must use IN ('stale', 'never_used')
-    assert "IN ('stale', 'never_used')" in source
-    assert "= 'stale'" not in source.split('Dormant')[1].split('dormant_count')[0]
+    # FIX1B moved inline SQL to canonical metric_queries — now uses get_metric_count_sql('dormant')
+    assert "get_metric_count_sql('dormant')" in source
+    # Canonical definition must include both stale and never_used
+    from app.api.metric_queries import METRIC_DORMANT
+    assert "'stale'" in METRIC_DORMANT
+    assert "'never_used'" in METRIC_DORMANT
 
 
 def test_sa_governance_dormant_matches():
-    """SA governance dormant uses same definition as dashboard."""
+    """SA governance dormant uses same definition as dashboard (both via canonical queries)."""
     import app.api.handlers
     posture_src = inspect.getsource(app.api.handlers.get_dashboard_posture)
     sa_src = inspect.getsource(app.api.handlers.get_sa_governance_stats)
-    # Both should use IN ('stale', 'never_used')
-    assert "IN ('stale', 'never_used')" in posture_src
-    assert "IN ('stale', 'never_used')" in sa_src
+    # Dashboard uses canonical metric query
+    assert "get_metric_count_sql('dormant')" in posture_src
+    # SA governance still uses inline (or canonical) — both share METRIC_DORMANT definition
+    assert "IN ('stale', 'never_used')" in sa_src or "get_metric_count_sql('dormant')" in sa_src
 
 
 # ── STEP 2: Dummy Subscriptions ────────────────────────────────────────────
