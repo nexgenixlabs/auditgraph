@@ -5120,13 +5120,13 @@ def get_dashboard_posture():
             "no_credentials": cred_row[3] or 0,
         }
 
-        # Dormant identities (stale activity)
+        # Dormant identities (stale + never_used — matches all other endpoints)
         cursor.execute(
             f"""
             SELECT COUNT(*)
             FROM identities i
             WHERE i.discovery_run_id = ANY(%s)
-              AND i.activity_status = 'stale'
+              AND i.activity_status IN ('stale', 'never_used')
             {HIDE_MICROSOFT_SQL}
             """,
             (run_ids,),
@@ -12548,6 +12548,130 @@ def get_data_security_summary():
         db.close()
 
 
+def get_data_security_combined():
+    """GET /api/data-security — aggregated summary + findings for SensitiveDataAccess page.
+    Returns shape matching frontend SecurityData interface."""
+    db = _db()
+    try:
+        _ensure_resource_tables(db)
+        organization_id = _org_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'overall_score': 0,
+                'overall_grade': 'N/A',
+                'total_resources': 0,
+                'total_findings': 0,
+                'components': {},
+                'risk_distribution': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0},
+                'findings': [],
+                'has_data': False,
+            })
+
+        org_filter = ""
+        params = [run_ids]
+        if organization_id and organization_id > 0:
+            org_filter = " AND (organization_id = %s OR organization_id IS NULL)"
+            params.append(organization_id)
+
+        # Fetch storage accounts
+        cursor.execute(f"""
+            SELECT name, resource_id, risk_score, risk_level,
+                   COALESCE(risk_components, '{{}}'::jsonb) AS risk_components,
+                   'storage_account' AS resource_type
+            FROM azure_storage_accounts
+            WHERE discovery_run_id = ANY(%s){org_filter}
+        """, params)
+        sa_rows = [dict(r) for r in cursor.fetchall()]
+
+        # Fetch key vaults
+        cursor.execute(f"""
+            SELECT name, resource_id, risk_score, risk_level,
+                   COALESCE(risk_components, '{{}}'::jsonb) AS risk_components,
+                   'key_vault' AS resource_type
+            FROM azure_key_vaults
+            WHERE discovery_run_id = ANY(%s){org_filter}
+        """, params)
+        kv_rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        all_resources = sa_rows + kv_rows
+        total = len(all_resources)
+
+        # Risk distribution
+        risk_dist = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
+        for r in all_resources:
+            lvl = r.get('risk_level', 'info')
+            if lvl in risk_dist:
+                risk_dist[lvl] += 1
+
+        # Component scores (aggregate across all resources)
+        comp_totals: dict = {}
+        comp_counts: dict = {}
+        findings = []
+        for r in all_resources:
+            rc = r.get('risk_components', {})
+            if isinstance(rc, str):
+                try:
+                    rc = json.loads(rc)
+                except Exception:
+                    rc = {}
+            for comp_name, comp_data in rc.items():
+                if isinstance(comp_data, dict):
+                    score = comp_data.get('score', 0)
+                    comp_totals[comp_name] = comp_totals.get(comp_name, 0) + score
+                    comp_counts[comp_name] = comp_counts.get(comp_name, 0) + 1
+                    # Generate findings from low-scoring components
+                    if score < 70:
+                        severity = 'critical' if score < 30 else 'high' if score < 50 else 'medium'
+                        findings.append({
+                            'resource_name': r.get('name', ''),
+                            'resource_type': r.get('resource_type', ''),
+                            'component': comp_name,
+                            'severity': severity,
+                            'title': f'{comp_name.replace("_", " ").title()} below threshold',
+                            'detail': f'Score {score}/100 on {r.get("name", "unknown")}',
+                        })
+
+        # Build component averages with grades
+        components = {}
+        for comp_name in comp_totals:
+            avg = round(comp_totals[comp_name] / max(comp_counts[comp_name], 1))
+            grade = 'A' if avg >= 90 else 'B' if avg >= 75 else 'C' if avg >= 60 else 'D' if avg >= 40 else 'F'
+            components[comp_name] = {
+                'score': avg,
+                'pct': avg,
+                'grade': grade,
+                'findings': sum(1 for f in findings if f['component'] == comp_name),
+            }
+
+        # Overall score
+        scores = [r.get('risk_score', 0) for r in all_resources]
+        avg_score = round(sum(scores) / max(len(scores), 1)) if scores else 0
+        # Invert: risk_score high = bad, but overall_score high = good
+        overall_score = max(0, 100 - avg_score)
+        overall_grade = 'A' if overall_score >= 90 else 'B' if overall_score >= 75 else 'C' if overall_score >= 60 else 'D' if overall_score >= 40 else 'F'
+
+        # Sort findings by severity
+        sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        findings.sort(key=lambda f: sev_order.get(f.get('severity', 'low'), 9))
+
+        return jsonify({
+            'overall_score': overall_score,
+            'overall_grade': overall_grade,
+            'total_resources': total,
+            'total_findings': len(findings),
+            'components': components,
+            'risk_distribution': risk_dist,
+            'findings': findings[:200],
+            'has_data': total > 0,
+        })
+    finally:
+        db.close()
+
+
 # ─── Phase 91: Sensitive Data Intelligence ────────────────────────
 
 # Auto-classification patterns for resource names and tags
@@ -18615,6 +18739,60 @@ def get_rbac_hygiene_findings():
         findings = findings[offset:offset + limit]
 
         return jsonify({'findings': findings, 'total': total})
+    finally:
+        db.close()
+
+
+def get_rbac_hygiene_combined():
+    """GET /api/rbac-hygiene — aggregated summary + findings for EffectiveAccessExplorer.
+    Returns shape matching frontend HygieneData interface."""
+    db = _db()
+    try:
+        latest = db.get_rbac_hygiene_latest()
+        if not latest:
+            return jsonify({
+                'overall_score': None,
+                'grade': None,
+                'total_identities': 0,
+                'total_findings': 0,
+                'rules': [],
+                'tier_distribution': {},
+                'scope_breakdown': {},
+                'findings': [],
+                'has_data': False,
+            })
+
+        summary = latest.get('summary', {})
+        findings = latest.get('findings', [])
+
+        # Build rules array from by_rule dict
+        by_rule = summary.get('by_rule', {})
+        rules = []
+        for rule_key, rule_data in by_rule.items():
+            if isinstance(rule_data, dict):
+                rules.append({
+                    'label': rule_data.get('label', rule_key),
+                    'severity': rule_data.get('severity', 'medium'),
+                    'count': rule_data.get('count', 0),
+                    'identities_affected': rule_data.get('identities_affected', 0),
+                })
+
+        # Sort findings by severity
+        sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        findings.sort(key=lambda f: (sev_order.get(f.get('severity', 'low'), 9), -(f.get('risk_score', 0))))
+
+        return jsonify({
+            'overall_score': latest.get('score'),
+            'grade': latest.get('grade'),
+            'total_identities': latest.get('total_assignments', 0),
+            'total_findings': latest.get('total_findings', 0),
+            'rules': rules,
+            'tier_distribution': summary.get('tier_distribution', {}),
+            'scope_breakdown': summary.get('exposure_index', {}),
+            'findings': findings[:200],
+            'has_data': True,
+            'analyzed_at': latest['created_at'].isoformat() if latest.get('created_at') else None,
+        })
     finally:
         db.close()
 

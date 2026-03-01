@@ -153,6 +153,7 @@ from app.api.handlers import (
     get_resource_anomalies,
     get_resource_expiry_summary,
     get_resource_compliance_summary,
+    get_data_security_combined,
     get_data_security_summary,
     get_organization_by_slug_public,
     provision_organization_handler,
@@ -253,6 +254,7 @@ from app.api.handlers import (
     delete_client_connection,
     test_client_connection,
     discover_client_connection,
+    get_rbac_hygiene_combined,
     get_rbac_hygiene_summary,
     get_rbac_hygiene_findings,
     run_rbac_hygiene_scan,
@@ -1451,8 +1453,12 @@ def create_app():
         return get_role_mining()
 
     # -----------------------
-    # RBAC Hygiene (Phase 88)
+    # RBAC Hygiene (Phase 88 + FIX1A)
     # -----------------------
+    @app.get("/api/rbac-hygiene")
+    def rbac_hygiene_combined():
+        return get_rbac_hygiene_combined()
+
     @app.get("/api/rbac-hygiene/summary")
     def rbac_hygiene_summary():
         return get_rbac_hygiene_summary()
@@ -1765,6 +1771,11 @@ def create_app():
     def resources_anomalies(resource_id):
         return get_resource_anomalies(resource_id)
 
+    @app.get("/api/data-security")
+    @require_role('compliance', 'reader', 'admin')
+    def data_security_combined():
+        return get_data_security_combined()
+
     @app.get("/api/data-security/summary")
     @require_role('compliance', 'reader', 'admin')
     def data_security_summary():
@@ -1944,23 +1955,25 @@ def create_app():
         return delete_organization_logo(organization_id)
 
     # Backward compat: /api/tenants/<id>/logo + /api/clients/<id>/logo
+    # FIX1A: Client portal uses @require_role (not portal_role) since
+    # these are called from the client Settings page with client JWT
     @app.post("/api/tenants/<int:organization_id>/logo")
-    @require_portal_role('superadmin', 'poweradmin')
+    @require_role('admin')
     def tenant_logo_upload(organization_id):
         return upload_organization_logo(organization_id)
 
     @app.delete("/api/tenants/<int:organization_id>/logo")
-    @require_portal_role('superadmin', 'poweradmin')
+    @require_role('admin')
     def tenant_logo_delete(organization_id):
         return delete_organization_logo(organization_id)
 
     @app.post("/api/clients/<int:organization_id>/logo")
-    @require_portal_role('superadmin', 'poweradmin')
+    @require_role('admin')
     def client_logo_upload(organization_id):
         return upload_organization_logo(organization_id)
 
     @app.delete("/api/clients/<int:organization_id>/logo")
-    @require_portal_role('superadmin', 'poweradmin')
+    @require_role('admin')
     def client_logo_delete(organization_id):
         return delete_organization_logo(organization_id)
 

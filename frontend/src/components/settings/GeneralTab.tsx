@@ -69,14 +69,22 @@ export function GeneralTab({
                     try {
                       const tid = currentOrg?.id;
                       if (!tid) { setError('No organization context'); return; }
+                      // Parse data URL into base64 + content_type for backend
+                      const dataUrl = reader.result as string;
+                      const match = dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+                      if (!match) { setError('Invalid image format'); return; }
+                      const [, content_type, logo_data] = match;
                       const res = await fetch(`/api/clients/${tid}/logo`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ logo: reader.result }),
+                        body: JSON.stringify({ logo_data, content_type }),
                       });
-                      if (!res.ok) throw new Error('Upload failed');
+                      if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        throw new Error(err.error || 'Upload failed');
+                      }
                       setSuccess('Logo uploaded');
-                    } catch { setError('Failed to upload logo'); }
+                    } catch (err) { setError(err instanceof Error ? err.message : 'Failed to upload logo'); }
                   };
                   reader.readAsDataURL(file);
                 }}
