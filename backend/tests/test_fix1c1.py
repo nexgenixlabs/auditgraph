@@ -52,15 +52,16 @@ def test_reconcile_method_exists():
 
 
 def test_reconcile_identifies_orphaned_subs():
-    """reconcile_subscriptions checks for subs whose connector belongs to different org."""
+    """reconcile_subscriptions checks for subs whose connector belongs to different org or is NULL."""
     from app.database import Database
     source = inspect.getsource(Database.reconcile_subscriptions)
     # Must join cloud_connections to check ownership
     assert 'cloud_connections' in source
     assert 'organization_id' in source
-    # Must detect connector mismatch or missing connector
-    assert 'c.id IS NULL' in source or 'IS NULL' in source
-    assert 'c.organization_id != s.organization_id' in source or 'conn_org_id' in source
+    # Must detect NULL connector (legacy sync), deleted connector, and org mismatch
+    assert 'cloud_connection_id IS NULL' in source
+    assert 'c.id IS NULL' in source
+    assert 'c.organization_id != s.organization_id' in source
 
 
 def test_reconcile_soft_deletes():
@@ -117,6 +118,13 @@ def test_activate_all_skips_deleted():
     """activate_all_cloud_subscriptions adds deleted=false guard."""
     from app.database import Database
     source = inspect.getsource(Database.activate_all_cloud_subscriptions)
+    assert 'deleted = false' in source
+
+
+def test_sync_excludes_deleted_from_count():
+    """sync_cloud_subscriptions count check excludes deleted rows."""
+    from app.database import Database
+    source = inspect.getsource(Database.sync_cloud_subscriptions)
     assert 'deleted = false' in source
 
 

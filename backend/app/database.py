@@ -8246,15 +8246,15 @@ class Database:
 
     def reconcile_subscriptions(self, organization_id):
         """FIX1C.1: Identify and soft-delete subscriptions whose cloud_connection_id
-        points to a connector belonging to a different org, or whose connector no longer exists.
-        Also resets usage counters for the org.
+        is NULL (legacy sync artifacts), points to a deleted connector, or belongs to
+        a different org. Also resets usage counters for the org.
         Returns dict with counts of reconciled items.
         """
         self._ensure_cloud_subscriptions_table()
         self._ensure_cloud_connections_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Step 1: Find orphaned subs — connection doesn't exist or belongs to different org
+        # Step 1: Find orphaned subs — no connector, connector deleted, or connector belongs to different org
         cursor.execute("""
             SELECT s.id, s.account_id, s.account_name, s.cloud, s.monitored,
                    s.cloud_connection_id, c.organization_id AS conn_org_id
@@ -8263,7 +8263,8 @@ class Database:
             WHERE s.organization_id = %s
               AND s.deleted = false
               AND (
-                  c.id IS NULL  -- connector was deleted
+                  s.cloud_connection_id IS NULL  -- legacy sync artifact, never linked to connector
+                  OR c.id IS NULL  -- connector was deleted
                   OR c.organization_id != s.organization_id  -- connector belongs to different org
               )
         """, (organization_id,))
@@ -9320,16 +9321,17 @@ class Database:
 
         Sources: identity_subscription_access (individual rows) and
         discovery_runs (comma-separated fallback). Only runs when the
-        table has no rows for the given organization.
+        table has no non-deleted rows for the given organization.
+        FIX1C.1: Excludes deleted rows from count check.
         """
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor()
 
-        # Check if any records already exist
+        # Check if any non-deleted records already exist
         if organization_id is not None and organization_id > 0:
-            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s", (organization_id,))
+            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s AND deleted = false", (organization_id,))
         else:
-            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions")
+            cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE deleted = false")
         if cursor.fetchone()[0] > 0:
             cursor.close()
             return  # Already populated
