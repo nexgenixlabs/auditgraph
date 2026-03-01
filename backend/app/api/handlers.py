@@ -10936,6 +10936,20 @@ def create_client_connection():
     if cloud == 'azure' and not azure_directory_id:
         return jsonify({'error': 'Entra Directory ID is required for Azure connections'}), 400
 
+    # FIX1C: Cross-org uniqueness check — prevent same cloud account reused by another org
+    if azure_directory_id:
+        from app.connectors import validate_connector_unique
+        check_db = Database()
+        try:
+            existing_org = validate_connector_unique(check_db, cloud, azure_directory_id)
+            if existing_org and existing_org != tid:
+                return jsonify({
+                    'error': f'This {cloud} directory is already connected by another organization.',
+                    'code': 'DUPLICATE_CONNECTOR'
+                }), 409
+        finally:
+            check_db.close()
+
     # Build metadata — store credentials securely in JSONB
     metadata = data.get('metadata') or {}
     if client_secret:
@@ -11068,6 +11082,11 @@ def delete_client_connection(connection_id):
         db.delete_cloud_connection(connection_id, organization_id=tid)
         _log(db, 'connection_deleted', f'Deleted connection: {existing["label"]}',
              {'connection_id': connection_id, 'cloud': existing['cloud']})
+
+        # FIX1C: Track usage on connection removal
+        from app.entitlements.service import track_usage
+        track_usage(db, tid, 'connection', str(connection_id), 'removed', {'cloud': existing['cloud']})
+
         return jsonify({'deleted': True})
     finally:
         db.close()

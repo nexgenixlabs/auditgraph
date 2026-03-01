@@ -136,85 +136,100 @@ export function ConnectionsTab({
               </div>
             )}
 
-            {/* Connections List */}
-            {cloudConnections.length > 0 && (
-              <div className="space-y-2">
-                {cloudConnections.map(conn => (
-                  <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
-                    conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
-                    conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
-                    'border-gray-200 bg-gray-50/30'
-                  }`}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                          conn.cloud === 'azure' ? 'bg-blue-100 text-blue-700' :
-                          conn.cloud === 'aws' ? 'bg-orange-100 text-orange-700' :
-                          'bg-red-100 text-red-600'
-                        }`}>{conn.cloud.toUpperCase()}</span>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-gray-800">{conn.label}</span>
-                            {conn.label === 'Primary' && (
-                              <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
-                            )}
-                          </div>
-                          {conn.azure_directory_id && (
-                            <div className="text-[10px] text-gray-400 font-mono">{conn.azure_directory_id.slice(0, 8)}...</div>
-                          )}
-                          <div className="text-[10px] text-gray-500 mt-0.5">
-                            {conn.sub_count || 0} active subs
-                            {conn.last_discovery_at ? ` · Last snapshot: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No snapshot yet'}
-                          </div>
-                        </div>
-                      </div>
+            {/* FIX1C: Provider-Grouped Connections List */}
+            {cloudConnections.length > 0 && (() => {
+              const PROVIDERS = [
+                { key: 'azure', label: 'Azure', color: 'blue', bgClass: 'bg-blue-100 text-blue-700', borderClass: 'border-blue-200' },
+                { key: 'aws', label: 'AWS', color: 'orange', bgClass: 'bg-orange-100 text-orange-700', borderClass: 'border-orange-200' },
+                { key: 'gcp', label: 'GCP', color: 'red', bgClass: 'bg-red-100 text-red-600', borderClass: 'border-red-200' },
+              ];
+              const grouped = PROVIDERS.map(p => ({
+                ...p,
+                connections: cloudConnections.filter(c => c.cloud === p.key),
+              })).filter(g => g.connections.length > 0);
+
+              return (
+                <div className="space-y-4">
+                  {grouped.map(({ key, label, bgClass, borderClass, connections }) => (
+                    <div key={key} className="space-y-2">
                       <div className="flex items-center gap-2">
-                        <span className={`flex items-center gap-1 text-[10px] font-semibold ${
-                          conn.status === 'connected' ? 'text-green-600' :
-                          conn.status === 'failed' ? 'text-red-600' :
-                          'text-gray-400'
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${bgClass}`}>{label}</span>
+                        <span className="text-[10px] text-gray-400">{connections.length} connection{connections.length !== 1 ? 's' : ''}</span>
+                      </div>
+                      {connections.map(conn => (
+                        <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
+                          conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
+                          conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
+                          'border-gray-200 bg-gray-50/30'
                         }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${
-                            conn.status === 'connected' ? 'bg-green-500' :
-                            conn.status === 'failed' ? 'bg-red-500' :
-                            'bg-gray-400'
-                          }`} />
-                          {conn.status === 'connected' ? 'Connected' :
-                           conn.status === 'failed' ? 'Failed' : 'Pending'}
-                        </span>
-                        {isAdmin && conn.status === 'connected' && (
-                          <button
-                            onClick={() => handleRunScan(conn.id)}
-                            disabled={scanningConnId === conn.id}
-                            className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
-                          >
-                            {scanningConnId === conn.id ? 'Starting...' : 'Capture Snapshot'}
-                          </button>
-                        )}
-                        {isAdmin && (
-                          <button
-                            onClick={() => handleDeleteConnection(conn.id)}
-                            className="text-[10px] text-red-400 hover:text-red-600 font-medium"
-                          >
-                            Remove
-                          </button>
-                        )}
-                      </div>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-semibold text-gray-800">{conn.label}</span>
+                                  {conn.label === 'Primary' && (
+                                    <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
+                                  )}
+                                </div>
+                                {conn.azure_directory_id && (
+                                  <div className="text-[10px] text-gray-400 font-mono">{conn.azure_directory_id.slice(0, 8)}...</div>
+                                )}
+                                <div className="text-[10px] text-gray-500 mt-0.5">
+                                  {conn.sub_count || 0} active subs
+                                  {conn.last_discovery_at ? ` · Last snapshot: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No snapshot yet'}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className={`flex items-center gap-1 text-[10px] font-semibold ${
+                                conn.status === 'connected' ? 'text-green-600' :
+                                conn.status === 'failed' ? 'text-red-600' :
+                                'text-gray-400'
+                              }`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${
+                                  conn.status === 'connected' ? 'bg-green-500' :
+                                  conn.status === 'failed' ? 'bg-red-500' :
+                                  'bg-gray-400'
+                                }`} />
+                                {conn.status === 'connected' ? 'Connected' :
+                                 conn.status === 'failed' ? 'Failed' : 'Pending'}
+                              </span>
+                              {isAdmin && conn.status === 'connected' && (
+                                <button
+                                  onClick={() => handleRunScan(conn.id)}
+                                  disabled={scanningConnId === conn.id}
+                                  className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
+                                >
+                                  {scanningConnId === conn.id ? 'Starting...' : 'Capture Snapshot'}
+                                </button>
+                              )}
+                              {isAdmin && (
+                                <button
+                                  onClick={() => handleDeleteConnection(conn.id)}
+                                  className="text-[10px] text-red-400 hover:text-red-600 font-medium"
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          {/* Discovered subscriptions warning */}
+                          {(conn.discovered_count || 0) > 0 && (
+                            <div className="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
+                              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                              </svg>
+                              <span>{conn.discovered_count} subscription(s) discovered — </span>
+                              <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                    {/* Discovered subscriptions warning */}
-                    {(conn.discovered_count || 0) > 0 && (
-                      <div className="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
-                        <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                        </svg>
-                        <span>{conn.discovered_count} subscription(s) discovered — </span>
-                        <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              );
+            })()}
 
             {/* Add Connection Wizard Modal */}
             {showAddWizard && (

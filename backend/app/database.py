@@ -7392,6 +7392,7 @@ class Database:
     _migration_020_ensured = False
     _migration_021_ensured = False
     _migration_022_ensured = False
+    _migration_023_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -7788,11 +7789,12 @@ class Database:
         Database._migration_019_ensured = True
 
     def _ensure_entitlements_tables(self):
-        """Ensure entitlements + billing tables exist (calls migrations 019-022). Idempotent."""
+        """Ensure entitlements + billing tables exist (calls migrations 019-023). Idempotent."""
         self._run_migration_019_entitlements()
         self._run_migration_020_entitlement_hardening()
         self._run_migration_021_billing_transparency()
         self._run_migration_022_billing_integrity()
+        self._run_migration_023_connector_integrity()
 
     # ── Migration 020: Entitlement Hardening ───────────────────────────────────
 
@@ -8118,6 +8120,105 @@ class Database:
 
         cursor.close()
         Database._migration_022_ensured = True
+
+    # ── Migration 023: Connector Integrity Hardening ──────────────────────────
+
+    def _run_migration_023_connector_integrity(self):
+        """FIX1C: Add external_id column, global uniqueness constraint, subscription FK.
+        Idempotent — uses IF NOT EXISTS / savepoints. Runs as admin (BYPASSRLS)."""
+        if Database._migration_023_ensured:
+            return
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor()
+
+        # 1. Add external_id column
+        cursor.execute("ALTER TABLE cloud_connections ADD COLUMN IF NOT EXISTS external_id VARCHAR(100)")
+        self.conn.commit()
+
+        # 2. Backfill external_id from azure_directory_id where NULL
+        cursor.execute("""
+            UPDATE cloud_connections SET external_id = azure_directory_id
+            WHERE external_id IS NULL AND azure_directory_id IS NOT NULL
+        """)
+        self.conn.commit()
+
+        # 3. Deduplicate cross-org conflicts (keep earliest per cloud+external_id)
+        cursor.execute("""
+            SELECT cloud, external_id, array_agg(id ORDER BY created_at) AS ids
+            FROM cloud_connections
+            WHERE external_id IS NOT NULL
+            GROUP BY cloud, external_id HAVING COUNT(*) > 1
+        """)
+        for row in cursor.fetchall():
+            keep_id = row[2][0]  # earliest
+            dup_ids = row[2][1:]
+            # Delete subscriptions linked to duplicates, then delete connections
+            cursor.execute("DELETE FROM cloud_subscriptions WHERE cloud_connection_id = ANY(%s)", (dup_ids,))
+            cursor.execute("DELETE FROM cloud_connections WHERE id = ANY(%s)", (dup_ids,))
+            # Log dedup action
+            try:
+                cursor.execute("""
+                    INSERT INTO admin_audit_log (actor, action, target_type, target_id, details)
+                    VALUES ('system', 'migration_023_dedup', 'cloud_connection', %s,
+                            %s::jsonb)
+                """, (str(keep_id), json.dumps({'removed_ids': dup_ids, 'cloud': row[0], 'external_id': row[1]})))
+            except Exception:
+                pass  # admin_audit_log may not exist yet
+        self.conn.commit()
+
+        # 4. Per-org uniqueness: prevents duplicate connector within same org
+        try:
+            sp = 'sp_m023_uq_org'
+            cursor.execute(f"SAVEPOINT {sp}")
+            cursor.execute("""
+                ALTER TABLE cloud_connections
+                ADD CONSTRAINT uq_org_provider_external UNIQUE (organization_id, cloud, external_id)
+            """)
+            cursor.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception:
+            cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+        self.conn.commit()
+
+        # 5. Global uniqueness: prevents same cloud account reused across orgs
+        try:
+            sp = 'sp_m023_uq_global'
+            cursor.execute(f"SAVEPOINT {sp}")
+            cursor.execute("""
+                ALTER TABLE cloud_connections
+                ADD CONSTRAINT uq_provider_external_global UNIQUE (cloud, external_id)
+            """)
+            cursor.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception:
+            cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+        self.conn.commit()
+
+        # 6. Clean orphaned subscription references before adding FK
+        try:
+            cursor.execute("""
+                UPDATE cloud_subscriptions SET cloud_connection_id = NULL
+                WHERE cloud_connection_id IS NOT NULL
+                AND cloud_connection_id NOT IN (SELECT id FROM cloud_connections)
+            """)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
+        # 7. Add FK from cloud_subscriptions → cloud_connections with CASCADE
+        try:
+            sp = 'sp_m023_fk_sub'
+            cursor.execute(f"SAVEPOINT {sp}")
+            cursor.execute("""
+                ALTER TABLE cloud_subscriptions
+                ADD CONSTRAINT fk_subscription_connector
+                FOREIGN KEY (cloud_connection_id) REFERENCES cloud_connections(id) ON DELETE CASCADE
+            """)
+            cursor.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception:
+            cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+        self.conn.commit()
+
+        cursor.close()
+        Database._migration_023_ensured = True
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 
@@ -8953,16 +9054,18 @@ class Database:
         # Auto-assign display_order
         cursor.execute("SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order FROM cloud_connections WHERE organization_id = %s", (organization_id,))
         next_order = cursor.fetchone()['next_order']
+        # external_id mirrors azure_directory_id (canonical cloud-agnostic identifier)
+        external_id = azure_directory_id
         cursor.execute("""
             INSERT INTO cloud_connections (organization_id, cloud, connection_type, label, azure_directory_id,
-                                           client_id, status, display_order, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+                                           client_id, status, display_order, metadata, external_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
             ON CONFLICT (organization_id, cloud, azure_directory_id) DO UPDATE
               SET label = EXCLUDED.label, client_id = EXCLUDED.client_id,
-                  updated_at = NOW()
+                  external_id = EXCLUDED.external_id, updated_at = NOW()
             RETURNING *
         """, (organization_id, cloud, connection_type, label, azure_directory_id,
-              client_id, next_order, json.dumps(metadata or {})))
+              client_id, next_order, json.dumps(metadata or {}), external_id))
         row = cursor.fetchone()
         self.conn.commit()
         cursor.close()
