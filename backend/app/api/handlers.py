@@ -17740,6 +17740,23 @@ def deactivate_subscription(sub_id):
         db.close()
 
 
+def reconcile_subscriptions():
+    """POST /api/subscriptions/reconcile — FIX1C.1: Identify and soft-delete orphaned subscriptions,
+    reset usage counters, rebuild from actual monitored state. Admin only."""
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = _db()
+    try:
+        result = db.reconcile_subscriptions(tid)
+        _log(db, 'subscription_reconciliation', f'Reconciled subscriptions: {result["deleted_count"]} removed, {result["active_after_reconciliation"]} active',
+             {'orphaned_found': result['orphaned_found'], 'deleted_count': result['deleted_count']})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 def get_subscriptions_distinct():
     """GET /api/subscriptions/distinct — distinct subscription_id/name pairs from discovery_runs."""
     db = _db()

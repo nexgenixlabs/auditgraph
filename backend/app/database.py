@@ -7393,6 +7393,7 @@ class Database:
     _migration_021_ensured = False
     _migration_022_ensured = False
     _migration_023_ensured = False
+    _migration_024_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -7789,12 +7790,13 @@ class Database:
         Database._migration_019_ensured = True
 
     def _ensure_entitlements_tables(self):
-        """Ensure entitlements + billing tables exist (calls migrations 019-023). Idempotent."""
+        """Ensure entitlements + billing tables exist (calls migrations 019-024). Idempotent."""
         self._run_migration_019_entitlements()
         self._run_migration_020_entitlement_hardening()
         self._run_migration_021_billing_transparency()
         self._run_migration_022_billing_integrity()
         self._run_migration_023_connector_integrity()
+        self._run_migration_024_subscription_reconciliation()
 
     # ── Migration 020: Entitlement Hardening ───────────────────────────────────
 
@@ -8219,6 +8221,102 @@ class Database:
 
         cursor.close()
         Database._migration_023_ensured = True
+
+    # ── Migration 024: Subscription Reconciliation ────────────────────────────
+
+    def _run_migration_024_subscription_reconciliation(self):
+        """FIX1C.1: Add deleted/deleted_at columns to cloud_subscriptions for soft-delete.
+        Idempotent — uses ADD COLUMN IF NOT EXISTS. Runs as admin (BYPASSRLS)."""
+        if Database._migration_024_ensured:
+            return
+        self._ensure_cloud_subscriptions_table()
+        cursor = self.conn.cursor()
+
+        # 1. Add deleted + deleted_at columns
+        cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT false")
+        cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+        self.conn.commit()
+
+        # 2. Index for fast filtering of non-deleted rows
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_deleted ON cloud_subscriptions(deleted) WHERE deleted = false")
+        self.conn.commit()
+
+        cursor.close()
+        Database._migration_024_ensured = True
+
+    def reconcile_subscriptions(self, organization_id):
+        """FIX1C.1: Identify and soft-delete subscriptions whose cloud_connection_id
+        points to a connector belonging to a different org, or whose connector no longer exists.
+        Also resets usage counters for the org.
+        Returns dict with counts of reconciled items.
+        """
+        self._ensure_cloud_subscriptions_table()
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Step 1: Find orphaned subs — connection doesn't exist or belongs to different org
+        cursor.execute("""
+            SELECT s.id, s.account_id, s.account_name, s.cloud, s.monitored,
+                   s.cloud_connection_id, c.organization_id AS conn_org_id
+            FROM cloud_subscriptions s
+            LEFT JOIN cloud_connections c ON s.cloud_connection_id = c.id
+            WHERE s.organization_id = %s
+              AND s.deleted = false
+              AND (
+                  c.id IS NULL  -- connector was deleted
+                  OR c.organization_id != s.organization_id  -- connector belongs to different org
+              )
+        """, (organization_id,))
+        orphaned = [dict(r) for r in cursor.fetchall()]
+
+        # Step 2: Soft-delete orphaned subscriptions
+        orphaned_ids = [r['id'] for r in orphaned]
+        deleted_count = 0
+        if orphaned_ids:
+            cursor.execute("""
+                UPDATE cloud_subscriptions
+                SET deleted = true, deleted_at = NOW(), monitored = false, status = 'archived'
+                WHERE id = ANY(%s)
+            """, (orphaned_ids,))
+            deleted_count = cursor.rowcount
+            self.conn.commit()
+
+        # Step 3: Reset usage counters for this org (they'll rebuild on next activation)
+        cursor.execute("""
+            DELETE FROM organization_usage_counters
+            WHERE organization_id = %s
+        """, (organization_id,))
+        self.conn.commit()
+
+        # Step 4: Rebuild subscription counter from actual monitored subs
+        cursor.execute("""
+            SELECT COUNT(*) AS active_count
+            FROM cloud_subscriptions
+            WHERE organization_id = %s AND monitored = true AND deleted = false
+        """, (organization_id,))
+        active_count = cursor.fetchone()['active_count']
+
+        if active_count > 0:
+            cursor.execute("""
+                INSERT INTO organization_usage_counters (organization_id, resource_type, current_count, updated_at)
+                VALUES (%s, 'active_subscriptions', %s, NOW())
+                ON CONFLICT (organization_id, resource_type)
+                DO UPDATE SET current_count = %s, updated_at = NOW()
+            """, (organization_id, active_count, active_count))
+            self.conn.commit()
+
+        cursor.close()
+
+        return {
+            'orphaned_found': len(orphaned),
+            'deleted_count': deleted_count,
+            'active_after_reconciliation': active_count,
+            'orphaned_details': [
+                {'id': r['id'], 'account_id': r['account_id'], 'cloud': r['cloud'],
+                 'was_monitored': r['monitored']}
+                for r in orphaned
+            ],
+        }
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 
@@ -9343,7 +9441,8 @@ class Database:
         return inserted
 
     def get_cloud_subscriptions(self, organization_id, cloud=None):
-        """List cloud subscriptions for an organization with connection_label. None = superadmin (all)."""
+        """List cloud subscriptions for an organization with connection_label. None = superadmin (all).
+        FIX1C.1: Excludes soft-deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         self._ensure_cloud_connections_table()
         self.sync_cloud_subscriptions(organization_id)
@@ -9352,13 +9451,13 @@ class Database:
             query = """SELECT cs.*, cc.label AS connection_label
                        FROM cloud_subscriptions cs
                        LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                       WHERE cs.organization_id = %s"""
+                       WHERE cs.organization_id = %s AND cs.deleted = false"""
             params: list = [organization_id]
         else:
             query = """SELECT cs.*, cc.label AS connection_label
                        FROM cloud_subscriptions cs
                        LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
-                       WHERE 1=1"""
+                       WHERE cs.deleted = false"""
             params = []
         if cloud:
             query += " AND cs.cloud = %s"
@@ -9374,7 +9473,8 @@ class Database:
         return rows
 
     def get_subscription_stats(self, organization_id):
-        """Summary counts for cloud subscriptions. None = superadmin (all)."""
+        """Summary counts for cloud subscriptions. None = superadmin (all).
+        FIX1C.1: Excludes soft-deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         self.sync_cloud_subscriptions(organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -9386,7 +9486,7 @@ class Database:
                     COUNT(*) FILTER (WHERE monitored = false) as discovered,
                     COUNT(DISTINCT cloud) as clouds
                 FROM cloud_subscriptions
-                WHERE organization_id = %s
+                WHERE organization_id = %s AND deleted = false
             """, (organization_id,))
         else:
             cursor.execute("""
@@ -9396,27 +9496,29 @@ class Database:
                     COUNT(*) FILTER (WHERE monitored = false) as discovered,
                     COUNT(DISTINCT cloud) as clouds
                 FROM cloud_subscriptions
+                WHERE deleted = false
             """)
         row = dict(cursor.fetchone())
         cursor.close()
         return row
 
     def activate_cloud_subscription(self, sub_id, user_id, organization_id=None):
-        """Activate a subscription for monitoring, scoped by organization."""
+        """Activate a subscription for monitoring, scoped by organization.
+        FIX1C.1: Refuses to activate deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if organization_id is not None:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE id = %s AND organization_id = %s
+                WHERE id = %s AND organization_id = %s AND deleted = false
                 RETURNING *
             """, (user_id, sub_id, organization_id))
         else:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE id = %s
+                WHERE id = %s AND deleted = false
                 RETURNING *
             """, (user_id, sub_id))
         row = cursor.fetchone()
@@ -9431,21 +9533,22 @@ class Database:
         return result
 
     def activate_all_cloud_subscriptions(self, user_id, organization_id=None):
-        """Activate all discovered (unmonitored) subscriptions for an organization."""
+        """Activate all discovered (unmonitored) subscriptions for an organization.
+        FIX1C.1: Skips deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if organization_id is not None:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE organization_id = %s AND monitored = false
+                WHERE organization_id = %s AND monitored = false AND deleted = false
                 RETURNING *
             """, (user_id, organization_id))
         else:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE monitored = false
+                WHERE monitored = false AND deleted = false
                 RETURNING *
             """, (user_id,))
         rows = [dict(r) for r in cursor.fetchall()]

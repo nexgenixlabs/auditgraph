@@ -222,6 +222,7 @@ from app.api.handlers import (
     activate_subscription,
     activate_all_subscriptions,
     deactivate_subscription,
+    reconcile_subscriptions,
     get_subscriptions_distinct,
     get_identity_subscriptions,
     get_admin_organization_billing,
@@ -2059,6 +2060,11 @@ def create_app():
     @require_role('admin', 'security_admin')
     def subscriptions_deactivate(sub_id):
         return deactivate_subscription(sub_id)
+
+    @app.post("/api/subscriptions/reconcile")
+    @require_role('admin', 'security_admin')
+    def subscriptions_reconcile():
+        return reconcile_subscriptions()
 
     @app.get("/api/subscriptions/distinct")
     def subscriptions_distinct():
