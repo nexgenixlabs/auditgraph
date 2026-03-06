@@ -6,16 +6,7 @@
 //   - auditgraph-app-dev   (client portal, port 3000, 0.5 CPU / 1Gi)
 //   - auditgraph-admin-dev (admin portal, port 3001, 0.5 CPU / 1Gi)
 //
-// All containers:
-//   - Pull from ACR via user-assigned managed identity with AcrPull role
-//   - External ingress, HTTPS only
-//
-// Usage:
-//   az deployment group create \
-//     --resource-group eus2-ag-nonprod-rg \
-//     --template-file infra/containerapps-dev.bicep \
-//     --parameters dbPassword='...' dbAdminPassword='...' \
-//                  jwtSecret='...' adminJwtSecret='...' clientJwtSecret='...'
+// All containers pull from ACR via admin credentials.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Parameters ──────────────────────────────────────────────────────────────
@@ -23,11 +14,16 @@
 @description('Existing Container Apps Environment name')
 param environmentName string = 'dev-cae'
 
-@description('Azure Container Registry name')
-param acrName string = 'auditgraphcr'
-
 @description('Azure Container Registry login server')
 param acrLoginServer string = 'auditgraphcr.azurecr.io'
+
+@secure()
+@description('ACR admin username')
+param acrUsername string
+
+@secure()
+@description('ACR admin password')
+param acrPassword string
 
 @description('API image tag')
 param apiImageTag string = 'dev'
@@ -63,7 +59,7 @@ param dbAdminPassword string
 // ── JWT Secrets ─────────────────────────────────────────────────────────────
 
 @secure()
-@description('JWT signing secret (dev fallback)')
+@description('JWT signing secret')
 param jwtSecret string
 
 @secure()
@@ -82,33 +78,10 @@ param corsOrigins string = 'https://dev.app.auditgraph.ai,https://dev.admin.audi
 @description('Max DB pool connections per replica')
 param dbPoolMax int = 8
 
-// ── Existing Resources ────────────────────────────────────────────────────
+// ── Existing Environment ────────────────────────────────────────────────────
 
 resource cae 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
-}
-
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
-  name: acrName
-}
-
-// ── User-Assigned Managed Identity for ACR Pull ───────────────────────────
-
-resource acrPullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: 'auditgraph-dev-acr-pull'
-  location: resourceGroup().location
-}
-
-var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d' // AcrPull built-in role
-
-resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(acrPullIdentity.id, acr.id, acrPullRoleId)
-  scope: acr
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
-    principalId: acrPullIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -118,13 +91,6 @@ resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'auditgraph-api-dev'
   location: resourceGroup().location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${acrPullIdentity.id}': {}
-    }
-  }
-  dependsOn: [acrPullRoleAssignment]
   properties: {
     managedEnvironmentId: cae.id
     configuration: {
@@ -138,10 +104,12 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: acrLoginServer
-          identity: acrPullIdentity.id
+          username: acrUsername
+          passwordSecretRef: 'acr-password'
         }
       ]
       secrets: [
+        { name: 'acr-password', value: acrPassword }
         { name: 'db-password', value: dbPassword }
         { name: 'db-admin-password', value: dbAdminPassword }
         { name: 'jwt-secret', value: jwtSecret }
@@ -228,13 +196,6 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
 resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'auditgraph-app-dev'
   location: resourceGroup().location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${acrPullIdentity.id}': {}
-    }
-  }
-  dependsOn: [acrPullRoleAssignment]
   properties: {
     managedEnvironmentId: cae.id
     configuration: {
@@ -248,8 +209,12 @@ resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: acrLoginServer
-          identity: acrPullIdentity.id
+          username: acrUsername
+          passwordSecretRef: 'acr-password'
         }
+      ]
+      secrets: [
+        { name: 'acr-password', value: acrPassword }
       ]
     }
     template: {
@@ -290,13 +255,6 @@ resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
 resource adminApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'auditgraph-admin-dev'
   location: resourceGroup().location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${acrPullIdentity.id}': {}
-    }
-  }
-  dependsOn: [acrPullRoleAssignment]
   properties: {
     managedEnvironmentId: cae.id
     configuration: {
@@ -310,8 +268,12 @@ resource adminApp 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: acrLoginServer
-          identity: acrPullIdentity.id
+          username: acrUsername
+          passwordSecretRef: 'acr-password'
         }
+      ]
+      secrets: [
+        { name: 'acr-password', value: acrPassword }
       ]
     }
     template: {
