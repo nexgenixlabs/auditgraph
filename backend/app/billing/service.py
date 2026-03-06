@@ -8,10 +8,8 @@ import json
 import logging
 from datetime import date, datetime, timezone, timedelta
 
-from app.pricing import (
-    calculate_billing, calculate_invoice,
-    PRICING_VERSION, PLATFORM_FEES, DEFAULT_SUB_RATES,
-)
+from app.pricing import calculate_billing, calculate_invoice
+from app.billing.config import PRICING_VERSION, PLAN_PLATFORM_FEES, CLOUD_SUB_RATES
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +18,8 @@ def _build_unit_prices(org):
     """Build a snapshot of current unit prices for audit trail."""
     plan = org.get('plan', 'free')
     return {
-        'platform_fee_cents': org.get('platform_fee_cents', PLATFORM_FEES.get(plan, 0)),
-        'sub_rates': dict(DEFAULT_SUB_RATES),
+        'platform_fee_cents': org.get('platform_fee_cents', PLAN_PLATFORM_FEES.get(plan, 0)),
+        'sub_rates': dict(CLOUD_SUB_RATES),
         'discount_pct': float(org.get('discount_pct', 0)),
     }
 
@@ -34,11 +32,11 @@ def log_billing_audit(db, organization_id, action, actor_id=None, details=None):
             INSERT INTO billing_audit_log (organization_id, action, actor_id, details)
             VALUES (%s, %s, %s, %s)
         """, (organization_id, action, actor_id, json.dumps(details or {})))
-        db.conn.commit()
+        db._commit()
         cursor.close()
     except Exception:
         try:
-            db.conn.rollback()
+            db._rollback()
         except Exception:
             pass
 
@@ -152,7 +150,7 @@ def store_billing_snapshot(db, snapshot, force=False):
         """, _snapshot_params(snapshot))
 
     row = cursor.fetchone()
-    db.conn.commit()
+    db._commit()
 
     if row is None and not force:
         # Conflict — return existing row
@@ -371,7 +369,7 @@ def generate_invoice_pdf(db, organization_id, snapshot_id=None, invoice_id=None,
         generated_by,
     ))
     doc = dict(cursor.fetchone())
-    db.conn.commit()
+    db._commit()
     cursor.close()
 
     if doc.get('generated_at'):

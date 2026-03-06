@@ -556,7 +556,7 @@ In `get_login_sessions()`:
 
 ---
 
-# Phase 19B — Authentication & Authorization Isolation Audit
+# Phase 19 — Authentication & Authorization Isolation Audit
 
 **Date**: 2026-02-27
 **Type**: Security audit (no code changes)

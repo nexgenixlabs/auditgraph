@@ -129,7 +129,7 @@ class AWSDiscoveryEngine:
                 cursor.execute(
                     "UPDATE discovery_runs SET status='failed', completed_at=%s WHERE id=%s",
                     (datetime.utcnow(), run_id))
-                self.db.conn.commit()
+                self.db._commit()
                 cursor.close()
             except Exception:
                 pass

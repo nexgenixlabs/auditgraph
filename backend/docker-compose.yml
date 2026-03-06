@@ -1,0 +1,75 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — local development database
+  # ---------------------------------------------------------------------------
+  auditgraph-postgres:
+    image: postgres:15
+    container_name: auditgraph-postgres
+    ports:
+      # Host port 5434 → container port 5432.
+      # Avoids conflict with any Postgres already on the host (5432/5433).
+      # Host-direct backend uses localhost:5434 via .env.local.
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: auditgraph
+      POSTGRES_USER: auditgraph
+      POSTGRES_PASSWORD: auditgraph
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auditgraph_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Backend — Flask API (gunicorn)
+  # ---------------------------------------------------------------------------
+  backend:
+    build: .
+    container_name: auditgraph-backend
+    ports:
+      - "5001:5000"
+    env_file:
+      # Base values (JWT secrets, DB_NAME, DB_USER, etc.).
+      # Only fills in vars NOT already set by `environment:` below
+      # (config.py uses load_dotenv override=False).
+      - .env.local
+    environment:
+      # --- Container networking overrides ---
+      # Inside Docker, "localhost" is the container itself, not the host.
+      # "auditgraph-postgres" resolves to the postgres service via Docker DNS.
+      APP_ENV: local
+      DATABASE_URL: postgresql://auditgraph:auditgraph@auditgraph-postgres:5432/auditgraph
+    depends_on:
+      auditgraph-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Frontend — React (nginx)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        # Empty = use nginx proxy to backend (no hardcoded API URL)
+        REACT_APP_API_URL: ""
+    container_name: auditgraph-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount the local-proxy nginx config (proxies /api/ → backend:5000)
+      - ../frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

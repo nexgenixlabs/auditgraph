@@ -71,10 +71,12 @@ import { ToastProvider } from './components/ToastProvider';
 import Sidebar from './components/layout/Sidebar';
 import TopBar from './components/layout/TopBar';
 import CopilotPanel from './components/CopilotPanel';
+import DemoBanner from './components/DemoBanner';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { OrganizationProvider, useOrganization } from './contexts/TenantContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { isAdminHost } from './utils/hostDetection';
 // ConnectionSwitcher removed — scope selection now in TopBar
 
 function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode; requiredRole?: string }) {
@@ -119,9 +121,10 @@ function AppContent() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Phase 48: Check if onboarding is needed (admin only)
+  // Phase 48: Check if onboarding is needed (client portal admin only, not superadmins, not demo)
   useEffect(() => {
-    if (!user || loading || user.role !== 'admin') return;
+    if (!user || loading || user.role !== 'admin' || user.is_superadmin || user.is_demo) return;
+    if (window.location.pathname.startsWith('/admin')) return;
     fetch('/api/onboarding/status')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
@@ -132,14 +135,25 @@ function AppContent() {
       .catch(() => {});
   }, [user, loading]);
 
-  // Phase 85: Fetch organization onboarding stage (non-superadmin only)
+  // Phase 85: Fetch organization onboarding stage (client portal only, non-superadmin)
   // Re-fetch on route change so navigating away from Settings picks up stage updates
+  // Also check discovery status — if a snapshot exists, treat as 'active' regardless of DB stage
   useEffect(() => {
     if (!user || loading || user.is_superadmin) return;
-    fetch('/api/organization/stage')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.stage) setTenantStage(data.stage);
+    if (location.pathname.startsWith('/admin')) return;
+    Promise.all([
+      fetch('/api/organization/stage').then(r => r.ok ? r.json().catch(() => null) : null),
+      fetch('/api/discovery/status').then(r => r.ok ? r.json().catch(() => null) : null),
+    ])
+      .then(([stageData, discData]) => {
+        const stage = stageData?.stage || 'active';
+        const hasSnapshot = discData?.has_snapshot || false;
+        // If discovery data exists, unlock the dashboard regardless of onboarding stage
+        if (hasSnapshot || stage === 'active') {
+          setTenantStage('active');
+        } else {
+          setTenantStage(stage);
+        }
       })
       .catch(() => {});
   }, [user, loading, location.pathname]);
@@ -180,13 +194,14 @@ function AppContent() {
     );
   }
 
-  // Phase 48: Auto-redirect to onboarding if needed
-  if (needsOnboarding && location.pathname !== '/onboarding' && location.pathname !== '/login') {
+  // Phase 48: Auto-redirect to onboarding if needed (skip for admin portal)
+  if (needsOnboarding && location.pathname !== '/onboarding' && location.pathname !== '/login'
+      && !location.pathname.startsWith('/admin')) {
     return <Navigate to="/onboarding" replace />;
   }
 
-  // Detect admin subdomain (admin.auditgraph.ai) — render admin portal at root
-  const isAdminSubdomain = window.location.hostname.split('.')[0] === 'admin';
+  // Detect admin subdomain (admin.auditgraph.ai, dev.admin.auditgraph.ai) — render admin portal at root
+  const isAdminSubdomain = isAdminHost();
   const isAdminAccessible = isAdminSubdomain
     || window.location.hostname === 'localhost'
     || window.location.hostname === '127.0.0.1';
@@ -234,6 +249,7 @@ function AppContent() {
         {/* All other routes - with sidebar + topbar, protected */}
         <Route path="/*" element={
           <ProtectedRoute>
+            <DemoBanner />
             <div className="min-h-screen" style={{ backgroundColor: 'var(--bg-surface)' }}>
               {/* Top Bar */}
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />

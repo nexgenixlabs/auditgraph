@@ -79,7 +79,7 @@ export default function OnboardingWizard() {
           azure_client_secret: azureClientSecret.trim(),
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setTestResult({ status: 'error', error: data.error || data.message || 'Connection failed' });
       } else {

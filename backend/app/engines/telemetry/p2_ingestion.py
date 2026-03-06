@@ -130,7 +130,7 @@ class P2TelemetryService:
                     VALUES %s
                     ON CONFLICT DO NOTHING
                 """, rows)
-                self.db.conn.commit()
+                self.db._commit()
                 cursor.close()
                 total_ingested += len(rows)
 
@@ -199,11 +199,11 @@ class P2TelemetryService:
             """, (period_start, period_end, lookback_days, run_id, run_id,
                   datetime.combine(period_start, datetime.min.time())))
             stats_count = cursor.rowcount
-            self.db.conn.commit()
+            self.db._commit()
             print(f"  ✓ Computed activity stats for {stats_count} identities")
             return stats_count
         except Exception as e:
-            self.db.conn.rollback()
+            self.db._rollback()
             print(f"  ⚠️ Activity stats computation error: {e}")
             return 0
         finally:
@@ -227,12 +227,12 @@ class P2TelemetryService:
                   AND i.last_sign_in IS NULL
             """, (run_id,))
             updated = cursor.rowcount
-            self.db.conn.commit()
+            self.db._commit()
             if updated:
                 print(f"  ✓ Backfilled last_sign_in for {updated} identities from P2 telemetry")
             return updated
         except Exception as e:
-            self.db.conn.rollback()
+            self.db._rollback()
             print(f"  ⚠️ last_sign_in backfill error: {e}")
             return 0
         finally:

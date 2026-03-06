@@ -62,15 +62,21 @@ PUBLIC_PATHS = {
 # ── Phase 1B: Host-derived portal detection ──
 
 def _derive_portal() -> str:
-    """Derive portal from Host header. admin.* -> 'admin', else -> 'client'."""
+    """Derive portal from Host header. Supports multi-level subdomains (dev.admin.*)."""
     host = request.host.split(':')[0]
-    if host.startswith('admin.') or host == 'admin':
+    parts = host.split('.')
+    if 'admin' in parts:
         return 'admin'
-    # Dev mode: accept X-Portal-Context header when no subdomain routing
+    # Accept X-Portal-Context header with Origin cross-validation (cross-origin API calls)
+    portal_header = request.headers.get('X-Portal-Context', '')
+    if portal_header == 'admin':
+        origin = request.headers.get('Origin', '') or request.headers.get('Referer', '')
+        if 'admin' in origin.lower():
+            return 'admin'
+    # Dev mode fallback: accept X-Portal-Context without Origin check
     if os.getenv('FLASK_ENV') == 'development' or host in ('localhost', '127.0.0.1'):
-        override = request.headers.get('X-Portal-Context', '')
-        if override in ('admin', 'client'):
-            return override
+        if portal_header in ('admin', 'client'):
+            return portal_header
     return 'client'
 
 
@@ -111,6 +117,7 @@ def generate_access_token(user: dict, portal: str = 'client', org_slug: str | No
         'tenant_name': user.get('org_name'),         # backward compat
         'is_superadmin': user.get('is_superadmin', False),
         'portal_role': user.get('portal_role'),
+        'is_demo': bool(user.get('is_demo', False)),
         'force_password_change': user.get('force_password_change', False),
         'portal': portal,
         'iss': iss,
@@ -143,7 +150,7 @@ def generate_refresh_token(user: dict, portal: str = 'client') -> str:
     raw_token = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
 
-    db = Database()
+    db = Database(_admin_reason='generate_refresh_token: save token hash')
     try:
         expires_at = datetime.now(timezone.utc) + REFRESH_TOKEN_EXPIRY
         db.save_refresh_token(user['id'], token_hash, expires_at, portal=portal)
@@ -161,7 +168,7 @@ def hash_refresh_token(raw_token: str) -> str:
 def _authenticate_api_key(raw_key: str):
     """Validate an API key and set g.current_user. Returns None on success, error tuple on failure."""
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    db = Database()
+    db = Database(_admin_reason='api_key_auth: validate key hash')
     try:
         row = db.get_api_key_by_hash(key_hash)
         if not row:
@@ -265,7 +272,7 @@ def auth_middleware():
                     token_tid = payload.get('org_id') or payload.get('tenant_id')
                     if token_tid is not None:
                         try:
-                            _db = Database()
+                            _db = Database(_admin_reason='auth_middleware: host-slug guard')
                             _cur = _db.conn.cursor()
                             _cur.execute("SELECT id FROM organizations WHERE slug = %s", (host_slug,))
                             _row = _cur.fetchone()
@@ -295,6 +302,7 @@ def auth_middleware():
                 'org_name': payload.get('org_name') or payload.get('tenant_name'),
                 'is_superadmin': payload.get('is_superadmin', False),
                 'portal_role': payload.get('portal_role'),
+                'is_demo': payload.get('is_demo', False),
                 'portal': portal,
             }
 
@@ -325,7 +333,7 @@ def auth_middleware():
             # Phase 1D: Log cross-org admin actions
             logger.info(f"Superadmin cross-org override: user_id={g.current_user['id']} -> organization_id={override_oid}")
             try:
-                _log_db = Database()
+                _log_db = Database(_admin_reason='auth_middleware: log cross-org action')
                 _log_cur = _log_db.conn.cursor()
                 _log_cur.execute(
                     """INSERT INTO activity_log (action, description, user_id, organization_id, metadata, created_at)
@@ -336,7 +344,7 @@ def auth_middleware():
                      int(override_oid),
                      '{}')
                 )
-                _log_db.conn.commit()
+                _log_db._commit()
                 _log_cur.close()
                 _log_db.close()
             except Exception as e:
@@ -349,7 +357,7 @@ def auth_middleware():
         _ps_org_id = g.current_user.get('organization_id')
         if _ps_org_id:
             try:
-                _ps_db = Database()
+                _ps_db = Database(_admin_reason='auth_middleware: plan_status check')
                 _ps_cur = _ps_db.conn.cursor()
                 _ps_cur.execute("SELECT plan_status FROM organizations WHERE id = %s", (_ps_org_id,))
                 _ps_row = _ps_cur.fetchone()
@@ -369,7 +377,7 @@ def auth_middleware():
         org_id = g.current_user.get('organization_id')
         if org_id:
             try:
-                tdb = Database()
+                tdb = Database(_admin_reason='auth_middleware: license check')
                 tcur = tdb.conn.cursor()
                 tcur.execute("SELECT plan, license_activated_at FROM organizations WHERE id = %s", (org_id,))
                 trow = tcur.fetchone()
@@ -393,17 +401,40 @@ def auth_middleware():
     return None
 
 
+# Phase 1 Security Hardening: Role hierarchy — higher roles inherit lower permissions
+# owner > admin > security_admin > compliance > reader
+ROLE_HIERARCHY = {
+    'owner': {'owner', 'admin', 'security_admin', 'compliance', 'reader', 'auditor', 'viewer'},
+    'admin': {'admin', 'security_admin', 'compliance', 'reader', 'auditor', 'viewer'},
+    'security_admin': {'security_admin', 'compliance', 'reader', 'auditor', 'viewer'},
+    'compliance': {'compliance', 'reader', 'viewer'},
+    'reader': {'reader', 'viewer'},
+    # Backward compat aliases
+    'auditor': {'auditor', 'viewer', 'reader'},
+    'viewer': {'viewer', 'reader'},
+}
+
+
 def require_role(*allowed_roles):
-    """Decorator for handlers that require specific roles."""
+    """Decorator for handlers that require specific roles.
+    Uses role hierarchy: owner inherits admin, admin inherits security_admin, etc."""
+    allowed_set = set(allowed_roles)
+
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
             user = getattr(g, 'current_user', None)
             if not user:
                 return jsonify({'error': 'Authentication required'}), 401
-            if user['role'] not in allowed_roles:
-                return jsonify({'error': 'Insufficient permissions'}), 403
-            return f(*args, **kwargs)
+            user_role = user['role']
+            # Direct match
+            if user_role in allowed_set:
+                return f(*args, **kwargs)
+            # Hierarchy check: user's role inherits allowed roles
+            inherited = ROLE_HIERARCHY.get(user_role, {user_role})
+            if inherited & allowed_set:
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Insufficient permissions'}), 403
         return wrapper
     return decorator
 

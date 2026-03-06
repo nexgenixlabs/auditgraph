@@ -41,18 +41,18 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from dotenv import load_dotenv
+from app.config import AZURE_DISCOVERY_ENABLED, AWS_DISCOVERY_ENABLED
 
-from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
-from app.engines.discovery.aws_discovery import AWSDiscoveryEngine
+if AZURE_DISCOVERY_ENABLED:
+    from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+else:
+    AzureDiscoveryEngine = None
 from app.engines.drift_detector import DriftDetector
 from app.engines.anomaly_detector import AnomalyDetector
 from app.services.email_service import EmailService
 from app.database import Database
 from typing import Dict
 
-# Load environment
-load_dotenv()
 
 # Setup logging
 logging.basicConfig(
@@ -121,7 +121,8 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
     for db_org_id, org_name in orgs:
         logger.info(f"▶ Running discovery for organization: {org_name} (id={db_org_id})")
         try:
-            _run_org_discovery(db_org_id, org_name, scan_mode)
+            _track_job('discovery', db_org_id,
+                       _run_org_discovery, db_org_id, org_name, scan_mode)
         except Exception as e:
             logger.error(f"❌ Discovery FAILED for organization {org_name}: {str(e)}")
             logger.exception(e)
@@ -130,6 +131,9 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
                 'description': f'Discovery failed for organization {org_name}: {str(e)[:200]}',
                 'severity': 'critical',
             }, db_org_id=db_org_id)
+        # CONTEXT SAFETY: Reset any lingering org context after each iteration.
+        # Each _run_org_discovery creates/closes its own Database connections,
+        # but this ensures no thread-local state leaks between org iterations.
 
     logger.info("=" * 70)
     logger.info("SCHEDULED DISCOVERY COMPLETED (all organizations)")
@@ -143,8 +147,14 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     Otherwise scan ALL connected connections for the organization.
     Falls back to legacy settings-based credentials if no connections exist.
     """
+    # Demo tenant guard — block real cloud discovery for demo orgs
     admin_db = Database()
     try:
+        org = admin_db.get_organization_by_id(db_org_id)
+        if org and org.get('is_demo'):
+            logger.info(f"  ⏭ Skipping discovery for demo organization '{org_name}' (is_demo=true)")
+            admin_db.close()
+            return
         connections = admin_db.get_cloud_connections(db_org_id,
                                                      include_secrets=True)
     finally:
@@ -188,7 +198,7 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     try:
         admin_db = Database()
         org = admin_db.get_organization_by_id(db_org_id)
-        if org and org.get('onboarding_stage') in ('locked', 'authenticating', 'password_change'):
+        if org and org.get('onboarding_stage') in ('connections', 'locked', 'authenticating', 'password_change'):
             admin_db.update_organization(db_org_id, onboarding_stage='active')
             logger.info(f"  ✓ Organization {org_name} onboarding stage advanced to 'active'")
         admin_db.close()
@@ -208,6 +218,9 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
 
 def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mode: str = 'deep'):
     """Run discovery for a single cloud connection."""
+    if not AZURE_DISCOVERY_ENABLED and conn.get('cloud', 'azure') == 'azure':
+        logger.info(f"  ⏭ Azure discovery disabled (APP_ENV=local), skipping connection '{conn.get('label', 'Unknown')}'")
+        return
     conn_id = conn['id']
     label = conn.get('label', 'Unknown')
     cloud = conn.get('cloud', 'azure')
@@ -224,19 +237,23 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
             logger.warning(f"  ⏭ Skipping '{label}' — incomplete Azure credentials")
             return
         engine = AzureDiscoveryEngine(
-            tenant_id=azure_directory_id,
+            azure_directory_id=azure_directory_id,
             client_id=client_id,
             client_secret=client_secret,
             db_org_id=db_org_id,
             cloud_connection_id=conn_id,
         )
     elif cloud == 'aws':
+        if not AWS_DISCOVERY_ENABLED:
+            logger.info(f"  ⏭ AWS discovery disabled (APP_ENV=local), skipping connection '{label}'")
+            return
         access_key_id = metadata.get('access_key_id') or conn.get('client_id')
         secret_access_key = metadata.get('secret_access_key') or metadata.get('client_secret')
         region = metadata.get('region', 'us-east-1')
         if not all([access_key_id, secret_access_key]):
             logger.warning(f"  ⏭ Skipping '{label}' — incomplete AWS credentials")
             return
+        from app.engines.discovery.aws_discovery import AWSDiscoveryEngine
         engine = AWSDiscoveryEngine(
             access_key_id=access_key_id,
             secret_access_key=secret_access_key,
@@ -249,6 +266,16 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
         return
 
     logger.info(f"    ✓ {cloud.upper()} engine initialized for '{label}'")
+
+    # Phase 1 Security: Audit log snapshot_started
+    try:
+        act_db = Database(organization_id=db_org_id)
+        act_db.log_activity('snapshot_started',
+                            f'Discovery scan started for connection "{label}" ({cloud})',
+                            {'connection_id': conn_id, 'cloud': cloud, 'scan_mode': scan_mode})
+        act_db.close()
+    except Exception:
+        pass
 
     engine.run_discovery()
     logger.info(f"    ✅ Discovery completed for connection '{label}'")
@@ -264,6 +291,9 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
 
 def _run_legacy_settings_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep'):
     """Fallback: run discovery using legacy settings-table credentials (single connection)."""
+    if not AZURE_DISCOVERY_ENABLED:
+        logger.info(f"  ⏭ Azure discovery disabled (APP_ENV=local), skipping legacy discovery for '{org_name}'")
+        return
     settings_db = Database(organization_id=db_org_id)
     try:
         settings = settings_db.get_settings(organization_id=db_org_id)
@@ -447,11 +477,30 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 89: Run resource anomaly detection
         _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
 
+        # Phase 2: Security findings engine (tracked by Phase 8)
+        _track_job('security_findings', db_org_id,
+                   _run_security_findings, current_run_id, db)
+
+        # Phase 3: Attack path analysis (tracked by Phase 8)
+        _track_job('attack_paths', db_org_id,
+                   _run_attack_path_analysis, current_run_id, db)
+
+        # Phase 4: Fix recommendations (tracked by Phase 8)
+        _track_job('fix_recommendations', db_org_id,
+                   _run_fix_recommendations, current_run_id, db)
+
+        # Phase 5: Blast radius analysis (tracked by Phase 8)
+        _track_job('blast_radius', db_org_id,
+                   _run_blast_radius_analysis, current_run_id, db)
+
         # Phase 51: Save compliance snapshot
         _save_compliance_snapshot(current_run_id, db)
 
         # AGIRS: Compute and persist AGIRS scores
         _compute_agirs_scores(current_run_id, db_org_id, db)
+
+        # Phase 8: Evaluate tenant health + discovery integrity (non-blocking)
+        _run_platform_health_check(current_run_id, db_org_id, db)
 
         db.close()
 
@@ -839,6 +888,283 @@ def _run_resource_anomaly_detection(current_run_id: int, previous_run_id: int, d
         logger.exception(e)
 
 
+def _run_security_findings(current_run_id: int, db: Database):
+    """Run security findings engine after resource anomaly detection."""
+    try:
+        from app.engines.security_findings import SecurityFindingsEngine
+
+        engine = SecurityFindingsEngine(db)
+        findings = engine.analyze(current_run_id)
+
+        if findings:
+            count = db.save_security_findings(current_run_id, findings)
+            logger.info(f"Security findings engine: {count} finding(s) saved for run #{current_run_id}")
+
+            # Create in-app notifications for critical/high findings
+            for f in findings:
+                if f.get('severity') in ('critical', 'high'):
+                    try:
+                        db.create_notification(
+                            event_type='security_finding',
+                            category='security',
+                            severity=f['severity'],
+                            title=f['title'],
+                            description=f['description'],
+                            payload=f.get('metadata'),
+                            related_identity_id=f.get('entity_id'),
+                            related_run_id=current_run_id,
+                        )
+                    except Exception:
+                        pass  # Non-critical
+
+            # Dispatch Slack/Teams for critical findings
+            critical = [f for f in findings if f.get('severity') == 'critical']
+            if critical:
+                _dispatch_notification('security_finding', {
+                    'title': f'{len(critical)} Critical Security Finding(s)',
+                    'description': f'Run #{current_run_id}: {", ".join(f["title"] for f in critical[:3])}',
+                    'severity': 'critical',
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
+        else:
+            logger.info(f"Security findings engine: no findings for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Security findings engine failed: {e}")
+        logger.exception(e)
+
+
+def _run_attack_path_analysis(current_run_id: int, db: Database):
+    """Run attack path analysis after security findings engine."""
+    try:
+        from app.engines.attack_path_engine import AttackPathEngine
+
+        engine = AttackPathEngine(db)
+        paths = engine.analyze(current_run_id)
+
+        if paths:
+            count = db.save_attack_paths(current_run_id, paths)
+            logger.info(f"Attack path analysis: {count} path(s) saved for run #{current_run_id}")
+
+            # Create in-app notifications for critical paths
+            critical_paths = [p for p in paths if p.get('severity') == 'critical']
+            for p in critical_paths:
+                try:
+                    db.create_notification(
+                        event_type='attack_path_detected',
+                        category='security',
+                        severity='critical',
+                        title=p.get('description', 'Critical attack path detected'),
+                        description=p.get('narrative', ''),
+                        payload={'path_type': p['path_type'], 'risk_score': p['risk_score']},
+                        related_identity_id=p.get('source_entity_id'),
+                        related_run_id=current_run_id,
+                    )
+                except Exception:
+                    pass  # Non-critical
+
+            # Dispatch Slack/Teams for critical paths
+            if critical_paths:
+                _dispatch_notification('attack_path_detected', {
+                    'title': f'{len(critical_paths)} Critical Attack Path(s) Detected',
+                    'description': f'Run #{current_run_id}: {", ".join(p["description"] for p in critical_paths[:3])}',
+                    'severity': 'critical',
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
+        else:
+            logger.info(f"Attack path analysis: no paths found for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Attack path analysis failed: {e}")
+        logger.exception(e)
+
+
+def _run_fix_recommendations(current_run_id: int, db: Database):
+    """Run fix recommendations engine after attack path analysis."""
+    try:
+        from app.engines.fix_recommendation_engine import FixRecommendationEngine
+
+        engine = FixRecommendationEngine(db)
+        recommendations = engine.analyze(current_run_id)
+
+        if recommendations:
+            count = db.save_fix_recommendations(current_run_id, recommendations)
+            logger.info(f"Fix recommendations: {count} recommendation(s) saved for run #{current_run_id}")
+
+            # Create in-app notifications for high-priority recommendations (>= 85)
+            for r in recommendations:
+                if r.get('priority_score', 0) >= 85:
+                    try:
+                        db.create_notification(
+                            event_type='fix_recommendation',
+                            category='security',
+                            severity='high',
+                            title=r['title'],
+                            description=r['description'],
+                            payload={
+                                'fix_type': r['fix_type'],
+                                'priority_score': r['priority_score'],
+                                'fix_category': r['fix_category'],
+                            },
+                            related_identity_id=r.get('entity_id'),
+                            related_run_id=current_run_id,
+                        )
+                    except Exception:
+                        pass  # Non-critical
+
+            # Dispatch Slack/Teams for high-priority recommendations
+            high_priority = [r for r in recommendations if r.get('priority_score', 0) >= 85]
+            if high_priority:
+                _dispatch_notification('fix_recommendation', {
+                    'title': f'{len(high_priority)} High-Priority Fix Recommendation(s)',
+                    'description': f'Run #{current_run_id}: {", ".join(r["title"] for r in high_priority[:3])}',
+                    'severity': 'high',
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
+        else:
+            logger.info(f"Fix recommendations: no recommendations for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Fix recommendations engine failed: {e}")
+        logger.exception(e)
+
+
+def _run_blast_radius_analysis(current_run_id: int, db: Database):
+    """Run blast radius engine after fix recommendations."""
+    try:
+        from app.engines.blast_radius_engine import BlastRadiusEngine
+
+        engine = BlastRadiusEngine(db)
+        results = engine.analyze(current_run_id)
+
+        if results:
+            count = db.save_blast_radius_results(current_run_id, results)
+            logger.info(f"Blast radius: {count} result(s) saved for run #{current_run_id}")
+
+            # Create in-app notifications for CRITICAL exposure identities
+            critical = [r for r in results if r.get('identity_exposure_level') == 'CRITICAL']
+            for r in critical:
+                try:
+                    db.create_notification(
+                        event_type='blast_radius_critical',
+                        category='security',
+                        severity='critical',
+                        title=f'Critical blast radius: {r.get("identity_name", "Unknown")}',
+                        description=(
+                            f'{r.get("identity_name")} can reach {r.get("reachable_resource_count", 0)} resources '
+                            f'with {r.get("sensitive_resource_count", 0)} sensitive assets'
+                        ),
+                        payload={
+                            'identity_id': r['identity_id'],
+                            'risk_score': r['risk_score'],
+                            'reachable_resource_count': r['reachable_resource_count'],
+                        },
+                        related_run_id=current_run_id,
+                    )
+                except Exception:
+                    pass  # Non-critical
+
+            # Dispatch Slack/Teams for critical blast radius
+            if critical:
+                _dispatch_notification('blast_radius_critical', {
+                    'title': f'{len(critical)} Identity(s) with CRITICAL Blast Radius',
+                    'description': f'Run #{current_run_id}: {", ".join(r.get("identity_name", "?") for r in critical[:3])}',
+                    'severity': 'critical',
+                }, db_org_id=db._organization_id if hasattr(db, '_organization_id') else None)
+        else:
+            logger.info(f"Blast radius: no results for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Blast radius engine failed: {e}")
+        logger.exception(e)
+
+
+def run_periodic_access_reviews():
+    """
+    Phase 6: Periodic access review generation.
+    Creates a quarterly access review campaign for each tenant with privileged scope.
+    Runs as a standalone scheduled job (not part of discovery pipeline).
+    """
+    logger.info("=" * 50)
+    logger.info("PERIODIC ACCESS REVIEW CHECK")
+    logger.info("=" * 50)
+
+    try:
+        from psycopg2.extras import RealDictCursor as _RDC
+
+        db_admin = Database()
+        db_admin._ensure_tenants_table()
+        cursor = db_admin.conn.cursor(cursor_factory=_RDC)
+        cursor.execute("SELECT id FROM tenants WHERE active = true")
+        tenant_ids = [r['id'] for r in cursor.fetchall()]
+        cursor.close()
+        db_admin.close()
+
+        for tid in tenant_ids:
+            try:
+                db = Database(organization_id=tid)
+
+                # Check if there is already an open/in_progress periodic review
+                db._ensure_access_reviews_tables()
+                cursor = db.conn.cursor(cursor_factory=_RDC)
+                cursor.execute("""
+                    SELECT id FROM access_reviews
+                    WHERE review_type = 'periodic'
+                      AND status IN ('open', 'in_progress')
+                    LIMIT 1
+                """)
+                existing = cursor.fetchone()
+                cursor.close()
+
+                if existing:
+                    logger.info(f"Tenant {tid}: periodic review #{existing['id']} already open, skipping")
+                    db.close()
+                    continue
+
+                # Create new periodic review
+                from datetime import datetime, timedelta
+                due = datetime.utcnow() + timedelta(days=30)
+
+                now = datetime.utcnow()
+                quarter = (now.month - 1) // 3 + 1
+                review = db.create_access_review(
+                    title=f"Quarterly Privileged Access Review — {now.year}-Q{quarter}",
+                    description='Auto-generated periodic review of privileged identities for compliance.',
+                    review_type='periodic',
+                    scope='privileged',
+                    created_by='system',
+                    due_date=due.isoformat(),
+                    compliance_frameworks=['SOC2', 'HIPAA', 'ISO27001', 'NIST'],
+                )
+
+                from app.engines.access_review_engine import AccessReviewEngine
+                engine = AccessReviewEngine(db)
+                assignments = engine.generate_assignments(review['id'], 'privileged')
+
+                if assignments:
+                    for a in assignments:
+                        a['due_date'] = due.isoformat()
+                    saved = db.save_review_assignments(assignments)
+                    logger.info(f"Tenant {tid}: created periodic review #{review['id']} with {saved} assignments")
+
+                    # Update status
+                    cursor = db.conn.cursor()
+                    cursor.execute("""
+                        UPDATE access_reviews SET status = 'in_progress', updated_at = NOW()
+                        WHERE id = %s
+                    """, (review['id'],))
+                    db._commit()
+                    cursor.close()
+                else:
+                    logger.info(f"Tenant {tid}: no privileged assignments found, review #{review['id']} stays open")
+
+                db.close()
+
+            except Exception as e:
+                logger.error(f"Periodic review failed for tenant {tid}: {e}")
+
+    except Exception as e:
+        logger.error(f"Periodic access review job failed: {e}")
+        logger.exception(e)
+
+
 def _generate_anomaly_notifications(current_run_id: int, anomalies: list, db: Database):
     """Create in-app notifications for each detected anomaly."""
     try:
@@ -1104,9 +1430,79 @@ def run_data_retention():
                 db.close()
             except Exception as e:
                 logger.error(f"Data retention failed for {org_name}: {e}")
+            # CONTEXT SAFETY: each iteration creates/closes its own Database(org).
+            # No lingering context to reset, but comment documents the guarantee.
 
     except Exception as e:
         logger.error(f"Data retention failed: {e}")
+        logger.exception(e)
+
+
+def run_rls_audit_job():
+    """Nightly RLS isolation audit — validates drift and logs findings.
+
+    Called by the scheduler at 04:30 UTC daily.
+    Runs validate_rls_drift() and enforce_force_rls(), then records
+    any findings in the admin_audit_log table.
+    """
+    logger.info("=" * 70)
+    logger.info("RLS ISOLATION AUDIT STARTED")
+    logger.info(f"Time: {datetime.utcnow().isoformat()}")
+    logger.info("=" * 70)
+
+    try:
+        # Step 1: Enforce FORCE RLS on all tenant tables (idempotent)
+        Database.enforce_force_rls()
+
+        # Step 2: Run comprehensive drift detection
+        drift_result = Database.validate_rls_drift()
+
+        if drift_result.get('skipped'):
+            logger.info("RLS audit skipped: %s", drift_result.get('reason', 'unknown'))
+            return
+
+        # Step 3: Log findings to admin_audit_log
+        if not drift_result['ok'] or drift_result['summary']['issues_found'] > 0:
+            db = Database(_admin_reason='rls_audit_job')
+            try:
+                cursor = db.conn.cursor()
+                # Ensure admin_audit_log table exists
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_audit_log (
+                        id SERIAL PRIMARY KEY,
+                        action TEXT NOT NULL,
+                        actor TEXT NOT NULL DEFAULT 'system',
+                        details JSONB,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cursor.execute(
+                    """INSERT INTO admin_audit_log (action, actor, details)
+                       VALUES (%s, %s, %s)""",
+                    (
+                        'rls_drift_detected',
+                        'scheduler:rls_audit',
+                        json.dumps(drift_result, default=str),
+                    ),
+                )
+                db._commit()
+                cursor.close()
+
+                logger.error(
+                    "RLS AUDIT FAILED — %d findings (%d critical). Details logged to admin_audit_log.",
+                    drift_result['summary']['issues_found'],
+                    drift_result['summary']['critical'],
+                )
+            finally:
+                db.close()
+        else:
+            logger.info(
+                "RLS AUDIT PASSED — %d tables checked, 0 issues",
+                drift_result['summary']['tables_checked'],
+            )
+
+    except Exception as e:
+        logger.error("RLS audit job failed: %s", e)
         logger.exception(e)
 
 
@@ -1123,7 +1519,7 @@ def mark_overdue_invoices():
             RETURNING id, organization_id, invoice_number
         """)
         rows = cursor.fetchall()
-        db.conn.commit()
+        db._commit()
         cursor.close()
         if rows:
             logger.info(f"Marked {len(rows)} invoices as overdue")
@@ -1332,6 +1728,17 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Enterprise isolation: Nightly RLS audit — daily at 4:30 AM UTC
+    scheduler.add_job(
+        func=run_rls_audit_job,
+        trigger=CronTrigger(hour=4, minute=30, timezone="UTC"),
+        id='rls_audit',
+        name='RLS Isolation Audit (Daily, 04:30 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Phase 3B: Monthly billing snapshots — 1st of each month at 04:00 UTC
     scheduler.add_job(
         func=run_monthly_billing_snapshots,
@@ -1354,6 +1761,17 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Phase 6: Periodic access reviews — quarterly (1st of Jan/Apr/Jul/Oct at 06:00 UTC)
+    scheduler.add_job(
+        func=run_periodic_access_reviews,
+        trigger=CronTrigger(month='1,4,7,10', day=1, hour=6, minute=0, timezone="UTC"),
+        id='periodic_access_reviews',
+        name='Periodic Access Reviews (Quarterly, 1st @ 06:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
 
@@ -1362,6 +1780,7 @@ def start_scheduler():
     logger.info(f"📊 Report: {report_name} (enabled={report_enabled})")
     logger.info("🗑️ Retention: Daily at 03:00 UTC")
     logger.info("📋 Invoice overdue: Daily at 02:00 UTC")
+    logger.info("🔒 RLS audit: Daily at 04:30 UTC")
     logger.info("🔄 Scan schedules: Every 60 seconds")
 
     # Get next run times
@@ -1421,6 +1840,122 @@ def get_next_report_time():
         return job.next_run_time
 
     return None
+
+
+# ── Phase 8: Platform Operations & Health Monitoring ─────────────────
+
+def _track_job(job_type: str, org_id: int, func, *args, **kwargs):
+    """Wrap an engine call with job_runs tracking.
+
+    Creates a job_run record before calling *func*, then marks it
+    completed or failed once it returns.  Non-blocking: if the
+    tracking DB call itself fails we log and continue.
+    """
+    job_run = None
+    db_track = None
+    try:
+        db_track = Database()
+        job_run = db_track.create_job_run(job_type, organization_id=org_id)
+        db_track.close()
+        db_track = None
+    except Exception as e:
+        logger.warning(f"Phase 8: failed to create job_run for {job_type}: {e}")
+        if db_track:
+            db_track.close()
+
+    # Execute the actual engine function
+    result = None
+    error = None
+    try:
+        result = func(*args, **kwargs)
+    except Exception as e:
+        error = str(e)[:500]
+        raise  # Re-raise so outer handler sees it
+    finally:
+        if job_run:
+            try:
+                db_track = Database()
+                status = 'failed' if error else 'completed'
+                db_track.complete_job_run(
+                    str(job_run['job_id']), status=status, error_message=error,
+                )
+                # Log event (Part 11)
+                event = 'job_failed' if error else 'job_completed'
+                db_track.log_activity(event,
+                    f'{job_type} job {status}' + (f': {error[:120]}' if error else ''),
+                    {'job_id': str(job_run['job_id']), 'job_type': job_type})
+                db_track.close()
+            except Exception as te:
+                logger.warning(f"Phase 8: failed to complete job_run: {te}")
+                if db_track:
+                    db_track.close()
+
+    return result
+
+
+def _run_platform_health_check(current_run_id: int, org_id: int, db: Database):
+    """Post-pipeline: evaluate tenant health + discovery integrity.
+
+    Called at the end of each per-org pipeline run, after all engines.
+    Lightweight SELECT-only queries; does not block the pipeline.
+    """
+    try:
+        from app.engines.platform_health import PlatformHealthEngine
+
+        engine = PlatformHealthEngine(db)
+
+        # Part 6: Discovery integrity check
+        integrity = engine.check_discovery_integrity(org_id, current_run_id)
+        db.save_integrity_metrics(integrity)
+
+        if integrity.get('integrity_warning'):
+            logger.warning(
+                f"Phase 8 INTEGRITY WARNING (org={org_id}, run={current_run_id}): "
+                + "; ".join(integrity.get('warnings', []))
+            )
+            # Part 11: audit log
+            try:
+                db.log_activity('integrity_warning_detected',
+                    f'Discovery integrity warning for run #{current_run_id}',
+                    {'warnings': integrity['warnings'], 'run_id': current_run_id})
+            except Exception:
+                pass
+
+        # Part 5: Tenant health evaluation
+        health = engine.evaluate_tenant_health(org_id)
+        if integrity.get('integrity_warning'):
+            health['integrity_warning'] = True
+            if health['status'] == 'healthy':
+                health['status'] = 'warning'
+
+        db.upsert_tenant_health(health)
+        logger.info(
+            f"Phase 8: tenant_health updated for org={org_id} "
+            f"status={health['status']} snapshot_age={health['snapshot_age_hours']}h"
+        )
+
+        # Part 11: audit log
+        try:
+            db.log_activity('tenant_health_updated',
+                f'Tenant health evaluated: {health["status"]}',
+                {'organization_id': org_id, 'status': health['status'],
+                 'findings_count': health['findings_count'],
+                 'critical_risks': health['critical_risks']})
+        except Exception:
+            pass
+
+        # Record system-level metrics
+        try:
+            admin_db = Database()
+            failure_rate = admin_db.get_job_failure_rate(hours=24)
+            admin_db.record_system_metric('job_failure_rate', failure_rate)
+            admin_db.close()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"Phase 8: platform health check failed for org={org_id}: {e}")
+        logger.exception(e)
 
 
 def trigger_manual_discovery(scan_mode: str = 'deep', db_org_id: int = None,

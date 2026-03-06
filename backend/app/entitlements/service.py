@@ -251,11 +251,11 @@ def _update_counter(db, organization_id, resource_type, delta):
             DO UPDATE SET current_count = GREATEST(0, organization_usage_counters.current_count + %s),
                           updated_at = NOW()
         """, (organization_id, resource_type, delta, delta))
-        db.conn.commit()
+        db._commit()
         cursor.close()
     except Exception:
         try:
-            db.conn.rollback()
+            db._rollback()
         except Exception:
             pass
 
@@ -304,11 +304,11 @@ def track_usage(db, organization_id, resource_type, resource_id, action, metadat
             INSERT INTO organization_usage (organization_id, resource_type, resource_id, action, metadata)
             VALUES (%s, %s, %s, %s, %s)
         """, (organization_id, resource_type, resource_id, action, json.dumps(metadata or {})))
-        db.conn.commit()
+        db._commit()
         cursor.close()
     except Exception:
         try:
-            db.conn.rollback()
+            db._rollback()
         except Exception:
             pass
 

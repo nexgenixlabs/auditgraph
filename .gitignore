@@ -53,4 +53,3 @@ pnpm-debug.log*
 .DS_Store
 .idea/
 .vscode/
-backend/.env.docker

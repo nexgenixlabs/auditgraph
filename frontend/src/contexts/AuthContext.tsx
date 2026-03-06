@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { isAdminHost } from '../utils/hostDetection';
 
 interface User {
   id: number;
@@ -10,6 +11,7 @@ interface User {
   is_superadmin?: boolean;
   portal_role?: 'superadmin' | 'poweradmin' | 'billing' | 'reader' | null;
   force_password_change?: boolean;
+  is_demo?: boolean;
 }
 
 type PortalContext = 'admin' | 'client';
@@ -34,6 +36,7 @@ interface AuthContextValue {
   canManageRemediation: boolean;
   canViewCompliance: boolean;
   canTriggerScans: boolean;
+  isDemo: boolean;
   activeOrgId: number | null;
   activeOrgName: string | null;
   switchOrganization: (orgId: number | null, orgName?: string) => void;
@@ -61,10 +64,10 @@ function resolveApiUrl(url: string): string {
   return url;
 }
 
-/** Detect which portal we're running in based on current URL path. */
+/** Detect which portal we're running in based on current URL path or hostname. */
 function detectPortal(): PortalContext {
   if (window.location.pathname.startsWith('/admin')) return 'admin';
-  if (window.location.hostname.startsWith('admin.')) return 'admin';
+  if (isAdminHost()) return 'admin';
   return 'client';
 }
 
@@ -171,8 +174,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (activeOid && !headers.has('X-Organization-Id')) {
             headers.set('X-Organization-Id', activeOid);
           }
-          // Phase 1B: Send portal context header in dev mode (no subdomain routing)
-          if (!API_BASE && detectPortal() === 'admin') {
+          // Send portal context header so backend knows admin context even on cross-origin API calls
+          if (detectPortal() === 'admin') {
             headers.set('X-Portal-Context', 'admin');
           }
           init = { ...init, headers };
@@ -250,9 +253,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const body: any = { username, password };
     if (tenantSlug) body.tenant_slug = tenantSlug;
 
-    // Phase 1B: Build headers — include portal context for dev mode
+    // Send portal context header so backend knows admin context even on cross-origin API calls
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (!API_BASE && resolvedPortal === 'admin') {
+    if (resolvedPortal === 'admin') {
       headers['X-Portal-Context'] = 'admin';
     }
 
@@ -265,7 +268,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.message || data.error || 'Login failed');
     }
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!data.access_token) throw new Error('Invalid login response');
     localStorage.setItem(keys.access, data.access_token);
     localStorage.setItem(keys.refresh, data.refresh_token);
     // Don't set user when force_password_change is required — keeps user null
@@ -424,6 +428,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     canManageRemediation: role === 'admin' || role === 'security_admin',
     canTriggerScans: role === 'admin' || role === 'security_admin',
     canViewCompliance: role === 'admin' || role === 'security_admin' || role === 'compliance',
+    isDemo: !!user?.is_demo,
     activeOrgId,
     activeOrgName,
     switchOrganization,

@@ -152,7 +152,7 @@ export const ACCOUNT_PRICING = {
 };
 
 export const PLATFORM_FEE = {
-  direct: 200,  // $200/month base platform fee
+  direct: 500,  // $500/month base platform fee
   msp: 500,     // $500/month MSP platform fee
 };
 
@@ -165,8 +165,8 @@ export const TIER_LIMITS: Record<string, { max_identities: number | null; trial_
 };
 
 // ── Per-Subscription Billing (cents-based) ────────────────────────────────
-export const SUB_RATES_CENTS: Record<string, number> = { azure: 6900, aws: 7900, gcp: 7400 };
-export const PLATFORM_FEE_CENTS: Record<string, number> = { free: 0, trial: 0, pro: 20000, enterprise: 50000 };
+export const SUB_RATES_CENTS: Record<string, number> = { azure: 6900, aws: 6900, gcp: 6900 };
+export const PLATFORM_FEE_CENTS: Record<string, number> = { free: 0, trial: 0, pro: 50000, enterprise: 50000 };
 
 /** Format cents as dollars (e.g. 6900 → "$69") */
 export function formatCents(cents: number): string {

@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 
+from app.config import IS_DEV, IS_LOCAL, log_startup_banner
 from app.logging_config import configure_logging
 from app.metrics import MetricsCollector
 from app.security import rate_limit, add_security_headers
@@ -46,6 +47,7 @@ from app.api.handlers import (
     save_app_settings,
     test_email,
     get_activity,
+    export_audit_trail,
     get_remediation_status,
     post_remediation_action,
     get_remediation_dashboard_summary,
@@ -90,15 +92,6 @@ from app.api.handlers import (
     delete_saved_view_handler,
     set_default_view_handler,
     get_identity_lifecycle,
-    get_access_reviews_list,
-    create_access_review,
-    get_access_review_detail,
-    update_access_review,
-    delete_access_review,
-    update_review_decision,
-    bulk_review_decisions,
-    get_campaign_metrics_handler,
-    get_campaign_audit_log_handler,
     get_groups_list,
     create_group_handler,
     get_group_detail,
@@ -225,6 +218,9 @@ from app.api.handlers import (
     reconcile_subscriptions,
     get_subscriptions_distinct,
     get_identity_subscriptions,
+    activate_client_subscription,
+    get_discovery_status,
+    run_discovery,
     get_admin_organization_billing,
     update_admin_organization_plan,
     update_admin_organization_commitment,
@@ -311,16 +307,53 @@ from app.api.handlers import (
     admin_generate_billing_snapshot,
     admin_generate_invoice_document,
     admin_update_msp_relationship,
+    verify_snapshot_integrity,
+    get_findings_list,
+    get_findings_stats_handler,
+    get_finding_detail,
+    update_finding_status_handler,
+    get_attack_paths_list,
+    get_attack_path_detail,
+    get_identity_persisted_attack_paths,
+    get_fix_recommendations_list,
+    get_fix_recommendations_stats_handler,
+    get_fix_recommendation_detail,
+    update_fix_recommendation_status_handler,
+    get_identity_fix_recommendations,
+    get_blast_radius_list,
+    get_blast_radius_detail,
+    get_identity_blast_radius,
+    p6_create_access_review,
+    p6_get_access_reviews,
+    p6_get_access_review,
+    get_access_review_assignments_handler,
+    submit_review_decision_handler,
+    get_access_reviews_stats_handler,
+    get_identity_access_reviews_handler,
+    complete_access_review_handler,
+    get_assignment_evidence_handler,
+    create_report_handler,
+    get_reports_list_handler,
+    get_report_detail_handler,
+    get_report_runs_handler,
+    download_report_handler,
+    get_platform_health_handler,
+    get_system_jobs_handler,
+    get_system_job_detail_handler,
+    get_system_tenants_health_handler,
+    get_system_tenant_health_detail_handler,
+    get_system_metrics_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
+from app.middleware.input_sanitizer import sanitize_request
 
 logger = logging.getLogger(__name__)
 
 
 def _validate_startup_secrets():
     """Fail fast if critical secrets are missing in production."""
-    if os.getenv('FLASK_ENV') == 'development':
-        return  # Skip in dev
+    if IS_DEV:
+        return  # Skip in local/dev
 
     required = [
         ('ADMIN_JWT_SECRET', 'Admin portal JWT signing'),
@@ -338,9 +371,36 @@ def _validate_startup_secrets():
         )
 
 
+def _run_core_schema(db_init):
+    """Run migration 001 SQL to create core tables (discovery_runs, identities, etc.).
+    All statements use IF NOT EXISTS so it's safe to run on every startup.
+    Also adds organization_id/cloud_connection_id columns needed by later migrations.
+    """
+    import pathlib
+    sql_path = pathlib.Path(__file__).parent.parent / 'migrations' / '001_create_identity_roles.sql'
+    if not sql_path.exists():
+        print(f"  ⚠️ Core schema SQL not found at {sql_path}")
+        return
+    sql = sql_path.read_text()
+    cursor = db_init.conn.cursor()
+    cursor.execute(sql)
+    db_init._commit()
+    # Add columns that later migrations (018) would add
+    cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+    cursor.execute("ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS cloud_connection_id INTEGER")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org ON discovery_runs(organization_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_connection ON discovery_runs(cloud_connection_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org_status ON discovery_runs(organization_id, status)")
+    db_init._commit()
+    cursor.close()
+
+
 def create_app():
     # Phase 4A: Structured logging
     configure_logging()
+
+    # Environment diagnostics
+    log_startup_banner()
 
     # Phase 4A: Startup secrets validation
     _validate_startup_secrets()
@@ -351,6 +411,9 @@ def create_app():
 
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
+
+    # Phase 1 Security Hardening: Input sanitization (XSS/SQLi defense-in-depth)
+    app.before_request(sanitize_request)
 
     # Phase 4A: Request ID correlation + Phase 68: Request timing middleware
     @app.before_request
@@ -372,12 +435,81 @@ def create_app():
             path = re.sub(r'/\d+', '/:id', path)
             MetricsCollector.get().record_request(
                 request.method, path, response.status_code, duration_ms)
+
+            # Enterprise logging: tenant/org context per API request
+            org_id = getattr(g, 'org_id', None)
+            tenant_id = getattr(g, 'tenant_id', None) or org_id
+            if response.status_code >= 400:
+                logger.warning(
+                    "API %s %s org=%s tenant=%s status=%d duration=%.0fms",
+                    request.method, path, org_id, tenant_id,
+                    response.status_code, duration_ms,
+                )
+            elif duration_ms > 1000:
+                logger.info(
+                    "API_SLOW %s %s org=%s status=%d duration=%.0fms",
+                    request.method, path, org_id,
+                    response.status_code, duration_ms,
+                )
+
+            # JSON contract enforcement: warn on non-JSON API responses
+            ct = response.content_type or ''
+            if not ct.startswith('application/json') and response.status_code != 204:
+                # Allow Prometheus metrics and health probes
+                if '/metrics' not in request.path:
+                    logger.error(
+                        "NON_JSON_RESPONSE %s %s content_type=%s status=%d",
+                        request.method, path, ct, response.status_code,
+                    )
         return response
 
     # Phase 5: Security headers on all responses
     app.after_request(add_security_headers)
 
+    # ------------------------------------------------------------------
+    # Tenant context teardown — CRITICAL for isolation safety
+    # ------------------------------------------------------------------
+    # Ensures app.current_organization_id is RESET at the end of every
+    # request, regardless of success or failure. This prevents context
+    # leakage if connections are ever reused (pooling, keep-alive).
+    # Defense-in-depth: Database.close() also resets, and we use
+    # transaction-scoped context (SET LOCAL), but this teardown hook
+    # provides a belt-and-suspenders guarantee.
+    @app.teardown_request
+    def _reset_tenant_context(exc):
+        db_conn = getattr(g, '_tenant_db', None)
+        if db_conn is not None:
+            try:
+                db_conn.reset_organization_context()
+                db_conn.close()
+            except Exception:
+                pass  # Connection may already be closed/errored
+            g._tenant_db = None
+
+    # SecurityViolationError handler — returns 403, never exposes internals
+    from app.database import SecurityViolationError as _SVE
+
+    @app.errorhandler(_SVE)
+    def _security_violation(e):
+        request_id = getattr(g, 'request_id', None)
+        logger.error(
+            "SECURITY_VIOLATION [request_id=%s]: %s", request_id, str(e)
+        )
+        return jsonify({
+            'error': 'Access denied',
+            'error_code': 'SECURITY_VIOLATION',
+            'request_id': request_id,
+        }), 403
+
     # Phase 4A/4B: Global error boundary with standardized error_code
+    @app.errorhandler(400)
+    def _bad_request(e):
+        return jsonify({
+            'error': str(e.description) if hasattr(e, 'description') else 'Bad request',
+            'error_code': 'BAD_REQUEST',
+            'request_id': getattr(g, 'request_id', None),
+        }), 400
+
     @app.errorhandler(404)
     def _not_found(e):
         return jsonify({
@@ -420,27 +552,83 @@ def create_app():
             'request_id': request_id,
         }), 500
 
-    # Ensure tables exist at startup (run as admin user for DDL privileges)
+    # Ensure tables exist at startup (run as admin user for DDL privileges).
+    # Each block is independently guarded so one failure doesn't block the rest.
+    # Set migration flag so readiness probe returns 503 during DDL.
+    from app.database import Database as _DbInit
+    _DbInit._migration_in_progress = True
     try:
-        from app.database import Database as _DbInit
         _db_init = _DbInit()
-        _db_init._ensure_identity_subscription_access_table()
-        _db_init.backfill_microsoft_flag()
-        _db_init.ensure_permission_plane_column()
-        _db_init.ensure_deleted_at_column()
-        _db_init._ensure_spn_exposure()
-        _db_init._ensure_app_reg_exposure()
-        _db_init._ensure_workload_telemetry_tables()
-        # ICE tables (human_identities, identity_links, orphaned_privileged_findings)
-        from app.database import _ensure_orphaned_findings_table
-        _ensure_orphaned_findings_table(_db_init.conn)
-        # Phase 6: Scan schedules + Stripe columns
-        from app.database import _ensure_scan_schedules_table, _ensure_stripe_columns
-        _ensure_scan_schedules_table(_db_init.conn)
-        _ensure_stripe_columns(_db_init.conn)
-        # Phase 3A: Entitlements tables
-        _db_init._ensure_entitlements_tables()
-        # Phase 6: Performance indexes for scale (500+ identities)
+    except Exception as e:
+        print(f"  ⚠️ Startup DB connection failed: {e}")
+        _DbInit._migration_in_progress = False
+        _db_init = None
+
+    if _db_init:
+        # ── Critical tables (must exist for Settings, Connections, etc.) ──
+        _startup_ops = [
+            ('settings table', lambda: _db_init.conn.cursor().execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    id SERIAL PRIMARY KEY,
+                    key VARCHAR(255) NOT NULL,
+                    value TEXT,
+                    organization_id INTEGER NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(organization_id, key)
+                )
+            """) or _db_init._commit()),
+            ('settings index', lambda: _db_init.conn.cursor().execute(
+                "CREATE INDEX IF NOT EXISTS idx_settings_org ON settings(organization_id)"
+            ) or _db_init._commit()),
+            ('core schema (migration 001)', lambda: _run_core_schema(_db_init)),
+            ('cloud_connections table', lambda: _db_init._ensure_cloud_connections_table()),
+            ('cloud_subscriptions table', lambda: _db_init._ensure_cloud_subscriptions_table()),
+            ('entitlements tables', lambda: _db_init._ensure_entitlements_tables()),
+        ]
+
+        # ── Optional backfill/migration ops (depend on tables that may not exist yet) ──
+        _startup_ops += [
+            ('identity_subscription_access', lambda: _db_init._ensure_identity_subscription_access_table()),
+            ('backfill_microsoft_flag', lambda: _db_init.backfill_microsoft_flag()),
+            ('permission_plane_column', lambda: _db_init.ensure_permission_plane_column()),
+            ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
+            ('spn_exposure', lambda: _db_init._ensure_spn_exposure()),
+            ('app_reg_exposure', lambda: _db_init._ensure_app_reg_exposure()),
+            ('workload_telemetry', lambda: _db_init._ensure_workload_telemetry_tables()),
+            ('security_findings', lambda: _db_init._ensure_security_findings_table()),
+            ('attack_paths', lambda: _db_init._ensure_attack_paths_table()),
+            ('fix_recommendations', lambda: _db_init._ensure_fix_recommendations_table()),
+            ('blast_radius', lambda: _db_init._ensure_blast_radius_table()),
+            ('access_reviews', lambda: _db_init._ensure_access_reviews_tables()),
+            ('reports', lambda: _db_init._ensure_reports_tables()),
+        ]
+
+        for label, op in _startup_ops:
+            try:
+                op()
+            except Exception as e:
+                print(f"  ⚠️ Startup DDL skipped ({label}): {e}")
+                try:
+                    _db_init._rollback()
+                except Exception:
+                    pass
+
+        # ICE tables + scan schedules + Stripe columns (independent functions)
+        for label, fn in [
+            ('orphaned_findings', lambda: __import__('app.database', fromlist=['_ensure_orphaned_findings_table'])._ensure_orphaned_findings_table(_db_init.conn)),
+            ('scan_schedules', lambda: __import__('app.database', fromlist=['_ensure_scan_schedules_table'])._ensure_scan_schedules_table(_db_init.conn)),
+            ('stripe_columns', lambda: __import__('app.database', fromlist=['_ensure_stripe_columns'])._ensure_stripe_columns(_db_init.conn)),
+        ]:
+            try:
+                fn()
+            except Exception as e:
+                print(f"  ⚠️ Startup DDL skipped ({label}): {e}")
+                try:
+                    _db_init._rollback()
+                except Exception:
+                    pass
+
+        # Performance indexes (each independently guarded)
         _perf_cursor = _db_init.conn.cursor()
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_identities_tenant_run ON identities(tenant_id, discovery_run_id)",
@@ -456,12 +644,14 @@ def create_app():
             try:
                 _perf_cursor.execute(idx_sql)
             except Exception:
-                _db_init.conn.rollback()
-        _db_init.conn.commit()
+                _db_init._rollback()
+        try:
+            _db_init._commit()
+        except Exception:
+            pass
         _perf_cursor.close()
         _db_init.close()
-    except Exception as e:
-        print(f"  ⚠️ Could not ensure tables/backfill: {e}")
+        _DbInit._migration_in_progress = False
 
     # -----------------------
     # Health & Monitoring (Phase 68 + Phase 4A)
@@ -1373,6 +1563,12 @@ def create_app():
     def snapshots_compare():
         return get_snapshot_compare()
 
+    # Phase 1 Security: Snapshot integrity verification
+    @app.get("/api/snapshots/<int:run_id>/verify")
+    @require_role('admin', 'security_admin')
+    def snapshots_verify(run_id):
+        return verify_snapshot_integrity()
+
     # Gate 29: Snapshot immutability — reject all mutation attempts
     @app.route("/api/snapshots", methods=["DELETE", "PUT", "PATCH"])
     @app.route("/api/snapshots/<path:subpath>", methods=["DELETE", "PUT", "PATCH", "POST"])
@@ -1642,48 +1838,46 @@ def create_app():
         return set_default_view_handler(view_id)
 
     # -----------------------
-    # Access Review Campaigns (Phase 36)
+    # Access Reviews (Phase 6 — replaces Phase 36 campaigns)
     # -----------------------
     @app.get("/api/access-reviews")
     def access_reviews_list():
-        return get_access_reviews_list()
+        return p6_get_access_reviews()
 
     @app.post("/api/access-reviews")
-    @require_role('admin')
+    @require_role('admin', 'security_admin')
     def access_reviews_create():
-        return create_access_review()
+        return p6_create_access_review()
 
-    @app.get("/api/access-reviews/<int:campaign_id>")
-    def access_reviews_detail(campaign_id):
-        return get_access_review_detail(campaign_id)
+    @app.get("/api/access-reviews/stats")
+    def access_reviews_stats():
+        return get_access_reviews_stats_handler()
 
-    @app.put("/api/access-reviews/<int:campaign_id>")
-    @require_role('admin')
-    def access_reviews_update(campaign_id):
-        return update_access_review(campaign_id)
+    @app.get("/api/access-reviews/<int:review_id>")
+    def access_reviews_detail(review_id):
+        return p6_get_access_review(review_id)
 
-    @app.delete("/api/access-reviews/<int:campaign_id>")
-    @require_role('admin')
-    def access_reviews_delete(campaign_id):
-        return delete_access_review(campaign_id)
+    @app.get("/api/access-reviews/<int:review_id>/assignments")
+    def access_review_assignments(review_id):
+        return get_access_review_assignments_handler(review_id)
 
-    @app.patch("/api/access-reviews/<int:campaign_id>/reviews/<int:review_id>")
-    @require_role('auditor', 'admin')
-    def review_decision(campaign_id, review_id):
-        return update_review_decision(campaign_id, review_id)
+    @app.patch("/api/access-reviews/assignments/<int:assignment_id>/decision")
+    @require_role('admin', 'security_admin', 'auditor')
+    def access_review_decision(assignment_id):
+        return submit_review_decision_handler(assignment_id)
 
-    @app.post("/api/access-reviews/<int:campaign_id>/reviews/bulk")
-    @require_role('auditor', 'admin')
-    def review_bulk_decision(campaign_id):
-        return bulk_review_decisions(campaign_id)
+    @app.get("/api/access-reviews/assignments/<int:assignment_id>/evidence")
+    def access_review_assignment_evidence(assignment_id):
+        return get_assignment_evidence_handler(assignment_id)
 
-    @app.get("/api/access-reviews/metrics")
-    def access_reviews_metrics():
-        return get_campaign_metrics_handler()
+    @app.patch("/api/access-reviews/<int:review_id>/complete")
+    @require_role('admin', 'security_admin')
+    def access_review_complete(review_id):
+        return complete_access_review_handler(review_id)
 
-    @app.get("/api/access-reviews/<int:campaign_id>/audit-log")
-    def access_reviews_audit_log(campaign_id):
-        return get_campaign_audit_log_handler(campaign_id)
+    @app.get("/api/identities/<identity_id>/access-reviews")
+    def identity_access_reviews(identity_id):
+        return get_identity_access_reviews_handler(identity_id)
 
     # -----------------------
     # Identity Groups (Phase 38)
@@ -1826,6 +2020,11 @@ def create_app():
     @app.get("/api/activity")
     def activity_log():
         return get_activity()
+
+    @app.get("/api/audit/export")
+    @require_role('admin')
+    def audit_export():
+        return export_audit_trail()
 
     # -----------------------
     # Notifications (Phase 30)
@@ -2075,6 +2274,25 @@ def create_app():
         return get_identity_subscriptions(identity_id)
 
     # -----------------------
+    # Client Subscription Activation (REST path-param)
+    # -----------------------
+    @app.post("/api/client/subscriptions/<int:subscription_id>/activate")
+    @require_role('admin', 'security_admin')
+    def client_subscription_activate(subscription_id):
+        return activate_client_subscription(subscription_id)
+
+    # -----------------------
+    # Discovery Status & Trigger
+    # -----------------------
+    @app.get("/api/discovery/status")
+    def discovery_status():
+        return get_discovery_status()
+
+    @app.post("/api/discovery/run")
+    def discovery_run():
+        return run_discovery()
+
+    # -----------------------
     # Phase 6: Scan Schedules
     # -----------------------
     @app.get("/api/scan-schedules")
@@ -2247,24 +2465,201 @@ def create_app():
         return get_correlation_accounts()
 
     # -----------------------
+    # Security Findings (Phase 2)
+    # -----------------------
+    @app.get("/api/findings")
+    def findings_list():
+        return get_findings_list()
+
+    @app.get("/api/findings/stats")
+    def findings_stats():
+        return get_findings_stats_handler()
+
+    @app.get("/api/findings/<int:finding_id>")
+    def finding_detail(finding_id):
+        return get_finding_detail(finding_id)
+
+    @app.patch("/api/findings/<int:finding_id>/status")
+    @require_role('admin', 'security_admin')
+    def finding_status_update(finding_id):
+        return update_finding_status_handler(finding_id)
+
+    # -----------------------
+    # Attack Path Analysis (Phase 3)
+    # -----------------------
+    @app.get("/api/attack-paths")
+    def attack_paths_list():
+        return get_attack_paths_list()
+
+    @app.get("/api/attack-paths/<int:path_id>")
+    def attack_path_detail(path_id):
+        return get_attack_path_detail(path_id)
+
+    @app.get("/api/identities/<identity_id>/persisted-attack-paths")
+    def identity_persisted_attack_paths(identity_id):
+        return get_identity_persisted_attack_paths(identity_id)
+
+    # -----------------------
+    # Fix Recommendations (Phase 4)
+    # -----------------------
+    @app.get("/api/fix-recommendations")
+    def fix_recommendations_list():
+        return get_fix_recommendations_list()
+
+    @app.get("/api/fix-recommendations/stats")
+    def fix_recommendations_stats():
+        return get_fix_recommendations_stats_handler()
+
+    @app.get("/api/fix-recommendations/<int:rec_id>")
+    def fix_recommendation_detail(rec_id):
+        return get_fix_recommendation_detail(rec_id)
+
+    @app.patch("/api/fix-recommendations/<int:rec_id>/status")
+    @require_role('admin', 'security_admin')
+    def fix_recommendation_status_update(rec_id):
+        return update_fix_recommendation_status_handler(rec_id)
+
+    @app.get("/api/identities/<identity_id>/fix-recommendations")
+    def identity_fix_recommendations(identity_id):
+        return get_identity_fix_recommendations(identity_id)
+
+    # -----------------------
+    # Blast Radius (Phase 5)
+    # -----------------------
+    @app.get("/api/blast-radius")
+    def blast_radius_list():
+        return get_blast_radius_list()
+
+    @app.get("/api/blast-radius/<identity_id>")
+    def blast_radius_detail(identity_id):
+        return get_blast_radius_detail(identity_id)
+
+    @app.get("/api/identities/<identity_id>/blast-radius")
+    def identity_blast_radius_detail(identity_id):
+        return get_identity_blast_radius(identity_id)
+
+    # -----------------------
+    # Reporting Engine (Phase 7)
+    # -----------------------
+    @app.post("/api/reports")
+    @require_role('admin', 'security_admin', 'auditor')
+    def reports_create():
+        return create_report_handler()
+
+    @app.get("/api/reports")
+    def reports_list():
+        return get_reports_list_handler()
+
+    @app.get("/api/reports/<int:report_id>")
+    def reports_detail(report_id):
+        return get_report_detail_handler(report_id)
+
+    @app.get("/api/reports/<int:report_id>/runs")
+    def reports_runs(report_id):
+        return get_report_runs_handler(report_id)
+
+    @app.get("/api/reports/<int:report_id>/download")
+    def reports_download(report_id):
+        return download_report_handler(report_id)
+
+    # -----------------------
+    # Phase 8: Platform Operations & Health Monitoring
+    # -----------------------
+
+    @app.get("/api/platform/health")
+    @require_role('admin', 'security_admin')
+    def platform_health_overview():
+        return get_platform_health_handler()
+
+    @app.get("/api/platform/jobs")
+    @require_role('admin', 'security_admin')
+    def platform_jobs_list():
+        return get_system_jobs_handler()
+
+    @app.get("/api/platform/jobs/<job_id>")
+    @require_role('admin', 'security_admin')
+    def platform_job_detail(job_id):
+        return get_system_job_detail_handler(job_id)
+
+    @app.get("/api/platform/tenants")
+    @require_role('admin', 'security_admin')
+    def platform_tenants_health():
+        return get_system_tenants_health_handler()
+
+    @app.get("/api/platform/tenants/<int:org_id>")
+    @require_role('admin', 'security_admin')
+    def platform_tenant_health_detail(org_id):
+        return get_system_tenant_health_detail_handler(org_id)
+
+    @app.get("/api/platform/metrics")
+    @require_role('admin', 'security_admin')
+    def platform_metrics():
+        return get_system_metrics_handler()
+
+    # -----------------------
     # Start background scheduler (only in main process, not reloader)
     # -----------------------
     if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         start_scheduler()
         atexit.register(stop_scheduler)
 
-    # Ensure default admin user and compliance frameworks on first startup
+    # RLS startup validation — fail fast if role config is wrong
     from app.database import Database
+    Database.validate_rls_startup()
+
+    # Enterprise isolation: FORCE ROW LEVEL SECURITY on all tenant tables
+    Database.enforce_force_rls()
+
+    # Ensure default admin user and compliance frameworks on first startup
     db = Database()
     try:
         db.ensure_default_admin()
+        if IS_LOCAL:
+            db.seed_local_admin()
         db.seed_compliance_frameworks()
         db.seed_compliance_root_causes()
         db._migrate_compliance_controls_v2()
         db._migrate_compliance_v3()
         db.deduplicate_auto_groups()
+
+        # Migration 025: Tenant index coverage — create missing org_id indexes
+        if db.migrate_025_tenant_indexes():
+            logger.info("Migration 025_tenant_indexes applied")
+
+        # Phase 8: Ensure platform operations tables
+        db._ensure_platform_ops_tables()
+
+        # Demo tenant: seed demo org + users (idempotent)
+        db.seed_demo_tenant()
+
     finally:
         db.close()
+
+    # Validate tenant index coverage (warning-only, does not block startup)
+    idx_report = Database.validate_tenant_index_coverage()
+    if not idx_report.get('skipped'):
+        if idx_report['missing_index']:
+            logger.warning(
+                "TENANT INDEX GAP: %d tables lack organization_id index: %s",
+                len(idx_report['missing_index']),
+                ', '.join(idx_report['missing_index']),
+            )
+        if idx_report['non_leading']:
+            logger.warning(
+                "TENANT INDEX WARNING: %d tables have non-leading org_id index: %s",
+                len(idx_report['non_leading']),
+                ', '.join(e['table'] for e in idx_report['non_leading']),
+            )
+        if idx_report['ok']:
+            logger.info(
+                "Tenant index coverage OK — %d tables checked, all covered",
+                idx_report['tables_checked'],
+            )
+
+    # Enable the request-context admin guard now that startup is done.
+    # Any Database() call inside a request without _admin_reason will raise
+    # RuntimeError (ENFORCE_ADMIN_GUARD=True) or log a warning (False).
+    Database._startup_complete = True
 
     return app
 

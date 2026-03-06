@@ -22,8 +22,6 @@ import logging
 import asyncio
 from datetime import datetime
 from typing import Dict, List
-from dotenv import load_dotenv
-
 from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
 from msgraph.generated.users.item.send_mail.send_mail_post_request_body import SendMailPostRequestBody
@@ -32,8 +30,6 @@ from msgraph.generated.models.item_body import ItemBody
 from msgraph.generated.models.body_type import BodyType
 from msgraph.generated.models.recipient import Recipient
 from msgraph.generated.models.email_address import EmailAddress
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 

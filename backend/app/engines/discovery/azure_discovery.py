@@ -284,6 +284,7 @@ class AzureDiscoveryEngine:
                 print("  ✓ P2 telemetry ingested — activity stats ready for scoring")
         except Exception as e:
             print(f"  ⚠️ P2 telemetry ingestion error: {e}")
+            self.db._rollback()
 
         # Step 9a-ii: Compute Workload Identity Exposure Scores (uses P2 data)
         print("\n🎯 Computing workload identity exposure scores...")
@@ -291,8 +292,7 @@ class AzureDiscoveryEngine:
             self._compute_workload_exposure(run_id)
         except Exception as e:
             print(f"  ✗ Workload exposure computation error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.db._rollback()
 
         # Step 9a-iii: Behavioral anomaly detection (after scoring)
         try:
@@ -302,29 +302,45 @@ class AzureDiscoveryEngine:
                 anomaly_engine.detect_anomalies(run_id, self.db._organization_id)
         except Exception as e:
             print(f"  ⚠️ Behavioral anomaly detection error: {e}")
+            self.db._rollback()
 
         # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
         print("\n🗄️  Discovering Azure Resources...")
-        storage_accounts = self._discover_storage_accounts()
-        print(f"  ✓ Found {len(storage_accounts)} storage accounts")
-        key_vaults = self._discover_key_vaults()
-        print(f"  ✓ Found {len(key_vaults)} key vaults")
-
-        # Save resources to database
+        storage_accounts = []
+        key_vaults = []
         org_id_val = getattr(self, '_organization_id', None) or self.db_org_id
-        for sa in storage_accounts:
-            sa['organization_id'] = org_id_val
-            self.db.save_storage_account(run_id, sa)
-        for kv in key_vaults:
-            kv['organization_id'] = org_id_val
-            self.db.save_key_vault(run_id, kv)
-        print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
+        try:
+            storage_accounts = self._discover_storage_accounts()
+            print(f"  ✓ Found {len(storage_accounts)} storage accounts")
+            key_vaults = self._discover_key_vaults()
+            print(f"  ✓ Found {len(key_vaults)} key vaults")
+
+            # Save resources to database
+            for sa in storage_accounts:
+                sa['organization_id'] = org_id_val
+                try:
+                    self.db.save_storage_account(run_id, sa)
+                except Exception as e:
+                    print(f"  ⚠️ save_storage_account error: {e}")
+                    self.db._rollback()
+            for kv in key_vaults:
+                kv['organization_id'] = org_id_val
+                try:
+                    self.db.save_key_vault(run_id, kv)
+                except Exception as e:
+                    print(f"  ⚠️ save_key_vault error: {e}")
+                    self.db._rollback()
+            print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
+        except Exception as e:
+            print(f"  ✗ Resource discovery error: {e}")
+            self.db._rollback()
 
         # Step 9b-2: Identity exposure enhancement + risk history persistence
         try:
             self._enhance_resources_with_identity_exposure(run_id, storage_accounts, key_vaults)
         except Exception as e:
             print(f"  ⚠️ Identity exposure enhancement error: {e}")
+            self.db._rollback()
 
         # Step 9c: Discover App Registrations
         print("\n📋 Discovering App Registrations...")
@@ -346,30 +362,44 @@ class AzureDiscoveryEngine:
                     }
             spn_cursor.close()
 
-            app_regs = asyncio.get_event_loop().run_until_complete(
-                self._discover_app_registrations(spn_app_id_map)
-            )
+            app_regs = await self._discover_app_registrations(spn_app_id_map)
             for ar in app_regs:
                 ar['organization_id'] = org_id_val
                 self.db.save_app_registration(run_id, ar)
             print(f"  ✓ Saved {len(app_regs)} app registrations")
         except Exception as e:
             print(f"  ✗ App registration discovery error: {e}")
+            self.db._rollback()
             import traceback
             traceback.print_exc()
 
         # Step 10: Complete discovery run
         print("\n✅ Completing discovery run...")
-        critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
-        high_count = sum(1 for i in final_identities if i['risk_level'] == 'high')
-        medium_count = sum(1 for i in final_identities if i['risk_level'] == 'medium')
-        low_count = sum(1 for i in final_identities if i['risk_level'] == 'low')
-        
-        self.db.complete_discovery_run(
-            run_id, len(final_identities),
-            critical_count, high_count, medium_count, low_count
-        )
-        print(f"  ✓ Discovery run completed")
+        try:
+            critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
+            high_count = sum(1 for i in final_identities if i['risk_level'] == 'high')
+            medium_count = sum(1 for i in final_identities if i['risk_level'] == 'medium')
+            low_count = sum(1 for i in final_identities if i['risk_level'] == 'low')
+
+            self.db.complete_discovery_run(
+                run_id, len(final_identities),
+                critical_count, high_count, medium_count, low_count
+            )
+            print(f"  ✓ Discovery run completed")
+        except Exception as e:
+            print(f"  ✗ complete_discovery_run error: {e}")
+            self.db._rollback()
+            # Try a simpler completion
+            try:
+                cursor = self.db.conn.cursor()
+                cursor.execute("UPDATE discovery_runs SET status='completed', completed_at=NOW(), total_identities=%s WHERE id=%s",
+                               (len(final_identities), run_id))
+                cursor.close()
+                self.db._commit()
+                print(f"  ✓ Discovery run completed (fallback)")
+            except Exception as e2:
+                print(f"  ✗ Fallback completion also failed: {e2}")
+                self.db._rollback()
 
         # Sync discovered subscriptions into cloud_subscriptions registry
         try:
@@ -394,11 +424,12 @@ class AzureDiscoveryEngine:
                         ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
                         SET account_name = EXCLUDED.account_name
                     """, (run_org_id, sub['id'], sub['name']))
-                self.db.conn.commit()
+                self.db.safe_commit()
                 cursor.close()
             print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
         except Exception as e:
             print(f"  ⚠️ Subscription sync warning: {e}")
+            self.db._rollback()
 
         # Seed auto identity groups for this organization (Phase 38 + RLS fix)
         try:
@@ -411,6 +442,7 @@ class AzureDiscoveryEngine:
                 print(f"  ✓ Auto identity groups seeded for organization {row[0]}")
         except Exception as e:
             print(f"  ⚠️ Auto groups seed warning: {e}")
+            self.db._rollback()
 
         # Create result object
         # result = self._create_result(final_identities, role_assignments, run_id)
@@ -2750,102 +2782,120 @@ class AzureDiscoveryEngine:
                         # Truly new identity
                         identity['created_datetime'] = datetime.utcnow().isoformat()
             
-            identity_db_id = self.db.save_identity(run_id, identity)
-            
-            # Save role assignments for this identity
-            identity_roles = identity.get('roles', [])
-            for role in identity_roles:
-                self.db.save_role_assignment(identity_db_id, role)
+            try:
+                identity_db_id = self.db.save_identity(run_id, identity)
+            except Exception as e:
+                logger.error("save_identity FAILED for %s: %s", identity.get('display_name'), e)
+                self.db._rollback()
+                continue
 
-            # Save identity ↔ subscription access (multi-subscription junction table)
-            seen_sub_roles = set()
-            for role in identity_roles:
-                sub_id_from_role = role.get('subscription_id')
-                if sub_id_from_role:
-                    key = (sub_id_from_role, role.get('role_name', ''), role.get('scope', ''))
-                    if key not in seen_sub_roles:
-                        seen_sub_roles.add(key)
-                        self.db.save_identity_subscription_access(
-                            identity_db_id,
-                            identity.get('identity_id', ''),
-                            role,
-                            sub_id_from_role,
-                            role.get('subscription_name', ''),
-                            run_id,
-                        )
-            # Compute primary subscription + additional count
-            if seen_sub_roles:
-                self.db.update_identity_subscription_summary(identity_db_id)
+            # Save all per-identity metadata (roles, subs, creds, permissions, PIM, etc.)
+            try:
+                # Save role assignments for this identity
+                identity_roles = identity.get('roles', [])
+                for role in identity_roles:
+                    self.db.save_role_assignment(identity_db_id, role)
 
-            # Save Entra ID role assignments for this identity
-            identity_entra_roles = identity.get('entra_roles', [])
-            for entra_role in identity_entra_roles:
-                self.db.save_entra_role_assignment(identity_db_id, entra_role)
-            
-            # Save credentials for this identity (SPNs only)
-            if credentials_map and identity.get('identity_id') in credentials_map:
-                credentials = credentials_map[identity.get('identity_id')]
-                for credential in credentials:
-                    self.db.save_credential(identity_db_id, credential)
-                
-                # Update credential summary on identity record
-                self.db.update_identity_credential_summary(identity_db_id)
-            
-            # Save API permissions for this identity (SPNs only)
-            if permissions_map and identity.get('identity_id') in permissions_map:
-                permissions = permissions_map[identity.get('identity_id')]
-                self.db.store_graph_permissions(identity_db_id, permissions)
-            
-            # Save custom app roles for this identity (SPNs only)
-            if app_roles_map and identity.get('identity_id') in app_roles_map:
-                app_roles = app_roles_map[identity.get('identity_id')]
-                self.db.store_app_roles(identity_db_id, app_roles)
+                # Save identity ↔ subscription access (multi-subscription junction table)
+                seen_sub_roles = set()
+                for role in identity_roles:
+                    sub_id_from_role = role.get('subscription_id')
+                    if sub_id_from_role:
+                        key = (sub_id_from_role, role.get('role_name', ''), role.get('scope', ''))
+                        if key not in seen_sub_roles:
+                            seen_sub_roles.add(key)
+                            self.db.save_identity_subscription_access(
+                                identity_db_id,
+                                identity.get('identity_id', ''),
+                                role,
+                                sub_id_from_role,
+                                role.get('subscription_name', ''),
+                                run_id,
+                            )
+                # Compute primary subscription + additional count
+                if seen_sub_roles:
+                    self.db.update_identity_subscription_summary(identity_db_id)
 
-            # Save ownership for this identity (SPNs only)
-            if ownership_map and identity.get('identity_id') in ownership_map:
-                owners = ownership_map[identity.get('identity_id')]
-                self.db.store_ownership(identity_db_id, owners)
+                # Save Entra ID role assignments for this identity
+                identity_entra_roles = identity.get('entra_roles', [])
+                for entra_role in identity_entra_roles:
+                    self.db.save_entra_role_assignment(identity_db_id, entra_role)
 
-            # Save PIM data for this identity (keyed by object_id)
-            object_id = identity.get('object_id')
-            if pim_map and object_id and object_id in pim_map:
-                pim_data = pim_map[object_id]
-                for eligible in pim_data.get('eligible', []):
-                    self.db.save_pim_eligible(identity_db_id, eligible)
-                for activation in pim_data.get('activations', []):
-                    self.db.save_pim_activation(identity_db_id, activation)
-                self.db.update_identity_pim_summary(identity_db_id)
+                # Save credentials for this identity (SPNs only)
+                if credentials_map and identity.get('identity_id') in credentials_map:
+                    credentials = credentials_map[identity.get('identity_id')]
+                    for credential in credentials:
+                        self.db.save_credential(identity_db_id, credential)
+
+                    # Update credential summary on identity record
+                    self.db.update_identity_credential_summary(identity_db_id)
+
+                # Save API permissions for this identity (SPNs only)
+                if permissions_map and identity.get('identity_id') in permissions_map:
+                    permissions = permissions_map[identity.get('identity_id')]
+                    self.db.store_graph_permissions(identity_db_id, permissions)
+
+                # Save custom app roles for this identity (SPNs only)
+                if app_roles_map and identity.get('identity_id') in app_roles_map:
+                    app_roles = app_roles_map[identity.get('identity_id')]
+                    self.db.store_app_roles(identity_db_id, app_roles)
+
+                # Save ownership for this identity (SPNs only)
+                if ownership_map and identity.get('identity_id') in ownership_map:
+                    owners = ownership_map[identity.get('identity_id')]
+                    self.db.store_ownership(identity_db_id, owners)
+
+                # Save PIM data for this identity (keyed by object_id)
+                object_id = identity.get('object_id')
+                if pim_map and object_id and object_id in pim_map:
+                    pim_data = pim_map[object_id]
+                    for eligible in pim_data.get('eligible', []):
+                        self.db.save_pim_eligible(identity_db_id, eligible)
+                    for activation in pim_data.get('activations', []):
+                        self.db.save_pim_activation(identity_db_id, activation)
+                    self.db.update_identity_pim_summary(identity_db_id)
+            except Exception as e:
+                logger.error("save_identity_metadata FAILED for %s: %s", identity.get('display_name'), e)
+                self.db._rollback()
 
             saved_count += 1
 
         # Save CA policies and compute coverage after all identities are saved
-        if ca_policies:
-            print(f"\n🛡️  Saving {len(ca_policies)} CA policies and computing coverage...")
-            for policy in ca_policies:
-                self.db.save_ca_policy(run_id, policy)
+        try:
+            if ca_policies:
+                print(f"\n🛡️  Saving {len(ca_policies)} CA policies and computing coverage...")
+                for policy in ca_policies:
+                    self.db.save_ca_policy(run_id, policy)
 
-            # Compute per-identity coverage
-            ca_coverage_map = self._compute_ca_coverage(ca_policies, identities)
-            if ca_coverage_map:
-                # Need to re-resolve identity_db_ids for coverage
-                cursor = self.db.conn.cursor()
-                cursor.execute(
-                    "SELECT id, object_id FROM identities WHERE discovery_run_id = %s AND object_id IS NOT NULL",
-                    (run_id,),
-                )
-                id_map = {row[1]: row[0] for row in cursor.fetchall()}
-                cursor.close()
+                # Compute per-identity coverage
+                ca_coverage_map = self._compute_ca_coverage(ca_policies, identities)
+                if ca_coverage_map:
+                    # Need to re-resolve identity_db_ids for coverage
+                    cursor = self.db.conn.cursor()
+                    cursor.execute(
+                        "SELECT id, object_id FROM identities WHERE discovery_run_id = %s AND object_id IS NOT NULL",
+                        (run_id,),
+                    )
+                    id_map = {row[1]: row[0] for row in cursor.fetchall()}
+                    cursor.close()
 
-                for object_id, coverage in ca_coverage_map.items():
-                    db_id = id_map.get(object_id)
-                    if db_id:
-                        self.db.save_ca_identity_coverage(db_id, coverage)
+                    for object_id, coverage in ca_coverage_map.items():
+                        db_id = id_map.get(object_id)
+                        if db_id:
+                            self.db.save_ca_identity_coverage(db_id, coverage)
 
-                covered = sum(1 for c in ca_coverage_map.values() if c['coverage_status'] == 'covered')
-                print(f"  ✓ CA coverage computed: {covered}/{len(ca_coverage_map)} identities covered")
+                    covered = sum(1 for c in ca_coverage_map.values() if c['coverage_status'] == 'covered')
+                    print(f"  ✓ CA coverage computed: {covered}/{len(ca_coverage_map)} identities covered")
+        except Exception as e:
+            print(f"  ⚠️ CA policy save/coverage error: {e}")
+            self.db._rollback()
 
         # Post-discovery sweep: catch any Microsoft SPNs that slipped through detection
-        self.db.sweep_microsoft_flag(run_id)
+        try:
+            self.db.sweep_microsoft_flag(run_id)
+        except Exception as e:
+            print(f"  ⚠️ Microsoft flag sweep error: {e}")
+            self.db._rollback()
 
         return saved_count
 
@@ -2899,7 +2949,7 @@ class AzureDiscoveryEngine:
                 creds_map.setdefault(r['identity_db_id'], []).append(dict(r))
 
             # Batch-fetch permissions
-            cursor.execute(f"SELECT identity_db_id, permission_id, permission_name, permission_type FROM graph_api_permissions WHERE identity_db_id IN ({ph})", db_ids)
+            cursor.execute(f"SELECT identity_db_id, permission_name, risk_level FROM graph_api_permissions WHERE identity_db_id IN ({ph})", db_ids)
             for r in cursor.fetchall():
                 perms_map.setdefault(r['identity_db_id'], []).append(dict(r))
 

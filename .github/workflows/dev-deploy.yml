@@ -1,0 +1,288 @@
+name: Deploy AuditGraph DEV
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+env:
+  RG: eus2-ag-nonprod-rg
+  ACR: auditgraphcr
+  ACR_SERVER: auditgraphcr.azurecr.io
+  CAE: dev-cae
+  API_APP: auditgraph-api-dev
+  CLIENT_APP: auditgraph-app-dev
+  ADMIN_APP: auditgraph-admin-dev
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 1. Security Scan + Guardrail Tests
+  # ═══════════════════════════════════════════════════════════════════════════
+  test-guardrails:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: auditgraph_test
+          POSTGRES_USER: auditgraph
+          POSTGRES_PASSWORD: auditgraph_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U auditgraph"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: pip install -r requirements.txt
+
+      - name: pip-audit security scan
+        working-directory: ./backend
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --strict --fix --dry-run 2>&1 \
+            || echo "::warning::pip-audit found vulnerabilities"
+
+      - name: Run guardrail tests
+        working-directory: ./backend
+        env:
+          APP_ENV: local
+          FLASK_ENV: development
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: auditgraph_test
+          DB_USER: auditgraph
+          DB_PASSWORD: auditgraph_test
+          DB_ADMIN_USER: auditgraph
+          DB_ADMIN_PASSWORD: auditgraph_test
+          DB_SSLMODE: disable
+          JWT_SECRET: ci-test-secret
+          ADMIN_JWT_SECRET: ci-admin-test
+          CLIENT_JWT_SECRET: ci-client-test
+          ENFORCE_ADMIN_GUARD: 'false'
+        run: |
+          PYTHONPATH=. python tests/test_production_guardrails.py
+          PYTHONPATH=. python tests/test_isolation_stress.py
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 2. Build & Push Images (parallel)
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-api:
+    runs-on: ubuntu-latest
+    needs: [test-guardrails]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build & push API image
+        run: |
+          az acr build \
+            --registry ${{ env.ACR }} \
+            --platform linux/amd64 \
+            --image auditgraph-api:${{ github.sha }} \
+            --image auditgraph-api:dev \
+            --file Dockerfile.api \
+            .
+
+  build-app:
+    runs-on: ubuntu-latest
+    needs: [test-guardrails]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build & push client app image
+        run: |
+          az acr build \
+            --registry ${{ env.ACR }} \
+            --platform linux/amd64 \
+            --image auditgraph-app:${{ github.sha }} \
+            --image auditgraph-app:dev \
+            --file Dockerfile.app \
+            --build-arg REACT_APP_API_URL=https://dev.api.auditgraph.ai \
+            .
+
+  build-admin:
+    runs-on: ubuntu-latest
+    needs: [test-guardrails]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build & push admin image
+        run: |
+          az acr build \
+            --registry ${{ env.ACR }} \
+            --platform linux/amd64 \
+            --image auditgraph-admin:${{ github.sha }} \
+            --image auditgraph-admin:dev \
+            --file Dockerfile.admin \
+            --build-arg REACT_APP_API_URL=https://dev.api.auditgraph.ai \
+            .
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 3-5. Deploy Infrastructure + Container Apps
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-api, build-app, build-admin]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Bicep infrastructure
+        uses: azure/arm-deploy@v2
+        with:
+          resourceGroupName: ${{ env.RG }}
+          template: ./infra/containerapps-dev.bicep
+          parameters: >-
+            environmentName=${{ env.CAE }}
+            acrLoginServer=${{ env.ACR_SERVER }}
+            apiImageTag=${{ github.sha }}
+            appImageTag=${{ github.sha }}
+            adminImageTag=${{ github.sha }}
+            dbHost=${{ vars.DEV_DB_HOST }}
+            dbName=${{ vars.DEV_DB_NAME }}
+            dbUser=${{ secrets.DEV_DB_USER }}
+            dbPassword=${{ secrets.DEV_DB_PASSWORD }}
+            dbAdminUser=${{ secrets.DEV_DB_ADMIN_USER }}
+            dbAdminPassword=${{ secrets.DEV_DB_ADMIN_PASSWORD }}
+            jwtSecret=${{ secrets.DEV_JWT_SECRET }}
+            adminJwtSecret=${{ secrets.DEV_ADMIN_JWT_SECRET }}
+            clientJwtSecret=${{ secrets.DEV_CLIENT_JWT_SECRET }}
+
+      - name: Wait for API readiness
+        run: |
+          API_FQDN=$(az containerapp show \
+            -n ${{ env.API_APP }} -g ${{ env.RG }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Waiting for API at https://$API_FQDN/health/ready..."
+          for i in $(seq 1 24); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://$API_FQDN/health/ready" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "API ready after $((i * 5))s"
+              break
+            fi
+            if [ "$i" = "24" ]; then
+              echo "::error::API not healthy after 120s"
+              exit 1
+            fi
+            echo "  Attempt $i: HTTP $STATUS (5s...)"
+            sleep 5
+          done
+
+      - name: Verify container endpoints
+        run: |
+          API_FQDN=$(az containerapp show -n ${{ env.API_APP }} -g ${{ env.RG }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          APP_FQDN=$(az containerapp show -n ${{ env.CLIENT_APP }} -g ${{ env.RG }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          ADMIN_FQDN=$(az containerapp show -n ${{ env.ADMIN_APP }} -g ${{ env.RG }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+
+          echo "=== API Health ==="
+          curl -sf "https://$API_FQDN/api/health" | python3 -m json.tool
+
+          echo "=== Client App ==="
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$APP_FQDN/")
+          echo "HTTP $STATUS"
+          [ "$STATUS" = "200" ] || exit 1
+
+          echo "=== Admin App ==="
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$ADMIN_FQDN/")
+          echo "HTTP $STATUS"
+          [ "$STATUS" = "200" ] || exit 1
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 6-7. Database Bootstrap + Demo Seed + Validation
+  # ═══════════════════════════════════════════════════════════════════════════
+  post-deploy:
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        working-directory: ./backend
+        run: pip install -r requirements.txt
+
+      - name: Run database bootstrap
+        env:
+          APP_ENV: dev
+          FLASK_ENV: production
+          DB_HOST: ${{ vars.DEV_DB_HOST }}
+          DB_PORT: '5432'
+          DB_NAME: ${{ vars.DEV_DB_NAME }}
+          DB_USER: ${{ secrets.DEV_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEV_DB_PASSWORD }}
+          DB_ADMIN_USER: ${{ secrets.DEV_DB_ADMIN_USER }}
+          DB_ADMIN_PASSWORD: ${{ secrets.DEV_DB_ADMIN_PASSWORD }}
+          DB_SSLMODE: require
+          JWT_SECRET: ${{ secrets.DEV_JWT_SECRET }}
+          ADMIN_JWT_SECRET: ${{ secrets.DEV_ADMIN_JWT_SECRET }}
+          CLIENT_JWT_SECRET: ${{ secrets.DEV_CLIENT_JWT_SECRET }}
+        run: bash scripts/bootstrap_dev_db.sh
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Validate deployment
+        run: bash scripts/validate_dev.sh --fqdn-only
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 8. Final Status
+  # ═══════════════════════════════════════════════════════════════════════════
+  summary:
+    runs-on: ubuntu-latest
+    needs: [post-deploy]
+    if: always()
+    steps:
+      - name: Deployment summary
+        run: |
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "AuditGraph DEV Environment Ready"
+          echo "═══════════════════════════════════════════════"
+          echo ""
+          echo "https://dev.api.auditgraph.ai"
+          echo "https://dev.app.auditgraph.ai"
+          echo "https://dev.admin.auditgraph.ai"
+          echo "https://demo.auditgraph.ai"
+          echo ""

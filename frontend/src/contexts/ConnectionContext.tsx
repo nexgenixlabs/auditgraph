@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { api } from '../services/apiClient';
+import { isAdminHost } from '../utils/hostDetection';
 
 interface CloudConnection {
   id: number;
@@ -34,6 +35,14 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
   useEffect(() => {
     if (!user) {
+      setConnections([]);
+      setLoading(false);
+      return;
+    }
+    // Skip connection fetch on admin portal — connections are client-scoped
+    const isAdmin = window.location.pathname.startsWith('/admin')
+      || isAdminHost();
+    if (isAdmin) {
       setConnections([]);
       setLoading(false);
       return;

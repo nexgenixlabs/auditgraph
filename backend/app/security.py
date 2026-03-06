@@ -127,12 +127,25 @@ def add_security_headers(response):
     response.headers['Strict-Transport-Security'] = \
         'max-age=31536000; includeSubDomains; preload'
 
-    # Referrer policy
-    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    # Referrer policy — strict-origin prevents leaking path/query to cross-origin
+    response.headers['Referrer-Policy'] = 'strict-origin'
 
     # Permissions policy (disable unused browser features)
     response.headers['Permissions-Policy'] = \
-        'camera=(), microphone=(), geolocation=(), payment=()'
+        'geolocation=(), camera=(), microphone=()'
+
+    # Content Security Policy (Phase 1 Security Hardening)
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
 
     # Cache control for API responses
     if response.content_type and 'application/json' in response.content_type:

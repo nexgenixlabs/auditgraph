@@ -304,10 +304,10 @@ class DriftDetector:
                         UPDATE identities SET status = 'deleted', deleted_at = NOW()
                         WHERE id = %s AND deleted_at IS NULL
                     """, (db_id,))
-            self.db.conn.commit()
+            self.db._commit()
             logger.info(f"Soft-deleted {len(removed_list)} removed identities")
         except Exception as e:
-            self.db.conn.rollback()
+            self.db._rollback()
             logger.error(f"Error soft-deleting identities: {e}")
         finally:
             cursor.close()
@@ -328,11 +328,11 @@ class DriftDetector:
                         WHERE identity_id = %s AND deleted_at IS NOT NULL
                     """, (identity_id,))
                     reactivated += cursor.rowcount
-            self.db.conn.commit()
+            self.db._commit()
             if reactivated > 0:
                 logger.info(f"Reactivated {reactivated} returned identities")
         except Exception as e:
-            self.db.conn.rollback()
+            self.db._rollback()
             logger.error(f"Error reactivating identities: {e}")
         finally:
             cursor.close()

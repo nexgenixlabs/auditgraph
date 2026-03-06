@@ -46,10 +46,10 @@ class BehavioralAnomalyEngine:
                 json.dumps(evidence), json.dumps(baseline), json.dumps(detected_value),
                 run_id,
             ))
-            self.db.conn.commit()
+            self.db._commit()
             return 1
         except Exception as e:
-            self.db.conn.rollback()
+            self.db._rollback()
             print(f"  ⚠️ Failed to insert anomaly: {e}")
             return 0
         finally:

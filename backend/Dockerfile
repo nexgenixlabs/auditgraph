@@ -25,6 +25,7 @@ RUN groupadd -r auditgraph && useradd -r -g auditgraph -d /app -s /sbin/nologin 
     && chown -R auditgraph:auditgraph /app
 
 # Environment
+ENV APP_ENV=prod
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 

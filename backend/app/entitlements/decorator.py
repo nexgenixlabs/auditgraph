@@ -36,7 +36,7 @@ def require_entitlement(feature_key):
                 return f(*args, **kwargs)  # No org context — allow
 
             from app.entitlements.service import is_feature_enabled
-            db = Database()
+            db = Database(_admin_reason='entitlement_gate: check feature access')
             try:
                 allowed, err = is_feature_enabled(db, organization_id, feature_key)
                 if not allowed:
@@ -52,7 +52,7 @@ def require_entitlement(feature_key):
                              organization_id,
                              '{}')
                         )
-                        db.conn.commit()
+                        db._commit()
                         cursor.close()
                     except Exception:
                         pass

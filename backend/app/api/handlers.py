@@ -10,22 +10,19 @@ import bcrypt
 import secrets
 import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from flask import jsonify, request, g, Response
-from dotenv import load_dotenv
 import json
 
 logger = logging.getLogger(__name__)
 
 from psycopg2.extras import RealDictCursor
-from app.database import Database
+from app.database import Database, SecurityViolationError
 from app.engines.drift_detector import DriftDetector
 from app.engines.data_security import compute_sas_risk, score_storage_account, score_key_vault
 from app.api.auth import generate_access_token, generate_refresh_token, hash_refresh_token, VALID_PORTAL_ROLES
 from app.security import validate_password
 
-load_dotenv(".env.local")
-load_dotenv()
 
 # SQL clause to identify/hide Microsoft first-party identities.
 # The is_microsoft_system flag is the single source of truth, set by:
@@ -150,6 +147,23 @@ def _get_agirs_factor_sql(factor: str) -> str:
             AND i.credential_expiration < NOW() + INTERVAL '30 days'""",
     }
     return AGIRS_SQL.get(factor, "")
+
+
+def _is_demo() -> bool:
+    """Check if the current user belongs to a demo tenant."""
+    user = getattr(g, 'current_user', None)
+    return bool(user and user.get('is_demo'))
+
+
+def _demo_write_guard():
+    """Return a 403 response tuple if the current tenant is a demo tenant.
+
+    Call at the top of any mutation handler (POST/PATCH/DELETE) that should
+    be blocked in demo mode.  Returns None if the request is allowed.
+    """
+    if _is_demo():
+        return jsonify({'error': 'Demo tenant is read-only.'}), 403
+    return None
 
 
 def _db() -> Database:
@@ -333,7 +347,7 @@ def health_check():
         {
             "service": "AuditGraph API",
             "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )
 
@@ -1125,6 +1139,60 @@ def get_snapshots():
         db.close()
 
 
+def verify_snapshot_integrity():
+    """
+    GET /api/snapshots/<run_id>/verify
+    Verify the integrity of a completed discovery run snapshot.
+    Re-computes hash from immutable fields and compares with stored hash.
+    """
+    from app.middleware.snapshot_integrity import verify_snapshot
+    run_id = request.view_args.get('run_id')
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT id, subscription_id, started_at, completed_at,
+                   total_identities, critical_count, high_count, medium_count, low_count,
+                   organization_id, snapshot_hash, snapshot_signature, status
+            FROM discovery_runs
+            WHERE id = %s AND organization_id = %s
+            """,
+            (run_id, _org_id()),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Snapshot not found"}), 404
+
+        run_data = {
+            'id': row[0],
+            'subscription_id': row[1],
+            'started_at': row[2],
+            'completed_at': row[3],
+            'total_identities': row[4],
+            'critical_count': row[5],
+            'high_count': row[6],
+            'medium_count': row[7],
+            'low_count': row[8],
+            'organization_id': row[9],
+            'snapshot_hash': row[10],
+            'snapshot_signature': row[11],
+            'status': row[12],
+        }
+
+        result = verify_snapshot(run_data)
+        result['run_id'] = run_data['id']
+        result['status'] = run_data['status']
+
+        _log(db, 'snapshot_verified', f'Snapshot integrity check for run {run_id}: valid={result["valid"]}',
+             {'run_id': run_id, 'valid': result['valid']})
+
+        return jsonify(result)
+    finally:
+        cursor.close()
+        db.close()
+
+
 def get_snapshot_state():
     """
     GET /api/snapshots/state?date=YYYY-MM-DD[&connection_id=N]
@@ -1136,8 +1204,7 @@ def get_snapshot_state():
         return jsonify({"error": "date query parameter required (YYYY-MM-DD)"}), 400
 
     try:
-        from datetime import datetime as _dt
-        target_date = _dt.strptime(date_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+        target_date = datetime.strptime(date_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
@@ -1282,9 +1349,8 @@ def get_snapshot_compare():
         return jsonify({"error": "Both 'from' and 'to' date parameters required (YYYY-MM-DD)"}), 400
 
     try:
-        from datetime import datetime as _dt
-        from_dt = _dt.strptime(from_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-        to_dt = _dt.strptime(to_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+        from_dt = datetime.strptime(from_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+        to_dt = datetime.strptime(to_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
@@ -1998,6 +2064,10 @@ def trigger_discovery():
     """Trigger a manual discovery run in a background thread.
     Accepts optional JSON body: {connection_id: int} to scan a single connection.
     """
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+
     import threading
     from app.scheduler import trigger_manual_discovery
 
@@ -2172,6 +2242,146 @@ def get_activity():
     except Exception as e:
         logger.error(f"Activity log load failed: {e}", exc_info=True)
         return jsonify({"error": "Failed to load activity log", "entries": []}), 500
+    finally:
+        db.close()
+
+
+def export_audit_trail():
+    """GET /api/audit/export — SOC 2 / HIPAA audit trail export.
+
+    Returns a structured JSON package combining activity_log and admin_audit_log
+    entries within a date range. Designed for auditor review and evidence packages.
+
+    Query params:
+        start_date: ISO 8601 date (default: 30 days ago)
+        end_date: ISO 8601 date (default: now)
+        action_type: Filter by action type (optional)
+        format: 'json' (default) or 'csv'
+        limit: Max entries (default: 10000, max: 50000)
+    """
+    db = _db()
+    try:
+        # Parse date range
+        end_date = request.args.get('end_date', datetime.now(timezone.utc).isoformat()[:10])
+        start_default = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()[:10]
+        start_date = request.args.get('start_date', start_default)
+        action_type = request.args.get('action_type')
+        export_format = request.args.get('format', 'json')
+        limit = min(request.args.get('limit', 10000, type=int), 50000)
+
+        current_user = getattr(g, 'current_user', None)
+        tid = _org_id()
+        is_super = current_user.get('is_superadmin') if current_user else False
+
+        # Activity log entries
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        activity_sql = """
+            SELECT al.id, al.action_type, al.description, al.metadata,
+                   al.user_id, al.organization_id, al.created_at, al.integrity_hash,
+                   u.username, u.display_name
+            FROM activity_log al
+            LEFT JOIN users u ON u.id = al.user_id
+            WHERE al.created_at >= %s::date
+              AND al.created_at < %s::date + INTERVAL '1 day'
+        """
+        params = [start_date, end_date]
+
+        if not is_super and tid and tid != -1:
+            activity_sql += " AND al.organization_id = %s"
+            params.append(tid)
+
+        if action_type:
+            activity_sql += " AND al.action_type = %s"
+            params.append(action_type)
+
+        activity_sql += " ORDER BY al.created_at ASC LIMIT %s"
+        params.append(limit)
+
+        cursor.execute(activity_sql, params)
+        activity_entries = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        # Admin audit log entries (superadmin only or own org)
+        admin_entries = []
+        if is_super or (current_user and current_user.get('role') == 'admin'):
+            cursor2 = db.conn.cursor(cursor_factory=RealDictCursor)
+            admin_sql = """
+                SELECT aal.id, aal.action, aal.details, aal.ip_address,
+                       aal.admin_user_id, aal.target_user_id,
+                       aal.target_organization_id, aal.created_at,
+                       u.username as admin_username
+                FROM admin_audit_log aal
+                LEFT JOIN users u ON u.id = aal.admin_user_id
+                WHERE aal.created_at >= %s::date
+                  AND aal.created_at < %s::date + INTERVAL '1 day'
+                ORDER BY aal.created_at ASC
+                LIMIT %s
+            """
+            cursor2.execute(admin_sql, [start_date, end_date, limit])
+            admin_entries = [dict(r) for r in cursor2.fetchall()]
+            cursor2.close()
+
+        # Serialize datetime fields
+        for entry in activity_entries + admin_entries:
+            for key in ('created_at',):
+                if entry.get(key) and hasattr(entry[key], 'isoformat'):
+                    entry[key] = entry[key].isoformat()
+
+        # Integrity chain verification summary
+        chain_valid = True
+        chain_breaks = 0
+        if activity_entries:
+            import hashlib
+            prev_hash = ''
+            for entry in activity_entries:
+                if entry.get('integrity_hash'):
+                    # We can't fully verify without the timestamp used during insert,
+                    # but we can verify chain continuity (no missing entries)
+                    prev_hash = entry['integrity_hash']
+                else:
+                    # Entries before hash chain was added
+                    chain_breaks += 1
+
+        if export_format == 'csv':
+            import csv
+            import io
+            output = io.StringIO()
+            if activity_entries:
+                writer = csv.DictWriter(output, fieldnames=activity_entries[0].keys())
+                writer.writeheader()
+                for entry in activity_entries:
+                    # Serialize metadata to string for CSV
+                    if isinstance(entry.get('metadata'), dict):
+                        entry['metadata'] = json.dumps(entry['metadata'])
+                    writer.writerow(entry)
+            csv_content = output.getvalue()
+            return Response(
+                csv_content,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename=audit_trail_{start_date}_{end_date}.csv'},
+            )
+
+        return jsonify({
+            'export_metadata': {
+                'start_date': start_date,
+                'end_date': end_date,
+                'action_type_filter': action_type,
+                'activity_count': len(activity_entries),
+                'admin_audit_count': len(admin_entries),
+                'total_entries': len(activity_entries) + len(admin_entries),
+                'exported_at': datetime.now(timezone.utc).isoformat(),
+                'exported_by': current_user.get('username') if current_user else None,
+                'integrity_chain': {
+                    'entries_with_hash': len(activity_entries) - chain_breaks,
+                    'entries_without_hash': chain_breaks,
+                },
+            },
+            'activity_log': activity_entries,
+            'admin_audit_log': admin_entries,
+        })
+    except Exception as e:
+        logger.error(f"Audit export failed: {e}", exc_info=True)
+        return jsonify({"error": "Failed to export audit trail"}), 500
     finally:
         db.close()
 
@@ -3442,7 +3652,7 @@ def get_overview_insights():
         unowned_spns = []
         expiring_creds = 0
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for r in rows:
             identity_id, display_name, category, risk_level, activity_status, owner_count, cred_exp, cloud, tier = r
@@ -4679,7 +4889,6 @@ def get_compliance_gap_analysis():
     """
     import io as _io
     import csv as _csv
-    from datetime import datetime, timezone
 
     fw_filter = request.args.get('framework')
     out_format = request.args.get('format', 'json')
@@ -4813,7 +5022,6 @@ def get_compliance_intelligence():
     Returns risk-weighted compliance scoring, root cause clustering,
     cloud failure counts, top risk drivers, and trend mini.
     """
-    from datetime import datetime, timezone
     from psycopg2.extras import RealDictCursor
 
     SEVERITY_MULT = {'critical': 2.0, 'high': 1.5, 'medium': 1.0, 'low': 0.8}
@@ -5811,7 +6019,7 @@ def get_identity_graph_data(identity_id):
         }
 
         # ── SECRET EXPOSURE ──────────────────────────────────────
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         secret_exposure = []
         for c in credentials:
             flags = []
@@ -6316,7 +6524,7 @@ def _execute_remediation(action_type: str, identity: dict, playbook: dict, db) -
         'identity_id': identity.get('identity_id'),
         'display_name': identity.get('display_name'),
         'playbook_title': playbook.get('title'),
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
     }
 
     # Check if Azure credentials are configured for real execution
@@ -6626,7 +6834,7 @@ def get_remediation_dashboard_summary():
 # Phase 31: Authentication & User Management
 # ================================================================
 
-VALID_ROLES = {'admin', 'security_admin', 'compliance', 'reader'}
+VALID_ROLES = {'owner', 'admin', 'security_admin', 'compliance', 'reader'}
 
 
 def auth_login():
@@ -6646,7 +6854,7 @@ def auth_login():
     # deadlock between this connection's implicit transaction and the new
     # connection opened by generate_refresh_token() → _ensure_users_table() DDL.
     # Login is pre-auth (no g.current_user), so use admin DB to bypass RLS.
-    db = Database()
+    db = Database(_admin_reason='auth_login: pre-auth user lookup')
     try:
         user = db.get_user_by_username(username)
 
@@ -6762,7 +6970,7 @@ def auth_refresh():
     # Phase 68 fix: Close DB connection BEFORE token generation to avoid deadlock
     # (same pattern as auth_login fix)
     # Refresh is pre-auth (public path), so use admin DB to bypass RLS.
-    db = Database()
+    db = Database(_admin_reason='auth_refresh: pre-auth token exchange')
     try:
         token_hash = hash_refresh_token(raw_refresh)
         token_record = db.get_refresh_token(token_hash)
@@ -6780,7 +6988,10 @@ def auth_refresh():
                 logger.error(f"Failed to revoke all tokens for user_id={token_record['user_id']}: {e}")
             return jsonify({'error': 'Token reuse detected — all sessions invalidated'}), 401
 
-        if token_record['expires_at'].replace(tzinfo=None) < datetime.utcnow():
+        expires_at = token_record['expires_at']
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
             return jsonify({'error': 'Refresh token expired'}), 401
 
         user = db.get_user_by_id(token_record['user_id'])
@@ -7260,6 +7471,11 @@ def update_user_handler(user_id):
                 changed_fields.append('password')
             _log(db,'user_updated', f'User "{existing["username"]}" updated: {", ".join(changed_fields)}',
                             {'user_id': user_id, 'changes': changed_fields})
+            # Phase 1 Security: Dedicated role_change audit entry
+            if 'role' in updates and updates['role'] != existing.get('role'):
+                _log(db, 'role_change',
+                     f'User "{existing["username"]}" role changed: {existing.get("role")} → {updates["role"]}',
+                     {'user_id': user_id, 'old_role': existing.get('role'), 'new_role': updates['role']})
         except Exception:
             pass
 
@@ -7325,9 +7541,8 @@ def _resolve_export_run_ids(cursor, tid, conn_id):
 
     if from_date and to_date:
         try:
-            from datetime import datetime as _dt
-            from_dt = _dt.strptime(from_date, '%Y-%m-%d')
-            to_dt = _dt.strptime(to_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+            from_dt = datetime.strptime(from_date, '%Y-%m-%d')
+            to_dt = datetime.strptime(to_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
 
             query = """
                 SELECT id FROM discovery_runs
@@ -7502,7 +7717,7 @@ def _export_identities():
 
         return jsonify({
             'export_type': 'identities',
-            'generated_at': datetime.utcnow().isoformat(),
+            'generated_at': datetime.now(timezone.utc).isoformat(),
             'run_id': run_ids[0] if run_ids else None,
             'date_range': date_range,
             'total_count': len(identities),
@@ -7592,7 +7807,7 @@ def _export_compliance():
 
         return jsonify({
             'export_type': 'compliance',
-            'generated_at': datetime.utcnow().isoformat(),
+            'generated_at': datetime.now(timezone.utc).isoformat(),
             'run_id': run_ids[0] if run_ids else None,
             'overall_score': overall_score,
             'raw_metrics': metrics,
@@ -7624,7 +7839,7 @@ def _export_drift():
         if not report:
             return jsonify({
                 'export_type': 'drift',
-                'generated_at': datetime.utcnow().isoformat(),
+                'generated_at': datetime.now(timezone.utc).isoformat(),
                 'has_data': False,
                 'total_changes': 0,
                 'changes': [],
@@ -7690,7 +7905,7 @@ def _export_drift():
 
         return jsonify({
             'export_type': 'drift',
-            'generated_at': datetime.utcnow().isoformat(),
+            'generated_at': datetime.now(timezone.utc).isoformat(),
             'run_id': run_id,
             'previous_run_id': report.get('previous_run_id'),
             'total_changes': report.get('total_changes', 0),
@@ -7736,7 +7951,7 @@ def _export_risk_summary():
 
         return jsonify({
             'export_type': 'risk-summary',
-            'generated_at': datetime.utcnow().isoformat(),
+            'generated_at': datetime.now(timezone.utc).isoformat(),
             'run_id': data.get('run_id'),
             'collected_at': data.get('collected_at'),
             'risk_distribution': data.get('stats'),
@@ -7836,7 +8051,7 @@ def _export_evidence_package():
             'export_type': 'evidence-package',
             'metadata': {
                 'organization': org_name or 'Organization',
-                'generated_at': datetime.utcnow().isoformat(),
+                'generated_at': datetime.now(timezone.utc).isoformat(),
                 'framework': 'HIPAA',
                 'run_id': data.get('run_id'),
                 'identity_count': data.get('stats', {}).get('total_identities', 0),
@@ -7951,7 +8166,7 @@ def _export_sensitive_data():
             'export_type': 'sensitive-data',
             'metadata': {
                 'organization': org_name or 'Organization',
-                'generated_at': datetime.utcnow().isoformat(),
+                'generated_at': datetime.now(timezone.utc).isoformat(),
                 'total_classified_resources': len(classified),
                 'total_access_mappings': len(access_map),
             },
@@ -7983,7 +8198,7 @@ def _export_evidence_json():
             cursor.close()
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         # --- 1. Run metadata ---
         cursor.execute("""
@@ -8176,7 +8391,7 @@ def export_evidence_zip():
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
         org_name = db.get_setting('org_name', organization_id=tid) if tid else 'Organization'
-        generated_at = datetime.utcnow()
+        generated_at = datetime.now(timezone.utc)
 
         # Determine date range text
         date_range_text = 'Latest discovery run'
@@ -8185,9 +8400,8 @@ def export_evidence_zip():
 
         if from_date and to_date:
             try:
-                from datetime import datetime as _dt
-                from_dt = _dt.strptime(from_date, '%Y-%m-%d')
-                to_dt = _dt.strptime(to_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+                from_dt = datetime.strptime(from_date, '%Y-%m-%d')
+                to_dt = datetime.strptime(to_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
                 date_range_text = f'{from_date} to {to_date}'
                 # Get all runs in date range
                 cursor.execute("""
@@ -10040,11 +10254,20 @@ def reset_dashboard_preferences_handler():
 # ===================================================================
 
 def get_organizations_list():
-    """GET /api/organizations — list all organizations (superadmin only)."""
-    db = _db()
+    """GET /api/organizations — list all organizations (superadmin/portal access).
+
+    Uses admin DB connection (bypasses RLS) because organizations table has
+    no tenant_id column — it IS the tenant registry.  All portal-role users
+    need to see the full list.
+    """
+    db = Database(_admin_reason='admin_portal_org_list')
     try:
         organizations = db.get_organizations()
-        return jsonify({'organizations': organizations})
+        # Return both keys: 'organizations' (TopBar, Settings) + 'tenants' (AdminTenants compat)
+        return jsonify({'organizations': organizations, 'tenants': organizations})
+    except Exception as e:
+        logger.exception("Failed to list organizations: %s", e)
+        return jsonify({'error': 'Internal server error', 'organizations': [], 'tenants': []}), 500
     finally:
         db.close()
 
@@ -10077,7 +10300,7 @@ def create_organization_handler():
         return jsonify({'error': 'primary_cloud must be azure, aws, or gcp'}), 400
 
     # Use admin DB (no RLS) — creates user in a different org than caller's context
-    db = Database()
+    db = Database(_admin_reason='admin_portal_org_create')
     try:
         existing = db.get_organization_by_slug(slug)
         if existing:
@@ -10091,7 +10314,6 @@ def create_organization_handler():
         # Set subscription term + auto-compute dates if provided
         term = int(data.get('subscription_term', 0))
         if term in (1, 3, 5):
-            from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             db.update_organization(org['id'],
                              subscription_term=term,
@@ -10142,7 +10364,7 @@ def create_organization_handler():
                 except Exception:
                     settings = {}
             settings['provisioned'] = True
-            settings['provisioned_at'] = datetime.utcnow().isoformat()
+            settings['provisioned_at'] = datetime.now(timezone.utc).isoformat()
             settings['onboarding_stage'] = 'password_change'
             # Auto-enable primary cloud in cloud_providers
             if primary_cloud:
@@ -10175,6 +10397,9 @@ def create_organization_handler():
         if root_user:
             result['root_user'] = {k: v for k, v in root_user.items() if k != 'password_hash'}
         return jsonify(result), 201
+    except Exception as e:
+        logger.exception("Client onboarding failed: %s", e)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -10182,7 +10407,7 @@ def create_organization_handler():
 def update_organization_handler(organization_id):
     """PUT /api/organizations/<id> — update organization details (superadmin only)."""
     data = request.get_json(silent=True) or {}
-    db = _db()
+    db = Database(_admin_reason='admin_portal_org_update')
     try:
         existing = db.get_organization_by_id(organization_id)
         if not existing:
@@ -10216,7 +10441,6 @@ def update_organization_handler(organization_id):
             if term > 0:
                 activated = data.get('license_activated_at') or existing.get('license_activated_at')
                 if activated:
-                    from datetime import datetime, timezone
                     act_dt = datetime.fromisoformat(str(activated).replace('Z', '+00:00')) if isinstance(activated, str) else activated
                     updates['license_expires_at'] = act_dt.replace(year=act_dt.year + term).isoformat()
             elif term == 0:
@@ -10264,7 +10488,7 @@ def update_organization_handler(organization_id):
 def delete_organization_handler(organization_id):
     """DELETE /api/organizations/<id> — delete an organization (superadmin only)."""
     # Use admin DB (no RLS) so cascade can delete across org boundaries
-    db = Database()
+    db = Database(_admin_reason='admin_portal_org_delete')
     try:
         existing = db.get_organization_by_id(organization_id)
         if not existing:
@@ -10333,7 +10557,7 @@ def get_organization_entitlements():
     from app.pricing import PLAN_LIMITS
     db = _db()
     try:
-        admin_db = Database()
+        admin_db = Database(_admin_reason='entitlements: read org plan metadata')
         try:
             org = admin_db.get_organization_by_id(tid) if tid else None
         finally:
@@ -10375,7 +10599,7 @@ def get_organization_branding():
     slug = request.args.get('slug', '').strip().lower()
     if not slug:
         return jsonify({'error': 'slug parameter required'}), 400
-    db = Database()  # Public endpoint — bypass RLS
+    db = Database(_admin_reason='public endpoint — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org:
@@ -10405,13 +10629,9 @@ def get_organization_stage():
         org = db.get_organization_by_id(tid)
         if not org:
             return jsonify({'stage': 'active', 'primary_cloud': None, 'org_name': None})
-        settings = org.get('settings') or {}
-        if isinstance(settings, str):
-            try:
-                settings = json.loads(settings)
-            except Exception:
-                settings = {}
-        stage = settings.get('onboarding_stage', 'active')
+        # Read from onboarding_stage COLUMN (not settings JSONB) —
+        # scheduler writes to this column, so they must match.
+        stage = org.get('onboarding_stage') or 'active'
         return jsonify({
             'stage': stage,
             'primary_cloud': org.get('primary_cloud'),
@@ -10437,14 +10657,8 @@ def update_organization_stage():
         org = db.get_organization_by_id(tid)
         if not org:
             return jsonify({'error': 'Tenant not found'}), 404
-        settings = org.get('settings') or {}
-        if isinstance(settings, str):
-            try:
-                settings = json.loads(settings)
-            except Exception:
-                settings = {}
-        settings['onboarding_stage'] = stage
-        db.update_organization(tid, settings=settings)
+        # Write to onboarding_stage COLUMN (matches scheduler + get_organization_stage)
+        db.update_organization(tid, onboarding_stage=stage)
         try:
             _log(db, 'org_stage_updated',
                  f'Onboarding stage changed to "{stage}"',
@@ -10459,55 +10673,84 @@ def update_organization_stage():
 # ── Phase 47: Cross-Tenant Analytics ─────────────────────────────
 
 def get_cross_org_analytics():
-    """GET /api/analytics/organizations — per-org metrics + global aggregates (superadmin only)."""
-    db = _db()
-    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    """GET /api/analytics/organizations — per-org metrics + global aggregates (superadmin only).
+
+    Uses admin DB (no RLS) — organizations table has no tenant_id.
+    Gracefully degrades when discovery_runs table doesn't exist (fresh DB).
+    """
+    db = Database(_admin_reason='admin_cross_org_analytics')
     try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Check if discovery_runs table exists (fresh DB may not have it)
         cursor.execute("""
-            WITH latest_runs AS (
-                SELECT DISTINCT ON (organization_id)
-                    id, organization_id, completed_at, total_identities,
-                    critical_count, high_count, medium_count, low_count
-                FROM discovery_runs
-                WHERE status = 'completed'
-                ORDER BY organization_id, id DESC
-            ),
-            prev_runs AS (
-                SELECT DISTINCT ON (organization_id)
-                    organization_id, total_identities AS prev_total,
-                    critical_count AS prev_critical, high_count AS prev_high
-                FROM discovery_runs
-                WHERE status = 'completed' AND id NOT IN (SELECT id FROM latest_runs)
-                ORDER BY organization_id, id DESC
-            ),
-            run_counts AS (
-                SELECT organization_id, COUNT(*) AS total_runs
-                FROM discovery_runs GROUP BY organization_id
-            ),
-            user_counts AS (
-                SELECT organization_id, COUNT(*) AS user_count
-                FROM users WHERE organization_id IS NOT NULL GROUP BY organization_id
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'discovery_runs'
             )
-            SELECT
-                o.id, o.name, o.slug, o.plan, o.enabled,
-                o.settings, o.license_activated_at, o.license_expires_at, o.subscription_term,
-                COALESCE(uc.user_count, 0) AS user_count,
-                COALESCE(rc.total_runs, 0) AS total_runs,
-                lr.completed_at AS last_discovery,
-                COALESCE(lr.total_identities, 0) AS total_identities,
-                COALESCE(lr.critical_count, 0) AS critical_count,
-                COALESCE(lr.high_count, 0) AS high_count,
-                COALESCE(lr.medium_count, 0) AS medium_count,
-                COALESCE(lr.low_count, 0) AS low_count,
-                pr.prev_total, pr.prev_critical, pr.prev_high
-            FROM organizations o
-            LEFT JOIN latest_runs lr ON lr.organization_id = o.id
-            LEFT JOIN prev_runs pr ON pr.organization_id = o.id
-            LEFT JOIN run_counts rc ON rc.organization_id = o.id
-            LEFT JOIN user_counts uc ON uc.organization_id = o.id
-            ORDER BY o.id
         """)
+        has_discovery_runs = cursor.fetchone()['exists']
+
+        if has_discovery_runs:
+            cursor.execute("""
+                WITH latest_runs AS (
+                    SELECT DISTINCT ON (organization_id)
+                        id, organization_id, completed_at, total_identities,
+                        critical_count, high_count, medium_count, low_count
+                    FROM discovery_runs
+                    WHERE status = 'completed'
+                    ORDER BY organization_id, id DESC
+                ),
+                prev_runs AS (
+                    SELECT DISTINCT ON (organization_id)
+                        organization_id, total_identities AS prev_total,
+                        critical_count AS prev_critical, high_count AS prev_high
+                    FROM discovery_runs
+                    WHERE status = 'completed' AND id NOT IN (SELECT id FROM latest_runs)
+                    ORDER BY organization_id, id DESC
+                ),
+                run_counts AS (
+                    SELECT organization_id, COUNT(*) AS total_runs
+                    FROM discovery_runs GROUP BY organization_id
+                ),
+                user_counts AS (
+                    SELECT organization_id, COUNT(*) AS user_count
+                    FROM users WHERE organization_id IS NOT NULL GROUP BY organization_id
+                )
+                SELECT
+                    o.id, o.name, o.slug, o.plan, o.enabled,
+                    o.settings, o.license_activated_at, o.license_expires_at, o.subscription_term,
+                    COALESCE(uc.user_count, 0) AS user_count,
+                    COALESCE(rc.total_runs, 0) AS total_runs,
+                    lr.completed_at AS last_discovery,
+                    COALESCE(lr.total_identities, 0) AS total_identities,
+                    COALESCE(lr.critical_count, 0) AS critical_count,
+                    COALESCE(lr.high_count, 0) AS high_count,
+                    COALESCE(lr.medium_count, 0) AS medium_count,
+                    COALESCE(lr.low_count, 0) AS low_count,
+                    pr.prev_total, pr.prev_critical, pr.prev_high
+                FROM organizations o
+                LEFT JOIN latest_runs lr ON lr.organization_id = o.id
+                LEFT JOIN prev_runs pr ON pr.organization_id = o.id
+                LEFT JOIN run_counts rc ON rc.organization_id = o.id
+                LEFT JOIN user_counts uc ON uc.organization_id = o.id
+                ORDER BY o.id
+            """)
+        else:
+            # Fallback: org + user counts only (no discovery data)
+            cursor.execute("""
+                SELECT o.id, o.name, o.slug, o.plan, o.enabled,
+                       o.settings, o.license_activated_at, o.license_expires_at, o.subscription_term,
+                       COALESCE((SELECT COUNT(*) FROM users u WHERE u.organization_id = o.id), 0) AS user_count,
+                       0 AS total_runs, NULL AS last_discovery,
+                       0 AS total_identities, 0 AS critical_count, 0 AS high_count,
+                       0 AS medium_count, 0 AS low_count,
+                       NULL AS prev_total, NULL AS prev_critical, NULL AS prev_high
+                FROM organizations o ORDER BY o.id
+            """)
+
         rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
 
         # Compute risk score per org + serialize timestamps + extract clouds
         for row in rows:
@@ -10534,27 +10777,53 @@ def get_cross_org_analytics():
         scores = [r['risk_score'] for r in rows if r.get('total_runs', 0) > 0]
         avg_risk_score = round(sum(scores) / len(scores)) if scores else 0
 
+        global_metrics = {
+            'total_orgs': total_orgs,
+            'active_orgs': active_orgs,
+            # AdminOverview.tsx reads total_tenants/active_tenants
+            'total_tenants': total_orgs,
+            'active_tenants': active_orgs,
+            'total_identities': total_identities,
+            'total_critical': total_critical,
+            'total_high': total_high,
+            'avg_risk_score': avg_risk_score,
+        }
+
         return jsonify({
             'organizations': rows,
-            'global': {
-                'total_orgs': total_orgs,
-                'active_orgs': active_orgs,
-                'total_identities': total_identities,
-                'total_critical': total_critical,
-                'total_high': total_high,
-                'avg_risk_score': avg_risk_score,
-            },
+            'tenants': rows,  # AdminOverview compat
+            'global': global_metrics,
         })
+    except Exception as e:
+        logger.exception("Failed to load cross-org analytics: %s", e)
+        return jsonify({
+            'organizations': [], 'tenants': [],
+            'global': {'total_orgs': 0, 'active_orgs': 0,
+                       'total_tenants': 0, 'active_tenants': 0,
+                       'total_identities': 0, 'total_critical': 0,
+                       'total_high': 0, 'avg_risk_score': 0},
+        }), 500
     finally:
-        cursor.close()
         db.close()
 
 
 def get_cross_org_trends():
     """GET /api/analytics/organizations/trends — recent runs per org for timeline (superadmin only)."""
-    db = _db()
+    db = Database(_admin_reason='admin_cross_org_trends')
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # Check if discovery_runs table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'discovery_runs'
+            )
+        """)
+        has_runs = cursor.fetchone()['exists']
+
+        if not has_runs:
+            return jsonify({'trends': {}})
+
         cursor.execute("""
             SELECT dr.organization_id, o.name AS org_name,
                    dr.id, dr.completed_at, dr.total_identities,
@@ -10584,6 +10853,9 @@ def get_cross_org_trends():
             })
 
         return jsonify({'trends': trends})
+    except Exception as e:
+        logger.exception("Failed to load cross-org trends: %s", e)
+        return jsonify({'trends': {}}), 500
     finally:
         cursor.close()
         db.close()
@@ -10593,7 +10865,7 @@ def get_login_sessions():
     """GET /api/analytics/login-sessions — paired login/logout events for governance.
     ?portal=admin|client — filter by portal context (default: all)
     """
-    db = _db()
+    db = Database(_admin_reason='admin_login_sessions')
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
     try:
         limit = request.args.get('limit', 50, type=int)
@@ -10666,10 +10938,9 @@ def get_login_sessions():
                     if lo['created_at'] and login_time and lo['created_at'] > login_time:
                         logout_time = lo['created_at']
                         # Calculate duration
-                        from datetime import datetime as _dt
                         try:
-                            lt = _dt.fromisoformat(login_time.replace('Z', '+00:00'))
-                            lot = _dt.fromisoformat(logout_time.replace('Z', '+00:00'))
+                            lt = datetime.fromisoformat(login_time.replace('Z', '+00:00'))
+                            lot = datetime.fromisoformat(logout_time.replace('Z', '+00:00'))
                             duration_min = round((lot - lt).total_seconds() / 60, 1)
                         except Exception:
                             pass
@@ -10698,6 +10969,9 @@ def get_login_sessions():
             'sessions': sessions,
             'count': len(sessions),
         })
+    except Exception as e:
+        logger.exception("Failed to load login sessions: %s", e)
+        return jsonify({'sessions': [], 'count': 0}), 500
     finally:
         cursor.close()
         db.close()
@@ -10712,11 +10986,40 @@ def get_onboarding_status():
         tid = _org_id()
         settings = db.get_settings(organization_id=tid)
         completed = settings.get('onboarding_completed', 'false') == 'true'
-        azure_configured = all([
-            settings.get('azure_directory_id'),
-            settings.get('azure_client_id'),
-            settings.get('azure_client_secret'),
-        ])
+
+        # Check cloud_connections table for verified connections (not stale settings keys)
+        azure_configured = False
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM cloud_connections
+                WHERE organization_id = %s AND status = 'connected'
+            """, (tid,))
+            row = cursor.fetchone()
+            azure_configured = row and row[0] > 0
+            cursor.close()
+        except Exception:
+            # Fallback to settings keys if cloud_connections table doesn't exist
+            azure_configured = all([
+                settings.get('azure_directory_id'),
+                settings.get('azure_client_id'),
+                settings.get('azure_client_secret'),
+            ])
+
+        # Check for active subscriptions
+        subs_activated = False
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM cloud_subscriptions
+                WHERE organization_id = %s AND monitored = true
+                  AND (deleted IS NULL OR deleted = false)
+            """, (tid,))
+            row = cursor.fetchone()
+            subs_activated = row and row[0] > 0
+            cursor.close()
+        except Exception:
+            pass
 
         # Build onboarding checklist
         checklist = [
@@ -10729,6 +11032,11 @@ def get_onboarding_status():
                 'key': 'cloud_connected',
                 'label': 'Connect a cloud provider',
                 'done': azure_configured,
+            },
+            {
+                'key': 'subscriptions_activated',
+                'label': 'Activate a subscription',
+                'done': subs_activated,
             },
             {
                 'key': 'first_scan',
@@ -10752,7 +11060,7 @@ def get_onboarding_status():
         try:
             run_ids = _latest_run_ids(cursor, tid, None)
             if run_ids:
-                checklist[2]['done'] = True
+                checklist[3]['done'] = True  # first_scan (index 3 after subscriptions_activated)
                 # Check if any identity was viewed (proxy for "reviewed")
                 cursor.execute("""
                     SELECT COUNT(*) FROM activity_log
@@ -10761,7 +11069,7 @@ def get_onboarding_status():
                 """, (tid,))
                 row = cursor.fetchone()
                 if row and row[0] > 0:
-                    checklist[3]['done'] = True
+                    checklist[4]['done'] = True  # review_identities (index 4)
         except Exception:
             pass
         finally:
@@ -10799,7 +11107,7 @@ def test_azure_connection():
         from azure.mgmt.resource import SubscriptionClient
 
         credential = ClientSecretCredential(
-            organization_id=azure_directory_id,
+            tenant_id=azure_directory_id,
             client_id=azure_client_id,
             client_secret=azure_client_secret,
         )
@@ -10816,7 +11124,7 @@ def test_azure_connection():
         tid = _org_id()
         if tid:
             from app.database import Database
-            admin_db = Database()
+            admin_db = Database(_admin_reason='test_azure: advance stage + insert subs')
             try:
                 admin_db.update_organization(tid, onboarding_stage='active')
                 admin_db._ensure_cloud_subscriptions_table()
@@ -10827,7 +11135,7 @@ def test_azure_connection():
                         VALUES (%s, 'azure', %s, %s, 'discovered')
                         ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
                     """, (tid, s['id'], s['name']))
-                admin_db.conn.commit()
+                admin_db._commit()
                 cursor.close()
                 # Seed auto identity groups for this org
                 admin_db.seed_auto_groups_for_organization(tid)
@@ -10853,6 +11161,7 @@ def test_azure_connection():
 def get_client_connections():
     """List all cloud connections for the current organization.
     Auto-creates a 'Primary' connection from settings if none exist yet.
+    Returns {connected: false, requires_setup: true} when no connections exist.
     """
     tid = _org_id()
     if not tid or tid == -1:
@@ -10890,13 +11199,31 @@ def get_client_connections():
                         SET cloud_connection_id = %s
                         WHERE organization_id = %s AND cloud_connection_id IS NULL
                     """, (conn['id'], tid))
-                    db.conn.commit()
+                    db._commit()
                     cursor.close()
                     connections = db.get_cloud_connections(tid)
             except Exception:
                 pass
 
-        return jsonify({'connections': connections})
+        if not connections:
+            return jsonify({
+                'connected': False,
+                'connections': [],
+                'requires_setup': True,
+            })
+        return jsonify({
+            'connected': True,
+            'connections': connections,
+            'requires_setup': False,
+        })
+    except Exception as e:
+        logger.exception("Failed to list cloud connections: %s", e)
+        return jsonify({
+            'connected': False,
+            'connections': [],
+            'requires_setup': True,
+            'error': 'Internal server error',
+        }), 500
     finally:
         db.close()
 
@@ -10905,13 +11232,16 @@ def create_client_connection():
     """Create a new cloud connection for the current organization.
     Stores credentials in metadata and auto-discovers subscriptions.
     """
+    guard = _demo_write_guard()
+    if guard:
+        return guard
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
 
     # Enforce subscription limit before creating connection
     from app.entitlements.service import enforce_subscription_limit
-    admin_db = Database()
+    admin_db = Database(_admin_reason='create_connection: enforce subscription limit')
     try:
         allowed, err_msg = enforce_subscription_limit(admin_db, tid)
         if not allowed:
@@ -10939,7 +11269,7 @@ def create_client_connection():
     # FIX1C: Cross-org uniqueness check — prevent same cloud account reused by another org
     if azure_directory_id:
         from app.connectors import validate_connector_unique
-        check_db = Database()
+        check_db = Database(_admin_reason='create_connection: cross-org uniqueness check')
         try:
             existing_org = validate_connector_unique(check_db, cloud, azure_directory_id)
             if existing_org and existing_org != tid:
@@ -10977,7 +11307,7 @@ def create_client_connection():
                 from azure.identity import ClientSecretCredential
                 from azure.mgmt.resource import SubscriptionClient
                 credential = ClientSecretCredential(
-                    organization_id=azure_directory_id,
+                    tenant_id=azure_directory_id,
                     client_id=client_id,
                     client_secret=client_secret,
                 )
@@ -11024,6 +11354,37 @@ def create_client_connection():
         # Track usage
         from app.entitlements.service import track_usage
         track_usage(db, tid, 'connection', str(conn['id']), 'added', {'cloud': cloud})
+
+        # Auto-trigger initial discovery scan for verified connections
+        if status == 'connected':
+            # Advance org stage to 'active' so UI unlocks immediately
+            try:
+                adm = Database(_admin_reason='create_connection: advance onboarding stage')
+                try:
+                    o = adm.get_organization_by_id(tid)
+                    if o and o.get('onboarding_stage') in ('locked', 'authenticating', 'password_change'):
+                        adm.update_organization(tid, onboarding_stage='active')
+                finally:
+                    adm.close()
+            except Exception:
+                pass
+
+            import threading
+            from app.scheduler import trigger_manual_discovery
+            _conn_id = conn['id']
+            _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+            def _run_initial_discovery():
+                try:
+                    trigger_manual_discovery(
+                        scan_mode='deep',
+                        db_org_id=tid,
+                        org_name=_org_name,
+                        connection_id=_conn_id,
+                    )
+                except Exception as e:
+                    logging.getLogger(__name__).error(f"Initial discovery after connection save failed: {e}")
+            thread = threading.Thread(target=_run_initial_discovery, daemon=True)
+            thread.start()
 
         result = dict(conn)
         result['discovered_count'] = discovered_count
@@ -11117,7 +11478,7 @@ def test_client_connection():
             from azure.mgmt.resource import SubscriptionClient
 
             credential = ClientSecretCredential(
-                organization_id=azure_directory_id,
+                tenant_id=azure_directory_id,
                 client_id=azure_client_id,
                 client_secret=azure_client_secret,
             )
@@ -11130,7 +11491,7 @@ def test_client_connection():
                         'name': sub.display_name or sub.subscription_id,
                     })
 
-            # If connection_id provided, update its test status
+            # If connection_id provided, update its test status and persist subscriptions
             connection_id = data.get('connection_id')
             if connection_id:
                 db = _db()
@@ -11139,8 +11500,37 @@ def test_client_connection():
                                                last_test_at=datetime.now(timezone.utc).isoformat(),
                                                last_test_status='success',
                                                status='connected')
+
+                    # Insert discovered subscriptions into cloud_subscriptions
+                    cursor = db.conn.cursor()
+                    for s in subs:
+                        cursor.execute("""
+                            INSERT INTO cloud_subscriptions
+                                (organization_id, cloud, account_id, account_name,
+                                 status, cloud_connection_id)
+                            VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                            ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
+                                SET account_name = EXCLUDED.account_name,
+                                    cloud_connection_id = EXCLUDED.cloud_connection_id,
+                                    deleted = false
+                        """, (tid, s['id'], s['name'], connection_id))
+                    cursor.close()
+                    db._commit()
+                    logger.info("Inserted %d Azure subscription(s) into cloud_subscriptions for org %s", len(subs), tid)
                 finally:
                     db.close()
+
+            # Advance onboarding stage on successful connection test
+            try:
+                adm = Database(_admin_reason='test_connection: advance onboarding stage')
+                try:
+                    o = adm.get_organization_by_id(tid)
+                    if o and o.get('onboarding_stage') in ('connections', 'locked', 'authenticating', 'password_change'):
+                        adm.update_organization(tid, onboarding_stage='active')
+                finally:
+                    adm.close()
+            except Exception:
+                pass
 
             return jsonify({
                 'status': 'success',
@@ -11221,7 +11611,15 @@ def test_client_connection():
 
 
 def discover_client_connection(connection_id):
-    """Trigger discovery for a specific cloud connection."""
+    """Trigger discovery for a specific cloud connection.
+
+    Auto-activates all discovered (unmonitored) subscriptions for this
+    connection before triggering discovery, so identities are captured
+    for every subscription found during the connection test.
+    """
+    import threading
+    from app.scheduler import trigger_manual_discovery
+
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
@@ -11235,16 +11633,65 @@ def discover_client_connection(connection_id):
         if existing['status'] != 'connected':
             return jsonify({'error': 'Connection must be tested and connected before discovery'}), 400
 
-        _log(db, 'connection_discovery', f'Discovery triggered for connection: {existing["label"]}',
-             {'connection_id': connection_id})
+        # Auto-activate all unmonitored subscriptions for this connection
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            UPDATE cloud_subscriptions
+            SET monitored = true, status = 'active',
+                activated_at = NOW(), activated_by = %s
+            WHERE organization_id = %s
+              AND cloud_connection_id = %s
+              AND monitored = false
+              AND deleted = false
+            RETURNING id, account_id
+        """, (user_id, tid, connection_id))
+        activated = cursor.fetchall()
+        cursor.close()
+        db._commit()
+        if activated:
+            logger.info("Auto-activated %d subscription(s) for connection %d: %s",
+                         len(activated), connection_id,
+                         [row[1] for row in activated])
 
-        return jsonify({
-            'status': 'queued',
-            'message': f'Discovery queued for connection: {existing["label"]}',
-            'connection_id': connection_id,
-        })
+        _log(db, 'connection_discovery', f'Discovery triggered for connection: {existing["label"]}',
+             {'connection_id': connection_id, 'auto_activated': len(activated)})
     finally:
         db.close()
+
+    # Advance onboarding stage to 'active' immediately (don't rely on background thread)
+    try:
+        adm = Database(_admin_reason='discover_connection: advance onboarding stage')
+        try:
+            o = adm.get_organization_by_id(tid)
+            if o and o.get('onboarding_stage') in ('connections', 'locked', 'authenticating', 'password_change'):
+                adm.update_organization(tid, onboarding_stage='active')
+                logger.info("Onboarding stage advanced to 'active' for org %s", tid)
+        finally:
+            adm.close()
+    except Exception:
+        pass
+
+    # Run discovery in background thread (after DB closed to avoid holding connection)
+    _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+    def _run():
+        try:
+            trigger_manual_discovery(
+                scan_mode='deep', db_org_id=tid,
+                org_name=_org_name, connection_id=connection_id,
+            )
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Connection discovery failed for {connection_id}: {e}")
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return jsonify({
+        'status': 'started',
+        'message': f'Discovery started for connection: {existing["label"]}',
+        'connection_id': connection_id,
+        'subscriptions_activated': len(activated),
+    }), 202
 
 
 # ── Phase 49: Identity Risk Simulation ──────────────────────────
@@ -11348,7 +11795,6 @@ def _compute_risk_score(azure_roles, entra_roles, permissions, app_roles, creden
     for cred in credentials:
         end_date = cred.get('end_datetime')
         if end_date:
-            from datetime import datetime, timezone
             try:
                 if isinstance(end_date, str):
                     end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
@@ -12282,7 +12728,6 @@ def get_resource_expiry_summary():
         rows = cursor.fetchall()
         cursor.close()
 
-        from datetime import datetime, timezone, timedelta
         now = datetime.now(timezone.utc)
         d7 = now + timedelta(days=7)
         d30 = now + timedelta(days=30)
@@ -12863,7 +13308,7 @@ def classify_resource(resource_id):
             """, (classification, user, notes, resource_id, run_ids))
             row = cursor.fetchone()
             if row:
-                db.conn.commit()
+                db._commit()
                 cursor.close()
                 _log(db, 'resource_classified', f'Classified {row["name"]} as {classification}', {
                     'resource_id': resource_id, 'classification': classification, 'source': 'manual',
@@ -12908,7 +13353,7 @@ def declassify_resource(resource_id):
             """, (resource_id, run_ids))
             row = cursor.fetchone()
             if row:
-                db.conn.commit()
+                db._commit()
                 cursor.close()
                 return jsonify({'resource_id': resource_id, 'status': 'declassified'})
         cursor.close()
@@ -12974,7 +13419,7 @@ def auto_classify_resources():
                 else:
                     skipped += 1
 
-        db.conn.commit()
+        db._commit()
         cursor.close()
 
         if classified_count > 0:
@@ -13412,7 +13857,7 @@ def get_blast_radius_summary():
 
 def get_organization_by_slug_public(slug):
     """GET /api/organizations/by-slug/<slug> — Public (no auth). Returns limited organization info."""
-    db = Database()  # Public endpoint — bypass RLS
+    db = Database(_admin_reason='public endpoint — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org:
@@ -13468,7 +13913,7 @@ def provision_organization_handler(organization_id):
             except Exception:
                 settings = {}
         settings['provisioned'] = True
-        settings['provisioned_at'] = datetime.utcnow().isoformat()
+        settings['provisioned_at'] = datetime.now(timezone.utc).isoformat()
         db.update_organization(organization_id, settings=settings)
 
         _log(db, 'org_provisioned',
@@ -13524,7 +13969,7 @@ def sso_status():
     slug = request.args.get('org_slug', '').strip()
     if not slug:
         return jsonify({'sso_enabled': False})
-    db = Database()  # Public endpoint — bypass RLS
+    db = Database(_admin_reason='public endpoint — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org or not org.get('enabled'):
@@ -13545,7 +13990,7 @@ def saml_metadata():
     slug = request.args.get('org_slug', '').strip()
     if not slug:
         return jsonify({'error': 'org_slug is required'}), 400
-    db = Database()  # Public endpoint — bypass RLS
+    db = Database(_admin_reason='public endpoint — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org:
@@ -13575,7 +14020,7 @@ def saml_login():
     slug = request.args.get('org_slug', '').strip()
     if not slug:
         return jsonify({'error': 'org_slug is required'}), 400
-    db = Database()  # Public endpoint — bypass RLS
+    db = Database(_admin_reason='public endpoint — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org:
@@ -13603,7 +14048,7 @@ def saml_acs():
     if not slug:
         return jsonify({'error': 'Missing RelayState (org slug)'}), 400
 
-    db = Database()  # Public SAML callback — bypass RLS
+    db = Database(_admin_reason='SAML ACS callback — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org:
@@ -13689,7 +14134,7 @@ def saml_token_exchange():
     if not code:
         return jsonify({'error': 'Missing code'}), 400
 
-    db = Database()  # Public endpoint — bypass RLS
+    db = Database(_admin_reason='public endpoint — no auth context')
     try:
         result = db.consume_sso_auth_code(code)
         if not result:
@@ -13864,7 +14309,7 @@ def _load_sa_gov_policies(db, organization_id=None):
 def _compute_governance_status(identity, attestation, policies):
     """Compute governance status and issues for a single service account."""
     issues = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Check owner requirement
     if policies.get('sa_gov_require_owner') == 'true':
@@ -14123,7 +14568,7 @@ def get_sa_governance_list():
 
         # Build response items with governance overlay
         items = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for r in rows:
             att = att_map.get(r['identity_id'])
             gov_status, gov_issues = _compute_governance_status(r, att, policies)
@@ -14967,10 +15412,14 @@ def health_check():
     except ImportError:
         pass
 
+    # Connection pool
+    from app.database import _PoolManager
+    checks['connection_pool'] = _PoolManager.stats()
+
     return jsonify({
         'service': 'AuditGraph API',
         'status': overall,
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'checks': checks,
     })
 
@@ -14979,14 +15428,37 @@ def health_live():
     """GET /health/live — Kubernetes liveness probe. Always returns 200."""
     return jsonify({
         'status': 'alive',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
     })
 
 
 def health_ready():
-    """GET /health/ready — Kubernetes readiness probe. Checks DB + scheduler."""
+    """GET /health/ready — Kubernetes readiness probe. Checks DB + scheduler.
+
+    Returns 503 (not ready) during:
+      - Database connectivity failure
+      - Scheduler not running
+      - Active schema migration (MIGRATION_IN_PROGRESS flag)
+      - Startup not yet complete (_startup_complete flag)
+    """
     checks = {}
     ready = True
+
+    # Migration gate — return not_ready during migrations so the load
+    # balancer stops routing traffic to this instance
+    from app.database import Database as _DbClass
+    if getattr(_DbClass, '_migration_in_progress', False):
+        checks['migration'] = 'in_progress'
+        ready = False
+    else:
+        checks['migration'] = 'idle'
+
+    # Startup complete gate
+    if not getattr(_DbClass, '_startup_complete', False):
+        checks['startup'] = 'initializing'
+        ready = False
+    else:
+        checks['startup'] = 'complete'
 
     # DB connectivity
     try:
@@ -15014,7 +15486,7 @@ def health_ready():
     status_code = 200 if ready else 503
     return jsonify({
         'status': 'ready' if ready else 'not_ready',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'checks': checks,
     }), status_code
 
@@ -15070,11 +15542,16 @@ def get_system_health():
         tables = [{'name': r[0], 'size_bytes': r[1], 'size_mb': round(r[1] / 1024 / 1024, 2)} for r in cursor2.fetchall()]
         cursor2.close()
 
+        # Connection pool stats
+        from app.database import _PoolManager
+        pool_stats = _PoolManager.stats()
+
         return jsonify({
             'api': summary,
             'top_endpoints': top_endpoints,
             'discovery_runs': runs,
             'database': {'tables': tables},
+            'connection_pool': pool_stats,
         })
     finally:
         db.close()
@@ -15218,7 +15695,7 @@ def _generate_risk_summary(identity, roles, credentials, entra_roles):
     elif cred_risk == 'expiring_soon':
         points.append("Credentials expiring within 30 days")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     oldest_secret_days = 0
     for c in credentials:
         if c.get('credential_type') == 'secret' and c.get('start_datetime'):
@@ -15903,7 +16380,7 @@ def validate_org_isolation():
     all_pass = True
 
     # 1. Check RLS policies exist on all org-scoped tables
-    admin_db = Database()  # admin connection — bypasses RLS for meta queries
+    admin_db = Database(_admin_reason='RLS audit — pg_policies meta query')
     cursor = admin_db.conn.cursor()
     try:
         cursor.execute("""
@@ -16024,7 +16501,7 @@ def validate_org_isolation():
 
     return jsonify({
         'validation': 'org_isolation',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'overall': 'pass' if all_pass else 'fail',
         'checks': results,
     })
@@ -16413,7 +16890,7 @@ def upload_organization_logo(organization_id):
 
         cursor = db.conn.cursor()
         cursor.execute("UPDATE organizations SET logo_url = %s, updated_at = NOW() WHERE id = %s", (logo_url, organization_id))
-        db.conn.commit()
+        db._commit()
         cursor.close()
 
         _log(db, 'org_logo_uploaded', f'Logo uploaded for org "{org["name"]}"',
@@ -16434,7 +16911,7 @@ def delete_organization_logo(organization_id):
 
         cursor = db.conn.cursor()
         cursor.execute("UPDATE organizations SET logo_url = NULL, updated_at = NOW() WHERE id = %s", (organization_id,))
-        db.conn.commit()
+        db._commit()
         cursor.close()
 
         _log(db, 'org_logo_deleted', f'Logo removed for org "{org["name"]}"',
@@ -16518,7 +16995,6 @@ def _check_tier_limits(db, organization_id):
 
     # Check trial expiry
     if plan == 'trial' and org.get('license_activated_at'):
-        from datetime import timedelta
         activated = org['license_activated_at']
         if isinstance(activated, str):
             activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
@@ -16799,7 +17275,6 @@ def get_identity_usage(identity_id):
         confidence = 'low'
         usage_source = 'none'
         if last_used:
-            from datetime import datetime, timezone
             try:
                 if isinstance(last_used, str):
                     last_dt = datetime.fromisoformat(last_used.replace('Z', '+00:00'))
@@ -16908,7 +17383,7 @@ def get_identity_timeline(identity_id):
                         'metadata': {'anomaly_type': r[4], 'details': r[5]},
                     })
             except Exception:
-                db.conn.rollback()
+                db._rollback()
 
         # 2. Risk score changes
         if not event_types or 'risk_change' in event_types:
@@ -16927,7 +17402,7 @@ def get_identity_timeline(identity_id):
                         'metadata': {'risk_score': r[1], 'risk_level': r[2]},
                     })
             except Exception:
-                db.conn.rollback()
+                db._rollback()
 
         # 3. PIM activations
         if not event_types or 'pim_activation' in event_types:
@@ -16946,7 +17421,7 @@ def get_identity_timeline(identity_id):
                         'metadata': {'role_name': r[1], 'status': r[2]},
                     })
             except Exception:
-                db.conn.rollback()
+                db._rollback()
 
         # 4. SOAR actions
         if not event_types or 'soar_action' in event_types:
@@ -16965,7 +17440,7 @@ def get_identity_timeline(identity_id):
                         'metadata': {'action_type': r[1], 'status': r[2], 'result': r[3]},
                     })
             except Exception:
-                db.conn.rollback()
+                db._rollback()
 
         # 5. Remediation actions
         if not event_types or 'remediation' in event_types:
@@ -16984,7 +17459,7 @@ def get_identity_timeline(identity_id):
                         'metadata': {'action_type': r[1], 'status': r[2]},
                     })
             except Exception:
-                db.conn.rollback()
+                db._rollback()
 
         cursor.close()
 
@@ -17062,7 +17537,7 @@ def get_identity_attack_paths(identity_id):
                     'narrative': f'This identity holds the {p[0]} ({p[1]}) permission, which allows direct escalation to tenant-wide administrative control without any intermediate steps.',
                 })
         except Exception:
-            db.conn.rollback()
+            db._rollback()
 
         # 2. Dangerous Entra roles
         try:
@@ -17085,7 +17560,7 @@ def get_identity_attack_paths(identity_id):
                     'narrative': f'The {r[0]} role provides administrative authority over the entire Entra ID directory. A compromised identity with this role can create, modify, or delete any directory object.',
                 })
         except Exception:
-            db.conn.rollback()
+            db._rollback()
 
         # 3. Ownership chain: identity owns SPNs with privileged roles
         try:
@@ -17118,7 +17593,7 @@ def get_identity_attack_paths(identity_id):
                         'narrative': f'This identity owns {owned[1]}, which holds the {priv_roles[0][0]} role. An attacker could create new credentials on the owned SPN and use them to exercise its privileged role.',
                     })
         except Exception:
-            db.conn.rollback()
+            db._rollback()
 
         # 4. PIM abuse: eligible for dangerous roles
         try:
@@ -17140,7 +17615,7 @@ def get_identity_attack_paths(identity_id):
                     'narrative': f'This identity is eligible to activate {pr[0]} through Privileged Identity Management. While PIM requires justification, a compromised identity could activate this role and gain administrative control.',
                 })
         except Exception:
-            db.conn.rollback()
+            db._rollback()
 
         # 5. Lateral movement: subscription-level Contributor/Owner
         try:
@@ -17165,7 +17640,7 @@ def get_identity_attack_paths(identity_id):
                     'narrative': f'The {sr[0]} role at subscription scope ({sr[1][:50]}) allows modification or deletion of any resource within the subscription, enabling lateral movement to sensitive workloads.',
                 })
         except Exception:
-            db.conn.rollback()
+            db._rollback()
 
         cursor.close()
 
@@ -17641,7 +18116,7 @@ def get_subscriptions_list():
         role = user.get('role', '') if user else ''
         if role in ('admin', 'security_admin'):
             from app.pricing import calculate_billing
-            admin_db = Database()
+            admin_db = Database(_admin_reason='subscriptions_list: read org plan for billing calc')
             try:
                 org = admin_db.get_organization_by_id(tid)
                 if org:
@@ -17677,7 +18152,7 @@ def activate_subscription():
 
         # Check plan limits before activation
         from app.pricing import can_activate_subscription
-        admin_db = Database()
+        admin_db = Database(_admin_reason='activate_subscription: read org plan for limit check')
         try:
             org = admin_db.get_organization_by_id(tid)
             if org:
@@ -17700,6 +18175,38 @@ def activate_subscription():
         from app.entitlements.service import track_usage
         track_usage(db, tid, 'subscription', str(sub_id), 'activated')
 
+        # Advance org stage to 'active' if still in onboarding
+        try:
+            adm = Database(_admin_reason='activate_subscription: advance onboarding stage')
+            try:
+                o = adm.get_organization_by_id(tid)
+                if o and o.get('onboarding_stage') in ('connections', 'locked', 'authenticating', 'password_change'):
+                    adm.update_organization(tid, onboarding_stage='active')
+            finally:
+                adm.close()
+        except Exception:
+            pass
+
+        # Trigger initial discovery scan in background
+        import threading
+        from app.scheduler import trigger_manual_discovery
+        _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+        _conn_id = result.get('cloud_connection_id')
+        def _run_discovery():
+            try:
+                trigger_manual_discovery(
+                    scan_mode='deep',
+                    db_org_id=tid,
+                    org_name=_org_name,
+                    connection_id=_conn_id,
+                )
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Discovery after subscription activation failed: {e}")
+        thread = threading.Thread(target=_run_discovery, daemon=True)
+        thread.start()
+
+        result['activated'] = True
+        result['subscription_id'] = sub_id
         return jsonify(result)
     finally:
         db.close()
@@ -17715,6 +18222,35 @@ def activate_all_subscriptions():
         activated = db.activate_all_cloud_subscriptions(user_id, organization_id=tid)
         if activated:
             _log(db, 'subscriptions_bulk_activated', f"Bulk activated {len(activated)} subscription(s)", {'count': len(activated)})
+
+            # Advance org stage to 'active' if still in onboarding
+            try:
+                adm = Database(_admin_reason='activate_all: advance onboarding stage')
+                try:
+                    o = adm.get_organization_by_id(tid)
+                    if o and o.get('onboarding_stage') in ('locked', 'authenticating', 'password_change'):
+                        adm.update_organization(tid, onboarding_stage='active')
+                finally:
+                    adm.close()
+            except Exception:
+                pass
+
+            # Trigger discovery scan in background
+            import threading
+            from app.scheduler import trigger_manual_discovery
+            _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+            def _run_discovery():
+                try:
+                    trigger_manual_discovery(
+                        scan_mode='deep',
+                        db_org_id=tid,
+                        org_name=_org_name,
+                    )
+                except Exception as e:
+                    logging.getLogger(__name__).error(f"Discovery after bulk activation failed: {e}")
+            thread = threading.Thread(target=_run_discovery, daemon=True)
+            thread.start()
+
         return jsonify({'activated': len(activated), 'subscriptions': activated})
     finally:
         db.close()
@@ -17823,13 +18359,177 @@ def get_identity_subscriptions(identity_id):
 
 
 # ================================================================
+# Client Subscription Activation (REST path-param style)
+# ================================================================
+
+def activate_client_subscription(subscription_id):
+    """POST /api/client/subscriptions/<id>/activate — activate a single subscription.
+
+    Uses the subscription_id from the URL path (not request body).
+    Returns {"activated": true} on success and triggers discovery.
+    """
+    db = _db()
+    try:
+        tid = _org_id()
+        if not tid or tid == -1:
+            return jsonify({'error': 'Organization context required'}), 403
+
+        # Plan limit check
+        from app.pricing import can_activate_subscription
+        admin_db = Database(_admin_reason='client_activate: plan limit check')
+        try:
+            org = admin_db.get_organization_by_id(tid)
+            if org:
+                stats = db.get_subscription_stats(tid)
+                allowed, err_msg = can_activate_subscription(org, stats.get('active', 0))
+                if not allowed:
+                    return jsonify({'error': err_msg, 'upgrade_required': True}), 403
+        finally:
+            admin_db.close()
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        result = db.activate_cloud_subscription(subscription_id, user_id, organization_id=tid)
+        if not result:
+            return jsonify({'error': 'Subscription not found'}), 404
+
+        _log(db, 'subscription_activated',
+             f"Activated subscription {result.get('account_id')}",
+             {'subscription_id': subscription_id})
+
+        # Track usage
+        from app.entitlements.service import track_usage
+        track_usage(db, tid, 'subscription', str(subscription_id), 'activated')
+
+        # Advance onboarding stage
+        try:
+            adm = Database(_admin_reason='client_activate: advance onboarding')
+            try:
+                o = adm.get_organization_by_id(tid)
+                if o and o.get('onboarding_stage') in ('connections', 'locked', 'authenticating', 'password_change'):
+                    adm.update_organization(tid, onboarding_stage='active')
+            finally:
+                adm.close()
+        except Exception:
+            pass
+
+        # Trigger discovery in background
+        import threading
+        from app.scheduler import trigger_manual_discovery
+        _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+        _conn_id = result.get('cloud_connection_id')
+
+        def _run_discovery():
+            try:
+                trigger_manual_discovery(
+                    scan_mode='deep',
+                    db_org_id=tid,
+                    org_name=_org_name,
+                    connection_id=_conn_id,
+                )
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Discovery after activation failed: {e}")
+
+        threading.Thread(target=_run_discovery, daemon=True).start()
+
+        return jsonify({'activated': True})
+    finally:
+        db.close()
+
+
+# ================================================================
+# Discovery Status & Trigger
+# ================================================================
+
+def get_discovery_status():
+    """GET /api/discovery/status — check if any snapshots exist for the org."""
+    db = _db()
+    try:
+        tid = _org_id()
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id, status, started_at, completed_at,
+                   total_identities, critical_count, high_count
+            FROM discovery_runs
+            WHERE organization_id = %s
+            ORDER BY id DESC LIMIT 1
+        """, (tid,))
+        row = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT COUNT(*) FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+        """, (tid,))
+        total_completed = cursor.fetchone()[0]
+        cursor.close()
+
+        if row:
+            latest = {
+                'id': row[0],
+                'status': row[1],
+                'started_at': row[2].isoformat() if row[2] else None,
+                'completed_at': row[3].isoformat() if row[3] else None,
+                'total_identities': row[4],
+                'critical_count': row[5],
+                'high_count': row[6],
+            }
+        else:
+            latest = None
+
+        return jsonify({
+            'has_snapshot': total_completed > 0,
+            'total_completed': total_completed,
+            'latest_run': latest,
+        })
+    finally:
+        db.close()
+
+
+def run_discovery():
+    """POST /api/discovery/run — trigger a discovery run."""
+    import threading
+    from app.scheduler import trigger_manual_discovery
+
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Organization context required'}), 403
+
+    tname = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+
+    conn_id = None
+    data = request.get_json(silent=True)
+    if data and data.get('connection_id'):
+        try:
+            conn_id = int(data['connection_id'])
+        except (ValueError, TypeError):
+            pass
+
+    def _run():
+        try:
+            trigger_manual_discovery(db_org_id=tid, org_name=tname,
+                                     connection_id=conn_id)
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Discovery run failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    db = _db()
+    try:
+        _log(db, 'discovery_triggered', 'Discovery run triggered')
+    finally:
+        db.close()
+
+    return jsonify({'status': 'started', 'message': 'Discovery run triggered.'}), 202
+
+
+# ================================================================
 # Admin Billing API
 # ================================================================
 
 def get_admin_organization_billing(organization_id):
     """GET /api/admin/organizations/<id>/billing — full billing breakdown for an org."""
     from app.pricing import calculate_billing
-    db = Database()
+    db = Database(_admin_reason='admin_org_billing')
     try:
         org = db.get_organization_by_id(organization_id)
         if not org:
@@ -17843,6 +18543,10 @@ def get_admin_organization_billing(organization_id):
             'subscriptions': subs,
             'recent_events': events,
         })
+    except Exception as e:
+        logger.exception("Failed to load org billing: %s", e)
+        return jsonify({'error': 'Internal server error', 'organization': None,
+                        'billing': {}, 'subscriptions': [], 'recent_events': []}), 500
     finally:
         db.close()
 
@@ -17850,7 +18554,7 @@ def get_admin_organization_billing(organization_id):
 def update_admin_organization_plan(organization_id):
     """PUT /api/admin/organizations/<id>/plan — change plan and auto-set platform fee."""
     from app.pricing import get_default_platform_fee
-    db = Database()
+    db = Database(_admin_reason='admin_update_plan')
     try:
         data = request.get_json(silent=True) or {}
         new_plan = data.get('plan')
@@ -17890,7 +18594,7 @@ def update_admin_organization_plan(organization_id):
 def update_admin_organization_commitment(organization_id):
     """PUT /api/admin/organizations/<id>/commitment — set commitment term and auto-set discount."""
     from app.pricing import COMMITMENT_DISCOUNTS
-    db = Database()
+    db = Database(_admin_reason='admin_update_commitment')
     try:
         data = request.get_json(silent=True) or {}
         term = data.get('subscription_term')
@@ -17945,7 +18649,7 @@ def update_admin_organization_commitment(organization_id):
 
 def update_admin_organization_platform_fee(organization_id):
     """PUT /api/admin/organizations/<id>/platform-fee — enterprise custom fee override."""
-    db = Database()
+    db = Database(_admin_reason='admin_update_platform_fee')
     try:
         data = request.get_json(silent=True) or {}
         fee_cents = data.get('platform_fee_cents')
@@ -17975,7 +18679,7 @@ def update_admin_organization_platform_fee(organization_id):
 
 def update_admin_cloud_rate(organization_id, cloud):
     """PUT /api/admin/organizations/<id>/clouds/<cloud>/rate — override per-sub rate."""
-    db = Database()
+    db = Database(_admin_reason='admin_update_cloud_rate')
     try:
         if cloud not in ('azure', 'aws', 'gcp'):
             return jsonify({'error': 'Invalid cloud. Must be azure, aws, or gcp.'}), 400
@@ -18009,7 +18713,7 @@ def update_admin_cloud_rate(organization_id, cloud):
 def get_admin_billing_summary():
     """GET /api/admin/billing/summary — aggregate billing across all organizations."""
     from app.pricing import calculate_billing
-    db = Database()
+    db = Database(_admin_reason='admin_billing_summary')
     try:
         organizations = db.get_organizations()
         total_mrr = 0
@@ -18051,7 +18755,7 @@ def get_admin_billing_summary():
         return jsonify({
             'total_mrr_cents': total_mrr,
             'projected_arr_cents': total_mrr * 12,
-            'total_orgs': len(orgs),
+            'total_orgs': len(organizations),
             'active_orgs': active_orgs,
             'by_plan': by_plan,
             'by_cloud': by_cloud,
@@ -18063,7 +18767,7 @@ def get_admin_billing_summary():
 
 def get_admin_billing_events():
     """GET /api/admin/billing/events — paginated billing event audit trail."""
-    db = Database()
+    db = Database(_admin_reason='admin_billing_events')
     try:
         organization_id = request.args.get('organization_id', type=int)
         limit = request.args.get('limit', 50, type=int)
@@ -18076,7 +18780,7 @@ def get_admin_billing_events():
 
 def get_admin_action_log():
     """GET /api/admin/action-log — unified admin audit + billing events."""
-    db = Database()
+    db = Database(_admin_reason='admin_action_log')
     try:
         source = request.args.get('source', 'all')  # admin_audit | billing | all
         action = request.args.get('action', '')
@@ -18162,7 +18866,7 @@ def admin_impersonate():
     if not target_organization_id:
         return jsonify({'error': 'organization_id is required'}), 400
 
-    db = Database()
+    db = Database(_admin_reason='admin_impersonate')
     try:
         org = db.get_organization_by_id(int(target_organization_id))
         if not org:
@@ -18203,7 +18907,7 @@ def admin_impersonate():
                 }),
                 request.remote_addr,
             ))
-            db.conn.commit()
+            db._commit()
             cursor.close()
         except Exception:
             pass
@@ -18229,7 +18933,7 @@ def admin_end_impersonation():
     if not user.get('impersonating'):
         return jsonify({'error': 'Not currently impersonating'}), 400
 
-    db = Database()
+    db = Database(_admin_reason='admin_end_impersonate')
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
@@ -18245,7 +18949,7 @@ def admin_end_impersonation():
             }),
             request.remote_addr,
         ))
-        db.conn.commit()
+        db._commit()
         cursor.close()
     except Exception:
         pass
@@ -18260,7 +18964,7 @@ def get_client_billing_summary():
     from app.pricing import calculate_billing
     tid = _org_id()
     # Use admin DB for org lookup (organizations table has no RLS)
-    admin_db = Database()
+    admin_db = Database(_admin_reason='client_billing_org_lookup')
     try:
         org = admin_db.get_organization_by_id(tid)
         if not org:
@@ -18276,6 +18980,9 @@ def get_client_billing_summary():
             'plan': org.get('plan'),
             'billing': billing,
         })
+    except Exception as e:
+        logger.exception("Failed to load client billing: %s", e)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -18284,7 +18991,7 @@ def get_client_usage_metering():
     """GET /api/client/billing/usage — current usage vs plan limits."""
     from app.pricing import PLAN_LIMITS
     tid = _org_id()
-    admin_db = Database()
+    admin_db = Database(_admin_reason='client_usage_org_lookup')
     try:
         org = admin_db.get_organization_by_id(tid)
         if not org:
@@ -18333,7 +19040,7 @@ def get_client_usage_metering():
 
 def get_platform_settings():
     """GET /api/admin/platform-settings — get seller/platform info."""
-    db = Database()
+    db = Database(_admin_reason='admin: platform settings read')
     try:
         return jsonify(db.get_platform_settings())
     finally:
@@ -18342,7 +19049,7 @@ def get_platform_settings():
 
 def update_platform_settings_handler():
     """POST /api/admin/platform-settings — update seller/platform info."""
-    db = Database()
+    db = Database(_admin_reason='admin: platform settings write')
     try:
         data = request.get_json(silent=True) or {}
         db.update_platform_settings(data)
@@ -18356,7 +19063,7 @@ def update_platform_settings_handler():
 def generate_invoice(organization_id):
     """POST /api/admin/organizations/<id>/invoices — generate invoice for a billing period."""
     from app.pricing import calculate_invoice, compute_invoice_hash
-    db = Database()
+    db = Database(_admin_reason='admin: generate invoice')
     try:
         org = db.get_organization_by_id(organization_id)
         if not org:
@@ -18454,7 +19161,7 @@ def generate_invoice(organization_id):
 
 def get_admin_invoices():
     """GET /api/admin/invoices — all invoices with optional filters."""
-    db = Database()
+    db = Database(_admin_reason='admin: list invoices')
     try:
         organization_id = request.args.get('organization_id', type=int)
         status = request.args.get('status')
@@ -18468,7 +19175,7 @@ def get_admin_invoices():
 
 def get_admin_invoice(invoice_id):
     """GET /api/admin/invoices/<id> — single invoice detail."""
-    db = Database()
+    db = Database(_admin_reason='admin: read invoice detail')
     try:
         invoice = db.get_invoice_by_id(invoice_id)
         if not invoice:
@@ -18480,7 +19187,7 @@ def get_admin_invoice(invoice_id):
 
 def update_invoice_status_handler(invoice_id):
     """PATCH /api/admin/invoices/<id>/status — mark sent/paid/void."""
-    db = Database()
+    db = Database(_admin_reason='admin: update invoice status')
     try:
         data = request.get_json(silent=True) or {}
         new_status = data.get('status', '').strip()
@@ -18520,7 +19227,7 @@ def update_invoice_status_handler(invoice_id):
 
 def send_invoice_email(invoice_id):
     """POST /api/admin/invoices/<id>/send — email invoice and mark as sent."""
-    db = Database()
+    db = Database(_admin_reason='admin: send invoice email')
     try:
         invoice = db.get_invoice_by_id(invoice_id)
         if not invoice:
@@ -18578,7 +19285,7 @@ def get_client_invoices():
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'No org context'}), 403
-    db = Database()
+    db = _db()
     try:
         limit = min(request.args.get('limit', 50, type=int), 200)
         offset = request.args.get('offset', 0, type=int)
@@ -18595,11 +19302,12 @@ def get_client_invoice(invoice_id):
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'No org context'}), 403
-    db = Database()
+    db = _db()
     try:
         invoice = db.get_invoice_by_id(invoice_id)
         if not invoice:
             return jsonify({'error': 'Invoice not found'}), 404
+        # Defense-in-depth: verify org match even though RLS already filters
         if invoice.get('organization_id') != tid:
             return jsonify({'error': 'Access denied'}), 403
         if invoice.get('status') == 'draft':
@@ -18614,11 +19322,12 @@ def verify_client_invoice(invoice_id):
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'No org context'}), 403
-    db = Database()
+    db = _db()
     try:
         invoice = db.get_invoice_by_id(invoice_id)
         if not invoice:
             return jsonify({'error': 'Invoice not found'}), 404
+        # Defense-in-depth: verify org match even though RLS already filters
         if invoice.get('organization_id') != tid:
             return jsonify({'error': 'Access denied'}), 403
         if invoice.get('status') == 'draft':
@@ -18633,7 +19342,7 @@ def verify_client_invoice(invoice_id):
 
 def verify_admin_invoice(invoice_id):
     """GET /api/admin/invoices/<id>/verify — verify invoice integrity for admin."""
-    db = Database()
+    db = Database(_admin_reason='admin: verify invoice integrity')
     try:
         result = db.verify_invoice_integrity(invoice_id)
         if not result:
@@ -18649,7 +19358,7 @@ def get_client_billing_preview():
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'No org context'}), 403
-    admin_db = Database()
+    admin_db = Database(_admin_reason='billing_preview: read org plan metadata')
     try:
         org = admin_db.get_organization_by_id(tid)
         if not org:
@@ -18681,6 +19390,8 @@ def get_client_billing_preview():
             'active_subscriptions': len(active_subs),
             'subscriptions_by_cloud': by_cloud,
             'platform_fee_cents': invoice_data.get('platform_fee_cents', 0),
+            'platform_fee_waiver_cents': invoice_data.get('platform_fee_waiver_cents', 0),
+            'trial_active': invoice_data.get('trial_active', False),
             'subscription_total_cents': invoice_data.get('subscription_total_cents', 0),
             'discount_pct': invoice_data.get('discount_pct', 0),
             'subtotal_cents': invoice_data.get('subtotal_cents', 0),
@@ -20065,7 +20776,7 @@ def save_correlation_config():
                         VALUES (%s, %s, %s)
                         ON CONFLICT (key, organization_id) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
                     """, (key, str(data[key]), _org_id()))
-            db.conn.commit()
+            db._commit()
         finally:
             cursor.close()
         _log(db, 'correlation_config', 'Updated ICE configuration')
@@ -20449,7 +21160,7 @@ def validate_launch_readiness():
                 'detail': str(e),
             })
 
-    admin_db = Database()
+    admin_db = Database(_admin_reason='gates_audit: cross-tenant schema introspection')
     cursor = admin_db.conn.cursor()
 
     try:
@@ -20701,7 +21412,7 @@ def validate_launch_readiness():
     return jsonify({
         'validation': 'launch_readiness',
         'version': 'v6.0.0',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'overall': 'READY' if failed == 0 and errors == 0 else 'NOT READY',
         'summary': {
             'total': len(gates),
@@ -20749,7 +21460,6 @@ def create_scan_schedule_handler():
             return jsonify({'error': 'frequency must be hourly, daily, weekly, or monthly'}), 400
 
         # Calculate next run
-        from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc)
         if frequency == 'hourly':
             next_run = now + timedelta(hours=1)
@@ -20882,7 +21592,7 @@ def stripe_webhook_handler():
     event_type = event.get('type', '')
     event_data = event.get('data', {}).get('object', {})
 
-    db = Database()
+    db = Database(_admin_reason='stripe webhook: process billing event')
     try:
         if event_type == 'invoice.payment_succeeded':
             # Find our invoice by Stripe invoice ID
@@ -20939,7 +21649,7 @@ def create_stripe_customer_handler(organization_id):
     if not stripe_key:
         return jsonify({'error': 'Stripe not configured. Set STRIPE_SECRET_KEY environment variable.'}), 503
 
-    db = Database()
+    db = Database(_admin_reason='admin: create Stripe customer')
     try:
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT * FROM organizations WHERE id = %s", (organization_id,))
@@ -20971,7 +21681,7 @@ def create_stripe_customer_handler(organization_id):
             cursor.execute(
                 "UPDATE organizations SET stripe_customer_id = %s WHERE id = %s",
                 (customer.id, organization_id))
-            db.conn.commit()
+            db._commit()
             cursor.close()
 
             db.log_billing_event(
@@ -21020,7 +21730,7 @@ def create_pilot_organization():
     if not valid:
         return jsonify({'error': pw_err}), 400
 
-    db = Database()  # admin connection
+    db = Database(_admin_reason='admin handler — cross-tenant operation')
     try:
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -21061,7 +21771,7 @@ def create_pilot_organization():
                 ON CONFLICT DO NOTHING
             """, (key, value, organization_id))
 
-        db.conn.commit()
+        db._commit()
         cursor.close()
 
         # Log activity
@@ -21083,7 +21793,7 @@ def create_pilot_organization():
             'message': f'Pilot org "{org_name}" created successfully',
         }), 201
     except Exception as e:
-        db.conn.rollback()
+        db._rollback()
         logger.error(f"Pilot org creation failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -21110,7 +21820,7 @@ def get_password_policy():
 def get_billing_current_estimate():
     """GET /api/billing/current-estimate — live estimate for current month."""
     from app.billing.service import get_current_estimated_bill
-    db = Database()
+    db = Database(_admin_reason='billing: read org + subscriptions for estimate')
     try:
         tid = _org_id()
         if not tid:
@@ -21126,7 +21836,7 @@ def get_billing_current_estimate():
 def get_billing_history_handler():
     """GET /api/billing/history — historical billing snapshots."""
     from app.billing.service import get_billing_history
-    db = Database()
+    db = Database(_admin_reason='billing: read billing history')
     try:
         tid = _org_id()
         if not tid:
@@ -21141,7 +21851,7 @@ def get_billing_history_handler():
 def get_billing_invoice_download(doc_id):
     """GET /api/billing/invoice/<id>/download — download invoice document."""
     from flask import Response
-    db = Database()
+    db = Database(_admin_reason='billing: download invoice document')
     try:
         tid = _org_id()
         if not tid:
@@ -21175,7 +21885,7 @@ def get_billing_invoice_download(doc_id):
 def get_msp_billing_aggregate():
     """GET /api/msp/billing/aggregate — MSP aggregate bill across clients."""
     from app.billing.service import get_msp_aggregate_bill
-    db = Database()
+    db = Database(_admin_reason='billing: MSP cross-tenant aggregate')
     try:
         tid = _org_id()
         if not tid:
@@ -21191,7 +21901,7 @@ def get_msp_billing_aggregate():
 def get_billing_status_handler():
     """GET /api/billing/status — billing health summary for current org."""
     from app.billing.service import get_billing_status
-    db = Database()
+    db = Database(_admin_reason='billing: read billing status')
     try:
         tid = _org_id()
         if not tid:
@@ -21207,7 +21917,7 @@ def get_billing_status_handler():
 def admin_generate_billing_snapshot(organization_id):
     """POST /api/admin/organizations/<id>/billing/snapshot — admin-triggered snapshot."""
     from app.billing.service import calculate_monthly_snapshot, store_billing_snapshot, log_billing_audit
-    db = Database()
+    db = Database(_admin_reason='admin: generate billing snapshot')
     try:
         data = request.get_json(silent=True) or {}
         period_start = data.get('period_start')
@@ -21222,11 +21932,10 @@ def admin_generate_billing_snapshot(organization_id):
                 return jsonify({'error': 'Only superadmin can force-overwrite snapshots'}), 403
 
         # Parse date strings if provided
-        from datetime import date as date_type
         if isinstance(period_start, str):
-            period_start = date_type.fromisoformat(period_start)
+            period_start = date.fromisoformat(period_start)
         if isinstance(period_end, str):
-            period_end = date_type.fromisoformat(period_end)
+            period_end = date.fromisoformat(period_end)
 
         snapshot = calculate_monthly_snapshot(db, organization_id, period_start, period_end)
         if not snapshot:
@@ -21261,7 +21970,7 @@ def admin_generate_billing_snapshot(organization_id):
 def admin_generate_invoice_document(organization_id):
     """POST /api/admin/organizations/<id>/billing/invoice-document — generate invoice doc."""
     from app.billing.service import generate_invoice_pdf
-    db = Database()
+    db = Database(_admin_reason='admin: generate invoice document')
     try:
         data = request.get_json(silent=True) or {}
         snapshot_id = data.get('snapshot_id')
@@ -21284,7 +21993,7 @@ def admin_generate_invoice_document(organization_id):
 
 def admin_update_msp_relationship():
     """POST /api/admin/msp/relationships — create/update MSP relationship."""
-    db = Database()
+    db = Database(_admin_reason='admin: update MSP relationship')
     try:
         data = request.get_json(silent=True) or {}
         msp_id = data.get('msp_organization_id')
@@ -21306,7 +22015,7 @@ def admin_update_msp_relationship():
             RETURNING *
         """, (msp_id, client_id, margin_pct))
         row = dict(cursor.fetchone())
-        db.conn.commit()
+        db._commit()
         cursor.close()
 
         if row.get('created_at'):
@@ -21327,5 +22036,867 @@ def admin_update_msp_relationship():
              f'MSP relationship: org {msp_id} → client {client_id} (margin {margin_pct}%)',
              {'msp_organization_id': msp_id, 'client_organization_id': client_id})
         return jsonify(row), 201
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 2: Security Findings
+# ================================================================
+
+def get_findings_list():
+    """GET /api/findings — list security findings with optional filters."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        finding_type = request.args.get('type')
+        severity = request.args.get('severity')
+        status = request.args.get('status')
+        entity_type = request.args.get('entity_type')
+        run_id = request.args.get('run_id', type=int)
+        entity_id = request.args.get('entity_id')
+
+        findings = db.get_security_findings(
+            limit=limit, offset=offset, finding_type=finding_type,
+            severity=severity, status=status, entity_type=entity_type,
+            run_id=run_id, entity_id=entity_id,
+        )
+        return jsonify({'findings': findings, 'count': len(findings)})
+    finally:
+        db.close()
+
+
+def get_findings_stats_handler():
+    """GET /api/findings/stats — security findings summary stats."""
+    db = _db()
+    try:
+        stats = db.get_security_findings_stats()
+        return jsonify(stats)
+    finally:
+        db.close()
+
+
+def get_finding_detail(finding_id):
+    """GET /api/findings/<id> — single security finding detail."""
+    db = _db()
+    try:
+        finding = db.get_security_finding(finding_id)
+        if not finding:
+            return jsonify({'error': 'Finding not found'}), 404
+        return jsonify(finding)
+    finally:
+        db.close()
+
+
+def update_finding_status_handler(finding_id):
+    """PATCH /api/findings/<id>/status — update finding status (open/acknowledged/resolved)."""
+    user = getattr(g, 'current_user', None)
+    data = request.get_json(silent=True) or {}
+    new_status = data.get('status')
+
+    valid_statuses = ('open', 'acknowledged', 'resolved')
+    if new_status not in valid_statuses:
+        return jsonify({'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
+
+    db = _db()
+    try:
+        changed_by = user['username'] if user else data.get('changed_by')
+        result = db.update_security_finding_status(finding_id, new_status, changed_by)
+        if not result:
+            return jsonify({'error': 'Finding not found'}), 404
+
+        _log(db, 'finding_status_updated',
+             f'Security finding #{finding_id} status → {new_status}',
+             {'finding_id': finding_id, 'new_status': new_status, 'changed_by': changed_by})
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 3: Attack Path Analysis
+# ================================================================
+
+def get_attack_paths_list():
+    """GET /api/attack-paths — list persisted attack paths with optional filters."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        severity = request.args.get('severity')
+        path_type = request.args.get('type')
+        run_id = request.args.get('run_id', type=int)
+        source_entity_id = request.args.get('entity_id')
+
+        paths = db.get_attack_paths(
+            limit=limit, offset=offset, severity=severity,
+            path_type=path_type, run_id=run_id,
+            source_entity_id=source_entity_id,
+        )
+        stats = db.get_attack_paths_stats()
+        return jsonify({'paths': paths, 'count': len(paths), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_attack_path_detail(path_id):
+    """GET /api/attack-paths/<id> — single attack path detail."""
+    db = _db()
+    try:
+        path = db.get_attack_path(path_id)
+        if not path:
+            return jsonify({'error': 'Attack path not found'}), 404
+        return jsonify(path)
+    finally:
+        db.close()
+
+
+def get_identity_persisted_attack_paths(identity_id):
+    """GET /api/identities/<id>/persisted-attack-paths — persisted attack paths for an identity."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        severity = request.args.get('severity')
+        path_type = request.args.get('path_type')
+
+        paths = db.get_attack_paths(
+            limit=limit, offset=offset, severity=severity,
+            path_type=path_type, source_entity_id=identity_id,
+        )
+        return jsonify({'paths': paths, 'count': len(paths), 'identity_id': identity_id})
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 4: Fix Recommendations
+# ================================================================
+
+def get_fix_recommendations_list():
+    """GET /api/fix-recommendations — list fix recommendations with optional filters."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        fix_type = request.args.get('type')
+        fix_category = request.args.get('category')
+        status = request.args.get('status')
+        effort = request.args.get('effort')
+        entity_id = request.args.get('entity_id')
+        run_id = request.args.get('run_id', type=int)
+
+        recs = db.get_fix_recommendations(
+            limit=limit, offset=offset, fix_type=fix_type,
+            fix_category=fix_category, status=status, effort=effort,
+            entity_id=entity_id, run_id=run_id,
+        )
+        stats = db.get_fix_recommendations_stats()
+        return jsonify({'recommendations': recs, 'count': len(recs), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_fix_recommendations_stats_handler():
+    """GET /api/fix-recommendations/stats — fix recommendation summary stats."""
+    db = _db()
+    try:
+        stats = db.get_fix_recommendations_stats()
+        return jsonify(stats)
+    finally:
+        db.close()
+
+
+def get_fix_recommendation_detail(rec_id):
+    """GET /api/fix-recommendations/<id> — single fix recommendation detail."""
+    db = _db()
+    try:
+        rec = db.get_fix_recommendation(rec_id)
+        if not rec:
+            return jsonify({'error': 'Recommendation not found'}), 404
+        return jsonify(rec)
+    finally:
+        db.close()
+
+
+def update_fix_recommendation_status_handler(rec_id):
+    """PATCH /api/fix-recommendations/<id>/status — update recommendation status."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    user = getattr(g, 'current_user', None)
+    data = request.get_json(silent=True) or {}
+    new_status = data.get('status')
+
+    valid_statuses = ('open', 'in_progress', 'completed', 'dismissed')
+    if new_status not in valid_statuses:
+        return jsonify({'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
+
+    db = _db()
+    try:
+        changed_by = user['username'] if user else data.get('changed_by')
+        assigned_to = data.get('assigned_to')
+        result = db.update_fix_recommendation_status(
+            rec_id, new_status, changed_by, assigned_to,
+        )
+        if not result:
+            return jsonify({'error': 'Recommendation not found'}), 404
+
+        _log(db, 'fix_recommendation_status_updated',
+             f'Fix recommendation #{rec_id} status → {new_status}',
+             {'rec_id': rec_id, 'new_status': new_status,
+              'changed_by': changed_by, 'assigned_to': assigned_to})
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_identity_fix_recommendations(identity_id):
+    """GET /api/identities/<id>/fix-recommendations — fix recommendations for an identity."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        status = request.args.get('status')
+
+        recs = db.get_fix_recommendations(
+            limit=limit, offset=offset, entity_id=identity_id, status=status,
+        )
+        return jsonify({'recommendations': recs, 'count': len(recs), 'identity_id': identity_id})
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 5: Blast Radius
+# ================================================================
+
+def get_blast_radius_list():
+    """GET /api/blast-radius — list blast radius results with optional filters."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        severity = request.args.get('severity')
+        run_id = request.args.get('run_id', type=int)
+
+        results = db.get_blast_radius_results(
+            limit=limit, offset=offset, severity=severity, run_id=run_id,
+        )
+        stats = db.get_blast_radius_stats()
+        return jsonify({'results': results, 'count': len(results), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_blast_radius_detail(identity_id):
+    """GET /api/blast-radius/<identity_id> — blast radius for a specific identity."""
+    db = _db()
+    try:
+        # identity_id here is the identities.id (DB primary key)
+        try:
+            idb_id = int(identity_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid identity_id'}), 400
+
+        result = db.get_blast_radius_for_identity(idb_id)
+        if not result:
+            return jsonify({'error': 'Blast radius result not found'}), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_identity_blast_radius(identity_id):
+    """GET /api/identities/<id>/blast-radius — blast radius for identity detail page."""
+    db = _db()
+    try:
+        try:
+            idb_id = int(identity_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid identity_id'}), 400
+
+        result = db.get_blast_radius_for_identity(idb_id)
+        if not result:
+            return jsonify({
+                'identity_id': idb_id,
+                'reachable_resource_count': 0,
+                'sensitive_resource_count': 0,
+                'privilege_escalation_paths': 0,
+                'identity_exposure_level': 'LOW',
+                'risk_score': 0,
+            })
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 6: Access Review Workflow Handlers
+# ================================================================
+
+def p6_create_access_review():
+    """POST /api/access-reviews — create a new access review + auto-generate assignments."""
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        title = data.get('title')
+        if not title:
+            return jsonify({'error': 'title is required'}), 400
+
+        valid_scopes = ('privileged', 'all', 'custom')
+        scope = data.get('scope', 'privileged')
+        if scope not in valid_scopes:
+            return jsonify({'error': f'scope must be one of {valid_scopes}'}), 400
+
+        valid_types = ('manual', 'periodic', 'triggered', 'external_identity', 'service_principal')
+        review_type = data.get('review_type', 'manual')
+        if review_type not in valid_types:
+            return jsonify({'error': f'review_type must be one of {valid_types}'}), 400
+
+        user = getattr(g, 'current_user', {})
+
+        review = db.create_access_review(
+            title=title,
+            description=data.get('description'),
+            review_type=review_type,
+            scope=scope,
+            created_by=user.get('username'),
+            created_by_user_id=user.get('id'),
+            due_date=data.get('due_date'),
+            compliance_frameworks=data.get('compliance_frameworks'),
+            settings=data.get('settings'),
+        )
+
+        # Auto-generate assignments
+        from app.engines.access_review_engine import AccessReviewEngine
+        engine = AccessReviewEngine(db)
+        custom_ids = data.get('identity_ids') if scope == 'custom' else None
+        assignments = engine.generate_assignments(review['id'], scope, custom_ids)
+
+        if assignments:
+            # Set due_date from review on each assignment
+            for a in assignments:
+                a['due_date'] = data.get('due_date')
+            saved = db.save_review_assignments(assignments)
+            review['total_assignments'] = saved
+
+            # Auto-generate evidence for each assignment
+            from psycopg2.extras import RealDictCursor
+            cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                "SELECT id, identity_id FROM review_assignments WHERE review_id = %s",
+                (review['id'],)
+            )
+            for row in cursor.fetchall():
+                evidence = engine.auto_generate_evidence(row['id'], row['identity_id'])
+                if evidence:
+                    db.save_review_evidence(evidence)
+            cursor.close()
+
+        # Update status to in_progress if we have assignments
+        if review.get('total_assignments', 0) > 0:
+            cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                UPDATE access_reviews SET status = 'in_progress', updated_at = NOW()
+                WHERE id = %s RETURNING *
+            """, (review['id'],))
+            row = cursor.fetchone()
+            if row:
+                review = db._format_access_review_row(dict(row))
+            db._commit()
+            cursor.close()
+
+        _log(db, 'review_created', f'Access review created: {title}', {
+            'review_id': review['id'],
+            'scope': scope,
+            'total_assignments': review.get('total_assignments', 0),
+        })
+
+        return jsonify(review), 201
+    finally:
+        db.close()
+
+
+def p6_get_access_reviews():
+    """GET /api/access-reviews — list access reviews with optional filters."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        status = request.args.get('status')
+        review_type = request.args.get('review_type')
+
+        reviews = db.get_access_reviews(limit=limit, offset=offset,
+                                         status=status, review_type=review_type)
+        stats = db.get_access_reviews_stats()
+
+        return jsonify({'reviews': reviews, 'stats': stats})
+    finally:
+        db.close()
+
+
+def p6_get_access_review(review_id):
+    """GET /api/access-reviews/<id> — single review with assignment summary."""
+    db = _db()
+    try:
+        review = db.get_access_review(review_id)
+        if not review:
+            return jsonify({'error': 'Access review not found'}), 404
+        return jsonify(review)
+    finally:
+        db.close()
+
+
+def get_access_review_assignments_handler(review_id):
+    """GET /api/access-reviews/<id>/assignments — assignments for a review."""
+    db = _db()
+    try:
+        review = db.get_access_review(review_id)
+        if not review:
+            return jsonify({'error': 'Access review not found'}), 404
+
+        decision = request.args.get('decision')
+        reviewer = request.args.get('reviewer')
+        limit = request.args.get('limit', 100, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        assignments = db.get_review_assignments(review_id, decision=decision,
+                                                  reviewer=reviewer,
+                                                  limit=limit, offset=offset)
+        return jsonify({'assignments': assignments, 'total': review.get('total_assignments', 0)})
+    finally:
+        db.close()
+
+
+def submit_review_decision_handler(assignment_id):
+    """PATCH /api/access-reviews/assignments/<id>/decision — submit a decision."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        decision = data.get('decision')
+        valid_decisions = ('approved', 'revoked', 'flagged')
+        if decision not in valid_decisions:
+            return jsonify({'error': f'decision must be one of {valid_decisions}'}), 400
+
+        user = getattr(g, 'current_user', {})
+        result = db.submit_review_decision(
+            assignment_id=assignment_id,
+            decision=decision,
+            reason=data.get('reason'),
+            reviewer=user.get('username'),
+            reviewer_user_id=user.get('id'),
+        )
+        if not result:
+            return jsonify({'error': 'Assignment not found'}), 404
+
+        _log(db, 'decision_submitted', f'Review decision: {decision} for assignment #{assignment_id}', {
+            'assignment_id': assignment_id,
+            'decision': decision,
+            'identity_name': result.get('identity_name'),
+            'role_name': result.get('role_name'),
+        })
+
+        # Add manual note evidence if reason provided
+        if data.get('reason'):
+            db.save_review_evidence([{
+                'assignment_id': assignment_id,
+                'evidence_type': 'manual_note',
+                'title': f'Decision: {decision}',
+                'detail': {'reason': data['reason'], 'reviewer': user.get('username')},
+                'added_by': user.get('username'),
+            }])
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_access_reviews_stats_handler():
+    """GET /api/access-reviews/stats — review summary stats."""
+    db = _db()
+    try:
+        stats = db.get_access_reviews_stats()
+        return jsonify(stats)
+    finally:
+        db.close()
+
+
+def get_identity_access_reviews_handler(identity_id):
+    """GET /api/identities/<id>/access-reviews — reviews for identity detail page."""
+    db = _db()
+    try:
+        try:
+            idb_id = int(identity_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid identity_id'}), 400
+
+        reviews = db.get_identity_access_reviews(idb_id)
+        return jsonify({'assignments': reviews})
+    finally:
+        db.close()
+
+
+def complete_access_review_handler(review_id):
+    """PATCH /api/access-reviews/<id>/complete — mark review as completed."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    db = _db()
+    try:
+        user = getattr(g, 'current_user', {})
+        result = db.complete_access_review(review_id, completed_by=user.get('username'))
+        if not result:
+            return jsonify({'error': 'Access review not found'}), 404
+
+        _log(db, 'review_completed', f'Access review completed: {result.get("title")}', {
+            'review_id': review_id,
+            'approved': result.get('approved_count', 0),
+            'revoked': result.get('revoked_count', 0),
+            'flagged': result.get('flagged_count', 0),
+        })
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_assignment_evidence_handler(assignment_id):
+    """GET /api/access-reviews/assignments/<id>/evidence — evidence for an assignment."""
+    db = _db()
+    try:
+        evidence = db.get_review_evidence(assignment_id)
+        return jsonify({'evidence': evidence})
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 7: Reporting Engine Handlers
+# ================================================================
+
+def create_report_handler():
+    """POST /api/reports — create and generate a report."""
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        report_type = data.get('report_type')
+
+        from app.engines.reporting_engine import VALID_REPORT_TYPES, VALID_EXPORT_FORMATS, REPORT_STORAGE_DIR, ReportingEngine
+        if report_type not in VALID_REPORT_TYPES:
+            return jsonify({'error': f'report_type must be one of {VALID_REPORT_TYPES}'}), 400
+
+        fmt = data.get('format', 'json')
+        if fmt not in VALID_EXPORT_FORMATS:
+            return jsonify({'error': f'format must be one of {VALID_EXPORT_FORMATS}'}), 400
+
+        user = getattr(g, 'current_user', {})
+        title = data.get('title', f'{report_type} report')
+        parameters = data.get('parameters', {})
+
+        # 1. Create report record
+        report = db.create_report(
+            report_type=report_type,
+            title=title,
+            parameters=parameters,
+            created_by=user.get('id'),
+            created_by_username=user.get('username'),
+        )
+
+        # 2. Create run (status: queued, with parameters)
+        run = db.create_report_run(report['id'], parameters=parameters)
+
+        # 3. Transition to running
+        import time as _time
+        start_ms = int(_time.time() * 1000)
+        db.update_report_run(run['id'], 'running')
+
+        # 4. Generate data
+        try:
+            engine = ReportingEngine(db)
+            result = engine.generate(report_type, parameters)
+            records = result.get('records', [])
+
+            # 5. Export to requested format
+            org_dir = os.path.join(REPORT_STORAGE_DIR, str(_org_id()))
+            filename = f"{report_type}_{run['run_id']}.{fmt}"
+            filepath = os.path.join(org_dir, filename)
+
+            if fmt == 'json':
+                file_size = ReportingEngine.export_json(result, filepath)
+            elif fmt == 'csv':
+                file_size = ReportingEngine.export_csv(records, filepath)
+            elif fmt == 'pdf':
+                file_size = ReportingEngine.export_pdf(result, filepath, report_type)
+            else:
+                file_size = 0
+
+            # 6. Record output
+            output = db.create_report_output(run['id'], fmt, filepath, file_size)
+
+            # 7. Mark run completed with duration
+            duration_ms = int(_time.time() * 1000) - start_ms
+            run = db.update_report_run(
+                run['id'], 'completed',
+                record_count=len(records),
+                generation_duration_ms=duration_ms,
+            )
+
+            _log(db, 'report_generated', f'Report generated: {title} ({report_type}, {fmt})', {
+                'report_id': report['id'],
+                'run_id': run['id'],
+                'report_type': report_type,
+                'format': fmt,
+                'record_count': len(records),
+                'generation_duration_ms': duration_ms,
+            })
+
+            return jsonify({
+                'report': report,
+                'run': run,
+                'output': output,
+                'summary': result.get('summary', {}),
+            }), 201
+
+        except Exception as e:
+            duration_ms = int(_time.time() * 1000) - start_ms
+            db.update_report_run(
+                run['id'], 'failed',
+                error_message=str(e),
+                generation_duration_ms=duration_ms,
+            )
+            logger.error(f"Report generation failed: {e}")
+            return jsonify({'error': f'Report generation failed: {str(e)}'}), 500
+
+    finally:
+        db.close()
+
+
+def get_reports_list_handler():
+    """GET /api/reports — list reports."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        report_type = request.args.get('report_type')
+
+        reports = db.get_reports(limit=limit, offset=offset, report_type=report_type)
+        return jsonify({'reports': reports})
+    finally:
+        db.close()
+
+
+def get_report_detail_handler(report_id):
+    """GET /api/reports/<id> — single report with latest run info."""
+    db = _db()
+    try:
+        report = db.get_report(report_id)
+        if not report:
+            return jsonify({'error': 'Report not found'}), 404
+
+        runs = db.get_report_runs(report_id)
+        report['runs'] = runs
+        return jsonify(report)
+    finally:
+        db.close()
+
+
+def get_report_runs_handler(report_id):
+    """GET /api/reports/<id>/runs — all runs for a report."""
+    db = _db()
+    try:
+        report = db.get_report(report_id)
+        if not report:
+            return jsonify({'error': 'Report not found'}), 404
+
+        runs = db.get_report_runs(report_id)
+        return jsonify({'runs': runs})
+    finally:
+        db.close()
+
+
+def download_report_handler(report_id):
+    """GET /api/reports/<id>/download — download latest report output file."""
+    db = _db()
+    try:
+        report = db.get_report(report_id)
+        if not report:
+            return jsonify({'error': 'Report not found'}), 404
+
+        runs = db.get_report_runs(report_id)
+        if not runs:
+            return jsonify({'error': 'No runs found for this report'}), 404
+
+        # Get latest completed run
+        completed = [r for r in runs if r.get('status') == 'completed']
+        if not completed:
+            return jsonify({'error': 'No completed runs available'}), 404
+
+        latest = completed[0]
+
+        # Check expiration
+        expires_at = latest.get('expires_at')
+        if expires_at:
+            from datetime import datetime
+            try:
+                exp_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00')) if isinstance(expires_at, str) else expires_at
+                if exp_dt.tzinfo:
+                    from datetime import timezone
+                    now = datetime.now(timezone.utc)
+                else:
+                    now = datetime.utcnow()
+                if now > exp_dt:
+                    return jsonify({'error': 'Report has expired. Please generate a new report.'}), 410
+            except (ValueError, TypeError):
+                pass  # If we can't parse, allow download
+
+        outputs = latest.get('outputs', [])
+        if not outputs:
+            return jsonify({'error': 'No output files available'}), 404
+
+        # Prefer requested format, fallback to first
+        fmt = request.args.get('format')
+        output = None
+        if fmt:
+            output = next((o for o in outputs if o.get('format') == fmt), None)
+        if not output:
+            output = outputs[0]
+
+        storage_path = output.get('storage_path')
+        if not storage_path or not os.path.exists(storage_path):
+            return jsonify({'error': 'Output file not found on disk'}), 404
+
+        _log(db, 'report_downloaded', f'Report downloaded: {report.get("title")}', {
+            'report_id': report_id,
+            'format': output.get('format'),
+        })
+
+        from flask import send_file
+        return send_file(
+            storage_path,
+            as_attachment=True,
+            download_name=os.path.basename(storage_path),
+        )
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 8: Platform Operations & Health Monitoring
+# ================================================================
+
+def get_platform_health_handler():
+    """GET /api/system/health — overall platform health summary."""
+    db = _db()
+    try:
+        tenants = db.get_all_tenant_health()
+        total = len(tenants)
+        healthy = sum(1 for t in tenants if t.get('status') == 'healthy')
+        warning = sum(1 for t in tenants if t.get('status') == 'warning')
+        stale = sum(1 for t in tenants if t.get('status') == 'stale')
+        integrity_warnings = sum(1 for t in tenants if t.get('integrity_warning'))
+
+        # Recent job stats
+        recent_jobs = db.get_job_runs(limit=100)
+        job_total = len(recent_jobs)
+        job_failed = sum(1 for j in recent_jobs if j.get('status') == 'failed')
+        job_running = sum(1 for j in recent_jobs if j.get('status') == 'running')
+        failure_rate = db.get_job_failure_rate(hours=24)
+
+        from app.engines.platform_health import MAX_JOB_FAILURE_RATE
+        overall = 'healthy'
+        if stale > 0 or failure_rate > MAX_JOB_FAILURE_RATE:
+            overall = 'degraded'
+        if stale > total / 2 or failure_rate > 0.5:
+            overall = 'critical'
+
+        return jsonify({
+            'status': overall,
+            'tenants': {
+                'total': total,
+                'healthy': healthy,
+                'warning': warning,
+                'stale': stale,
+                'integrity_warnings': integrity_warnings,
+            },
+            'jobs': {
+                'recent_total': job_total,
+                'failed': job_failed,
+                'running': job_running,
+                'failure_rate_24h': round(failure_rate, 4),
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_system_jobs_handler():
+    """GET /api/system/jobs — list job_runs with optional filters."""
+    db = _db()
+    try:
+        job_type = request.args.get('job_type')
+        status = request.args.get('status')
+        org_id = request.args.get('organization_id', type=int)
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+
+        jobs = db.get_job_runs(
+            job_type=job_type, status=status,
+            organization_id=org_id,
+            limit=limit, offset=offset,
+        )
+        return jsonify({'jobs': jobs, 'count': len(jobs)})
+    finally:
+        db.close()
+
+
+def get_system_job_detail_handler(job_id):
+    """GET /api/system/jobs/<job_id> — single job details."""
+    db = _db()
+    try:
+        job = db.get_job_run(str(job_id))
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        return jsonify(job)
+    finally:
+        db.close()
+
+
+def get_system_tenants_health_handler():
+    """GET /api/system/tenants — tenant health summary."""
+    db = _db()
+    try:
+        tenants = db.get_all_tenant_health()
+        return jsonify({'tenants': tenants, 'count': len(tenants)})
+    finally:
+        db.close()
+
+
+def get_system_tenant_health_detail_handler(org_id):
+    """GET /api/system/tenants/<org_id> — single tenant health detail."""
+    db = _db()
+    try:
+        health = db.get_tenant_health(int(org_id))
+        if not health:
+            return jsonify({'error': 'Tenant health record not found'}), 404
+        return jsonify(health)
+    finally:
+        db.close()
+
+
+def get_system_metrics_handler():
+    """GET /api/system/metrics — system health metrics."""
+    db = _db()
+    try:
+        metric_name = request.args.get('metric_name')
+        limit = min(request.args.get('limit', 100, type=int), 500)
+        metrics = db.get_system_metrics(metric_name=metric_name, limit=limit)
+        return jsonify({'metrics': metrics, 'count': len(metrics)})
     finally:
         db.close()

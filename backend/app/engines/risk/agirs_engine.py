@@ -82,7 +82,7 @@ class AGIRSEngine:
 
             # Compute + persist blast radius scores on identities
             self._update_blast_radius_scores(cursor, run_ids)
-            self.db.conn.commit()
+            self.db._commit()
 
             # Get top dangerous identities
             dangerous = self._get_top_dangerous(cursor, run_ids, n=5)
@@ -107,7 +107,7 @@ class AGIRSEngine:
 
         except Exception as e:
             logger.error(f"AGIRS computation failed: {e}")
-            self.db.conn.rollback()
+            self.db._rollback()
             raise
         finally:
             cursor.close()
@@ -467,9 +467,9 @@ class AGIRSEngine:
         # Ensure column exists
         try:
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS blast_radius_score NUMERIC(7,2) DEFAULT 0")
-            self.db.conn.commit()
+            self.db._commit()
         except Exception:
-            self.db.conn.rollback()
+            self.db._rollback()
 
         # Fetch identities with their tier, activity, scope info
         cursor.execute("""

@@ -140,6 +140,7 @@ export default function Dashboard() {
     }>;
     retention: Record<string, { retained: number; total: number; rate: number }>;
   } | null>(null);
+  const [discoveryStatus, setDiscoveryStatus] = useState<{ has_snapshot: boolean; total_completed: number; latest_run: any } | null>(null);
 
   // Dashboard customization (Phase 44)
   const [customizeOpen, setCustomizeOpen] = useState(false);
@@ -166,15 +167,15 @@ export default function Dashboard() {
         if (!summaryRes.ok) throw new Error(`Summary API error: ${summaryRes.status}`);
 
         const [statsJson, summaryJson] = await Promise.all([
-          statsRes.json(),
-          summaryRes.json(),
+          statsRes.json().catch(() => ({})),
+          summaryRes.json().catch(() => ({})),
         ]);
 
         let postureJson: PostureResponse | null = null;
-        if (postureRes.ok) postureJson = await postureRes.json();
+        if (postureRes.ok) postureJson = await postureRes.json().catch(() => null);
 
-        const complianceJson = complianceRes.ok ? await complianceRes.json() : null;
-        const caJson = caRes.ok ? await caRes.json() : null;
+        const complianceJson = complianceRes.ok ? await complianceRes.json().catch(() => null) : null;
+        const caJson = caRes.ok ? await caRes.json().catch(() => null) : null;
 
         let schedJson = null;
         try { const r = await fetch(withConnection('/api/scheduler')); if (r.ok) schedJson = await r.json(); } catch {}
@@ -197,6 +198,9 @@ export default function Dashboard() {
         let velocityJson = null;
         try { const r = await fetch(withConnection('/api/trends/velocity')); if (r.ok) velocityJson = await r.json(); } catch {}
 
+        let discStatusJson = null;
+        try { const r = await fetch('/api/discovery/status'); if (r.ok) discStatusJson = await r.json(); } catch {}
+
         if (!cancelled) {
           setStats(statsJson);
           setSummary(summaryJson);
@@ -210,6 +214,7 @@ export default function Dashboard() {
           setRoleUsage(roleUsageJson);
           setAnomalyData(anomalyJson);
           setVelocityData(velocityJson);
+          setDiscoveryStatus(discStatusJson);
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -296,6 +301,34 @@ export default function Dashboard() {
       setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Snapshot timed out. Check snapshot history for status.', 'error'); }, 600000);
     } catch (e: any) {
       addToast(e?.message || 'Failed to trigger snapshot', 'error');
+      setDiscoveryRunning(false);
+    }
+  }, [addToast]);
+
+  const runFirstDiscovery = useCallback(async () => {
+    setDiscoveryRunning(true);
+    try {
+      const res = await fetch('/api/discovery/run', { method: 'POST' });
+      if (!res.ok) throw new Error('Trigger failed');
+      addToast('First discovery started — this may take a few minutes', 'success');
+      const poll = setInterval(async () => {
+        try {
+          const r = await fetch('/api/discovery/status');
+          if (r.ok) {
+            const d = await r.json();
+            if (d.has_snapshot) {
+              clearInterval(poll);
+              setDiscoveryRunning(false);
+              setDiscoveryStatus(d);
+              addToast('Discovery complete! Refreshing...', 'success');
+              window.location.reload();
+            }
+          }
+        } catch {}
+      }, 5000);
+      setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Discovery timed out. Check snapshot history for status.', 'error'); }, 600000);
+    } catch (e: any) {
+      addToast(e?.message || 'Failed to start discovery', 'error');
       setDiscoveryRunning(false);
     }
   }, [addToast]);
@@ -391,6 +424,40 @@ export default function Dashboard() {
 
       <StaleDataBanner completedAt={latest?.completed_at} />
       <RiskMethodology />
+
+      {/* Run First Discovery CTA — shown when no snapshots exist */}
+      {!loading && discoveryStatus && !discoveryStatus.has_snapshot && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-6 text-center">
+          <svg className="mx-auto h-10 w-10 text-blue-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <h3 className="text-lg font-semibold text-blue-900 mb-1">No Snapshots Yet</h3>
+          <p className="text-sm text-blue-700 mb-4">
+            Run your first discovery to scan identities, roles, and permissions across your activated subscriptions.
+          </p>
+          <button
+            onClick={runFirstDiscovery}
+            disabled={snapshotRunning}
+            className={`inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg transition ${
+              snapshotRunning
+                ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-700'
+            }`}
+          >
+            {snapshotRunning ? (
+              <>
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                Running Discovery...
+              </>
+            ) : (
+              <>
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                Run First Discovery
+              </>
+            )}
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className="animate-pulse space-y-4">
