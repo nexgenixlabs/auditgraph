@@ -194,98 +194,57 @@ jobs:
             adminJwtSecret=${{ secrets.DEV_ADMIN_JWT_SECRET }}
             clientJwtSecret=${{ secrets.DEV_CLIENT_JWT_SECRET }}
 
-      - name: Wait for API readiness
+      - name: Wait for container apps to be running
         run: |
-          API_FQDN=$(az containerapp show \
-            -n ${{ env.API_APP }} -g ${{ env.RG }} \
-            --query properties.configuration.ingress.fqdn -o tsv)
-          echo "Waiting for API at https://$API_FQDN/health/ready..."
-          for i in $(seq 1 24); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              "https://$API_FQDN/health/ready" 2>/dev/null || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "API ready after $((i * 5))s"
-              break
-            fi
-            if [ "$i" = "24" ]; then
-              echo "::error::API not healthy after 120s"
-              exit 1
-            fi
-            echo "  Attempt $i: HTTP $STATUS (5s...)"
-            sleep 5
+          echo "Checking container app revision status (internal CAE — no public HTTP access)..."
+          for APP_NAME in ${{ env.API_APP }} ${{ env.CLIENT_APP }} ${{ env.ADMIN_APP }}; do
+            echo ""
+            echo "=== $APP_NAME ==="
+            for i in $(seq 1 24); do
+              STATE=$(az containerapp revision list \
+                -n "$APP_NAME" -g ${{ env.RG }} \
+                --query "[0].properties.runningState" -o tsv 2>/dev/null || echo "Unknown")
+              HEALTH=$(az containerapp revision list \
+                -n "$APP_NAME" -g ${{ env.RG }} \
+                --query "[0].properties.healthState" -o tsv 2>/dev/null || echo "Unknown")
+              echo "  Attempt $i: runningState=$STATE healthState=$HEALTH"
+              if [ "$STATE" = "Running" ] && [ "$HEALTH" = "Healthy" ]; then
+                echo "  ✓ $APP_NAME is running and healthy"
+                break
+              fi
+              if [ "$STATE" = "Failed" ] || [ "$STATE" = "Stopped" ]; then
+                echo "::error::$APP_NAME revision failed (state: $STATE)"
+                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 20 2>/dev/null || true
+                exit 1
+              fi
+              if [ "$i" = "24" ]; then
+                echo "::error::$APP_NAME not ready after 120s (state: $STATE, health: $HEALTH)"
+                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 20 2>/dev/null || true
+                exit 1
+              fi
+              sleep 5
+            done
           done
 
-      - name: Verify container endpoints
-        run: |
-          API_FQDN=$(az containerapp show -n ${{ env.API_APP }} -g ${{ env.RG }} \
-            --query properties.configuration.ingress.fqdn -o tsv)
-          APP_FQDN=$(az containerapp show -n ${{ env.CLIENT_APP }} -g ${{ env.RG }} \
-            --query properties.configuration.ingress.fqdn -o tsv)
-          ADMIN_FQDN=$(az containerapp show -n ${{ env.ADMIN_APP }} -g ${{ env.RG }} \
-            --query properties.configuration.ingress.fqdn -o tsv)
-
-          echo "=== API Health ==="
-          curl -sf "https://$API_FQDN/api/health" | python3 -m json.tool
-
-          echo "=== Client App ==="
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$APP_FQDN/")
-          echo "HTTP $STATUS"
-          [ "$STATUS" = "200" ] || exit 1
-
-          echo "=== Admin App ==="
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$ADMIN_FQDN/")
-          echo "HTTP $STATUS"
-          [ "$STATUS" = "200" ] || exit 1
+          echo ""
+          echo "=== Container App FQDNs ==="
+          az containerapp show -n ${{ env.API_APP }} -g ${{ env.RG }} \
+            --query "{app:name, fqdn:properties.configuration.ingress.fqdn}" -o table
+          az containerapp show -n ${{ env.CLIENT_APP }} -g ${{ env.RG }} \
+            --query "{app:name, fqdn:properties.configuration.ingress.fqdn}" -o table
+          az containerapp show -n ${{ env.ADMIN_APP }} -g ${{ env.RG }} \
+            --query "{app:name, fqdn:properties.configuration.ingress.fqdn}" -o table
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # 6-7. Database Bootstrap + Demo Seed + Validation
+  # 6. Final Status
   # ═══════════════════════════════════════════════════════════════════════════
-  post-deploy:
-    runs-on: ubuntu-latest
-    needs: [deploy]
-    environment: dev
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
-        working-directory: ./backend
-        run: pip install -r requirements.txt
-
-      - name: Run database bootstrap
-        env:
-          APP_ENV: dev
-          FLASK_ENV: production
-          DB_HOST: ${{ vars.DEV_DB_HOST }}
-          DB_PORT: '5432'
-          DB_NAME: ${{ vars.DEV_DB_NAME }}
-          DB_USER: ${{ secrets.DEV_DB_USER }}
-          DB_PASSWORD: ${{ secrets.DEV_DB_PASSWORD }}
-          DB_ADMIN_USER: ${{ secrets.DEV_DB_ADMIN_USER }}
-          DB_ADMIN_PASSWORD: ${{ secrets.DEV_DB_ADMIN_PASSWORD }}
-          DB_SSLMODE: require
-          JWT_SECRET: ${{ secrets.DEV_JWT_SECRET }}
-          ADMIN_JWT_SECRET: ${{ secrets.DEV_ADMIN_JWT_SECRET }}
-          CLIENT_JWT_SECRET: ${{ secrets.DEV_CLIENT_JWT_SECRET }}
-        run: bash scripts/bootstrap_dev_db.sh
-
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
-
-      - name: Validate deployment
-        run: bash scripts/validate_dev.sh --fqdn-only
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # 8. Final Status
-  # ═══════════════════════════════════════════════════════════════════════════
+  # NOTE: Database bootstrap (migrations + demo seed) must be run from within
+  # the VNet since the PostgreSQL server has public access disabled.
+  # Run manually: ./scripts/deploy-dev.sh --skip-build --skip-domains
+  # Or: az containerapp exec -n auditgraph-api-dev -g eus2-ag-nonprod-rg --command "python -m app.main"
   summary:
     runs-on: ubuntu-latest
-    needs: [post-deploy]
+    needs: [deploy]
     if: always()
     steps:
       - name: Deployment summary
