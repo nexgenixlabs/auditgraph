@@ -121,6 +121,11 @@ class AzureDiscoveryEngine:
             db_org_id: AuditGraph organization ID (integer) for RLS context
             cloud_connection_id: ID from cloud_connections table (for multi-connection support)
         """
+        if cloud_connection_id is None:
+            raise ValueError("cloud_connection_id is required for discovery")
+        if db_org_id is None:
+            raise ValueError("db_org_id is required for discovery")
+
         self.azure_directory_id = azure_directory_id
         self.client_id = client_id
         self.client_secret = client_secret
@@ -139,25 +144,51 @@ class AzureDiscoveryEngine:
             scopes=['https://graph.microsoft.com/.default']
         )
 
-        # Auto-discover all accessible subscriptions
-        self.subscriptions = self._discover_subscriptions()
+        # Auto-discover all accessible subscriptions, partitioned by tenant
+        all_subs = self._discover_subscriptions()
+        self.subscriptions = [s for s in all_subs if s.get('tenant_id') == self.azure_directory_id]
+        self.foreign_subscriptions = [s for s in all_subs if s.get('tenant_id') != self.azure_directory_id]
+        if self.foreign_subscriptions:
+            print(f"  ℹ️ Found {len(self.foreign_subscriptions)} subscription(s) from other tenants")
         sub_names = [f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions]
         print(f"✓ Discovery Engine initialized for {len(self.subscriptions)} subscription(s): {', '.join(sub_names) or 'none'}")
-    
+
+    def _update_job_progress(self, stage, progress, discovery_run_id=None):
+        """Report progress to snapshot_jobs. Non-fatal on failure."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id:
+            return
+        try:
+            self.db.update_snapshot_job_progress(job_id, stage, progress, discovery_run_id)
+        except Exception as e:
+            print(f"  (job progress update failed: {e}")
+
     def _discover_subscriptions(self) -> List[Dict[str, str]]:
         """Auto-discover all Azure subscriptions accessible to the service principal.
 
         IMPORTANT: Never falls back to env vars in multi-org mode — each organization's
         SPN must have RBAC access to their own subscriptions.
+
+        Each subscription's tenant_id is preserved exactly as reported by Azure.
+        Subscriptions with a different tenant_id than the source connection are
+        classified as cross-tenant and routed to their own cloud_connection.
         """
         try:
             sub_client = SubscriptionClient(self.credential)
             subs = []
             for sub in sub_client.subscriptions.list():
                 if sub.state and sub.state.lower() in ('enabled', 'warned'):
+                    sub_tenant = sub.tenant_id
+                    # Only fall back to source tenant if Azure SDK truly returned None
+                    # (very rare — most subscriptions report tenant_id)
+                    if not sub_tenant:
+                        sub_tenant = self.azure_directory_id
+                    elif sub_tenant != self.azure_directory_id:
+                        print(f"  🔀 Detected cross-tenant subscription: {sub.display_name} ({sub.subscription_id[:8]}...) → tenant {sub_tenant[:8]}...")
                     subs.append({
                         'id': sub.subscription_id,
                         'name': sub.display_name or sub.subscription_id,
+                        'tenant_id': sub_tenant,
                     })
             if not subs:
                 print("  ⚠️ No Azure subscriptions found — SPN needs Reader RBAC on at least one subscription")
@@ -194,6 +225,7 @@ class AzureDiscoveryEngine:
         run_id = self.db.create_discovery_run(all_sub_ids, all_sub_names,
                                                cloud_connection_id=self.cloud_connection_id)
         print(f"  ✓ Discovery run created (ID: {run_id})")
+        self._update_job_progress('discovering_subscriptions', 10, discovery_run_id=run_id)
         
         # Step 1: Get role assignments FIRST
         print("\n🎯 Discovering Role Assignments...")
@@ -240,6 +272,7 @@ class AzureDiscoveryEngine:
         print("\n👥 Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
         print(f"  Found {len(users)} users with role assignments")
+        self._update_job_progress('discovering_identities', 40)
         
         # Step 5: Discover Managed Identities
         print("\n🔐 Discovering Managed Identities...")
@@ -262,11 +295,13 @@ class AzureDiscoveryEngine:
         # Step 8: Check activity
         print("\n🕐 Checking Last Activity...")
         final_identities = self._check_activity(identities_with_creds)
-        
+        self._update_job_progress('discovering_rbac', 60)
+
         # Step 9: Save to database using Database class methods
         print("\n💾 Saving identities to database...")
         saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map, pim_map, ca_policies)
         print(f"  ✓ Saved {saved_count} identities")
+        self._update_job_progress('discovering_resources', 75)
 
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
         # MUST run before exposure scoring so fresh sign-in data is available
@@ -374,6 +409,7 @@ class AzureDiscoveryEngine:
             traceback.print_exc()
 
         # Step 10: Complete discovery run
+        self._update_job_progress('finalizing', 90)
         print("\n✅ Completing discovery run...")
         try:
             critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
@@ -409,27 +445,64 @@ class AzureDiscoveryEngine:
                 cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
                 run_row = cursor.fetchone()
                 run_org_id = run_row[0] if run_row and run_row[0] else 1
-                if self.cloud_connection_id:
-                    cursor.execute("""
-                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status, cloud_connection_id)
-                        VALUES (%s, 'azure', %s, %s, 'discovered', %s)
-                        ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
-                        SET account_name = EXCLUDED.account_name,
-                            cloud_connection_id = COALESCE(EXCLUDED.cloud_connection_id, cloud_subscriptions.cloud_connection_id)
-                    """, (run_org_id, sub['id'], sub['name'], self.cloud_connection_id))
-                else:
-                    cursor.execute("""
-                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
-                        VALUES (%s, 'azure', %s, %s, 'discovered')
-                        ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
-                        SET account_name = EXCLUDED.account_name
-                    """, (run_org_id, sub['id'], sub['name']))
+                if not self.cloud_connection_id:
+                    print(f"  ⚠️ Skipping subscription sync — cloud_connection_id is required (NOT NULL)")
+                    break
+                cursor.execute("""
+                    INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status, cloud_connection_id)
+                    VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                    ON CONFLICT (cloud_connection_id, account_id) DO UPDATE
+                    SET account_name = EXCLUDED.account_name
+                """, (run_org_id, sub['id'], sub['name'], self.cloud_connection_id))
                 self.db.safe_commit()
                 cursor.close()
             print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
         except Exception as e:
             print(f"  ⚠️ Subscription sync warning: {e}")
             self.db._rollback()
+
+        # Sync foreign-tenant subscriptions to their own connections
+        if self.foreign_subscriptions:
+            try:
+                cursor = self.db.conn.cursor()
+                cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
+                run_row = cursor.fetchone()
+                run_org_id = run_row[0] if run_row and run_row[0] else 1
+                cursor.close()
+                # Look up source connection label for provenance tracking
+                source_label = None
+                try:
+                    source_conn = self.db.get_cloud_connection_by_id(self.cloud_connection_id)
+                    if source_conn:
+                        source_label = source_conn.get('label')
+                except Exception:
+                    pass
+                # Group foreign subs by tenant to batch-create connections
+                foreign_by_tenant: Dict[str, list] = {}
+                for sub in self.foreign_subscriptions:
+                    foreign_by_tenant.setdefault(sub['tenant_id'], []).append(sub)
+                for foreign_tenant, tenant_subs in foreign_by_tenant.items():
+                    print(f"  🔀 Creating cloud connection for cross-tenant {foreign_tenant[:8]}... ({len(tenant_subs)} sub(s))")
+                    foreign_conn = self.db.find_or_create_cloud_connection(
+                        run_org_id, foreign_tenant,
+                        label=f'Azure Tenant {foreign_tenant[:8]}...',
+                        source_azure_directory_id=self.azure_directory_id,
+                        source_connection_label=source_label)
+                    for sub in tenant_subs:
+                        cursor = self.db.conn.cursor()
+                        cursor.execute("""
+                            INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name,
+                                                              status, cloud_connection_id)
+                            VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                            ON CONFLICT (cloud_connection_id, account_id) DO UPDATE
+                            SET account_name = EXCLUDED.account_name
+                        """, (run_org_id, sub['id'], sub['name'], foreign_conn['id']))
+                        self.db.safe_commit()
+                        cursor.close()
+                print(f"  ✓ Synced {len(self.foreign_subscriptions)} foreign-tenant subscription(s) across {len(foreign_by_tenant)} tenant(s)")
+            except Exception as e:
+                print(f"  ⚠️ Foreign subscription sync warning: {e}")
+                self.db._rollback()
 
         # Seed auto identity groups for this organization (Phase 38 + RLS fix)
         try:
@@ -2762,17 +2835,19 @@ class AzureDiscoveryEngine:
                 if role_dates:
                     identity['created_datetime'] = min(role_dates)
                 else:
-                    # Check previous runs for this identity_id
+                    # Check previous runs for this identity_id (scoped to current connection)
                     from datetime import datetime
                     cursor = self.db.conn.cursor()
                     cursor.execute("""
-                        SELECT created_datetime 
-                        FROM identities 
-                        WHERE identity_id = %s 
-                        AND created_datetime IS NOT NULL
-                        ORDER BY discovery_run_id DESC 
+                        SELECT i.created_datetime
+                        FROM identities i
+                        JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                        WHERE i.identity_id = %s
+                        AND i.created_datetime IS NOT NULL
+                        AND dr.cloud_connection_id = %s
+                        ORDER BY i.discovery_run_id DESC
                         LIMIT 1
-                    """, (identity.get('identity_id'),))
+                    """, (identity.get('identity_id'), self.cloud_connection_id))
                     prev_result = cursor.fetchone()
                     cursor.close()
                     

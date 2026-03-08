@@ -145,7 +145,7 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     """Run discovery for a single organization using their cloud connections.
     If connection_id is provided, only scan that specific connection.
     Otherwise scan ALL connected connections for the organization.
-    Falls back to legacy settings-based credentials if no connections exist.
+    Requires at least one connected cloud_connection — legacy settings path is deprecated.
     """
     # Demo tenant guard — block real cloud discovery for demo orgs
     admin_db = Database()
@@ -172,17 +172,15 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
 
     if connected:
         logger.info(f"  Found {len(connected)} connected connection(s) for {org_name}")
-        any_ran = False
         for conn in connected:
             _run_connection_discovery(db_org_id, org_name, conn, scan_mode)
-            any_ran = True
-        if not any_ran:
-            logger.info(f"  All connections skipped (missing credentials), trying legacy settings for {org_name}")
-            _run_legacy_settings_discovery(db_org_id, org_name, scan_mode)
     else:
-        # Fallback: legacy settings-based credentials
-        logger.info(f"  No cloud_connections found, trying legacy settings for {org_name}")
-        _run_legacy_settings_discovery(db_org_id, org_name, scan_mode)
+        logger.warning(
+            "  ⚠ No connected cloud_connections for org %s (id=%d). "
+            "Skipping discovery — configure a cloud connection first.",
+            org_name, db_org_id
+        )
+        return
 
     logger.info(f"  ✅ Discovery completed for {org_name}")
 
@@ -216,8 +214,27 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     }, db_org_id=db_org_id)
 
 
+def _classify_discovery_error(error):
+    """Classify a discovery error as retryable or not. Returns (error_type, is_retryable)."""
+    msg = str(error).lower()
+    if 'throttl' in msg or '429' in msg or 'rate limit' in msg or 'too many requests' in msg:
+        return 'throttling', True
+    if 'timeout' in msg or 'timed out' in msg or 'connection reset' in msg:
+        return 'network_timeout', True
+    if 'temporarily unavailable' in msg or '503' in msg or '502' in msg:
+        return 'temporary_auth_failure', True
+    if 'invalid' in msg and ('credential' in msg or 'secret' in msg or 'client' in msg):
+        return 'invalid_credentials', False
+    if 'unauthorized' in msg or '401' in msg or 'forbidden' in msg or '403' in msg:
+        return 'auth_failure', False
+    if 'not found' in msg and 'connection' in msg:
+        return 'connection_deleted', False
+    return 'unknown', False
+
+
 def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mode: str = 'deep'):
-    """Run discovery for a single cloud connection."""
+    """Run discovery for a single cloud connection with job lifecycle tracking."""
+    import time as _time
     if not AZURE_DISCOVERY_ENABLED and conn.get('cloud', 'azure') == 'azure':
         logger.info(f"  ⏭ Azure discovery disabled (APP_ENV=local), skipping connection '{conn.get('label', 'Unknown')}'")
         return
@@ -227,7 +244,44 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
 
     metadata = conn.get('metadata') or {}
 
-    logger.info(f"  ▶ Scanning connection '{label}' (id={conn_id}, cloud={cloud})")
+    # Phase 3: Concurrency guard — skip if a job is already active for this connection
+    job_id = None
+    try:
+        guard_db = Database()
+        active = guard_db.get_active_snapshot_job(conn_id)
+        guard_db.close()
+        if active:
+            logger.info(
+                "  DISCOVERY_SKIPPED connection_id=%d org_id=%d — active job %s (status=%s)",
+                conn_id, db_org_id, active['id'], active['status']
+            )
+            return
+    except Exception as e:
+        logger.warning(f"  ⚠ Concurrency guard check failed: {e}")
+
+    # Phase 3: Create snapshot job
+    try:
+        jdb = Database()
+        job_id = jdb.create_snapshot_job(db_org_id, conn_id, scan_mode)
+        jdb.close()
+        logger.info("  snapshot_job_id=%s created for connection_id=%d", job_id, conn_id)
+    except Exception as e:
+        logger.warning(f"  ⚠ Failed to create snapshot job: {e}")
+        job_id = None
+
+    # Phase 5: Mark snapshot started timestamp on connection
+    try:
+        tsdb = Database()
+        tsdb.update_snapshot_timestamps(conn_id, started=True)
+        tsdb.close()
+    except Exception:
+        pass
+
+    start_time = _time.monotonic()
+    logger.info(
+        "  DISCOVERY_START connection_id=%d org_id=%d cloud=%s label=%s snapshot_job_id=%s",
+        conn_id, db_org_id, cloud, label, job_id
+    )
 
     if cloud == 'azure':
         azure_directory_id = conn.get('azure_directory_id')
@@ -235,6 +289,13 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
         client_secret = metadata.get('client_secret')
         if not all([azure_directory_id, client_id, client_secret]):
             logger.warning(f"  ⏭ Skipping '{label}' — incomplete Azure credentials")
+            if job_id:
+                try:
+                    fdb = Database()
+                    fdb.complete_snapshot_job(job_id, 'failed', 'Incomplete Azure credentials')
+                    fdb.close()
+                except Exception:
+                    pass
             return
         engine = AzureDiscoveryEngine(
             azure_directory_id=azure_directory_id,
@@ -246,12 +307,26 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
     elif cloud == 'aws':
         if not AWS_DISCOVERY_ENABLED:
             logger.info(f"  ⏭ AWS discovery disabled (APP_ENV=local), skipping connection '{label}'")
+            if job_id:
+                try:
+                    fdb = Database()
+                    fdb.complete_snapshot_job(job_id, 'failed', 'AWS discovery disabled')
+                    fdb.close()
+                except Exception:
+                    pass
             return
         access_key_id = metadata.get('access_key_id') or conn.get('client_id')
         secret_access_key = metadata.get('secret_access_key') or metadata.get('client_secret')
         region = metadata.get('region', 'us-east-1')
         if not all([access_key_id, secret_access_key]):
             logger.warning(f"  ⏭ Skipping '{label}' — incomplete AWS credentials")
+            if job_id:
+                try:
+                    fdb = Database()
+                    fdb.complete_snapshot_job(job_id, 'failed', 'Incomplete AWS credentials')
+                    fdb.close()
+                except Exception:
+                    pass
             return
         from app.engines.discovery.aws_discovery import AWSDiscoveryEngine
         engine = AWSDiscoveryEngine(
@@ -263,61 +338,238 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
         )
     else:
         logger.info(f"  ⏭ Skipping unsupported cloud '{cloud}' for connection '{label}'")
+        if job_id:
+            try:
+                fdb = Database()
+                fdb.complete_snapshot_job(job_id, 'failed', f'Unsupported cloud: {cloud}')
+                fdb.close()
+            except Exception:
+                pass
         return
 
-    logger.info(f"    ✓ {cloud.upper()} engine initialized for '{label}'")
+    # Phase 3: Inject job_id into engine for progress reporting
+    if job_id:
+        engine.snapshot_job_id = job_id
+
+    subs_count = len(getattr(engine, 'subscriptions', []))
+    logger.info(
+        "    ✓ %s engine initialized for '%s' subscriptions_found=%d",
+        cloud.upper(), label, subs_count
+    )
+
+    # Phase 3: Start job (queued→running)
+    if job_id:
+        try:
+            sdb = Database()
+            sdb.start_snapshot_job(job_id, started_by='scheduler')
+            sdb.close()
+        except Exception as e:
+            logger.warning(f"  ⚠ Failed to start snapshot job: {e}")
+
+    # Phase 4: Heartbeat thread — sends heartbeat every 20s while discovery runs
+    import threading
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat_loop():
+        while not heartbeat_stop.is_set():
+            if heartbeat_stop.wait(timeout=20):
+                break
+            if job_id:
+                try:
+                    hdb = Database()
+                    hdb.update_snapshot_job_heartbeat(job_id)
+                    hdb.close()
+                except Exception:
+                    pass
+
+    heartbeat_thread = None
+    if job_id:
+        heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
 
     # Phase 1 Security: Audit log snapshot_started
     try:
         act_db = Database(organization_id=db_org_id)
         act_db.log_activity('snapshot_started',
                             f'Discovery scan started for connection "{label}" ({cloud})',
-                            {'connection_id': conn_id, 'cloud': cloud, 'scan_mode': scan_mode})
+                            {'connection_id': conn_id, 'cloud': cloud, 'scan_mode': scan_mode,
+                             'snapshot_job_id': job_id})
         act_db.close()
     except Exception:
         pass
 
-    engine.run_discovery()
-    logger.info(f"    ✅ Discovery completed for connection '{label}'")
+    try:
+        engine.run_discovery()
+        elapsed = _time.monotonic() - start_time
+        logger.info(
+            "  DISCOVERY_COMPLETE connection_id=%d org_id=%d cloud=%s duration=%.1fs snapshot_job_id=%s",
+            conn_id, db_org_id, cloud, elapsed, job_id
+        )
 
-    # Update last_discovery_at on the connection
+        # Phase 4: Record metrics + mark completed
+        if job_id:
+            try:
+                cdb = Database()
+                # Collect metrics from engine
+                ident_count = getattr(engine, '_identities_saved_count', 0) or len(getattr(engine, '_identities', []))
+                res_count = getattr(engine, '_resources_saved_count', 0)
+                sub_count = len(getattr(engine, 'subscriptions', []))
+                cdb.update_snapshot_job_metrics(job_id, identities=ident_count,
+                                                resources=res_count, subscriptions=sub_count)
+                cdb.complete_snapshot_job(job_id, 'completed')
+                cdb.close()
+            except Exception as e:
+                logger.warning(f"  ⚠ Failed to complete snapshot job: {e}")
+    except Exception as e:
+        elapsed = _time.monotonic() - start_time
+        error_type, is_retryable = _classify_discovery_error(e)
+        logger.error(
+            "  DISCOVERY_FAILED connection_id=%d org_id=%d cloud=%s duration=%.1fs error=%s error_type=%s retryable=%s snapshot_job_id=%s",
+            conn_id, db_org_id, cloud, elapsed, str(e)[:200], error_type, is_retryable, job_id
+        )
+
+        # Phase 4: Mark job failed with error classification
+        if job_id:
+            try:
+                fdb = Database()
+                fdb.complete_snapshot_job(job_id, 'failed', str(e)[:500], error_type=error_type)
+                # Phase 4: Auto-retry for retryable errors
+                if is_retryable:
+                    new_count = fdb.retry_snapshot_job(job_id)
+                    if new_count is not None:
+                        logger.info("  🔄 DISCOVERY_RETRY job=%s retry_count=%d error_type=%s",
+                                    job_id, new_count, error_type)
+                fdb.close()
+            except Exception as fe:
+                logger.warning(f"  ⚠ Failed to mark snapshot job as failed: {fe}")
+        raise
+    finally:
+        # Phase 4: Stop heartbeat thread
+        heartbeat_stop.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=5)
+
+    # Update last_discovery_at + last_snapshot_completed_at on the connection
     try:
         admin_db = Database()
         admin_db.update_cloud_connection(conn_id, last_discovery_at=datetime.utcnow())
+        admin_db.update_snapshot_timestamps(conn_id, completed=True)
         admin_db.close()
     except Exception as e:
         logger.warning(f"    ⚠ Failed to update last_discovery_at for connection {conn_id}: {e}")
 
 
 def _run_legacy_settings_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep'):
-    """Fallback: run discovery using legacy settings-table credentials (single connection)."""
-    if not AZURE_DISCOVERY_ENABLED:
-        logger.info(f"  ⏭ Azure discovery disabled (APP_ENV=local), skipping legacy discovery for '{org_name}'")
-        return
-    settings_db = Database(organization_id=db_org_id)
-    try:
-        settings = settings_db.get_settings(organization_id=db_org_id)
-    finally:
-        settings_db.close()
-
-    azure_directory_id = settings.get('azure_directory_id')
-    azure_client_id = settings.get('azure_client_id')
-    azure_client_secret = settings.get('azure_client_secret')
-
-    if not all([azure_directory_id, azure_client_id, azure_client_secret]):
-        logger.info(f"  ⏭ Skipping organization {org_name} — no Azure credentials configured")
-        return
-
-    logger.info(f"  ✓ Azure credentials loaded from settings for {org_name}")
-
-    engine = AzureDiscoveryEngine(
-        tenant_id=azure_directory_id,
-        client_id=azure_client_id,
-        client_secret=azure_client_secret,
-        db_org_id=db_org_id,
+    """DEPRECATED: Legacy settings-based discovery no longer supported."""
+    logger.warning(
+        "  ⚠ DEPRECATED: Legacy settings discovery skipped for %s. "
+        "Configure cloud_connections for org %d.", org_name, db_org_id
     )
-    logger.info(f"  ✓ Discovery engine initialized for {org_name}")
-    engine.run_discovery()
+    return
+
+
+def run_continuous_discovery():
+    """Phase 5: Check all cloud connections with continuous discovery enabled.
+    Triggers discovery for connections that are due based on their interval.
+    Runs every 5 minutes via scheduler."""
+    logger.info("🔄 CONTINUOUS_DISCOVERY checking for due connections")
+    triggered = 0
+
+    try:
+        admin_db = Database()
+        due_connections = admin_db.get_connections_due_for_discovery()
+        admin_db.close()
+
+        if not due_connections:
+            logger.info("  No connections due for continuous discovery")
+            return
+
+        logger.info("  Found %d connection(s) due for discovery", len(due_connections))
+
+        for conn in due_connections:
+            conn_id = conn['id']
+            org_id = conn['organization_id']
+
+            # Look up org name
+            try:
+                adb = Database()
+                org = adb.get_organization_by_id(org_id)
+                org_name = org['name'] if org else f'org-{org_id}'
+                adb.close()
+            except Exception:
+                org_name = f'org-{org_id}'
+
+            logger.info("  🔄 CONTINUOUS_TRIGGER connection_id=%d org=%s label=%s interval=%d min",
+                         conn_id, org_name, conn.get('label', '?'), conn.get('discovery_interval_minutes', 0))
+
+            try:
+                _run_connection_discovery(org_id, org_name, conn, scan_mode='deep')
+                triggered += 1
+            except Exception as e:
+                logger.error("  CONTINUOUS_DISCOVERY_FAILED connection_id=%d error=%s",
+                             conn_id, str(e)[:200])
+
+    except Exception as e:
+        logger.error("CONTINUOUS_DISCOVERY error: %s", str(e)[:200])
+
+    logger.info("🔄 CONTINUOUS_DISCOVERY complete: triggered=%d", triggered)
+
+
+def run_snapshot_job_maintenance():
+    """Phase 4: Periodic maintenance — detect zombies, enforce runtime limits,
+    retry eligible failed jobs. Runs every 5 minutes via scheduler."""
+    logger.info("🔧 SNAPSHOT_MAINTENANCE starting")
+    recovered = 0
+    timed_out = 0
+    retried = 0
+
+    try:
+        db = Database()
+
+        # 1. Detect and recover zombie jobs (stale heartbeat > 5 minutes)
+        zombies = db.get_zombie_snapshot_jobs(stale_minutes=5)
+        for z in zombies:
+            try:
+                db.complete_snapshot_job(z['id'], 'failed',
+                                        'Worker heartbeat lost — job recovered by maintenance',
+                                        error_type='zombie')
+                logger.warning("  ☠ ZOMBIE_RECOVERED job=%s connection=%s stage=%s",
+                               z['id'], z.get('cloud_connection_id'), z.get('stage'))
+                recovered += 1
+            except Exception as e:
+                logger.warning(f"  ⚠ Failed to recover zombie job {z['id']}: {e}")
+
+        # 2. Enforce runtime limit (30 minutes max)
+        overtime = db.get_runtime_exceeded_jobs(max_runtime_minutes=30)
+        for ot in overtime:
+            try:
+                db.complete_snapshot_job(ot['id'], 'failed',
+                                        'Discovery exceeded 30-minute runtime limit',
+                                        error_type='runtime_exceeded')
+                logger.warning("  ⏰ RUNTIME_EXCEEDED job=%s connection=%s",
+                               ot['id'], ot.get('cloud_connection_id'))
+                timed_out += 1
+            except Exception as e:
+                logger.warning(f"  ⚠ Failed to timeout job {ot['id']}: {e}")
+
+        # 3. Retry eligible failed jobs (retryable error types, under max_retries)
+        retryable = db.get_retryable_failed_jobs()
+        for rj in retryable:
+            try:
+                new_count = db.retry_snapshot_job(rj['id'])
+                if new_count is not None:
+                    logger.info("  🔄 MAINTENANCE_RETRY job=%s retry_count=%d error_type=%s",
+                                rj['id'], new_count, rj.get('error_type'))
+                    retried += 1
+            except Exception as e:
+                logger.warning(f"  ⚠ Failed to retry job {rj['id']}: {e}")
+
+        db.close()
+    except Exception as e:
+        logger.error(f"  SNAPSHOT_MAINTENANCE failed: {e}")
+
+    logger.info("🔧 SNAPSHOT_MAINTENANCE complete: recovered=%d timed_out=%d retried=%d",
+                recovered, timed_out, retried)
 
 
 def _send_change_notification_if_needed(db_org_id: int = None):
@@ -492,6 +744,94 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 5: Blast radius analysis (tracked by Phase 8)
         _track_job('blast_radius', db_org_id,
                    _run_blast_radius_analysis, current_run_id, db)
+
+        # Phase 6: Risk evaluation (rules-based findings per connection)
+        _track_job('risk_evaluation', db_org_id,
+                   _run_risk_evaluation, db_org_id, db)
+
+        # Phase 7: IAM graph rebuild (relationship graph per connection)
+        _track_job('iam_graph', db_org_id,
+                   _run_iam_graph_build, db_org_id, db)
+
+        # Phase 8: Privilege escalation detection (after graph build)
+        _track_job('escalation_detection', db_org_id,
+                   _run_escalation_detection, db_org_id, db)
+
+        # Phase 9: Non-human identity security analysis
+        _track_job('nhi_security', db_org_id,
+                   _run_nhi_analysis, db_org_id, db)
+
+        # Phase 11: Policy Recommendation Engine
+        _track_job('policy_recommendations', db_org_id,
+                   _run_policy_recommendations, db_org_id, db)
+
+        # Phase 12: Automated Remediation (process approved actions)
+        _track_job('auto_remediation', db_org_id,
+                   _run_auto_remediation, db_org_id, db)
+
+        # Phase 14: Collect tenant posture metrics for benchmarking
+        _track_job('posture_metrics', db_org_id,
+                   _run_posture_metrics, db_org_id, db)
+
+        # Phase 15: AI Security Advisor report
+        _track_job('security_advisor', db_org_id,
+                   _run_security_advisor, db_org_id, db)
+
+        # Phase 16: Graph visualization cache
+        _track_job('graph_visualization', db_org_id,
+                   _run_graph_visualization, db_org_id, db)
+
+        # Phase 18: Risk forecasting
+        _track_job('risk_forecast', db_org_id,
+                   _run_risk_forecast, db_org_id, db)
+
+        # Phase 19: Least-privilege policy generation
+        _track_job('policy_generation', db_org_id,
+                   _run_policy_generation, db_org_id, db)
+
+        # Phase 20: Continuous identity threat detection
+        _track_job('threat_detection', db_org_id,
+                   _run_threat_detection, db_org_id, db)
+
+        # Phase 21: Identity activity data lake ingestion
+        _track_job('activity_ingestion', db_org_id,
+                   _run_activity_ingestion, db_org_id, db)
+
+        # Phase 23: Identity attack replay & forensics
+        _track_job('attack_replay', db_org_id,
+                   _run_attack_replay, db_org_id, db)
+
+        # Phase 24: Autonomous security response orchestration
+        _track_job('security_orchestration', db_org_id,
+                   _run_security_orchestration, db_org_id, db)
+
+        # Phase 26: Identity attack prediction
+        _track_job('attack_prediction', db_org_id,
+                   _run_attack_prediction, db_org_id, db)
+
+        # Phase 27: Identity graph intelligence
+        _track_job('graph_intelligence', db_org_id,
+                   _run_graph_intelligence, db_org_id, db)
+
+        # Phase 28: Identity governance
+        _track_job('identity_governance', db_org_id,
+                   _run_identity_governance, db_org_id, db)
+
+        # Phase 30: Enterprise integrations dispatch
+        _track_job('integration_dispatch', db_org_id,
+                   _run_integration_dispatch, db_org_id, db)
+
+        # Phase 31: Governance analytics
+        _track_job('governance_analytics', db_org_id,
+                   _run_governance_analytics, db_org_id, db)
+
+        # Phase 32: Security strategy advisor
+        _track_job('security_strategy', db_org_id,
+                   _run_security_strategy, db_org_id, db)
+
+        # Phase 33: Security command center posture
+        _track_job('security_posture', db_org_id,
+                   _run_security_posture, db_org_id, db)
 
         # Phase 51: Save compliance snapshot
         _save_compliance_snapshot(current_run_id, db)
@@ -1073,6 +1413,406 @@ def _run_blast_radius_analysis(current_run_id: int, db: Database):
 
     except Exception as e:
         logger.error(f"Blast radius engine failed: {e}")
+        logger.exception(e)
+
+
+def _run_risk_evaluation(db_org_id, db):
+    """Phase 6: Run rules-based risk evaluation against all connected connections."""
+    try:
+        from app.engines.risk_evaluator import RiskEvaluator
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        evaluator = RiskEvaluator(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                findings = evaluator.evaluate_risks(conn['id'], db_org_id)
+                total += len(findings)
+        logger.info(f"Risk evaluation: {total} finding(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Risk evaluation failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_iam_graph_build(db_org_id, db):
+    """Phase 7: Build IAM relationship graph for all connected connections."""
+    try:
+        from app.engines.graph_builder import GraphBuilder
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        builder = GraphBuilder(db)
+        total_nodes = 0
+        total_edges = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                result = builder.build_iam_graph(conn['id'], db_org_id)
+                total_nodes += result.get('node_count', 0)
+                total_edges += result.get('edge_count', 0)
+        logger.info(f"IAM graph: {total_nodes} nodes, {total_edges} edges for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"IAM graph build failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_escalation_detection(db_org_id, db):
+    """Phase 8: Detect privilege escalation paths for all connected connections."""
+    try:
+        from app.engines.escalation_detector import EscalationDetector
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        detector = EscalationDetector(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                findings = detector.detect_privilege_escalation(conn['id'], db_org_id)
+                total += len(findings)
+        logger.info(f"Escalation detection: {total} finding(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Escalation detection failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_nhi_analysis(db_org_id, db):
+    """Phase 9: Analyze non-human identities for security risks."""
+    try:
+        from app.engines.nhi_analyzer import NHIAnalyzer
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        analyzer = NHIAnalyzer(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                findings = analyzer.analyze_nhi_security(conn['id'], db_org_id)
+                total += len(findings)
+        logger.info(f"NHI analysis: {total} finding(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"NHI analysis failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_policy_recommendations(db_org_id, db):
+    """Phase 11: Generate policy recommendations from risk findings."""
+    try:
+        from app.engines.policy_recommender import PolicyRecommender
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        recommender = PolicyRecommender(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                recs = recommender.generate_policy_recommendations(conn['id'], db_org_id)
+                total += len(recs)
+        logger.info(f"Policy recommendations: {total} recommendation(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Policy recommendations failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_auto_remediation(db_org_id, db):
+    """Phase 12: Execute approved remediation actions."""
+    try:
+        from app.engines.remediation_engine import RemediationEngine
+        engine = RemediationEngine(db)
+        approved_actions = db.get_auto_remediation_actions(status='approved')
+        total = 0
+        for action in approved_actions:
+            engine.execute_remediation(action['id'])
+            total += 1
+        if total > 0:
+            logger.info(f"Auto remediation: executed {total} action(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Auto remediation failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_posture_metrics(db_org_id, db):
+    """Phase 14: Collect tenant posture metrics for benchmarking."""
+    try:
+        from app.engines.benchmark_engine import BenchmarkEngine
+        engine = BenchmarkEngine(db)
+        result = engine.collect_tenant_posture(db_org_id)
+        if result:
+            logger.info(f"Posture metrics collected for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Posture metrics collection failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_benchmark_computation():
+    """Phase 14: Compute cross-tenant security benchmarks (admin context)."""
+    try:
+        from app.engines.benchmark_engine import BenchmarkEngine
+        admin_db = Database()
+        engine = BenchmarkEngine(admin_db)
+        benchmarks = engine.compute_security_benchmarks()
+        admin_db.close()
+        logger.info(f"Security benchmarks computed: {len(benchmarks)} metrics")
+    except Exception as e:
+        logger.error(f"Benchmark computation failed: {e}")
+        logger.exception(e)
+
+
+def _run_risk_forecast(db_org_id, db):
+    """Phase 18: Generate risk forecast for tenant."""
+    try:
+        from app.engines.risk_forecaster import RiskForecaster
+        forecaster = RiskForecaster(db)
+        forecast = forecaster.generate_risk_forecast(db_org_id)
+        logger.info(f"Risk forecast for org {db_org_id}: current={forecast.get('current_risk_score', 0)}, "
+                    f"predicted={forecast.get('predicted_risk_score', 0)}, trend={forecast.get('trend_direction', 'stable')}")
+    except Exception as e:
+        logger.error(f"Risk forecast failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_policy_generation(db_org_id, db):
+    """Phase 19: Generate least-privilege policies for tenant."""
+    try:
+        from app.engines.policy_generator import PolicyGenerator
+        from app.database import Database
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        generator = PolicyGenerator(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                policies = generator.generate_policies_for_connection(conn['id'], db_org_id)
+                total += len(policies)
+        logger.info(f"Policy generation: {total} policy/policies for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Policy generation failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_threat_detection(db_org_id, db):
+    """Phase 20: Detect identity threats for tenant."""
+    try:
+        from app.engines.identity_threat_detector import IdentityThreatDetector
+        from app.database import Database
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        detector = IdentityThreatDetector(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                events = detector.detect_identity_threats(conn['id'], db_org_id)
+                total += len(events)
+        logger.info(f"Threat detection: {total} event(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Threat detection failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_activity_ingestion(db_org_id, db):
+    """Phase 21: Ingest identity activity into data lake for tenant."""
+    try:
+        from app.engines.activity_ingestor import ActivityIngestor
+        from app.database import Database
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        ingestor = ActivityIngestor(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                counts = ingestor.ingest_identity_activity(conn['id'], db_org_id)
+                total += counts.get('total', 0)
+        logger.info(f"Activity ingestion: {total} record(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Activity ingestion failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_attack_replay(db_org_id, db):
+    """Phase 23: Detect identity attack incidents and generate replay timelines."""
+    try:
+        from app.engines.attack_replay_engine import AttackReplayEngine
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        engine = AttackReplayEngine(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                incidents = engine.detect_incidents_for_connection(conn['id'], db_org_id)
+                total += len(incidents)
+        logger.info(f"Attack replay: {total} incident(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Attack replay failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_security_orchestration(db_org_id, db):
+    """Phase 24: Evaluate incidents and create automated response actions."""
+    try:
+        from app.engines.security_orchestrator import SecurityOrchestrator
+        orchestrator = SecurityOrchestrator(db)
+        actions = orchestrator.execute_security_responses(db_org_id)
+        logger.info(f"Security orchestration: {len(actions)} action(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Security orchestration failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_attack_prediction(db_org_id, db):
+    """Phase 26: Generate identity attack predictions."""
+    try:
+        from app.engines.attack_predictor import AttackPredictor
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        predictor = AttackPredictor(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                predictions = predictor.predict_identity_attacks(conn['id'], db_org_id)
+                total += len(predictions)
+        logger.info(f"Attack prediction: {total} prediction(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Attack prediction failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_graph_intelligence(db_org_id, db):
+    """Phase 27: Compute identity graph intelligence metrics for tenant."""
+    try:
+        from app.engines.graph_intelligence import GraphIntelligenceEngine
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        engine = GraphIntelligenceEngine(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                insights = engine.compute_graph_insights(conn['id'], db_org_id)
+                total += len(insights)
+        logger.info(f"Graph intelligence: {total} insight(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Graph intelligence failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_identity_governance(db_org_id, db):
+    """Phase 28: Evaluate identity governance policies for tenant."""
+    try:
+        from app.engines.identity_governance_engine import IdentityGovernanceEngine
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        engine = IdentityGovernanceEngine(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                actions = engine.evaluate_identity_governance(conn['id'], db_org_id)
+                total += len(actions)
+        logger.info(f"Identity governance: {total} action(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Identity governance failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_integration_dispatch(db_org_id, db):
+    """Phase 30: Dispatch security events to configured integrations."""
+    try:
+        from app.engines.integration_dispatcher import IntegrationDispatcher
+        dispatcher = IntegrationDispatcher(db)
+        events = dispatcher.dispatch_integration_events(db_org_id)
+        logger.info(f"Integration dispatch: {len(events)} event(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Integration dispatch failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_security_posture(db_org_id, db):
+    """Phase 33: Compute identity security posture snapshot."""
+    try:
+        from app.engines.security_command_center import SecurityCommandCenter
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        center = SecurityCommandCenter(db)
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                posture = center.compute_security_posture(conn['id'], db_org_id)
+                logger.info(f"Security posture: risk_score={posture['risk_score']} for connection {conn['id']}")
+    except Exception as e:
+        logger.error(f"Security posture failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_security_strategy(db_org_id, db):
+    """Phase 32: Generate strategic security recommendations."""
+    try:
+        from app.engines.security_strategy_advisor import SecurityStrategyAdvisor
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        advisor = SecurityStrategyAdvisor(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                recs = advisor.generate_security_strategy(conn['id'], db_org_id)
+                total += len(recs)
+        logger.info(f"Security strategy: {total} recommendation(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Security strategy failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_governance_analytics(db_org_id, db):
+    """Phase 31: Compute governance posture metrics and trends."""
+    try:
+        from app.engines.governance_analytics import GovernanceAnalyticsEngine
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        engine = GovernanceAnalyticsEngine(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                metrics = engine.compute_governance_metrics(conn['id'], db_org_id)
+                total += len(metrics)
+        logger.info(f"Governance analytics: {total} metric(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Governance analytics failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_graph_visualization(db_org_id, db):
+    """Phase 16: Generate and cache identity graph visualizations for tenant."""
+    try:
+        from app.engines.graph_visualizer import GraphVisualizer
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        visualizer = GraphVisualizer(db)
+        total = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                visualizer.generate_identity_graph(conn['id'], db_org_id)
+                total += 1
+        logger.info(f"Graph visualization: cached {total} graph(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Graph visualization failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_security_advisor(db_org_id, db):
+    """Phase 15: Generate AI Security Advisor report for tenant."""
+    try:
+        from app.engines.security_advisor import SecurityAdvisor
+        advisor = SecurityAdvisor(db)
+        report = advisor.generate_security_advisor_report(db_org_id)
+        logger.info(f"Security advisor report generated for org {db_org_id}: risk_score={report.get('risk_score', 0)}")
+    except Exception as e:
+        logger.error(f"Security advisor failed for org {db_org_id}: {e}")
         logger.exception(e)
 
 
@@ -1772,6 +2512,28 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Phase 4: Snapshot job maintenance — every 5 minutes
+    scheduler.add_job(
+        func=run_snapshot_job_maintenance,
+        trigger=IntervalTrigger(minutes=5),
+        id='snapshot_job_maintenance',
+        name='Snapshot Job Maintenance (every 5 min)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Phase 5: Continuous discovery — every 5 minutes
+    scheduler.add_job(
+        func=run_continuous_discovery,
+        trigger=IntervalTrigger(minutes=5),
+        id='continuous_discovery',
+        name='Continuous Discovery (every 5 min)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
 
@@ -1782,6 +2544,7 @@ def start_scheduler():
     logger.info("📋 Invoice overdue: Daily at 02:00 UTC")
     logger.info("🔒 RLS audit: Daily at 04:30 UTC")
     logger.info("🔄 Scan schedules: Every 60 seconds")
+    logger.info("🔧 Snapshot maintenance: Every 5 minutes")
 
     # Get next run times
     job = scheduler.get_job('scheduled_discovery')

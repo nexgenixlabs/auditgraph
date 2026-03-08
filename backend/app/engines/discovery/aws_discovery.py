@@ -55,6 +55,11 @@ class AWSDiscoveryEngine:
     def __init__(self, access_key_id: str, secret_access_key: str,
                  region: str = 'us-east-1', db_org_id: int = None,
                  cloud_connection_id: int = None):
+        if cloud_connection_id is None:
+            raise ValueError("cloud_connection_id is required for discovery")
+        if db_org_id is None:
+            raise ValueError("db_org_id is required for discovery")
+
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.region = region
@@ -77,6 +82,16 @@ class AWSDiscoveryEngine:
         self.db = Database(organization_id=db_org_id)
         self._identities = []
 
+    def _update_job_progress(self, stage, progress, discovery_run_id=None):
+        """Report progress to snapshot_jobs. Non-fatal on failure."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id:
+            return
+        try:
+            self.db.update_snapshot_job_progress(job_id, stage, progress, discovery_run_id)
+        except Exception as e:
+            logger.warning(f"  (job progress update failed: {e})")
+
     def test_connection(self) -> bool:
         """Test AWS connectivity via STS."""
         try:
@@ -96,6 +111,7 @@ class AWSDiscoveryEngine:
             cloud_connection_id=self.cloud_connection_id,
         )
         logger.info(f"  Created discovery run #{run_id}")
+        self._update_job_progress('discovering_identities', 20, discovery_run_id=run_id)
 
         try:
             self._discover_iam_users()
@@ -103,11 +119,13 @@ class AWSDiscoveryEngine:
 
             self._discover_iam_roles()
             logger.info(f"  Discovered {sum(1 for i in self._identities if i.get('identity_category') in ('iam_role', 'iam_service_linked_role'))} IAM roles")
+            self._update_job_progress('discovering_rbac', 60)
 
             self._calculate_risks()
             self._check_activity()
 
             counts = self._save_identities(run_id)
+            self._update_job_progress('finalizing', 90)
 
             self.db.complete_discovery_run(
                 run_id=run_id,

@@ -40,6 +40,7 @@ export interface ConnectionsTabProps {
   wizardTestResult: ConnectionTestResult | null;
   wizardSaving: boolean;
   scanningConnId: number | null;
+  activeJobs: Record<number, any>;
   connectionTestResult: ConnectionTestResult | null;
   testingConnection: boolean;
   unlocking: boolean;
@@ -48,6 +49,7 @@ export interface ConnectionsTabProps {
   resetWizard: () => void;
   handleDeleteConnection: (connId: number) => void;
   handleRunScan: (connId: number) => void;
+  handleUpdateDiscoverySettings: (connId: number, enabled: boolean, intervalMinutes: number) => void;
   handleTestConnection: () => void;
   handleSaveAndUnlock: () => void;
   update: (key: keyof SettingsData, value: string) => void;
@@ -88,6 +90,7 @@ export function ConnectionsTab({
   wizardTestResult,
   wizardSaving,
   scanningConnId,
+  activeJobs,
   connectionTestResult,
   testingConnection,
   unlocking,
@@ -96,6 +99,7 @@ export function ConnectionsTab({
   resetWizard,
   handleDeleteConnection,
   handleRunScan,
+  handleUpdateDiscoverySettings,
   handleTestConnection,
   handleSaveAndUnlock,
   update,
@@ -103,6 +107,14 @@ export function ConnectionsTab({
   setSuccess,
   cloudSectionRef,
 }: ConnectionsTabProps) {
+  const STAGE_LABELS: Record<string, string> = {
+    discovering_subscriptions: 'Discovering subscriptions...',
+    discovering_identities: 'Discovering identities...',
+    discovering_rbac: 'Discovering RBAC roles...',
+    discovering_resources: 'Discovering resources...',
+    finalizing: 'Finalizing snapshot...',
+  };
+
   return (
     <>
           {/* Section 2: Cloud Connections */}
@@ -133,11 +145,23 @@ export function ConnectionsTab({
                 {cloudConnections.reduce((s, c) => s + (c.discovered_count || 0), 0) > 0 && (
                   <span className="text-amber-600 font-semibold">Discovered: {cloudConnections.reduce((s, c) => s + (c.discovered_count || 0), 0)}</span>
                 )}
+                {(() => {
+                  const tenantCount = new Set(
+                    cloudConnections.filter(c => c.cloud === 'azure').map(c => c.azure_directory_id).filter(Boolean)
+                  ).size;
+                  return tenantCount > 1 ? (
+                    <span className="text-purple-600 font-semibold">{tenantCount} Azure Tenants</span>
+                  ) : null;
+                })()}
               </div>
             )}
 
-            {/* FIX1C: Provider-Grouped Connections List */}
+            {/* FIX1C: Provider-Grouped Connections List with Tenant Sub-Grouping */}
             {cloudConnections.length > 0 && (() => {
+              const isAutoDiscovered = (conn: CloudConnection): boolean => {
+                return !!(conn.metadata?.auto_discovered);
+              };
+
               const PROVIDERS = [
                 { key: 'azure', label: 'Azure', color: 'blue', bgClass: 'bg-blue-100 text-blue-700', borderClass: 'border-blue-200' },
                 { key: 'aws', label: 'AWS', color: 'orange', bgClass: 'bg-orange-100 text-orange-700', borderClass: 'border-orange-200' },
@@ -148,85 +172,208 @@ export function ConnectionsTab({
                 connections: cloudConnections.filter(c => c.cloud === p.key),
               })).filter(g => g.connections.length > 0);
 
-              return (
-                <div className="space-y-4">
-                  {grouped.map(({ key, label, bgClass, borderClass, connections }) => (
-                    <div key={key} className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${bgClass}`}>{label}</span>
-                        <span className="text-[10px] text-gray-400">{connections.length} connection{connections.length !== 1 ? 's' : ''}</span>
-                      </div>
-                      {connections.map(conn => (
-                        <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
-                          conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
-                          conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
-                          'border-gray-200 bg-gray-50/30'
-                        }`}>
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-sm font-semibold text-gray-800">{conn.label}</span>
-                                  {conn.label === 'Primary' && (
-                                    <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
-                                  )}
-                                </div>
-                                {conn.azure_directory_id && (
-                                  <div className="text-[10px] text-gray-400 font-mono">{conn.azure_directory_id.slice(0, 8)}...</div>
-                                )}
-                                <div className="text-[10px] text-gray-500 mt-0.5">
-                                  {conn.sub_count || 0} active subs
-                                  {conn.last_discovery_at ? ` · Last snapshot: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No snapshot yet'}
-                                </div>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className={`flex items-center gap-1 text-[10px] font-semibold ${
-                                conn.status === 'connected' ? 'text-green-600' :
-                                conn.status === 'failed' ? 'text-red-600' :
-                                'text-gray-400'
-                              }`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${
-                                  conn.status === 'connected' ? 'bg-green-500' :
-                                  conn.status === 'failed' ? 'bg-red-500' :
-                                  'bg-gray-400'
-                                }`} />
-                                {conn.status === 'connected' ? 'Connected' :
-                                 conn.status === 'failed' ? 'Failed' : 'Pending'}
-                              </span>
-                              {isAdmin && conn.status === 'connected' && (
-                                <button
-                                  onClick={() => handleRunScan(conn.id)}
-                                  disabled={scanningConnId === conn.id}
-                                  className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
-                                >
-                                  {scanningConnId === conn.id ? 'Starting...' : 'Capture Snapshot'}
-                                </button>
-                              )}
-                              {isAdmin && (
-                                <button
-                                  onClick={() => handleDeleteConnection(conn.id)}
-                                  className="text-[10px] text-red-400 hover:text-red-600 font-medium"
-                                >
-                                  Remove
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                          {/* Discovered subscriptions warning */}
-                          {(conn.discovered_count || 0) > 0 && (
-                            <div className="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
-                              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                              </svg>
-                              <span>{conn.discovered_count} subscription(s) discovered — </span>
-                              <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
-                            </div>
+              const renderConnectionCard = (conn: CloudConnection, isCrossTenant: boolean) => (
+                <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
+                  isCrossTenant ? (
+                    conn.status === 'connected' ? 'border-l-4 border-l-purple-400 border-green-200 bg-green-50/30' :
+                    conn.status === 'failed' ? 'border-l-4 border-l-purple-400 border-red-200 bg-red-50/30' :
+                    'border-l-4 border-l-purple-400 border-purple-200 bg-purple-50/20'
+                  ) : (
+                    conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
+                    conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
+                    'border-gray-200 bg-gray-50/30'
+                  )
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-gray-800">{conn.label}</span>
+                          {conn.label === 'Primary' && (
+                            <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
+                          )}
+                          {isAutoDiscovered(conn) && (
+                            <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[9px] font-bold rounded">CROSS-TENANT</span>
+                          )}
+                          {isAutoDiscovered(conn) && conn.status === 'pending' && (
+                            <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 text-[9px] font-medium rounded">DISCOVERED</span>
                           )}
                         </div>
-                      ))}
+                        {conn.azure_directory_id && (
+                          <div className="text-[10px] text-gray-400 font-mono">{conn.azure_directory_id.slice(0, 8)}...</div>
+                        )}
+                        {isAutoDiscovered(conn) && conn.metadata?.discovered_via_label && (
+                          <div className="text-[10px] text-purple-500 mt-0.5 flex items-center gap-1">
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                            </svg>
+                            Discovered via <span className="font-semibold">{conn.metadata.discovered_via_label}</span>
+                          </div>
+                        )}
+                        <div className="text-[10px] text-gray-500 mt-0.5">
+                          {conn.sub_count || 0} active subs
+                          {conn.last_discovery_at ? ` · Last snapshot: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No snapshot yet'}
+                        </div>
+                      </div>
                     </div>
-                  ))}
+                    <div className="flex items-center gap-2">
+                      <span className={`flex items-center gap-1 text-[10px] font-semibold ${
+                        conn.status === 'connected' ? 'text-green-600' :
+                        conn.status === 'failed' ? 'text-red-600' :
+                        'text-gray-400'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          conn.status === 'connected' ? 'bg-green-500' :
+                          conn.status === 'failed' ? 'bg-red-500' :
+                          'bg-gray-400'
+                        }`} />
+                        {conn.status === 'connected' ? 'Connected' :
+                         conn.status === 'failed' ? 'Failed' : 'Pending'}
+                      </span>
+                      {isAdmin && conn.status === 'connected' && (
+                        <button
+                          onClick={() => handleRunScan(conn.id)}
+                          disabled={scanningConnId === conn.id || !!activeJobs[conn.id]}
+                          className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
+                        >
+                          {scanningConnId === conn.id ? 'Starting...' :
+                           activeJobs[conn.id] ? 'Scanning...' : 'Capture Snapshot'}
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteConnection(conn.id)}
+                          className="text-[10px] text-red-400 hover:text-red-600 font-medium"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {/* Phase 3+4: Snapshot job progress bar with retry info */}
+                  {activeJobs[conn.id] && ['queued', 'running'].includes(activeJobs[conn.id].status) && (
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
+                        <span>
+                          {STAGE_LABELS[activeJobs[conn.id].stage] || 'Queued...'}
+                          {activeJobs[conn.id].retry_count > 0 && (
+                            <span className="ml-1.5 text-amber-500 font-medium">
+                              (retry {activeJobs[conn.id].retry_count})
+                            </span>
+                          )}
+                        </span>
+                        <span>{activeJobs[conn.id].progress}%</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-1.5">
+                        <div
+                          className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
+                          style={{ width: `${activeJobs[conn.id].progress}%` }}
+                        />
+                      </div>
+                      {(activeJobs[conn.id].identities_discovered > 0 || activeJobs[conn.id].resources_discovered > 0) && (
+                        <div className="flex gap-3 mt-1 text-[9px] text-gray-400">
+                          {activeJobs[conn.id].identities_discovered > 0 && (
+                            <span>{activeJobs[conn.id].identities_discovered} identities</span>
+                          )}
+                          {activeJobs[conn.id].resources_discovered > 0 && (
+                            <span>{activeJobs[conn.id].resources_discovered} resources</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Phase 5: Continuous Discovery toggle */}
+                  {isAdmin && conn.status === 'connected' && (
+                    <div className="mt-2 flex items-center gap-3 text-[10px]">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!conn.discovery_enabled}
+                          onChange={(e) => handleUpdateDiscoverySettings(
+                            conn.id, e.target.checked,
+                            conn.discovery_interval_minutes || 360
+                          )}
+                          className="w-3 h-3 rounded border-gray-300 text-blue-500 focus:ring-blue-500"
+                        />
+                        <span className="text-gray-600">Auto-refresh</span>
+                      </label>
+                      {conn.discovery_enabled && (
+                        <select
+                          value={conn.discovery_interval_minutes || 360}
+                          onChange={(e) => handleUpdateDiscoverySettings(
+                            conn.id, true, parseInt(e.target.value)
+                          )}
+                          className="text-[10px] border border-gray-200 rounded px-1.5 py-0.5 text-gray-600 bg-white"
+                        >
+                          <option value={60}>Every 1 hour</option>
+                          <option value={120}>Every 2 hours</option>
+                          <option value={360}>Every 6 hours</option>
+                          <option value={720}>Every 12 hours</option>
+                          <option value={1440}>Every 24 hours</option>
+                        </select>
+                      )}
+                      {conn.last_snapshot_completed_at && (
+                        <span className="text-gray-400">
+                          Last: {new Date(conn.last_snapshot_completed_at).toLocaleString()}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {/* Discovered subscriptions warning */}
+                  {(conn.discovered_count || 0) > 0 && (
+                    <div className="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
+                      <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                      </svg>
+                      <span>{conn.discovered_count} subscription(s) discovered — </span>
+                      <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
+                    </div>
+                  )}
+                </div>
+              );
+
+              return (
+                <div className="space-y-4">
+                  {grouped.map(({ key, label, bgClass, connections }) => {
+                    const ownConns = connections.filter(c => !isAutoDiscovered(c));
+                    const crossConns = connections.filter(c => isAutoDiscovered(c));
+                    const hasBothSections = ownConns.length > 0 && crossConns.length > 0;
+
+                    return (
+                      <div key={key} className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-0.5 rounded text-xs font-bold ${bgClass}`}>{label}</span>
+                          <span className="text-[10px] text-gray-400">{connections.length} connection{connections.length !== 1 ? 's' : ''}</span>
+                        </div>
+
+                        {/* YOUR TENANT sub-section */}
+                        {ownConns.length > 0 && (
+                          <>
+                            {hasBothSections && (
+                              <div className="flex items-center gap-2 pt-1">
+                                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Your Tenant</span>
+                                <div className="flex-1 h-px bg-gray-200" />
+                              </div>
+                            )}
+                            {ownConns.map(conn => renderConnectionCard(conn, false))}
+                          </>
+                        )}
+
+                        {/* CROSS-TENANT ACCESS sub-section */}
+                        {crossConns.length > 0 && (
+                          <>
+                            {hasBothSections && (
+                              <div className="flex items-center gap-2 pt-1">
+                                <span className="text-[10px] font-semibold text-purple-600 uppercase tracking-wider">Cross-Tenant Access</span>
+                                <div className="flex-1 h-px bg-purple-200" />
+                              </div>
+                            )}
+                            {crossConns.map(conn => renderConnectionCard(conn, true))}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })()}

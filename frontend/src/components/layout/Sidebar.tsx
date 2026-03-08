@@ -66,6 +66,7 @@ const accessReviewIcon = icon('M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2
 
 // Remediation
 const remediationIcon = icon('M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z');
+const findingsIcon = icon('M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z');
 
 // Data Security
 const secretsIcon = icon('M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z');
@@ -106,6 +107,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
           { to: '/drift', label: 'Drift History', icon: driftIcon },
           { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
+          { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
+          { to: '/security-dashboard', label: 'Security Dashboard', icon: dashboardIcon },
+          { to: '/identity-graph', label: 'Identity Graph', icon: dashboardIcon },
         ],
       },
       {

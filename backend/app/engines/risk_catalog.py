@@ -323,6 +323,41 @@ RISK_FACTOR_CATALOG: Dict[str, Dict] = {
         "category": "gcp_iam",
         "cloud": "gcp",
     },
+    "GCP_OWNER_ROLE": {
+        "description": "Owner role binding on project",
+        "severity": "critical",
+        "points": 350,
+        "category": "gcp_iam",
+        "cloud": "gcp",
+    },
+    "GCP_EDITOR_ROLE": {
+        "description": "Editor role binding on project",
+        "severity": "high",
+        "points": 280,
+        "category": "gcp_iam",
+        "cloud": "gcp",
+    },
+    "GCP_PRIVILEGED_ROLE": {
+        "description": "Privileged predefined role",
+        "severity": "high",
+        "points": 250,
+        "category": "gcp_iam",
+        "cloud": "gcp",
+    },
+    "GCP_SA_KEY_EXPOSURE": {
+        "description": "Service account has user-managed keys",
+        "severity": "high",
+        "points": 300,
+        "category": "gcp_credential",
+        "cloud": "gcp",
+    },
+    "GCP_DISABLED_SA_WITH_KEYS": {
+        "description": "Disabled service account still has user-managed keys",
+        "severity": "high",
+        "points": 250,
+        "category": "gcp_credential",
+        "cloud": "gcp",
+    },
 }
 
 

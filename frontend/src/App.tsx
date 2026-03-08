@@ -62,6 +62,9 @@ import EffectiveAccessExplorer from './pages/EffectiveAccessExplorer';
 import SensitiveDataAccess from './pages/SensitiveDataAccess';
 import CISODashboard from './pages/CISODashboard';
 import RemediationCenter from './pages/RemediationCenter';
+import SecurityFindings from './pages/SecurityFindings';
+import SecurityDashboard from './pages/SecurityDashboard';
+import IdentityGraph from './pages/IdentityGraph';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
 import Documentation from './pages/Documentation';
@@ -277,6 +280,9 @@ function AppContent() {
                       : <ErrorBoundary><Dashboard /></ErrorBoundary>
                   } />
                   <Route path="/remediation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationCenter /></ErrorBoundary>} />
+                  <Route path="/security-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityFindings /></ErrorBoundary>} />
+                  <Route path="/security-dashboard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityDashboard /></ErrorBoundary>} />
+                  <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />

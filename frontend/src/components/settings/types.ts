@@ -82,6 +82,17 @@ export interface CloudConnection {
   created_at: string;
   sub_count?: number;
   discovered_count?: number;
+  discovery_enabled?: boolean;
+  discovery_interval_minutes?: number;
+  last_snapshot_started_at?: string | null;
+  last_snapshot_completed_at?: string | null;
+  metadata?: {
+    auto_discovered?: boolean;
+    discovered_via?: string;
+    discovered_via_label?: string;
+    migrated_from_settings?: boolean;
+    [key: string]: unknown;
+  };
 }
 
 export interface ConnectionTestResult {

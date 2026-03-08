@@ -220,6 +220,10 @@ from app.api.handlers import (
     get_identity_subscriptions,
     activate_client_subscription,
     get_discovery_status,
+    get_snapshot_job_status,
+    get_discovery_history,
+    get_discovery_settings,
+    update_discovery_settings,
     run_discovery,
     get_admin_organization_billing,
     update_admin_organization_plan,
@@ -312,6 +316,58 @@ from app.api.handlers import (
     get_findings_stats_handler,
     get_finding_detail,
     update_finding_status_handler,
+    get_risk_findings_list,
+    acknowledge_risk_finding,
+    resolve_risk_finding,
+    get_graph_identity_access,
+    get_graph_resource_identities,
+    get_graph_identity_attack_paths,
+    get_nhi_security_findings,
+    get_dashboard_summary_handler,
+    get_policy_recommendations_handler,
+    accept_policy_recommendation,
+    dismiss_policy_recommendation,
+    execute_remediation_handler,
+    approve_remediation_handler,
+    get_remediation_actions_handler,
+    run_attack_simulation_handler,
+    get_attack_simulation_handler,
+    get_attack_simulations_list_handler,
+    get_security_benchmark_handler,
+    get_security_advisor_handler,
+    get_risk_forecast_handler,
+    get_generated_policy_handler,
+    get_generated_policies_list_handler,
+    apply_generated_policy_handler,
+    dismiss_generated_policy_handler,
+    get_threat_events_handler,
+    acknowledge_threat_event_handler,
+    resolve_threat_event_handler,
+    get_identity_history_handler,
+    get_activity_events_handler,
+    get_attack_incidents_handler,
+    get_attack_replay_handler,
+    update_incident_status_handler,
+    get_response_actions_handler,
+    approve_response_action_handler,
+    execute_response_action_handler,
+    get_attack_predictions_handler,
+    get_graph_insights_handler,
+    get_governance_actions_handler,
+    run_risk_simulation_handler,
+    get_risk_simulations_handler,
+    get_integration_events_handler,
+    configure_integration_handler,
+    get_governance_metrics_handler,
+    get_governance_trends_handler,
+    get_strategy_advisor_handler,
+    get_command_center_handler,
+    process_copilot_query_handler,
+    get_copilot_history_handler,
+    get_cloud_risk_summary_handler,
+    get_graph_visualization_handler,
+    get_identity_graph_handler,
+    get_attack_path_graph_handler,
     get_attack_paths_list,
     get_attack_path_detail,
     get_identity_persisted_attack_paths,
@@ -1337,10 +1393,6 @@ def create_app():
     def summary():
         return get_stats()
 
-    @app.get("/api/dashboard/summary")
-    def dashboard_summary():
-        return get_stats()
-
     # UI expects this - provides category breakdown for dashboard
     @app.get("/api/identity-summary")
     def identity_summary():
@@ -2292,6 +2344,22 @@ def create_app():
     def discovery_run():
         return run_discovery()
 
+    @app.get("/api/discovery/jobs/<int:connection_id>")
+    def discovery_job_status(connection_id):
+        return get_snapshot_job_status(connection_id)
+
+    @app.get("/api/discovery/history")
+    def discovery_history():
+        return get_discovery_history()
+
+    @app.get("/api/discovery/settings/<int:connection_id>")
+    def discovery_settings_get(connection_id):
+        return get_discovery_settings(connection_id)
+
+    @app.put("/api/discovery/settings/<int:connection_id>")
+    def discovery_settings_update(connection_id):
+        return update_discovery_settings(connection_id)
+
     # -----------------------
     # Phase 6: Scan Schedules
     # -----------------------
@@ -2483,6 +2551,297 @@ def create_app():
     @require_role('admin', 'security_admin')
     def finding_status_update(finding_id):
         return update_finding_status_handler(finding_id)
+
+    # -----------------------
+    # Phase 6: Risk Findings (Rules-Based)
+    # -----------------------
+    @app.get("/api/risk/findings")
+    def risk_findings_list():
+        return get_risk_findings_list()
+
+    @app.post("/api/risk/findings/<finding_id>/acknowledge")
+    @require_role('admin', 'security_admin')
+    def risk_finding_acknowledge(finding_id):
+        return acknowledge_risk_finding(finding_id)
+
+    @app.post("/api/risk/findings/<finding_id>/resolve")
+    @require_role('admin', 'security_admin')
+    def risk_finding_resolve(finding_id):
+        return resolve_risk_finding(finding_id)
+
+    # -----------------------
+    # Phase 7: IAM Graph Queries
+    # -----------------------
+    @app.get("/api/graph/identity/<identity_id>/access")
+    def graph_identity_access(identity_id):
+        return get_graph_identity_access(identity_id)
+
+    @app.get("/api/graph/resource/<path:resource_id>/identities")
+    def graph_resource_identities(resource_id):
+        return get_graph_resource_identities(resource_id)
+
+    # -----------------------
+    # Phase 8: Privilege Escalation Paths
+    # -----------------------
+    @app.get("/api/graph/identity/<identity_id>/attack-paths")
+    def graph_identity_attack_paths(identity_id):
+        return get_graph_identity_attack_paths(identity_id)
+
+    # -----------------------
+    # Phase 9: NHI Security
+    # -----------------------
+    @app.get("/api/security/nhi")
+    def nhi_security():
+        return get_nhi_security_findings()
+
+    # -----------------------
+    # Phase 10: Executive Dashboard
+    # -----------------------
+    @app.get("/api/dashboard/summary")
+    def dashboard_summary():
+        return get_dashboard_summary_handler()
+
+    # -----------------------
+    # Phase 11: Policy Recommendations
+    # -----------------------
+    @app.get("/api/security/recommendations")
+    def security_recommendations():
+        return get_policy_recommendations_handler()
+
+    @app.post("/api/security/recommendations/<rec_id>/accept")
+    def security_recommendation_accept(rec_id):
+        return accept_policy_recommendation(rec_id)
+
+    @app.post("/api/security/recommendations/<rec_id>/dismiss")
+    def security_recommendation_dismiss(rec_id):
+        return dismiss_policy_recommendation(rec_id)
+
+    # -----------------------
+    # Phase 12: Automated Remediation
+    # -----------------------
+    @app.post("/api/security/remediation/<recommendation_id>/execute")
+    def security_remediation_execute(recommendation_id):
+        return execute_remediation_handler(recommendation_id)
+
+    @app.post("/api/security/remediation/<action_id>/approve")
+    def remediation_approve(action_id):
+        return approve_remediation_handler(action_id)
+
+    @app.get("/api/security/remediation/actions")
+    def remediation_actions_list():
+        return get_remediation_actions_handler()
+
+    # -----------------------
+    # Phase 13: Attack Simulation
+    # -----------------------
+    @app.post("/api/security/attack-simulation")
+    def attack_simulation_run():
+        return run_attack_simulation_handler()
+
+    @app.get("/api/security/attack-simulation/<simulation_id>")
+    def attack_simulation_detail(simulation_id):
+        return get_attack_simulation_handler(simulation_id)
+
+    @app.get("/api/security/attack-simulations")
+    def attack_simulations_list():
+        return get_attack_simulations_list_handler()
+
+    # -----------------------
+    # Phase 14: Security Benchmarking
+    # -----------------------
+    @app.get("/api/security/benchmark")
+    def security_benchmark():
+        return get_security_benchmark_handler()
+
+    # -----------------------
+    # Phase 15: AI Security Advisor
+    # -----------------------
+    @app.get("/api/security/advisor")
+    def security_advisor():
+        return get_security_advisor_handler()
+
+    # -----------------------
+    # Phase 17: Multi-Cloud Identity Support
+    # -----------------------
+    # -----------------------
+    # Phase 18: Risk Forecasting
+    # -----------------------
+    @app.get("/api/security/risk-forecast")
+    def risk_forecast():
+        return get_risk_forecast_handler()
+
+    # -----------------------
+    # Phase 19: Least-Privilege Policy Generation
+    # -----------------------
+    @app.get("/api/security/generated-policy/<identity_id>")
+    def generated_policy(identity_id):
+        return get_generated_policy_handler(identity_id)
+
+    @app.get("/api/security/generated-policies")
+    def generated_policies_list():
+        return get_generated_policies_list_handler()
+
+    @app.post("/api/security/generated-policies/<policy_id>/apply")
+    def apply_generated_policy(policy_id):
+        return apply_generated_policy_handler(policy_id)
+
+    @app.post("/api/security/generated-policies/<policy_id>/dismiss")
+    def dismiss_generated_policy(policy_id):
+        return dismiss_generated_policy_handler(policy_id)
+
+    # -----------------------
+    # Phase 20: Continuous Identity Threat Detection
+    # -----------------------
+    @app.get("/api/security/threat-events")
+    def threat_events():
+        return get_threat_events_handler()
+
+    @app.post("/api/security/threat-events/<event_id>/acknowledge")
+    def acknowledge_threat_event(event_id):
+        return acknowledge_threat_event_handler(event_id)
+
+    @app.post("/api/security/threat-events/<event_id>/resolve")
+    def resolve_threat_event(event_id):
+        return resolve_threat_event_handler(event_id)
+
+    # -----------------------
+    # Phase 21: Identity Security Data Lake
+    # -----------------------
+    @app.get("/api/security/identity-history/<identity_id>")
+    def identity_history(identity_id):
+        return get_identity_history_handler(identity_id)
+
+    @app.get("/api/security/activity-events")
+    def activity_events():
+        return get_activity_events_handler()
+
+    # -----------------------
+    # Phase 23: Identity Attack Replay & Forensics
+    # -----------------------
+    @app.get("/api/security/incidents")
+    def attack_incidents():
+        return get_attack_incidents_handler()
+
+    @app.get("/api/security/attack-replay/<incident_id>")
+    def attack_replay(incident_id):
+        return get_attack_replay_handler(incident_id)
+
+    @app.post("/api/security/incidents/<incident_id>/status")
+    def incident_status(incident_id):
+        return update_incident_status_handler(incident_id)
+
+    # -----------------------
+    # Phase 24: Autonomous Identity Security Operations
+    # -----------------------
+    @app.get("/api/security/response-actions")
+    def response_actions():
+        return get_response_actions_handler()
+
+    @app.post("/api/security/response-actions/<action_id>/approve")
+    def approve_response_action(action_id):
+        return approve_response_action_handler(action_id)
+
+    @app.post("/api/security/response-actions/<action_id>/execute")
+    def execute_response_action(action_id):
+        return execute_response_action_handler(action_id)
+
+    # -----------------------
+    # Phase 26: Identity Attack Prediction
+    # -----------------------
+    @app.get("/api/security/attack-predictions")
+    def attack_predictions():
+        return get_attack_predictions_handler()
+
+    # -----------------------
+    # Phase 27: Identity Graph Intelligence
+    # -----------------------
+    @app.get("/api/security/graph-insights")
+    def graph_insights():
+        return get_graph_insights_handler()
+
+    # -----------------------
+    # Phase 28: Identity Governance
+    # -----------------------
+    @app.get("/api/security/governance-actions")
+    def governance_actions():
+        return get_governance_actions_handler()
+
+    # -----------------------
+    # Phase 29: Identity Risk Simulation
+    # -----------------------
+    @app.post("/api/security/risk-simulation")
+    def risk_simulation():
+        return run_risk_simulation_handler()
+
+    @app.get("/api/security/risk-simulations")
+    def risk_simulations_list():
+        return get_risk_simulations_handler()
+
+    # -----------------------
+    # Phase 30: Enterprise Security Integrations
+    # -----------------------
+    @app.get("/api/security/integrations")
+    def security_integrations():
+        return get_integration_events_handler()
+
+    @app.post("/api/security/integrations/configure")
+    def configure_integration():
+        return configure_integration_handler()
+
+    # -----------------------
+    # Phase 31: Governance Analytics
+    # -----------------------
+    @app.get("/api/security/governance-metrics")
+    def governance_metrics():
+        return get_governance_metrics_handler()
+
+    @app.get("/api/security/governance-trends")
+    def governance_trends():
+        return get_governance_trends_handler()
+
+    # -----------------------
+    # Phase 32: Security Strategy Advisor
+    # -----------------------
+    @app.get("/api/security/strategy-advisor")
+    def strategy_advisor():
+        return get_strategy_advisor_handler()
+
+    # -----------------------
+    # Phase 33: Security Command Center
+    # -----------------------
+    @app.get("/api/security/command-center")
+    def command_center():
+        return get_command_center_handler()
+
+    # -----------------------
+    # Phase 25: AI Security Copilot
+    # -----------------------
+    @app.post("/api/security/copilot-query")
+    def copilot_query():
+        return process_copilot_query_handler()
+
+    @app.get("/api/security/copilot-history")
+    def copilot_history():
+        return get_copilot_history_handler()
+
+    @app.get("/api/security/cloud-summary")
+    def cloud_risk_summary():
+        return get_cloud_risk_summary_handler()
+
+    # -----------------------
+    # Phase 16: Graph Visualization
+    # -----------------------
+    @app.get("/api/graph/visualization")
+    def graph_visualization():
+        return get_graph_visualization_handler()
+
+    @app.get("/api/graph/identity/<identity_id>")
+    def graph_identity(identity_id):
+        return get_identity_graph_handler(identity_id)
+
+    @app.get("/api/graph/attack-path/<simulation_id>")
+    def graph_attack_path(simulation_id):
+        return get_attack_path_graph_handler(simulation_id)
 
     # -----------------------
     # Attack Path Analysis (Phase 3)

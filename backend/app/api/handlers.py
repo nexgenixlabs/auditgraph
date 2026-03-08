@@ -2083,6 +2083,33 @@ def trigger_discovery():
         except (ValueError, TypeError):
             pass
 
+    # Phase 3: Concurrency guard — reject if active job for this connection
+    if conn_id:
+        admin_db = Database(_admin_reason='trigger_discovery: check active job')
+        try:
+            active = admin_db.get_active_snapshot_job(conn_id)
+            if active:
+                return jsonify({
+                    'error': 'Discovery already running for this connection',
+                    'active_job': active,
+                }), 409
+        finally:
+            admin_db.close()
+
+    # Validate org has at least one connected cloud connection
+    if not conn_id:
+        admin_db = Database(_admin_reason='trigger_discovery: check connections')
+        try:
+            connections = admin_db.get_cloud_connections(tid, include_secrets=False)
+            connected = [c for c in connections if c.get('status') == 'connected']
+            if not connected:
+                return jsonify({
+                    "error": "Discovery requires a valid cloud connection. "
+                    "Add and test a cloud connection before triggering discovery."
+                }), 400
+        finally:
+            admin_db.close()
+
     def _run():
         try:
             trigger_manual_discovery(db_org_id=tid, org_name=tname,
@@ -5714,6 +5741,19 @@ def get_identity_summary():
         all_sub_ids = list(set(azure_subs + cs_subs))
         all_sub_ids.sort()
 
+        # Count distinct Azure tenants for multi-tenant display
+        azure_tenant_count = 1
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT cc.azure_directory_id)
+                FROM cloud_connections cc
+                WHERE cc.organization_id = %s AND cc.cloud = 'azure'
+                  AND cc.azure_directory_id IS NOT NULL
+            """, (tid,))
+            azure_tenant_count = cursor.fetchone()[0] or 1
+        except Exception:
+            pass
+
         return jsonify({
             "run_id": run_ids[0] if run_ids else None,
             "completed_at": completed_at.isoformat() if completed_at else None,
@@ -5722,6 +5762,7 @@ def get_identity_summary():
                 "azure": {
                     "subscriptions": azure_sub_count,
                     "subscription_ids": all_sub_ids,
+                    "tenant_count": azure_tenant_count,
                 },
                 "aws": {
                     "accounts": 0,
@@ -11318,10 +11359,30 @@ def create_client_connection():
                         subs_list.append({
                             'id': sub.subscription_id,
                             'name': sub.display_name or sub.subscription_id,
+                            'tenant_id': sub.tenant_id or azure_directory_id,
                         })
+                # Partition own-tenant vs foreign-tenant subscriptions
+                own_subs = [s for s in subs_list if s['tenant_id'] == azure_directory_id]
+                foreign_subs = [s for s in subs_list if s['tenant_id'] != azure_directory_id]
+                # Insert own-tenant subs under this connection
                 discovered_count = db.insert_discovered_subscriptions(
-                    tid, cloud, conn['id'], subs_list)
-                discovered_subs = subs_list
+                    tid, cloud, conn['id'], own_subs)
+                discovered_subs = own_subs
+                # Insert foreign-tenant subs under auto-created connections
+                import itertools
+                for foreign_tenant, group in itertools.groupby(
+                        sorted(foreign_subs, key=lambda s: s['tenant_id']),
+                        key=lambda s: s['tenant_id']):
+                    group_list = list(group)
+                    foreign_conn = db.find_or_create_cloud_connection(
+                        tid, foreign_tenant,
+                        label=f'Azure Tenant {foreign_tenant[:8]}...',
+                        source_azure_directory_id=azure_directory_id,
+                        source_connection_label=label)
+                    db.insert_discovered_subscriptions(
+                        tid, cloud, foreign_conn['id'], group_list)
+                    discovered_count += len(group_list)
+                    discovered_subs.extend(group_list)
             except Exception:
                 pass  # Non-fatal — connection is still saved
         elif cloud == 'aws' and status == 'connected':
@@ -18103,12 +18164,14 @@ def check_feature_gate(feature_name):
 def get_subscriptions_list():
     """GET /api/subscriptions — list cloud subscriptions for current org.
     For admin users, includes billing breakdown.
+    Optional query params: cloud, connection_id (for per-connection filtering).
     """
     db = _db()
     try:
         cloud = request.args.get('cloud')
+        connection_id = request.args.get('connection_id', type=int)
         tid = _org_id()
-        subs = db.get_cloud_subscriptions(tid, cloud=cloud)
+        subs = db.get_cloud_subscriptions(tid, cloud=cloud, connection_id=connection_id)
         result = {'subscriptions': subs}
 
         # Include billing for admin users
@@ -18476,13 +18539,104 @@ def get_discovery_status():
         else:
             latest = None
 
+        # Phase 3: Include recent snapshot jobs
+        jobs = []
+        try:
+            jobs = db.get_snapshot_jobs_for_org(tid, limit=10)
+        except Exception:
+            pass
+
         return jsonify({
             'has_snapshot': total_completed > 0,
             'total_completed': total_completed,
             'latest_run': latest,
+            'jobs': jobs,
         })
     finally:
         db.close()
+
+
+def get_snapshot_job_status(connection_id):
+    """GET /api/discovery/jobs/<connection_id> — poll active job for a connection."""
+    admin_db = Database(_admin_reason='snapshot_job_status')
+    try:
+        job = admin_db.get_active_snapshot_job(connection_id)
+        return jsonify({'active_job': job})
+    finally:
+        admin_db.close()
+
+
+def get_discovery_history():
+    """GET /api/discovery/history — snapshot job history for a connection or org."""
+    tid = _org_id()
+    connection_id = request.args.get('connection_id', type=int)
+    limit = request.args.get('limit', 10, type=int)
+    limit = min(limit, 50)
+
+    admin_db = Database(_admin_reason='discovery_history')
+    try:
+        history = admin_db.get_snapshot_history(
+            connection_id=connection_id, org_id=tid, limit=limit
+        )
+        return jsonify({'history': history})
+    finally:
+        admin_db.close()
+
+
+def get_discovery_settings(connection_id):
+    """GET /api/discovery/settings/<connection_id> — get continuous discovery settings."""
+    tid = _org_id()
+    admin_db = Database(_admin_reason='discovery_settings_get')
+    try:
+        conn = admin_db.get_cloud_connection_by_id(connection_id)
+        if not conn or conn.get('organization_id') != tid:
+            return jsonify({'error': 'Connection not found'}), 404
+        return jsonify({
+            'connection_id': connection_id,
+            'discovery_enabled': conn.get('discovery_enabled', False),
+            'discovery_interval_minutes': conn.get('discovery_interval_minutes', 360),
+            'last_snapshot_started_at': conn.get('last_snapshot_started_at'),
+            'last_snapshot_completed_at': conn.get('last_snapshot_completed_at'),
+        })
+    finally:
+        admin_db.close()
+
+
+def update_discovery_settings(connection_id):
+    """PUT /api/discovery/settings/<connection_id> — update continuous discovery settings."""
+    tid = _org_id()
+    data = request.get_json(silent=True) or {}
+    discovery_enabled = data.get('discovery_enabled')
+    discovery_interval_minutes = data.get('discovery_interval_minutes')
+
+    if discovery_enabled is None and discovery_interval_minutes is None:
+        return jsonify({'error': 'Provide discovery_enabled and/or discovery_interval_minutes'}), 400
+
+    admin_db = Database(_admin_reason='discovery_settings_update')
+    try:
+        conn = admin_db.get_cloud_connection_by_id(connection_id)
+        if not conn or conn.get('organization_id') != tid:
+            return jsonify({'error': 'Connection not found'}), 404
+
+        enabled = discovery_enabled if discovery_enabled is not None else conn.get('discovery_enabled', False)
+        interval = discovery_interval_minutes if discovery_interval_minutes is not None else conn.get('discovery_interval_minutes', 360)
+
+        # Validate interval: minimum 60 minutes, maximum 1440 (24 hours)
+        interval = max(60, min(1440, int(interval)))
+
+        result = admin_db.update_discovery_settings(connection_id, enabled, interval)
+        if not result:
+            return jsonify({'error': 'Failed to update'}), 500
+
+        return jsonify({
+            'connection_id': connection_id,
+            'discovery_enabled': result.get('discovery_enabled', False),
+            'discovery_interval_minutes': result.get('discovery_interval_minutes', 360),
+            'last_snapshot_started_at': result.get('last_snapshot_started_at'),
+            'last_snapshot_completed_at': result.get('last_snapshot_completed_at'),
+        })
+    finally:
+        admin_db.close()
 
 
 def run_discovery():
@@ -18503,6 +18657,20 @@ def run_discovery():
             conn_id = int(data['connection_id'])
         except (ValueError, TypeError):
             pass
+
+    # Validate org has at least one connected cloud connection
+    if not conn_id:
+        admin_db = Database(_admin_reason='run_discovery: check connections')
+        try:
+            connections = admin_db.get_cloud_connections(tid, include_secrets=False)
+            connected = [c for c in connections if c.get('status') == 'connected']
+            if not connected:
+                return jsonify({
+                    "error": "Discovery requires a valid cloud connection. "
+                    "Add and test a cloud connection before triggering discovery."
+                }), 400
+        finally:
+            admin_db.close()
 
     def _run():
         try:
@@ -22110,6 +22278,1067 @@ def update_finding_status_handler(finding_id):
              f'Security finding #{finding_id} status → {new_status}',
              {'finding_id': finding_id, 'new_status': new_status, 'changed_by': changed_by})
 
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 6: Risk Findings (Rules-Based)
+# ================================================================
+
+def get_risk_findings_list():
+    """GET /api/risk/findings — list risk findings with optional filters."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        connection_id = request.args.get('connection_id', type=int)
+        severity = request.args.get('severity')
+        status = request.args.get('status')
+
+        findings = db.get_risk_findings(
+            limit=limit, offset=offset, connection_id=connection_id,
+            severity=severity, status=status,
+        )
+        stats = db.get_risk_findings_stats()
+        return jsonify({'findings': findings, 'count': len(findings), 'stats': stats})
+    finally:
+        db.close()
+
+
+def acknowledge_risk_finding(finding_id):
+    """POST /api/risk/findings/<id>/acknowledge — mark finding as acknowledged."""
+    user = getattr(g, 'current_user', None)
+    db = _db()
+    try:
+        changed_by = user['username'] if user else 'system'
+        result = db.update_risk_finding_status(finding_id, 'acknowledged', changed_by)
+        if not result:
+            return jsonify({'error': 'Finding not found'}), 404
+
+        _log(db, 'risk_finding_acknowledged',
+             f'Risk finding {finding_id} acknowledged',
+             {'finding_id': finding_id, 'changed_by': changed_by})
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def resolve_risk_finding(finding_id):
+    """POST /api/risk/findings/<id>/resolve — mark finding as resolved."""
+    user = getattr(g, 'current_user', None)
+    db = _db()
+    try:
+        changed_by = user['username'] if user else 'system'
+        result = db.update_risk_finding_status(finding_id, 'resolved', changed_by)
+        if not result:
+            return jsonify({'error': 'Finding not found'}), 404
+
+        _log(db, 'risk_finding_resolved',
+             f'Risk finding {finding_id} resolved',
+             {'finding_id': finding_id, 'changed_by': changed_by})
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 7: IAM Graph Queries
+# ================================================================
+
+def get_graph_identity_access(identity_id):
+    """GET /api/graph/identity/<id>/access — resources accessible by identity."""
+    db = _db()
+    try:
+        resources = db.get_identity_access_graph(identity_id)
+        return jsonify({
+            'identity': identity_id,
+            'resources': [r['external_id'] for r in resources],
+            'details': resources,
+        })
+    finally:
+        db.close()
+
+
+def get_graph_resource_identities(resource_id):
+    """GET /api/graph/resource/<path:id>/identities — identities with access to resource."""
+    db = _db()
+    try:
+        identities = db.get_resource_identity_access(resource_id)
+        return jsonify({
+            'resource': resource_id,
+            'identities': [i['external_id'] for i in identities],
+            'details': identities,
+        })
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 8: Privilege Escalation Detection
+# ================================================================
+
+def get_graph_identity_attack_paths(identity_id):
+    """GET /api/graph/identity/<id>/attack-paths — escalation paths for identity."""
+    db = _db()
+    try:
+        from app.engines.escalation_detector import EscalationDetector
+        detector = EscalationDetector(db)
+        paths = detector.get_identity_escalation_paths(identity_id)
+        findings = db.get_escalation_findings(identity_id)
+        return jsonify({
+            'identity': identity_id,
+            'attack_paths': paths,
+            'escalation_findings': findings,
+        })
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 9: Non-Human Identity Security
+# ================================================================
+
+def get_nhi_security_findings():
+    """GET /api/security/nhi — list NHI security findings."""
+    db = _db()
+    try:
+        findings = db.get_nhi_findings()
+        # Compute summary stats
+        total = len(findings)
+        open_count = sum(1 for f in findings if f.get('status') == 'open')
+        by_severity = {}
+        for f in findings:
+            if f.get('status') == 'open':
+                sev = f.get('severity', 'info')
+                by_severity[sev] = by_severity.get(sev, 0) + 1
+        return jsonify({
+            'findings': findings,
+            'count': total,
+            'stats': {
+                'total': total,
+                'open': open_count,
+                'by_severity': by_severity,
+            },
+        })
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 10: Executive Security Dashboard
+# ================================================================
+
+def get_dashboard_summary_handler():
+    """GET /api/dashboard/summary — executive dashboard metrics."""
+    db = _db()
+    try:
+        summary = db.get_dashboard_summary()
+        return jsonify(summary)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 11: Policy Recommendation Engine
+# ================================================================
+
+def get_policy_recommendations_handler():
+    """GET /api/security/recommendations — list policy recommendations."""
+    db = _db()
+    try:
+        connection_id = request.args.get('connection_id', type=int)
+        severity = request.args.get('severity')
+        status = request.args.get('status')
+        recommendations = db.get_policy_recommendations(
+            connection_id=connection_id, severity=severity, status=status
+        )
+        stats = db.get_policy_recommendation_stats()
+        return jsonify({
+            'recommendations': recommendations,
+            'count': len(recommendations),
+            'stats': stats,
+        })
+    finally:
+        db.close()
+
+
+def accept_policy_recommendation(rec_id):
+    """POST /api/security/recommendations/<id>/accept — accept recommendation."""
+    db = _db()
+    try:
+        rec = db.get_policy_recommendation_by_id(rec_id)
+        if not rec:
+            return jsonify({'error': 'Recommendation not found'}), 404
+        db.update_policy_recommendation_status(rec_id, 'accepted')
+        return jsonify({'status': 'accepted', 'id': str(rec_id)})
+    finally:
+        db.close()
+
+
+def dismiss_policy_recommendation(rec_id):
+    """POST /api/security/recommendations/<id>/dismiss — dismiss recommendation."""
+    db = _db()
+    try:
+        rec = db.get_policy_recommendation_by_id(rec_id)
+        if not rec:
+            return jsonify({'error': 'Recommendation not found'}), 404
+        db.update_policy_recommendation_status(rec_id, 'dismissed')
+        return jsonify({'status': 'dismissed', 'id': str(rec_id)})
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 12: Automated Remediation Engine
+# ================================================================
+
+def execute_remediation_handler(recommendation_id):
+    """POST /api/security/remediation/<recommendation_id>/execute — create and execute remediation."""
+    db = _db()
+    try:
+        from app.engines.remediation_engine import RemediationEngine
+        engine = RemediationEngine(db)
+        requested_by = None
+        if hasattr(g, 'current_user') and g.current_user:
+            requested_by = g.current_user.get('username', 'system')
+        org_id = _org_id()
+        action = engine.create_remediation_action(
+            recommendation_id, org_id, requested_by=requested_by
+        )
+        if not action:
+            return jsonify({'error': 'Recommendation not found'}), 404
+        return jsonify(action)
+    finally:
+        db.close()
+
+
+def approve_remediation_handler(action_id):
+    """POST /api/security/remediation/<action_id>/approve — approve pending action."""
+    db = _db()
+    try:
+        from app.engines.remediation_engine import RemediationEngine
+        engine = RemediationEngine(db)
+        approved_by = None
+        if hasattr(g, 'current_user') and g.current_user:
+            approved_by = g.current_user.get('username', 'system')
+        result = engine.approve_action(action_id, approved_by=approved_by)
+        if not result:
+            return jsonify({'error': 'Action not found'}), 404
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_remediation_actions_handler():
+    """GET /api/security/remediation/actions — list remediation actions."""
+    db = _db()
+    try:
+        status = request.args.get('status')
+        connection_id = request.args.get('connection_id', type=int)
+        actions = db.get_auto_remediation_actions(
+            status=status, connection_id=connection_id
+        )
+        stats = db.get_auto_remediation_stats()
+        return jsonify({
+            'actions': actions,
+            'count': len(actions),
+            'stats': stats,
+        })
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 13: Identity Attack Simulation
+# ================================================================
+
+def run_attack_simulation_handler():
+    """POST /api/security/attack-simulation — trigger attack simulation."""
+    db = _db()
+    try:
+        from app.engines.attack_simulator import AttackSimulator
+        data = request.get_json() or {}
+        identity_id = data.get('identity_id')
+        if not identity_id:
+            return jsonify({'error': 'identity_id is required'}), 400
+
+        connection_id = data.get('connection_id')
+        max_depth = data.get('max_depth', 6)
+        org_id = _org_id()
+
+        # If no connection_id, find first connected one
+        if not connection_id:
+            from app.database import Database as AdminDB
+            admin_db = AdminDB()
+            connections = admin_db.get_cloud_connections(org_id)
+            admin_db.close()
+            for c in connections:
+                if c.get('status') == 'connected':
+                    connection_id = c['id']
+                    break
+            if not connection_id:
+                return jsonify({'error': 'No connected cloud connections'}), 400
+
+        simulator = AttackSimulator(db)
+        result = simulator.simulate_identity_attack(
+            connection_id, org_id, identity_id, max_depth=max_depth
+        )
+
+        if 'error' in result:
+            return jsonify(result), 400
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_attack_simulation_handler(simulation_id):
+    """GET /api/security/attack-simulation/<simulation_id> — get simulation detail."""
+    db = _db()
+    try:
+        simulation = db.get_attack_simulation_by_id(simulation_id)
+        if not simulation:
+            return jsonify({'error': 'Simulation not found'}), 404
+        return jsonify(simulation)
+    finally:
+        db.close()
+
+
+def get_attack_simulations_list_handler():
+    """GET /api/security/attack-simulations — list simulations."""
+    db = _db()
+    try:
+        connection_id = request.args.get('connection_id', type=int)
+        identity_id = request.args.get('identity_id')
+        simulations = db.get_attack_simulations(
+            connection_id=connection_id, identity_id=identity_id
+        )
+        return jsonify({
+            'simulations': simulations,
+            'count': len(simulations),
+        })
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 14: Cross-Tenant Security Benchmarking
+# ================================================================
+
+def get_security_benchmark_handler():
+    """GET /api/security/benchmark — compare tenant posture against benchmarks."""
+    db = _db()
+    try:
+        from app.engines.benchmark_engine import BenchmarkEngine
+        org_id = _org_id()
+        engine = BenchmarkEngine(db)
+        comparison = engine.get_tenant_benchmark_comparison(org_id)
+        if 'error' in comparison:
+            return jsonify(comparison), 400
+        return jsonify(comparison)
+    finally:
+        db.close()
+
+
+def get_graph_visualization_handler():
+    """GET /api/graph/visualization — get full IAM graph for a connection."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        connection_id = request.args.get('connection_id')
+        if not connection_id:
+            return jsonify({'error': 'connection_id is required'}), 400
+        connection_id = int(connection_id)
+
+        # Try cached first
+        cached = db.get_graph_visualization_cache(connection_id, 'identity_graph')
+        if cached:
+            cached['id'] = str(cached['id'])
+            return jsonify(cached.get('graph_data', {}))
+
+        # Generate on the fly
+        from app.engines.graph_visualizer import GraphVisualizer
+        visualizer = GraphVisualizer(db)
+        result = visualizer.generate_identity_graph(connection_id, org_id)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_identity_graph_handler(identity_id):
+    """GET /api/graph/identity/<id> — get neighborhood graph around identity."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        from app.engines.graph_visualizer import GraphVisualizer
+        visualizer = GraphVisualizer(db)
+        result = visualizer.generate_identity_neighborhood(identity_id, org_id)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_attack_path_graph_handler(simulation_id):
+    """GET /api/graph/attack-path/<simulation_id> — get attack simulation graph."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        from app.engines.graph_visualizer import GraphVisualizer
+        visualizer = GraphVisualizer(db)
+        result = visualizer.generate_attack_graph(simulation_id, org_id)
+        if 'error' in result:
+            return jsonify(result), 404
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_risk_forecast_handler():
+    """GET /api/security/risk-forecast — get latest risk forecast or generate one."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        window = request.args.get('window', 30, type=int)
+        if window not in (7, 30, 90):
+            window = 30
+
+        # Try cached forecast first
+        forecast = db.get_latest_risk_forecast(window_days=window)
+        if forecast:
+            forecast['id'] = str(forecast['id'])
+            return jsonify(forecast)
+
+        # Generate on the fly
+        from app.engines.risk_forecaster import RiskForecaster
+        forecaster = RiskForecaster(db)
+        result = forecaster.generate_risk_forecast(org_id, window_days=window)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_generated_policy_handler(identity_id):
+    """GET /api/security/generated-policy/<identity_id> — get or generate least-privilege policy."""
+    db = _db()
+    try:
+        org_id = _org_id()
+
+        # Try cached policy first
+        policy = db.get_generated_policy_by_identity(identity_id)
+        if policy:
+            return jsonify(policy)
+
+        # Generate on the fly
+        from app.engines.policy_generator import PolicyGenerator
+        generator = PolicyGenerator(db)
+        result = generator.generate_least_privilege_policy(identity_id, org_id)
+        if result:
+            return jsonify(result)
+        return jsonify({'error': 'No policy generated — identity may not have high-privilege roles'}), 404
+    finally:
+        db.close()
+
+
+def get_generated_policies_list_handler():
+    """GET /api/security/generated-policies — list generated policies with filters."""
+    db = _db()
+    try:
+        connection_id = request.args.get('connection_id', type=int)
+        status = request.args.get('status')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        policies = db.get_generated_policies(
+            connection_id=connection_id,
+            status=status,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        stats = db.get_generated_policies_stats()
+        return jsonify({'policies': policies, 'count': len(policies), 'stats': stats})
+    finally:
+        db.close()
+
+
+def apply_generated_policy_handler(policy_id):
+    """POST /api/security/generated-policies/<policy_id>/apply — mark policy as applied."""
+    db = _db()
+    try:
+        result = db.update_generated_policy_status(policy_id, 'applied')
+        if not result:
+            return jsonify({'error': 'Policy not found'}), 404
+        _log(db, 'policy_applied', f"Applied generated policy {policy_id}",
+             {'policy_id': policy_id})
+        return jsonify({'status': 'applied', 'policy': result})
+    finally:
+        db.close()
+
+
+def dismiss_generated_policy_handler(policy_id):
+    """POST /api/security/generated-policies/<policy_id>/dismiss — dismiss a generated policy."""
+    db = _db()
+    try:
+        result = db.update_generated_policy_status(policy_id, 'dismissed')
+        if not result:
+            return jsonify({'error': 'Policy not found'}), 404
+        _log(db, 'policy_dismissed', f"Dismissed generated policy {policy_id}",
+             {'policy_id': policy_id})
+        return jsonify({'status': 'dismissed', 'policy': result})
+    finally:
+        db.close()
+
+
+def get_threat_events_handler():
+    """GET /api/security/threat-events — list identity threat events with filters."""
+    db = _db()
+    try:
+        event_type = request.args.get('event_type')
+        severity = request.args.get('severity')
+        status = request.args.get('status')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        events = db.get_identity_threat_events(
+            event_type=event_type,
+            severity=severity,
+            status=status,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        stats = db.get_identity_threat_events_stats()
+        return jsonify({'events': events, 'count': len(events), 'stats': stats})
+    finally:
+        db.close()
+
+
+def acknowledge_threat_event_handler(event_id):
+    """POST /api/security/threat-events/<event_id>/acknowledge — acknowledge a threat event."""
+    db = _db()
+    try:
+        result = db.update_identity_threat_event_status(event_id, 'acknowledged')
+        if not result:
+            return jsonify({'error': 'Event not found'}), 404
+        _log(db, 'threat_acknowledged', f"Acknowledged threat event {event_id}",
+             {'event_id': event_id})
+        return jsonify({'status': 'acknowledged', 'event': result})
+    finally:
+        db.close()
+
+
+def resolve_threat_event_handler(event_id):
+    """POST /api/security/threat-events/<event_id>/resolve — resolve a threat event."""
+    db = _db()
+    try:
+        result = db.update_identity_threat_event_status(event_id, 'resolved')
+        if not result:
+            return jsonify({'error': 'Event not found'}), 404
+        _log(db, 'threat_resolved', f"Resolved threat event {event_id}",
+             {'event_id': event_id})
+        return jsonify({'status': 'resolved', 'event': result})
+    finally:
+        db.close()
+
+
+def get_identity_history_handler(identity_id):
+    """GET /api/security/identity-history/<identity_id> — full identity activity timeline."""
+    db = _db()
+    try:
+        from app.engines.activity_ingestor import ActivityIngestor
+        ingestor = ActivityIngestor(db)
+        history = ingestor.get_identity_history(identity_id)
+        return jsonify(history)
+    finally:
+        db.close()
+
+
+def get_activity_events_handler():
+    """GET /api/security/activity-events — list identity activity events with filters."""
+    db = _db()
+    try:
+        identity_id = request.args.get('identity_id')
+        event_type = request.args.get('event_type')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        events = db.get_identity_activity_events(
+            identity_id=identity_id,
+            event_type=event_type,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        return jsonify({'events': events, 'count': len(events)})
+    finally:
+        db.close()
+
+
+def get_attack_incidents_handler():
+    """GET /api/security/incidents — list attack incidents with filters."""
+    db = _db()
+    try:
+        status = request.args.get('status')
+        severity = request.args.get('severity')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        incidents = db.get_attack_incidents(
+            status=status,
+            severity=severity,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        stats = db.get_attack_incidents_stats()
+        return jsonify({'incidents': incidents, 'count': len(incidents), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_attack_replay_handler(incident_id):
+    """GET /api/security/attack-replay/<incident_id> — full replay timeline."""
+    db = _db()
+    try:
+        from app.engines.attack_replay_engine import AttackReplayEngine
+        engine = AttackReplayEngine(db)
+        replay = engine.get_incident_replay(incident_id)
+        if not replay:
+            return jsonify({'error': 'Incident not found'}), 404
+        return jsonify(replay)
+    finally:
+        db.close()
+
+
+def update_incident_status_handler(incident_id):
+    """POST /api/security/incidents/<incident_id>/status — update incident status."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+        new_status = data.get('status', 'investigating')
+        if new_status not in ('open', 'investigating', 'resolved'):
+            return jsonify({'error': 'Invalid status'}), 400
+
+        result = db.update_attack_incident_status(incident_id, new_status)
+        if not result:
+            return jsonify({'error': 'Incident not found'}), 404
+
+        _log(db, 'incident_status_change',
+             f"Incident {incident_id} marked {new_status}",
+             {'incident_id': incident_id, 'new_status': new_status})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_response_actions_handler():
+    """GET /api/security/response-actions — list security response actions."""
+    db = _db()
+    try:
+        status = request.args.get('status')
+        incident_id = request.args.get('incident_id')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        actions = db.get_security_response_actions(
+            status=status,
+            incident_id=incident_id,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        stats = db.get_security_response_actions_stats()
+        return jsonify({'actions': actions, 'count': len(actions), 'stats': stats})
+    finally:
+        db.close()
+
+
+def approve_response_action_handler(action_id):
+    """POST /api/security/response-actions/<id>/approve — approve a pending action."""
+    db = _db()
+    try:
+        from app.engines.security_orchestrator import SecurityOrchestrator
+        orchestrator = SecurityOrchestrator(db)
+        user = g.current_user.get('username', 'system') if hasattr(g, 'current_user') and g.current_user else 'system'
+        result = orchestrator.approve_action(action_id, approved_by=user)
+        if not result:
+            return jsonify({'error': 'Action not found or not pending'}), 404
+
+        _log(db, 'response_action_approved',
+             f"Response action {action_id} approved by {user}",
+             {'action_id': action_id, 'approved_by': user})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def execute_response_action_handler(action_id):
+    """POST /api/security/response-actions/<id>/execute — execute an approved action."""
+    db = _db()
+    try:
+        from app.engines.security_orchestrator import SecurityOrchestrator
+        orchestrator = SecurityOrchestrator(db)
+        result = orchestrator.execute_action(action_id)
+        if not result:
+            return jsonify({'error': 'Action not found or not ready for execution'}), 404
+
+        _log(db, 'response_action_executed',
+             f"Response action {action_id} executed",
+             {'action_id': action_id, 'status': result.get('status')})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_attack_predictions_handler():
+    """GET /api/security/attack-predictions — list attack predictions."""
+    db = _db()
+    try:
+        risk_level = request.args.get('risk_level')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        predictions = db.get_attack_predictions(
+            risk_level=risk_level,
+            limit=min(limit, 200),
+            offset=offset,
+        )
+        stats = db.get_attack_predictions_stats()
+        return jsonify({'predictions': predictions, 'count': len(predictions), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_graph_insights_handler():
+    """GET /api/security/graph-insights — retrieve identity graph intelligence metrics."""
+    db = _db()
+    try:
+        risk_level = request.args.get('risk_level')
+        connection_id = request.args.get('connection_id', type=int)
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        insights = db.get_graph_insights(
+            limit=min(limit, 200),
+            offset=offset,
+            risk_level=risk_level,
+            connection_id=connection_id,
+        )
+        stats = db.get_graph_insights_stats()
+        return jsonify({'insights': insights, 'count': len(insights), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_governance_actions_handler():
+    """GET /api/security/governance-actions — retrieve identity governance actions."""
+    db = _db()
+    try:
+        status = request.args.get('status')
+        action = request.args.get('action')
+        connection_id = request.args.get('connection_id', type=int)
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        actions = db.get_governance_actions(
+            limit=min(limit, 200),
+            offset=offset,
+            status=status,
+            action=action,
+            connection_id=connection_id,
+        )
+        stats = db.get_governance_actions_stats()
+        return jsonify({'actions': actions, 'count': len(actions), 'stats': stats})
+    finally:
+        db.close()
+
+
+def run_risk_simulation_handler():
+    """POST /api/security/risk-simulation — run a risk simulation for an identity."""
+    db = _db()
+    try:
+        from app.engines.identity_risk_simulator import IdentityRiskSimulator
+        data = request.get_json(silent=True) or {}
+        identity_id = data.get('identity_id')
+        simulation_type = data.get('simulation_type', 'identity_compromise')
+        connection_id = data.get('connection_id')
+        if not identity_id:
+            return jsonify({'error': 'identity_id is required'}), 400
+        org_id = g.current_user.get('organization_id') or g.current_user.get('tenant_id')
+        simulator = IdentityRiskSimulator(db)
+        result = simulator.run_identity_risk_simulation(identity_id, simulation_type, org_id, connection_id)
+        if not result:
+            return jsonify({'error': 'Identity not found'}), 404
+        return jsonify({'simulation': result})
+    finally:
+        db.close()
+
+
+def get_risk_simulations_handler():
+    """GET /api/security/risk-simulations — list recent risk simulations."""
+    db = _db()
+    try:
+        simulation_type = request.args.get('simulation_type')
+        identity_id = request.args.get('identity_id')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        simulations = db.get_risk_simulations(
+            limit=min(limit, 200),
+            offset=offset,
+            simulation_type=simulation_type,
+            identity_id=identity_id,
+        )
+        stats = db.get_risk_simulations_stats()
+        return jsonify({'simulations': simulations, 'count': len(simulations), 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_integration_events_handler():
+    """GET /api/security/integrations — retrieve integration events and configs."""
+    db = _db()
+    try:
+        event_type = request.args.get('event_type')
+        destination = request.args.get('destination')
+        status = request.args.get('status')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        events = db.get_integration_events(
+            limit=min(limit, 200), offset=offset,
+            event_type=event_type, destination=destination, status=status,
+        )
+        stats = db.get_integration_events_stats()
+        configs = db.get_integration_configs()
+        return jsonify({'events': events, 'count': len(events), 'stats': stats, 'configs': configs})
+    finally:
+        db.close()
+
+
+def configure_integration_handler():
+    """POST /api/security/integrations/configure — create/update an integration config."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+        integration_type = data.get('integration_type')
+        enabled = data.get('enabled', False)
+        config = data.get('config', {})
+        if not integration_type or integration_type not in ('slack', 'jira', 'servicenow', 'siem'):
+            return jsonify({'error': 'Valid integration_type required (slack, jira, servicenow, siem)'}), 400
+        org_id = g.current_user.get('organization_id') or g.current_user.get('tenant_id')
+        db.upsert_integration_config(org_id, integration_type, enabled, config)
+        _log(db, 'integration_configured', f"Configured {integration_type} integration (enabled={enabled})")
+        return jsonify({'status': 'ok', 'integration_type': integration_type, 'enabled': enabled})
+    finally:
+        db.close()
+
+
+def get_command_center_handler():
+    """GET /api/security/command-center — identity security posture."""
+    db = _db()
+    try:
+        connection_id = request.args.get('connection_id', type=int)
+        latest = db.get_security_posture_latest()
+        history = db.get_security_posture(limit=20, connection_id=connection_id)
+        stats = db.get_security_posture_stats()
+        if latest:
+            if latest.get('created_at') and hasattr(latest['created_at'], 'isoformat'):
+                latest['created_at'] = latest['created_at'].isoformat()
+            if latest.get('id') and hasattr(latest['id'], 'hex'):
+                latest['id'] = str(latest['id'])
+        for h in history:
+            if h.get('created_at') and hasattr(h['created_at'], 'isoformat'):
+                h['created_at'] = h['created_at'].isoformat()
+            if h.get('id') and hasattr(h['id'], 'hex'):
+                h['id'] = str(h['id'])
+        return jsonify({'posture': latest, 'history': history, 'stats': stats})
+    finally:
+        db.close()
+
+
+def get_strategy_advisor_handler():
+    """GET /api/security/strategy-advisor — strategic security recommendations."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        priority = request.args.get('priority')
+        status = request.args.get('status')
+        connection_id = request.args.get('connection_id', type=int)
+        recommendations = db.get_strategy_recommendations(
+            limit=limit, offset=offset, priority=priority,
+            status=status, connection_id=connection_id)
+        stats = db.get_strategy_recommendations_stats()
+        for rec in recommendations:
+            if rec.get('created_at') and hasattr(rec['created_at'], 'isoformat'):
+                rec['created_at'] = rec['created_at'].isoformat()
+            if rec.get('id') and hasattr(rec['id'], 'hex'):
+                rec['id'] = str(rec['id'])
+        return jsonify({'recommendations': recommendations, 'stats': stats, 'count': len(recommendations)})
+    finally:
+        db.close()
+
+
+def get_governance_metrics_handler():
+    """GET /api/security/governance-metrics — governance posture metrics."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        connection_id = request.args.get('connection_id', type=int)
+        metric_type = request.args.get('metric_type')
+        metrics = db.get_governance_metrics(limit=limit, offset=offset,
+                                             connection_id=connection_id, metric_type=metric_type)
+        stats = db.get_governance_metrics_stats()
+        for m in metrics:
+            for key in ('computed_at',):
+                if m.get(key) and hasattr(m[key], 'isoformat'):
+                    m[key] = m[key].isoformat()
+            if m.get('id') and hasattr(m['id'], 'hex'):
+                m['id'] = str(m['id'])
+        return jsonify({'metrics': metrics, 'stats': stats, 'count': len(metrics)})
+    finally:
+        db.close()
+
+
+def get_governance_trends_handler():
+    """GET /api/security/governance-trends — governance trend analysis."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        connection_id = request.args.get('connection_id', type=int)
+        metric_type = request.args.get('metric_type')
+        trends = db.get_governance_trends(limit=limit, offset=offset,
+                                           connection_id=connection_id, metric_type=metric_type)
+        stats = db.get_governance_trends_stats()
+        for t in trends:
+            for key in ('period_start', 'period_end', 'computed_at'):
+                if t.get(key) and hasattr(t[key], 'isoformat'):
+                    t[key] = t[key].isoformat()
+            if t.get('id') and hasattr(t['id'], 'hex'):
+                t['id'] = str(t['id'])
+            for key in ('previous_value', 'current_value', 'change_pct'):
+                if key in t and hasattr(t[key], '__float__'):
+                    t[key] = float(t[key])
+        return jsonify({'trends': trends, 'stats': stats, 'count': len(trends)})
+    finally:
+        db.close()
+
+
+def process_copilot_query_handler():
+    """POST /api/security/copilot-query — process a natural language security query."""
+    db = _db()
+    try:
+        from app.engines.security_copilot import SecurityCopilot
+        data = request.get_json(silent=True) or {}
+        query = data.get('query', '').strip()
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
+
+        org_id = _tenant_id()
+        user_id = None
+        if hasattr(g, 'current_user') and g.current_user:
+            user_id = str(g.current_user.get('id', ''))
+
+        copilot = SecurityCopilot(db)
+        result = copilot.process_copilot_query(query, org_id, user_id=user_id)
+
+        _log(db, 'copilot_query',
+             f"Copilot query: {query[:100]}",
+             {'intent': result.get('intent')})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_copilot_history_handler():
+    """GET /api/security/copilot-history — get recent copilot query history."""
+    db = _db()
+    try:
+        limit = request.args.get('limit', 20, type=int)
+        queries = db.get_copilot_queries(limit=min(limit, 100))
+        return jsonify({'queries': queries, 'count': len(queries)})
+    finally:
+        db.close()
+
+
+def get_cloud_risk_summary_handler():
+    """GET /api/security/cloud-summary — risk findings grouped by cloud provider."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COALESCE(i.source, 'unknown') AS cloud_provider,
+                COUNT(DISTINCT i.id) AS identity_count,
+                SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END) AS critical_count,
+                SUM(CASE WHEN i.risk_level = 'high' THEN 1 ELSE 0 END) AS high_count,
+                SUM(CASE WHEN i.risk_level = 'medium' THEN 1 ELSE 0 END) AS medium_count,
+                SUM(CASE WHEN i.risk_level = 'low' THEN 1 ELSE 0 END) AS low_count
+            FROM identities i
+            JOIN discovery_runs dr ON i.discovery_run_id = dr.id
+            WHERE dr.status = 'completed'
+              AND dr.id = (
+                  SELECT MAX(dr2.id) FROM discovery_runs dr2
+                  WHERE dr2.cloud_connection_id = dr.cloud_connection_id
+                    AND dr2.status = 'completed'
+              )
+            GROUP BY COALESCE(i.source, 'unknown')
+            ORDER BY identity_count DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+
+        providers = {}
+        for r in rows:
+            provider = r['cloud_provider']
+            # Normalize provider names
+            if provider in ('azure_ad', 'azure_arm', 'azure'):
+                key = 'azure'
+            elif provider in ('aws_iam', 'aws'):
+                key = 'aws'
+            elif provider in ('gcp_iam', 'gcp'):
+                key = 'gcp'
+            else:
+                key = provider
+
+            if key not in providers:
+                providers[key] = {
+                    'cloud': key,
+                    'identity_count': 0,
+                    'critical': 0,
+                    'high': 0,
+                    'medium': 0,
+                    'low': 0,
+                }
+            providers[key]['identity_count'] += r['identity_count']
+            providers[key]['critical'] += r['critical_count']
+            providers[key]['high'] += r['high_count']
+            providers[key]['medium'] += r['medium_count']
+            providers[key]['low'] += r['low_count']
+
+        return jsonify({
+            'providers': list(providers.values()),
+            'total_providers': len(providers),
+        })
+    finally:
+        db.close()
+
+
+def get_security_advisor_handler():
+    """GET /api/security/advisor — get latest security advisor report or generate one."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        report = db.get_latest_security_advisor_report()
+        if report:
+            # Convert UUID to string for JSON serialization
+            report['id'] = str(report['id'])
+            return jsonify(report)
+        # No report exists yet — generate one on-the-fly
+        from app.engines.security_advisor import SecurityAdvisor
+        advisor = SecurityAdvisor(db)
+        result = advisor.generate_security_advisor_report(org_id)
         return jsonify(result)
     finally:
         db.close()

@@ -2,7 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 
 interface MonitoredResources {
-  azure: { subscriptions: number; subscription_ids: string[] };
+  azure: { subscriptions: number; subscription_ids: string[]; tenant_count?: number };
   aws: { accounts: number; account_ids: string[] };
   gcp: { projects: number; project_ids: string[] };
 }
@@ -83,6 +83,9 @@ export default function CloudContextBanner({ monitoredResources }: CloudContextB
                   className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${c.bgColor} ${c.textColor} border ${c.borderColor} hover:opacity-70 transition cursor-pointer`}
                 >
                   {c.count} {c.resourceLabel}
+                  {c.cloud === 'azure' && (monitoredResources.azure?.tenant_count ?? 0) > 1 && (
+                    <> · <span className="text-purple-600 font-semibold">{monitoredResources.azure.tenant_count} Tenants</span></>
+                  )}
                 </button>
               ) : (
                 <span className="text-[10px] text-gray-400">Not connected</span>

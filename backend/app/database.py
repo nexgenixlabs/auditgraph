@@ -1396,6 +1396,8 @@ class Database:
         Returns:
             discovery_run_id
         """
+        if cloud_connection_id is None:
+            raise ValueError("cloud_connection_id is required for discovery runs")
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -9018,6 +9020,38 @@ class Database:
     _migration_023_ensured = False
     _migration_024_ensured = False
     _migration_025_snapshot_integrity_ensured = False
+    _migration_037_multi_tenant_cloud_ensured = False
+    _migration_038_discovery_runs_connection_not_null_ensured = False
+    _migration_039_snapshot_jobs_ensured = False
+    _migration_040_snapshot_jobs_reliability_ensured = False
+    _migration_041_continuous_discovery_ensured = False
+    _migration_042_risk_evaluator_ensured = False
+    _migration_043_iam_graph_ensured = False
+    _migration_044_escalation_rules_ensured = False
+    _migration_045_nhi_rules_ensured = False
+    _migration_046_identity_credentials_ensured = False
+    _migration_047_policy_recommendations_ensured = False
+    _migration_048_remediation_actions_ensured = False
+    _migration_049_attack_simulation_ensured = False
+    _migration_050_security_benchmarks_ensured = False
+    _migration_051_security_advisor_ensured = False
+    _migration_052_graph_visualization_cache_ensured = False
+    _migration_053_multi_cloud_support_ensured = False
+    _migration_054_risk_forecasts_ensured = False
+    _migration_055_generated_policies_ensured = False
+    _migration_056_identity_threat_events_ensured = False
+    _migration_057_identity_data_lake_ensured = False
+    _migration_058_attack_replay_ensured = False
+    _migration_059_security_response_actions_ensured = False
+    _migration_060_copilot_queries_ensured = False
+    _migration_061_attack_predictions_ensured = False
+    _migration_062_graph_intelligence_ensured = False
+    _migration_063_identity_governance_ensured = False
+    _migration_064_risk_simulations_ensured = False
+    _migration_065_integration_events_ensured = False
+    _migration_066_governance_analytics_ensured = False
+    _migration_067_security_strategy_ensured = False
+    _migration_068_security_command_center_ensured = False
 
     def _run_migration_018_org_rename(self):
         """Phase 2C: Rename tenants→organizations, tenant_id→organization_id across all tables.
@@ -9494,6 +9528,38 @@ class Database:
         self._run_migration_023_connector_integrity()
         self._run_migration_024_subscription_reconciliation()
         self._run_migration_025_snapshot_integrity()
+        self._run_migration_037_multi_tenant_cloud()
+        self._run_migration_038_discovery_runs_connection_not_null()
+        self._run_migration_039_snapshot_jobs()
+        self._run_migration_040_snapshot_jobs_reliability()
+        self._run_migration_041_continuous_discovery()
+        self._run_migration_042_risk_evaluator()
+        self._run_migration_043_iam_graph()
+        self._run_migration_044_escalation_rules()
+        self._run_migration_045_nhi_rules()
+        self._run_migration_046_identity_credentials()
+        self._run_migration_047_policy_recommendations()
+        self._run_migration_048_remediation_actions()
+        self._run_migration_049_attack_simulation()
+        self._run_migration_050_security_benchmarks()
+        self._run_migration_051_security_advisor()
+        self._run_migration_052_graph_visualization_cache()
+        self._run_migration_053_multi_cloud_support()
+        self._run_migration_054_risk_forecasts()
+        self._run_migration_055_generated_policies()
+        self._run_migration_056_identity_threat_events()
+        self._run_migration_057_identity_data_lake()
+        self._run_migration_058_attack_replay()
+        self._run_migration_059_security_response_actions()
+        self._run_migration_060_copilot_queries()
+        self._run_migration_061_attack_predictions()
+        self._run_migration_062_graph_intelligence()
+        self._run_migration_063_identity_governance()
+        self._run_migration_064_risk_simulations()
+        self._run_migration_065_integration_events()
+        self._run_migration_066_governance_analytics()
+        self._run_migration_067_security_strategy()
+        self._run_migration_068_security_command_center()
 
     # ── Migration 020: Entitlement Hardening ───────────────────────────────────
 
@@ -9990,17 +10056,2521 @@ class Database:
         cursor.close()
         Database._migration_025_snapshot_integrity_ensured = True
 
+    # ── Migration 037: Multi-Tenant Cloud Model ──────────────────────────────
+
+    def _run_migration_037_multi_tenant_cloud(self):
+        """Phase 1 multi-tenant cloud: cloud_connection_id NOT NULL, per-connection unique
+        constraint, RLS on cloud_subscriptions, org_id sync trigger.
+        Idempotent — checks column nullability and constraint existence before altering."""
+        if Database._migration_037_multi_tenant_cloud_ensured:
+            return
+        self._ensure_cloud_subscriptions_table()
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor()
+
+        # Check if migration already applied (cloud_connection_id is NOT NULL)
+        cursor.execute("""
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_name = 'cloud_subscriptions' AND column_name = 'cloud_connection_id'
+        """)
+        row = cursor.fetchone()
+        if row and row[0] == 'NO':
+            # Already NOT NULL — migration applied
+            cursor.close()
+            Database._migration_037_multi_tenant_cloud_ensured = True
+            return
+
+        # 1a. Backfill cloud_connection_id from matching org+cloud connections
+        cursor.execute("""
+            UPDATE cloud_subscriptions s
+            SET cloud_connection_id = (
+                SELECT c.id FROM cloud_connections c
+                WHERE c.organization_id = s.organization_id AND c.cloud = s.cloud
+                ORDER BY c.created_at ASC LIMIT 1
+            )
+            WHERE s.cloud_connection_id IS NULL AND s.deleted = false
+        """)
+
+        # 1b. Soft-delete orphaned subscriptions (no matching connection)
+        cursor.execute("""
+            UPDATE cloud_subscriptions
+            SET deleted = true, deleted_at = NOW(), status = 'archived'
+            WHERE cloud_connection_id IS NULL AND deleted = false
+        """)
+
+        # 1b2. Backfill deleted rows with 0 so NOT NULL can apply
+        cursor.execute("""
+            UPDATE cloud_subscriptions SET cloud_connection_id = 0
+            WHERE cloud_connection_id IS NULL AND deleted = true
+        """)
+
+        # 1c. Make cloud_connection_id NOT NULL
+        cursor.execute("""
+            ALTER TABLE cloud_subscriptions
+            ALTER COLUMN cloud_connection_id SET NOT NULL
+        """)
+
+        # 1d. Drop old unique constraint, add new per-connection constraint
+        cursor.execute("""
+            ALTER TABLE cloud_subscriptions
+            DROP CONSTRAINT IF EXISTS cloud_subscriptions_organization_id_cloud_account_id_key
+        """)
+        cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'uq_connection_account'
+                ) THEN
+                    ALTER TABLE cloud_subscriptions
+                    ADD CONSTRAINT uq_connection_account UNIQUE (cloud_connection_id, account_id);
+                END IF;
+            END $$
+        """)
+
+        # 1e. Index on cloud_connection_id
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cloud_subs_connection
+            ON cloud_subscriptions(cloud_connection_id)
+        """)
+
+        # 1f. Enable RLS
+        cursor.execute("ALTER TABLE cloud_subscriptions ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE cloud_subscriptions FORCE ROW LEVEL SECURITY")
+
+        # RLS policies (drop first for idempotency)
+        for pol in ('sub_strict_sel', 'sub_strict_ins', 'sub_strict_upd', 'sub_strict_del'):
+            cursor.execute(f"DROP POLICY IF EXISTS {pol} ON cloud_subscriptions")
+
+        rls_using = """cloud_connection_id IN (
+            SELECT id FROM cloud_connections
+            WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+        )"""
+        cursor.execute(f"CREATE POLICY sub_strict_sel ON cloud_subscriptions FOR SELECT USING ({rls_using})")
+        cursor.execute(f"CREATE POLICY sub_strict_ins ON cloud_subscriptions FOR INSERT WITH CHECK ({rls_using})")
+        cursor.execute(f"CREATE POLICY sub_strict_upd ON cloud_subscriptions FOR UPDATE USING ({rls_using})")
+        cursor.execute(f"CREATE POLICY sub_strict_del ON cloud_subscriptions FOR DELETE USING ({rls_using})")
+
+        # 1g. Trigger to auto-fill organization_id from cloud_connections
+        cursor.execute("""
+            CREATE OR REPLACE FUNCTION fn_sync_sub_org_id()
+            RETURNS trigger AS $trg$
+            BEGIN
+              SELECT organization_id INTO NEW.organization_id
+                FROM cloud_connections WHERE id = NEW.cloud_connection_id;
+              RETURN NEW;
+            END;
+            $trg$ LANGUAGE plpgsql
+        """)
+        cursor.execute("DROP TRIGGER IF EXISTS trg_sync_sub_org_id ON cloud_subscriptions")
+        cursor.execute("""
+            CREATE TRIGGER trg_sync_sub_org_id
+            BEFORE INSERT OR UPDATE OF cloud_connection_id ON cloud_subscriptions
+            FOR EACH ROW EXECUTE FUNCTION fn_sync_sub_org_id()
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_037_multi_tenant_cloud_ensured = True
+
+    # ── Migration 038: discovery_runs cloud_connection_id NOT NULL ────────────
+
+    def _run_migration_038_discovery_runs_connection_not_null(self):
+        """Phase 2 discovery isolation: cloud_connection_id NOT NULL on discovery_runs.
+        Backfills NULLs from matching org connections, archives orphans, enforces NOT NULL.
+        Idempotent — checks is_nullable before running."""
+        if Database._migration_038_discovery_runs_connection_not_null_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # Check if migration already applied (cloud_connection_id is NOT NULL)
+        cursor.execute("""
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_name = 'discovery_runs' AND column_name = 'cloud_connection_id'
+        """)
+        row = cursor.fetchone()
+        if row and row[0] == 'NO':
+            # Already NOT NULL — migration applied
+            cursor.close()
+            Database._migration_038_discovery_runs_connection_not_null_ensured = True
+            return
+
+        if not row:
+            # Column doesn't exist yet — skip (discovery_runs table not created yet)
+            cursor.close()
+            Database._migration_038_discovery_runs_connection_not_null_ensured = True
+            return
+
+        # Step 1: Backfill NULL cloud_connection_id from matching org connection
+        cursor.execute("""
+            UPDATE discovery_runs dr
+            SET cloud_connection_id = (
+                SELECT c.id FROM cloud_connections c
+                WHERE c.organization_id = dr.organization_id
+                ORDER BY c.created_at ASC LIMIT 1
+            )
+            WHERE dr.cloud_connection_id IS NULL AND dr.organization_id IS NOT NULL
+        """)
+
+        # Step 2: Archive orphaned runs (no matching connection)
+        cursor.execute("""
+            UPDATE discovery_runs SET status = 'archived'
+            WHERE cloud_connection_id IS NULL
+        """)
+
+        # Step 3: Backfill remaining NULLs with 0 for NOT NULL constraint
+        cursor.execute("""
+            UPDATE discovery_runs SET cloud_connection_id = 0
+            WHERE cloud_connection_id IS NULL
+        """)
+
+        # Step 4: Enforce NOT NULL
+        cursor.execute("""
+            ALTER TABLE discovery_runs ALTER COLUMN cloud_connection_id SET NOT NULL
+        """)
+
+        # Step 5: Composite index for _latest_run_ids query pattern
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_discovery_runs_conn_status
+            ON discovery_runs(cloud_connection_id, status, id DESC)
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_038_discovery_runs_connection_not_null_ensured = True
+
+    # ── Migration 039: Snapshot Jobs ──────────────────────────────────────────
+
+    def _run_migration_039_snapshot_jobs(self):
+        """Phase 3 discovery lifecycle: snapshot_jobs table to track per-connection
+        discovery progress (queued→running→completed/failed) with stage-level reporting.
+        Idempotent — checks information_schema.tables before creating."""
+        if Database._migration_039_snapshot_jobs_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # Check if table already exists
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'snapshot_jobs'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_039_snapshot_jobs_ensured = True
+            return
+
+        # Create snapshot_jobs table
+        cursor.execute("""
+            CREATE TABLE snapshot_jobs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                discovery_run_id INTEGER,
+                scan_mode VARCHAR(20) NOT NULL DEFAULT 'deep',
+                status VARCHAR(20) NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+                stage VARCHAR(40)
+                    CHECK (stage IS NULL OR stage IN (
+                        'discovering_subscriptions', 'discovering_identities',
+                        'discovering_rbac', 'discovering_resources', 'finalizing'
+                    )),
+                progress INTEGER NOT NULL DEFAULT 0
+                    CHECK (progress >= 0 AND progress <= 100),
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                started_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ
+            )
+        """)
+
+        # Partial index for fast concurrency guard (active jobs per connection)
+        cursor.execute("""
+            CREATE INDEX idx_snapshot_jobs_conn_active
+            ON snapshot_jobs (cloud_connection_id, status)
+            WHERE status IN ('queued', 'running')
+        """)
+
+        # Index for listing jobs by org
+        cursor.execute("""
+            CREATE INDEX idx_snapshot_jobs_org_status
+            ON snapshot_jobs (organization_id, status, created_at DESC)
+        """)
+
+        # Enable RLS
+        cursor.execute("ALTER TABLE snapshot_jobs ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE snapshot_jobs FORCE ROW LEVEL SECURITY")
+
+        # Strict RLS policies using organization_id
+        for pol in ('sj_strict_sel', 'sj_strict_ins', 'sj_strict_upd', 'sj_strict_del'):
+            cursor.execute(f"DROP POLICY IF EXISTS {pol} ON snapshot_jobs")
+
+        rls_cond = "organization_id = current_setting('app.current_organization_id', true)::integer"
+        cursor.execute(f"CREATE POLICY sj_strict_sel ON snapshot_jobs FOR SELECT USING ({rls_cond})")
+        cursor.execute(f"CREATE POLICY sj_strict_ins ON snapshot_jobs FOR INSERT WITH CHECK ({rls_cond})")
+        cursor.execute(f"CREATE POLICY sj_strict_upd ON snapshot_jobs FOR UPDATE USING ({rls_cond})")
+        cursor.execute(f"CREATE POLICY sj_strict_del ON snapshot_jobs FOR DELETE USING ({rls_cond})")
+
+        # Grant to app user
+        cursor.execute("GRANT SELECT, INSERT, UPDATE ON snapshot_jobs TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_039_snapshot_jobs_ensured = True
+
+    # ── Snapshot Job CRUD Methods ──────────────────────────────────────────
+
+    def create_snapshot_job(self, org_id, conn_id, scan_mode='deep'):
+        """Create a queued snapshot job. Returns UUID string."""
+        import uuid
+        job_id = str(uuid.uuid4())
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO snapshot_jobs (id, organization_id, cloud_connection_id, scan_mode, status, created_at)
+            VALUES (%s, %s, %s, %s, 'queued', NOW())
+        """, (job_id, org_id, conn_id, scan_mode))
+        self._commit()
+        cursor.close()
+        return job_id
+
+    def start_snapshot_job(self, job_id, started_by=None):
+        """Transition a queued job to running with initial stage and heartbeat."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE snapshot_jobs
+            SET status = 'running', started_at = NOW(),
+                stage = 'discovering_subscriptions',
+                last_heartbeat_at = NOW(),
+                started_by = %s
+            WHERE id = %s AND status = 'queued'
+        """, (started_by, job_id))
+        self._commit()
+        cursor.close()
+
+    def update_snapshot_job_progress(self, job_id, stage, progress, discovery_run_id=None):
+        """Update stage, progress, and heartbeat for a running job."""
+        cursor = self.conn.cursor()
+        if discovery_run_id is not None:
+            cursor.execute("""
+                UPDATE snapshot_jobs
+                SET stage = %s, progress = %s, discovery_run_id = %s,
+                    last_heartbeat_at = NOW()
+                WHERE id = %s AND status = 'running'
+            """, (stage, progress, discovery_run_id, job_id))
+        else:
+            cursor.execute("""
+                UPDATE snapshot_jobs
+                SET stage = %s, progress = %s, last_heartbeat_at = NOW()
+                WHERE id = %s AND status = 'running'
+            """, (stage, progress, job_id))
+        self._commit()
+        cursor.close()
+
+    def complete_snapshot_job(self, job_id, status='completed', error_message=None, error_type=None):
+        """Mark a job as completed or failed."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE snapshot_jobs
+            SET status = %s, completed_at = NOW(), error_message = %s,
+                error_type = %s,
+                duration_seconds = CASE WHEN started_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (NOW() - started_at))::integer
+                    ELSE NULL END
+            WHERE id = %s
+        """, (status, error_message, error_type, job_id))
+        self._commit()
+        cursor.close()
+
+    def get_active_snapshot_job(self, cloud_connection_id):
+        """Get the active (queued/running) job for a connection, if any."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                   scan_mode, status, stage, progress, error_message,
+                   retry_count, duration_seconds,
+                   identities_discovered, resources_discovered, subscriptions_discovered,
+                   created_at, started_at, completed_at, last_heartbeat_at
+            FROM snapshot_jobs
+            WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
+            ORDER BY created_at DESC LIMIT 1
+        """, (cloud_connection_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            result = dict(row)
+            # Serialize UUID and timestamps
+            result['id'] = str(result['id'])
+            for ts_key in ('created_at', 'started_at', 'completed_at', 'last_heartbeat_at'):
+                if result.get(ts_key):
+                    result[ts_key] = result[ts_key].isoformat()
+            return result
+        return None
+
+    def get_snapshot_jobs_for_org(self, org_id, limit=20):
+        """List recent snapshot jobs for an organization with connection labels."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT sj.id, sj.organization_id, sj.cloud_connection_id, sj.discovery_run_id,
+                   sj.scan_mode, sj.status, sj.stage, sj.progress, sj.error_message,
+                   sj.retry_count, sj.duration_seconds,
+                   sj.identities_discovered, sj.resources_discovered, sj.subscriptions_discovered,
+                   sj.created_at, sj.started_at, sj.completed_at,
+                   cc.label AS connection_label, cc.cloud AS connection_cloud
+            FROM snapshot_jobs sj
+            LEFT JOIN cloud_connections cc ON sj.cloud_connection_id = cc.id
+            WHERE sj.organization_id = %s
+            ORDER BY sj.created_at DESC
+            LIMIT %s
+        """, (org_id, limit))
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r['id'] = str(r['id'])
+            for ts_key in ('created_at', 'started_at', 'completed_at'):
+                if r.get(ts_key):
+                    r[ts_key] = r[ts_key].isoformat()
+            results.append(r)
+        return results
+
+    # ── Migration 040: Snapshot Jobs Reliability ─────────────────────────────
+
+    def _run_migration_040_snapshot_jobs_reliability(self):
+        """Phase 4 discovery reliability: Add heartbeat, retry, metrics, and runtime
+        columns to snapshot_jobs. Idempotent — checks column existence before altering."""
+        if Database._migration_040_snapshot_jobs_reliability_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # Check if migration already applied (last_heartbeat_at column exists)
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'snapshot_jobs' AND column_name = 'last_heartbeat_at'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_040_snapshot_jobs_reliability_ensured = True
+            return
+
+        # Check if snapshot_jobs table exists at all
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'snapshot_jobs'
+        """)
+        if not cursor.fetchone():
+            cursor.close()
+            Database._migration_040_snapshot_jobs_reliability_ensured = True
+            return
+
+        # Add reliability columns
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN last_heartbeat_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN started_by VARCHAR(50)")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN identities_discovered INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN resources_discovered INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN subscriptions_discovered INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN duration_seconds INTEGER")
+        cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN error_type VARCHAR(30)")
+
+        # Heartbeat index for zombie detection
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshot_jobs_heartbeat
+            ON snapshot_jobs (last_heartbeat_at)
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_040_snapshot_jobs_reliability_ensured = True
+
+    # ── Migration 041: Continuous Discovery Columns ───────────────────────────
+
+    def _run_migration_041_continuous_discovery(self):
+        """Phase 5: Add discovery_enabled, discovery_interval_minutes,
+        last_snapshot_started_at, last_snapshot_completed_at to cloud_connections.
+        Idempotent — checks column existence before altering."""
+        if Database._migration_041_continuous_discovery_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # Check if migration already applied
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'cloud_connections' AND column_name = 'discovery_enabled'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_041_continuous_discovery_ensured = True
+            return
+
+        # Check if cloud_connections table exists
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'cloud_connections'
+        """)
+        if not cursor.fetchone():
+            cursor.close()
+            Database._migration_041_continuous_discovery_ensured = True
+            return
+
+        # Add continuous discovery columns
+        cursor.execute("ALTER TABLE cloud_connections ADD COLUMN discovery_enabled BOOLEAN NOT NULL DEFAULT false")
+        cursor.execute("ALTER TABLE cloud_connections ADD COLUMN discovery_interval_minutes INTEGER NOT NULL DEFAULT 360")
+        cursor.execute("ALTER TABLE cloud_connections ADD COLUMN last_snapshot_started_at TIMESTAMPTZ")
+        cursor.execute("ALTER TABLE cloud_connections ADD COLUMN last_snapshot_completed_at TIMESTAMPTZ")
+
+        # Index for efficient due-for-discovery lookups
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cloud_conn_discovery_enabled
+            ON cloud_connections (discovery_enabled, discovery_interval_minutes)
+            WHERE discovery_enabled = true
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_041_continuous_discovery_ensured = True
+
+    # ── Migration 042: Risk Evaluator ────────────────────────────────────────
+
+    def _run_migration_042_risk_evaluator(self):
+        """Phase 6: risk_rules + risk_findings tables for rules-based risk detection.
+        Idempotent — checks if risk_rules exists before running."""
+        if Database._migration_042_risk_evaluator_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'risk_rules' AND table_schema = 'public'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_042_risk_evaluator_ensured = True
+            return
+
+        # ── risk_rules (system-wide, NO RLS) ──────────────────────────────
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS risk_rules (
+                id              SERIAL PRIMARY KEY,
+                rule_key        VARCHAR(100) UNIQUE NOT NULL,
+                rule_name       VARCHAR(255) NOT NULL,
+                description     TEXT,
+                severity        VARCHAR(20) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low', 'info')),
+                rule_type       VARCHAR(60) NOT NULL CHECK (rule_type IN ('identity', 'credential', 'access', 'configuration', 'compliance', 'behavioral')),
+                enabled         BOOLEAN DEFAULT TRUE,
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_risk_rules_enabled ON risk_rules(enabled)")
+        cursor.execute("GRANT SELECT ON risk_rules TO auditgraph_app")
+
+        # ── risk_findings (org-scoped, WITH RLS) ─────────────────────────
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS risk_findings (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                rule_id             INTEGER REFERENCES risk_rules(id),
+                severity            VARCHAR(20) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low', 'info')),
+                identity_id         TEXT,
+                resource_id         TEXT,
+                metadata            JSONB DEFAULT '{}',
+                status              VARCHAR(20) DEFAULT 'open' CHECK (status IN ('open', 'acknowledged', 'resolved')),
+                detected_at         TIMESTAMPTZ DEFAULT NOW(),
+                resolved_at         TIMESTAMPTZ,
+                resolved_by         VARCHAR(100)
+            )
+        """)
+
+        # Indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_org ON risk_findings(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_connection ON risk_findings(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_rule ON risk_findings(rule_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_severity ON risk_findings(severity)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_status ON risk_findings(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_detected ON risk_findings(detected_at DESC)")
+
+        # Partial unique index for dedup
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rf_dedup
+                ON risk_findings (cloud_connection_id, rule_id, COALESCE(identity_id, ''), COALESCE(resource_id, ''))
+                WHERE status = 'open'
+        """)
+
+        # RLS
+        cursor.execute("ALTER TABLE risk_findings ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE risk_findings FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY rf_strict_sel ON risk_findings FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY rf_strict_ins ON risk_findings FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY rf_strict_upd ON risk_findings FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY rf_strict_del ON risk_findings FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE ON risk_findings TO auditgraph_app")
+
+        # Seed 6 default rules
+        cursor.execute("""
+            INSERT INTO risk_rules (rule_key, rule_name, description, severity, rule_type) VALUES
+                ('disabled_user_with_role', 'Disabled User with Active Roles', 'Disabled users that still have active role assignments', 'high', 'identity'),
+                ('guest_high_privilege', 'Guest with High Privilege', 'Guest users with Owner or Contributor role assignments', 'critical', 'access'),
+                ('spn_owner', 'Service Principal with Owner Role', 'Service principals assigned the Owner role', 'critical', 'access'),
+                ('expired_spn_secret', 'Expired SPN Credential', 'Service principals with expired credentials', 'high', 'credential'),
+                ('spn_secret_expiring', 'SPN Credential Expiring Soon', 'Service principal credentials expiring within 30 days', 'medium', 'credential'),
+                ('inactive_privileged', 'Inactive Privileged Identity', 'Inactive or stale identities with Owner/Contributor roles', 'high', 'identity')
+            ON CONFLICT (rule_key) DO NOTHING
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_042_risk_evaluator_ensured = True
+
+    # ── Migration 043: IAM Graph ─────────────────────────────────────────────
+
+    def _run_migration_043_iam_graph(self):
+        """Phase 7: graph_nodes + graph_edges tables for IAM relationship graph.
+        Idempotent — checks if graph_nodes exists before running."""
+        if Database._migration_043_iam_graph_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'graph_nodes' AND table_schema = 'public'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_043_iam_graph_ensured = True
+            return
+
+        # ── graph_nodes (org-scoped, WITH RLS) ────────────────────────────
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                node_type           VARCHAR(50) NOT NULL CHECK (node_type IN ('identity', 'role', 'resource', 'subscription')),
+                external_id         VARCHAR(500) NOT NULL,
+                display_name        VARCHAR(500),
+                metadata            JSONB DEFAULT '{}',
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gn_org ON graph_nodes(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gn_connection ON graph_nodes(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gn_type ON graph_nodes(node_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gn_external ON graph_nodes(external_id)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_gn_dedup ON graph_nodes(cloud_connection_id, node_type, external_id)")
+
+        # RLS for graph_nodes
+        cursor.execute("ALTER TABLE graph_nodes ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE graph_nodes FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY gn_strict_sel ON graph_nodes FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY gn_strict_ins ON graph_nodes FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY gn_strict_upd ON graph_nodes FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY gn_strict_del ON graph_nodes FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON graph_nodes TO auditgraph_app")
+
+        # ── graph_edges (org-scoped, WITH RLS) ────────────────────────────
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                source_node_id      UUID NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                target_node_id      UUID NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                edge_type           VARCHAR(50) NOT NULL CHECK (edge_type IN ('assigned_role', 'grants_access', 'contains_resource')),
+                metadata            JSONB DEFAULT '{}',
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_org ON graph_edges(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_connection ON graph_edges(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_source ON graph_edges(source_node_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_target ON graph_edges(target_node_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_type ON graph_edges(edge_type)")
+
+        # RLS for graph_edges
+        cursor.execute("ALTER TABLE graph_edges ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE graph_edges FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY ge_strict_sel ON graph_edges FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ge_strict_ins ON graph_edges FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ge_strict_upd ON graph_edges FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ge_strict_del ON graph_edges FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON graph_edges TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_043_iam_graph_ensured = True
+
+    # ── Migration 044: Escalation Rules ──────────────────────────────────────
+
+    def _run_migration_044_escalation_rules(self):
+        """Phase 8: Seed 4 privilege escalation detection rules.
+        Idempotent — uses ON CONFLICT DO NOTHING."""
+        if Database._migration_044_escalation_rules_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # Check if at least one escalation rule already exists
+        cursor.execute("""
+            SELECT 1 FROM risk_rules WHERE rule_key = 'identity_can_assign_owner'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_044_escalation_rules_ensured = True
+            return
+
+        cursor.execute("""
+            INSERT INTO risk_rules (rule_key, rule_name, description, severity, rule_type) VALUES
+                ('identity_can_assign_owner', 'Can Assign Owner Role', 'Identity has roleAssignments/write permission enabling Owner assignment', 'critical', 'access'),
+                ('service_principal_owner', 'Service Principal with Owner', 'Service principal has Owner role — high-privilege non-human access', 'high', 'access'),
+                ('managed_identity_contributor', 'Managed Identity with Contributor', 'Managed identity has Contributor or Owner role', 'medium', 'access'),
+                ('identity_can_modify_role_definitions', 'Can Modify Role Definitions', 'Identity has roleDefinitions/write permission enabling custom role creation', 'critical', 'access')
+            ON CONFLICT (rule_key) DO NOTHING
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_044_escalation_rules_ensured = True
+
+    # ── Migration 045: NHI Rules ─────────────────────────────────────────────
+
+    def _run_migration_045_nhi_rules(self):
+        """Phase 9: Seed 5 NHI security detection rules.
+        Idempotent — uses ON CONFLICT DO NOTHING."""
+        if Database._migration_045_nhi_rules_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT 1 FROM risk_rules WHERE rule_key = 'spn_secret_without_expiry'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_045_nhi_rules_ensured = True
+            return
+
+        cursor.execute("""
+            INSERT INTO risk_rules (rule_key, rule_name, description, severity, rule_type) VALUES
+                ('spn_secret_without_expiry', 'SPN Secret Without Expiry', 'Service principal secret has no expiration date set', 'critical', 'credential'),
+                ('spn_secret_older_than_180_days', 'SPN Secret Older Than 180 Days', 'Service principal secret created more than 180 days ago', 'high', 'credential'),
+                ('unused_service_principal', 'Unused Service Principal', 'Service principal with no sign-in activity in 90+ days', 'medium', 'identity'),
+                ('spn_owner_role', 'SPN with Owner Role', 'Service principal has Owner role assignment', 'high', 'access'),
+                ('managed_identity_high_privilege', 'Managed Identity High Privilege', 'Managed identity has Contributor or Owner role', 'medium', 'access')
+            ON CONFLICT (rule_key) DO NOTHING
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_045_nhi_rules_ensured = True
+
+    # ── Migration 046: Identity Credentials ──────────────────────────────────
+
+    def _run_migration_046_identity_credentials(self):
+        """Phase 10: identity_credentials table for credential inventory.
+        Idempotent — checks if table exists before running."""
+        if Database._migration_046_identity_credentials_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'identity_credentials' AND table_schema = 'public'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_046_identity_credentials_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_credentials (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id         TEXT NOT NULL,
+                credential_type     VARCHAR(50) NOT NULL CHECK (credential_type IN ('secret', 'certificate', 'key', 'password', 'token')),
+                created_at          TIMESTAMPTZ,
+                expires_at          TIMESTAMPTZ,
+                last_used_at        TIMESTAMPTZ,
+                metadata            JSONB DEFAULT '{}',
+                discovered_at       TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ic_org ON identity_credentials(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ic_connection ON identity_credentials(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ic_identity ON identity_credentials(identity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ic_type ON identity_credentials(credential_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ic_expires ON identity_credentials(expires_at)")
+
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ic_dedup
+                ON identity_credentials (cloud_connection_id, identity_id, credential_type, COALESCE(created_at, '1970-01-01'::timestamptz))
+        """)
+
+        cursor.execute("ALTER TABLE identity_credentials ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_credentials FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY ic_strict_sel ON identity_credentials FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ic_strict_ins ON identity_credentials FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ic_strict_upd ON identity_credentials FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ic_strict_del ON identity_credentials FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_credentials TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_046_identity_credentials_ensured = True
+
+    # ── Migration 047: Policy Recommendations ──────────────────────────────
+
+    def _run_migration_047_policy_recommendations(self):
+        """Phase 11: Create policy_recommendations table."""
+        if Database._migration_047_policy_recommendations_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'policy_recommendations'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_047_policy_recommendations_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS policy_recommendations (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                finding_id          UUID NULL,
+                identity_id         VARCHAR NULL,
+                resource_id         VARCHAR NULL,
+                recommendation_type VARCHAR(100) NOT NULL,
+                severity            VARCHAR(20) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low', 'info')),
+                description         TEXT,
+                recommended_action  TEXT,
+                confidence_score    INTEGER DEFAULT 80,
+                metadata            JSONB DEFAULT '{}',
+                status              VARCHAR(20) DEFAULT 'open' CHECK (status IN ('open', 'accepted', 'dismissed', 'resolved')),
+                created_at          TIMESTAMPTZ DEFAULT NOW(),
+                updated_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pr_org ON policy_recommendations(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pr_connection ON policy_recommendations(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pr_status ON policy_recommendations(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pr_severity ON policy_recommendations(severity)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pr_type ON policy_recommendations(recommendation_type)")
+
+        # Dedup: one recommendation per connection+type+identity while open/accepted
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_dedup
+                ON policy_recommendations (cloud_connection_id, recommendation_type, COALESCE(identity_id, ''))
+                WHERE status IN ('open', 'accepted')
+        """)
+
+        # RLS
+        cursor.execute("ALTER TABLE policy_recommendations ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE policy_recommendations FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY pr_strict_sel ON policy_recommendations FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY pr_strict_ins ON policy_recommendations FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY pr_strict_upd ON policy_recommendations FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY pr_strict_del ON policy_recommendations FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON policy_recommendations TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_047_policy_recommendations_ensured = True
+
+    # ── Migration 048: Remediation Actions ──────────────────────────────
+
+    def _run_migration_048_remediation_actions(self):
+        """Phase 12: Create auto_remediation_actions table."""
+        if Database._migration_048_remediation_actions_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'auto_remediation_actions'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_048_remediation_actions_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_remediation_actions (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                recommendation_id   UUID NULL,
+                action_type         VARCHAR(100) NOT NULL,
+                status              VARCHAR(20) DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'approved', 'executing', 'completed', 'failed')),
+                requested_by        VARCHAR(255),
+                approved_by         VARCHAR(255),
+                executed_at         TIMESTAMPTZ,
+                result_message      TEXT,
+                metadata            JSONB DEFAULT '{}',
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ara_org ON auto_remediation_actions(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ara_connection ON auto_remediation_actions(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ara_recommendation ON auto_remediation_actions(recommendation_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ara_status ON auto_remediation_actions(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ara_type ON auto_remediation_actions(action_type)")
+
+        # RLS
+        cursor.execute("ALTER TABLE auto_remediation_actions ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE auto_remediation_actions FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY ara_strict_sel ON auto_remediation_actions FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ara_strict_ins ON auto_remediation_actions FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ara_strict_upd ON auto_remediation_actions FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ara_strict_del ON auto_remediation_actions FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON auto_remediation_actions TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_048_remediation_actions_ensured = True
+
+    # ── Migration 049: Attack Simulation ────────────────────────────────
+
+    def _run_migration_049_attack_simulation(self):
+        """Phase 13: Create attack_simulations + attack_sim_paths tables."""
+        if Database._migration_049_attack_simulation_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'attack_simulations'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_049_attack_simulation_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS attack_simulations (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id         VARCHAR NOT NULL,
+                simulation_type     VARCHAR(50) DEFAULT 'identity_compromise'
+                    CHECK (simulation_type IN ('identity_compromise', 'service_principal_compromise')),
+                max_depth           INTEGER DEFAULT 6,
+                blast_radius        INTEGER DEFAULT 0,
+                metadata            JSONB DEFAULT '{}',
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_as_org ON attack_simulations(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_as_connection ON attack_simulations(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_as_identity ON attack_simulations(identity_id)")
+
+        # RLS on attack_simulations
+        cursor.execute("ALTER TABLE attack_simulations ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE attack_simulations FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY as_strict_sel ON attack_simulations FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY as_strict_ins ON attack_simulations FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY as_strict_upd ON attack_simulations FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY as_strict_del ON attack_simulations FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON attack_simulations TO auditgraph_app")
+
+        # Attack paths child table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS attack_sim_paths (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                simulation_id   UUID NOT NULL REFERENCES attack_simulations(id) ON DELETE CASCADE,
+                path_index      INTEGER NOT NULL,
+                source_identity VARCHAR NOT NULL,
+                target_resource VARCHAR NOT NULL,
+                path_length     INTEGER NOT NULL,
+                path_nodes      JSONB DEFAULT '[]',
+                risk_level      VARCHAR(20) DEFAULT 'medium',
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_asp_simulation ON attack_sim_paths(simulation_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_asp_source ON attack_sim_paths(source_identity)")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON attack_sim_paths TO auditgraph_app")
+
+        # Seed blast radius risk rule
+        cursor.execute("""
+            INSERT INTO risk_rules (rule_key, rule_name, description, severity, rule_type)
+            VALUES ('identity_large_blast_radius', 'Large Blast Radius',
+                    'Identity has access to a high number of resources through role assignments',
+                    'high', 'privilege_escalation')
+            ON CONFLICT (rule_key) DO NOTHING
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_049_attack_simulation_ensured = True
+
+    # ── Migration 050: Security Benchmarks ──────────────────────────────
+
+    def _run_migration_050_security_benchmarks(self):
+        """Phase 14: Create security_benchmarks + tenant_posture_metrics tables."""
+        if Database._migration_050_security_benchmarks_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'security_benchmarks'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_050_security_benchmarks_ensured = True
+            return
+
+        # Aggregated benchmarks — NO RLS (system-wide anonymised data)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS security_benchmarks (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                metric_name     VARCHAR(100) NOT NULL,
+                metric_value    FLOAT NOT NULL,
+                sample_size     INTEGER DEFAULT 0,
+                percentile_25   FLOAT,
+                percentile_50   FLOAT,
+                percentile_75   FLOAT,
+                computed_at     TIMESTAMPTZ DEFAULT NOW(),
+                metadata        JSONB DEFAULT '{}'
+            )
+        """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sb_metric ON security_benchmarks(metric_name)")
+        cursor.execute("GRANT SELECT ON security_benchmarks TO auditgraph_app")
+
+        # Per-tenant posture metrics (org-scoped with RLS)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_posture_metrics (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                risk_score          FLOAT DEFAULT 0,
+                critical_findings   INTEGER DEFAULT 0,
+                high_findings       INTEGER DEFAULT 0,
+                blast_radius_avg    FLOAT DEFAULT 0,
+                nhi_exposure        INTEGER DEFAULT 0,
+                escalation_paths    INTEGER DEFAULT 0,
+                identity_count      INTEGER DEFAULT 0,
+                metadata            JSONB DEFAULT '{}',
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tpm_org ON tenant_posture_metrics(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tpm_created ON tenant_posture_metrics(created_at DESC)")
+
+        cursor.execute("ALTER TABLE tenant_posture_metrics ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE tenant_posture_metrics FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY tpm_strict_sel ON tenant_posture_metrics FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY tpm_strict_ins ON tenant_posture_metrics FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY tpm_strict_upd ON tenant_posture_metrics FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY tpm_strict_del ON tenant_posture_metrics FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_posture_metrics TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_050_security_benchmarks_ensured = True
+
+    # ── Migration 051: Security Advisor Reports ──────────────────────────────
+
+    def _run_migration_051_security_advisor(self):
+        """Phase 15: Security Advisor Reports table.
+        Idempotent — checks information_schema before creating."""
+        if Database._migration_051_security_advisor_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'security_advisor_reports'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_051_security_advisor_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS security_advisor_reports (
+                id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id         INTEGER NOT NULL,
+                risk_score              FLOAT DEFAULT 0,
+                benchmark_percentile    FLOAT DEFAULT 50,
+                top_risks               JSONB DEFAULT '[]',
+                recommended_actions     JSONB DEFAULT '[]',
+                risk_reduction_estimate FLOAT DEFAULT 0,
+                metadata                JSONB DEFAULT '{}',
+                created_at              TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sar_org ON security_advisor_reports(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sar_created ON security_advisor_reports(created_at DESC)")
+
+        cursor.execute("ALTER TABLE security_advisor_reports ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE security_advisor_reports FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY sar_strict_sel ON security_advisor_reports FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY sar_strict_ins ON security_advisor_reports FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY sar_strict_upd ON security_advisor_reports FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY sar_strict_del ON security_advisor_reports FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON security_advisor_reports TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_051_security_advisor_ensured = True
+
+    # ── Migration 052: Graph Visualization Cache ─────────────────────────────
+
+    def _run_migration_052_graph_visualization_cache(self):
+        """Phase 16: Graph Visualization Cache table.
+        Idempotent — checks information_schema before creating."""
+        if Database._migration_052_graph_visualization_cache_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'graph_visualization_cache'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_052_graph_visualization_cache_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS graph_visualization_cache (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id     INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                graph_type          VARCHAR(30) NOT NULL CHECK (graph_type IN ('identity_graph', 'attack_path_graph')),
+                graph_data          JSONB DEFAULT '{}',
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gvc_org ON graph_visualization_cache(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gvc_connection ON graph_visualization_cache(cloud_connection_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gvc_type ON graph_visualization_cache(graph_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gvc_created ON graph_visualization_cache(created_at DESC)")
+
+        cursor.execute("ALTER TABLE graph_visualization_cache ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE graph_visualization_cache FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY gvc_strict_sel ON graph_visualization_cache FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY gvc_strict_ins ON graph_visualization_cache FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY gvc_strict_upd ON graph_visualization_cache FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY gvc_strict_del ON graph_visualization_cache FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON graph_visualization_cache TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_052_graph_visualization_cache_ensured = True
+
+    # ── Migration 053: Multi-Cloud Support ────────────────────────────────────
+
+    def _run_migration_053_multi_cloud_support(self):
+        """Phase 17: Extend graph model for AWS/GCP + seed cloud-specific risk rules.
+        Idempotent — checks for existing rules before seeding."""
+        if Database._migration_053_multi_cloud_support_ensured:
+            return
+        cursor = self.conn.cursor()
+
+        # Check if cloud-specific rules already exist
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'risk_rules'
+        """)
+        if not cursor.fetchone():
+            cursor.close()
+            Database._migration_053_multi_cloud_support_ensured = True
+            return
+
+        # Extend graph_nodes CHECK constraint for multi-cloud node types
+        try:
+            cursor.execute("ALTER TABLE graph_nodes DROP CONSTRAINT IF EXISTS graph_nodes_node_type_check")
+            cursor.execute("""ALTER TABLE graph_nodes ADD CONSTRAINT graph_nodes_node_type_check
+                CHECK (node_type IN (
+                    'identity', 'role', 'resource', 'subscription',
+                    'aws_user', 'aws_role', 'gcp_service_account', 'gcp_project'
+                ))""")
+        except Exception:
+            self.conn.rollback()
+
+        # Extend graph_edges CHECK constraint for multi-cloud edge types
+        try:
+            cursor.execute("ALTER TABLE graph_edges DROP CONSTRAINT IF EXISTS graph_edges_edge_type_check")
+            cursor.execute("""ALTER TABLE graph_edges ADD CONSTRAINT graph_edges_edge_type_check
+                CHECK (edge_type IN (
+                    'assigned_role', 'grants_access', 'contains_resource',
+                    'escalation_path', 'policy_attachment', 'role_binding'
+                ))""")
+        except Exception:
+            self.conn.rollback()
+
+        # Seed 4 cloud-specific risk rules
+        cursor.execute("""
+            INSERT INTO risk_rules (rule_key, rule_name, description, severity, rule_type) VALUES
+                ('aws_access_key_stale', 'AWS Access Key Older Than 90 Days', 'AWS IAM user with access key older than 90 days', 'high', 'credential'),
+                ('aws_user_admin_policy', 'AWS IAM User with Admin Policy', 'AWS IAM user with AdministratorAccess or equivalent attached', 'critical', 'access'),
+                ('gcp_sa_key_exposure', 'GCP Service Account Key Exposure', 'GCP service account with user-managed keys (potential key exposure)', 'high', 'credential'),
+                ('gcp_owner_on_project', 'GCP Owner Role on Project', 'Identity with Owner role binding on a GCP project', 'critical', 'access')
+            ON CONFLICT (rule_key) DO NOTHING
+        """)
+
+        self._commit()
+        cursor.close()
+        Database._migration_053_multi_cloud_support_ensured = True
+
+    # ── Migration 054: Risk Forecasts ─────────────────────────────────────────
+
+    def _run_migration_054_risk_forecasts(self):
+        """Phase 18: Risk Forecasts table.
+        Idempotent — checks information_schema before creating."""
+        if Database._migration_054_risk_forecasts_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'risk_forecasts'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_054_risk_forecasts_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS risk_forecasts (
+                id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id         INTEGER NOT NULL,
+                forecast_window_days    INTEGER NOT NULL DEFAULT 30,
+                current_risk_score      FLOAT DEFAULT 0,
+                predicted_risk_score    FLOAT DEFAULT 0,
+                trend_direction         VARCHAR(20) NOT NULL CHECK (trend_direction IN ('increasing', 'stable', 'decreasing')),
+                drivers                 JSONB DEFAULT '[]',
+                created_at              TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rfc_org ON risk_forecasts(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rfc_created ON risk_forecasts(created_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rfc_window ON risk_forecasts(forecast_window_days)")
+
+        cursor.execute("ALTER TABLE risk_forecasts ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE risk_forecasts FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY rfc_strict_sel ON risk_forecasts FOR SELECT TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY rfc_strict_ins ON risk_forecasts FOR INSERT TO auditgraph_app
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY rfc_strict_upd ON risk_forecasts FOR UPDATE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY rfc_strict_del ON risk_forecasts FOR DELETE TO auditgraph_app
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON risk_forecasts TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_054_risk_forecasts_ensured = True
+
+    def _run_migration_055_generated_policies(self):
+        """Phase 19: Create generated_policies table for least-privilege policy generation."""
+        if Database._migration_055_generated_policies_ensured:
+            return
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'generated_policies'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_055_generated_policies_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE generated_policies (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id VARCHAR(500) NOT NULL,
+                cloud_provider VARCHAR(20) NOT NULL,
+                generated_policy JSONB DEFAULT '{}',
+                policy_type VARCHAR(30) NOT NULL CHECK (policy_type IN ('least_privilege', 'role_replacement')),
+                confidence_score FLOAT DEFAULT 0.0,
+                status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'dismissed')),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX idx_gp_org ON generated_policies(organization_id)")
+        cursor.execute("CREATE INDEX idx_gp_connection ON generated_policies(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_gp_identity ON generated_policies(identity_id)")
+        cursor.execute("CREATE INDEX idx_gp_type ON generated_policies(policy_type)")
+        cursor.execute("CREATE INDEX idx_gp_created ON generated_policies(created_at DESC)")
+
+        cursor.execute("""
+            CREATE UNIQUE INDEX idx_gp_dedup
+                ON generated_policies(cloud_connection_id, identity_id, policy_type)
+                WHERE status = 'pending'
+        """)
+
+        cursor.execute("ALTER TABLE generated_policies ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE generated_policies FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""
+            CREATE POLICY gp_strict_sel ON generated_policies FOR SELECT
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY gp_strict_ins ON generated_policies FOR INSERT
+                WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY gp_strict_upd ON generated_policies FOR UPDATE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY gp_strict_del ON generated_policies FOR DELETE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON generated_policies TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_055_generated_policies_ensured = True
+
+    def _run_migration_056_identity_threat_events(self):
+        """Phase 20: Create identity_threat_events table for continuous threat detection."""
+        if Database._migration_056_identity_threat_events_ensured:
+            return
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'identity_threat_events'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_056_identity_threat_events_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE identity_threat_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id VARCHAR(500),
+                event_type VARCHAR(40) NOT NULL CHECK (event_type IN (
+                    'privilege_escalation', 'credential_creation',
+                    'suspicious_login', 'policy_change'
+                )),
+                severity VARCHAR(20) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low')),
+                description TEXT,
+                metadata JSONB DEFAULT '{}',
+                status VARCHAR(20) DEFAULT 'open' CHECK (status IN ('open', 'acknowledged', 'resolved')),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX idx_ite_org ON identity_threat_events(organization_id)")
+        cursor.execute("CREATE INDEX idx_ite_connection ON identity_threat_events(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_ite_identity ON identity_threat_events(identity_id)")
+        cursor.execute("CREATE INDEX idx_ite_event_type ON identity_threat_events(event_type)")
+        cursor.execute("CREATE INDEX idx_ite_severity ON identity_threat_events(severity)")
+        cursor.execute("CREATE INDEX idx_ite_status ON identity_threat_events(status)")
+        cursor.execute("CREATE INDEX idx_ite_created ON identity_threat_events(created_at DESC)")
+
+        cursor.execute("ALTER TABLE identity_threat_events ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_threat_events FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""
+            CREATE POLICY ite_strict_sel ON identity_threat_events FOR SELECT
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY ite_strict_ins ON identity_threat_events FOR INSERT
+                WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY ite_strict_upd ON identity_threat_events FOR UPDATE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY ite_strict_del ON identity_threat_events FOR DELETE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_threat_events TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_056_identity_threat_events_ensured = True
+
+    def _run_migration_057_identity_data_lake(self):
+        """Phase 21: Create identity data lake tables (activity_events, role_history, access_history)."""
+        if Database._migration_057_identity_data_lake_ensured:
+            return
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'identity_activity_events'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_057_identity_data_lake_ensured = True
+            return
+
+        # Table 1: identity_activity_events
+        cursor.execute("""
+            CREATE TABLE identity_activity_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id VARCHAR(500),
+                event_type VARCHAR(40) NOT NULL CHECK (event_type IN (
+                    'login', 'role_assignment', 'credential_change',
+                    'policy_update', 'resource_access'
+                )),
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_iae_org ON identity_activity_events(organization_id)")
+        cursor.execute("CREATE INDEX idx_iae_connection ON identity_activity_events(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_iae_identity ON identity_activity_events(identity_id)")
+        cursor.execute("CREATE INDEX idx_iae_event_type ON identity_activity_events(event_type)")
+        cursor.execute("CREATE INDEX idx_iae_created ON identity_activity_events(created_at DESC)")
+        cursor.execute("ALTER TABLE identity_activity_events ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_activity_events FORCE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY iae_strict_sel ON identity_activity_events FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iae_strict_ins ON identity_activity_events FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iae_strict_upd ON identity_activity_events FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iae_strict_del ON identity_activity_events FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_activity_events TO auditgraph_app")
+
+        # Table 2: identity_role_history
+        cursor.execute("""
+            CREATE TABLE identity_role_history (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                identity_id VARCHAR(500) NOT NULL,
+                role_name VARCHAR(255) NOT NULL,
+                scope VARCHAR(1000),
+                assigned_at TIMESTAMPTZ DEFAULT NOW(),
+                revoked_at TIMESTAMPTZ
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_irh_org ON identity_role_history(organization_id)")
+        cursor.execute("CREATE INDEX idx_irh_identity ON identity_role_history(identity_id)")
+        cursor.execute("CREATE INDEX idx_irh_role ON identity_role_history(role_name)")
+        cursor.execute("CREATE INDEX idx_irh_assigned ON identity_role_history(assigned_at DESC)")
+        cursor.execute("ALTER TABLE identity_role_history ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_role_history FORCE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY irh_strict_sel ON identity_role_history FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY irh_strict_ins ON identity_role_history FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY irh_strict_upd ON identity_role_history FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY irh_strict_del ON identity_role_history FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_role_history TO auditgraph_app")
+
+        # Table 3: identity_access_history
+        cursor.execute("""
+            CREATE TABLE identity_access_history (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                identity_id VARCHAR(500) NOT NULL,
+                resource_id VARCHAR(1000),
+                action VARCHAR(255),
+                access_time TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_iah_org ON identity_access_history(organization_id)")
+        cursor.execute("CREATE INDEX idx_iah_identity ON identity_access_history(identity_id)")
+        cursor.execute("CREATE INDEX idx_iah_resource ON identity_access_history(resource_id)")
+        cursor.execute("CREATE INDEX idx_iah_access_time ON identity_access_history(access_time DESC)")
+        cursor.execute("ALTER TABLE identity_access_history ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_access_history FORCE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY iah_strict_sel ON identity_access_history FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iah_strict_ins ON identity_access_history FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iah_strict_upd ON identity_access_history FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iah_strict_del ON identity_access_history FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_access_history TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_057_identity_data_lake_ensured = True
+
+    def _run_migration_058_attack_replay(self):
+        """Phase 23: Create identity_attack_incidents and identity_attack_replay_steps tables."""
+        if Database._migration_058_attack_replay_ensured:
+            return
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'identity_attack_incidents'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_058_attack_replay_ensured = True
+            return
+
+        # Table 1: identity_attack_incidents
+        cursor.execute("""
+            CREATE TABLE identity_attack_incidents (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                identity_id VARCHAR(500) NOT NULL,
+                incident_type VARCHAR(40) NOT NULL CHECK (incident_type IN (
+                    'privilege_escalation_attack', 'credential_compromise',
+                    'lateral_movement', 'resource_exposure'
+                )),
+                severity VARCHAR(20) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low')),
+                start_time TIMESTAMPTZ,
+                end_time TIMESTAMPTZ,
+                summary TEXT,
+                status VARCHAR(20) DEFAULT 'open' CHECK (status IN ('open', 'investigating', 'resolved')),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_iai_org ON identity_attack_incidents(organization_id)")
+        cursor.execute("CREATE INDEX idx_iai_identity ON identity_attack_incidents(identity_id)")
+        cursor.execute("CREATE INDEX idx_iai_type ON identity_attack_incidents(incident_type)")
+        cursor.execute("CREATE INDEX idx_iai_severity ON identity_attack_incidents(severity)")
+        cursor.execute("CREATE INDEX idx_iai_status ON identity_attack_incidents(status)")
+        cursor.execute("CREATE INDEX idx_iai_created ON identity_attack_incidents(created_at DESC)")
+        cursor.execute("ALTER TABLE identity_attack_incidents ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_attack_incidents FORCE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY iai_strict_sel ON identity_attack_incidents FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iai_strict_ins ON identity_attack_incidents FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iai_strict_upd ON identity_attack_incidents FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iai_strict_del ON identity_attack_incidents FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_attack_incidents TO auditgraph_app")
+
+        # Table 2: identity_attack_replay_steps
+        cursor.execute("""
+            CREATE TABLE identity_attack_replay_steps (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                incident_id UUID NOT NULL REFERENCES identity_attack_incidents(id),
+                step_index INTEGER NOT NULL,
+                event_type VARCHAR(60) NOT NULL,
+                event_time TIMESTAMPTZ,
+                description TEXT,
+                metadata JSONB DEFAULT '{}'
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_iars_incident ON identity_attack_replay_steps(incident_id)")
+        cursor.execute("CREATE INDEX idx_iars_step ON identity_attack_replay_steps(incident_id, step_index)")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_attack_replay_steps TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_058_attack_replay_ensured = True
+
+    def _run_migration_059_security_response_actions(self):
+        """Phase 24: security_response_actions table for autonomous security operations."""
+        if Database._migration_059_security_response_actions_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'security_response_actions'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_059_security_response_actions_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS security_response_actions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                incident_id UUID REFERENCES identity_attack_incidents(id),
+                identity_id VARCHAR(500),
+                response_action VARCHAR(40) NOT NULL CHECK (response_action IN (
+                    'rotate_credential', 'disable_identity',
+                    'remove_privileged_role', 'revert_policy_change'
+                )),
+                status VARCHAR(20) DEFAULT 'pending' CHECK (status IN (
+                    'pending', 'approved', 'executed', 'failed', 'rejected'
+                )),
+                metadata JSONB DEFAULT '{}',
+                approved_by VARCHAR(100),
+                approved_at TIMESTAMPTZ,
+                executed_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_sra_org ON security_response_actions(organization_id)")
+        cursor.execute("CREATE INDEX idx_sra_incident ON security_response_actions(incident_id)")
+        cursor.execute("CREATE INDEX idx_sra_identity ON security_response_actions(identity_id)")
+        cursor.execute("CREATE INDEX idx_sra_status ON security_response_actions(status)")
+        cursor.execute("CREATE INDEX idx_sra_action ON security_response_actions(response_action)")
+        cursor.execute("CREATE INDEX idx_sra_created ON security_response_actions(created_at DESC)")
+
+        cursor.execute("ALTER TABLE security_response_actions ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE security_response_actions FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY sra_strict_sel ON security_response_actions FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY sra_strict_ins ON security_response_actions FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY sra_strict_upd ON security_response_actions FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY sra_strict_del ON security_response_actions FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON security_response_actions TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_059_security_response_actions_ensured = True
+
+    def _run_migration_060_copilot_queries(self):
+        """Phase 25: copilot_queries table for AI Security Copilot."""
+        if Database._migration_060_copilot_queries_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'copilot_queries'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_060_copilot_queries_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS copilot_queries (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                user_id VARCHAR(100),
+                query TEXT NOT NULL,
+                response TEXT,
+                context JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_cq_org ON copilot_queries(organization_id)")
+        cursor.execute("CREATE INDEX idx_cq_user ON copilot_queries(user_id)")
+        cursor.execute("CREATE INDEX idx_cq_created ON copilot_queries(created_at DESC)")
+
+        cursor.execute("ALTER TABLE copilot_queries ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE copilot_queries FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY cq_strict_sel ON copilot_queries FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY cq_strict_ins ON copilot_queries FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY cq_strict_upd ON copilot_queries FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY cq_strict_del ON copilot_queries FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON copilot_queries TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_060_copilot_queries_ensured = True
+
+    def _run_migration_061_attack_predictions(self):
+        """Phase 26: identity_attack_predictions table for attack prediction."""
+        if Database._migration_061_attack_predictions_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'identity_attack_predictions'
+        """)
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_061_attack_predictions_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_attack_predictions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                identity_id VARCHAR(500) NOT NULL,
+                prediction_score FLOAT NOT NULL DEFAULT 0,
+                risk_level VARCHAR(20) NOT NULL CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+                risk_drivers JSONB DEFAULT '[]',
+                recommended_actions JSONB DEFAULT '[]',
+                confidence FLOAT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_iap_org ON identity_attack_predictions(organization_id)")
+        cursor.execute("CREATE INDEX idx_iap_identity ON identity_attack_predictions(identity_id)")
+        cursor.execute("CREATE INDEX idx_iap_risk ON identity_attack_predictions(risk_level)")
+        cursor.execute("CREATE INDEX idx_iap_score ON identity_attack_predictions(prediction_score DESC)")
+        cursor.execute("CREATE INDEX idx_iap_created ON identity_attack_predictions(created_at DESC)")
+
+        cursor.execute("ALTER TABLE identity_attack_predictions ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_attack_predictions FORCE ROW LEVEL SECURITY")
+
+        cursor.execute("""CREATE POLICY iap_strict_sel ON identity_attack_predictions FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iap_strict_ins ON identity_attack_predictions FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iap_strict_upd ON identity_attack_predictions FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY iap_strict_del ON identity_attack_predictions FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_attack_predictions TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_061_attack_predictions_ensured = True
+
+    def _run_migration_062_graph_intelligence(self):
+        """Phase 27: Create identity_graph_insights table for graph-based IAM analytics."""
+        if Database._migration_062_graph_intelligence_ensured:
+            return
+        cursor = self._cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'identity_graph_insights'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_062_graph_intelligence_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE identity_graph_insights (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id VARCHAR(500),
+                identity_name VARCHAR(500),
+                identity_category VARCHAR(100),
+                centrality_score FLOAT DEFAULT 0,
+                blast_radius INTEGER DEFAULT 0,
+                trust_chain_length INTEGER DEFAULT 0,
+                resource_reachability INTEGER DEFAULT 0,
+                privilege_concentration FLOAT DEFAULT 0,
+                risk_level VARCHAR(20) NOT NULL CHECK (risk_level IN ('critical', 'high', 'medium', 'low')),
+                insight_summary TEXT,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX idx_igi_org ON identity_graph_insights(organization_id)")
+        cursor.execute("CREATE INDEX idx_igi_connection ON identity_graph_insights(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_igi_identity ON identity_graph_insights(identity_id)")
+        cursor.execute("CREATE INDEX idx_igi_risk ON identity_graph_insights(risk_level)")
+        cursor.execute("CREATE INDEX idx_igi_centrality ON identity_graph_insights(centrality_score DESC)")
+        cursor.execute("CREATE INDEX idx_igi_created ON identity_graph_insights(created_at DESC)")
+
+        # Dedup: one insight per identity per connection
+        cursor.execute("""
+            CREATE UNIQUE INDEX idx_igi_dedup
+                ON identity_graph_insights(cloud_connection_id, identity_id)
+        """)
+
+        # RLS
+        cursor.execute("ALTER TABLE identity_graph_insights ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""
+            CREATE POLICY igi_strict_sel ON identity_graph_insights FOR SELECT
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY igi_strict_ins ON identity_graph_insights FOR INSERT
+                WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY igi_strict_upd ON identity_graph_insights FOR UPDATE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY igi_strict_del ON identity_graph_insights FOR DELETE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_graph_insights TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_062_graph_intelligence_ensured = True
+
+    def _run_migration_063_identity_governance(self):
+        """Phase 28: Create identity_governance_actions table for autonomous governance."""
+        if Database._migration_063_identity_governance_ensured:
+            return
+        cursor = self._cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'identity_governance_actions'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_063_identity_governance_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE identity_governance_actions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                identity_id VARCHAR(500),
+                identity_name VARCHAR(500),
+                identity_category VARCHAR(100),
+                governance_action VARCHAR(60) NOT NULL CHECK (governance_action IN (
+                    'downgrade_privileged_role', 'disable_unused_identity',
+                    'rotate_old_credential', 'remove_guest_privilege'
+                )),
+                status VARCHAR(20) DEFAULT 'pending' CHECK (status IN (
+                    'pending', 'approved', 'executed', 'failed'
+                )),
+                reason TEXT,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX idx_iga_org ON identity_governance_actions(organization_id)")
+        cursor.execute("CREATE INDEX idx_iga_connection ON identity_governance_actions(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_iga_identity ON identity_governance_actions(identity_id)")
+        cursor.execute("CREATE INDEX idx_iga_action ON identity_governance_actions(governance_action)")
+        cursor.execute("CREATE INDEX idx_iga_status ON identity_governance_actions(status)")
+        cursor.execute("CREATE INDEX idx_iga_created ON identity_governance_actions(created_at DESC)")
+
+        # Dedup: one pending action per identity per action type per connection
+        cursor.execute("""
+            CREATE UNIQUE INDEX idx_iga_dedup
+                ON identity_governance_actions(cloud_connection_id, identity_id, governance_action)
+                WHERE status = 'pending'
+        """)
+
+        # RLS
+        cursor.execute("ALTER TABLE identity_governance_actions ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""
+            CREATE POLICY iga_strict_sel ON identity_governance_actions FOR SELECT
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY iga_strict_ins ON identity_governance_actions FOR INSERT
+                WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY iga_strict_upd ON identity_governance_actions FOR UPDATE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY iga_strict_del ON identity_governance_actions FOR DELETE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_governance_actions TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_063_identity_governance_ensured = True
+
+    def _run_migration_064_risk_simulations(self):
+        """Phase 29: Create identity_risk_simulations table for risk simulation engine."""
+        if Database._migration_064_risk_simulations_ensured:
+            return
+        cursor = self._cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'identity_risk_simulations'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_064_risk_simulations_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE identity_risk_simulations (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER,
+                identity_id VARCHAR(500),
+                identity_name VARCHAR(500),
+                identity_category VARCHAR(100),
+                simulation_type VARCHAR(60) NOT NULL CHECK (simulation_type IN (
+                    'identity_compromise', 'credential_leak', 'privilege_grant'
+                )),
+                exposed_resources INTEGER DEFAULT 0,
+                exposed_identities INTEGER DEFAULT 0,
+                escalation_paths INTEGER DEFAULT 0,
+                simulation_score FLOAT DEFAULT 0,
+                risk_level VARCHAR(20) NOT NULL CHECK (risk_level IN ('critical', 'high', 'medium', 'low')),
+                impact_summary TEXT,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("CREATE INDEX idx_irs_org ON identity_risk_simulations(organization_id)")
+        cursor.execute("CREATE INDEX idx_irs_identity ON identity_risk_simulations(identity_id)")
+        cursor.execute("CREATE INDEX idx_irs_type ON identity_risk_simulations(simulation_type)")
+        cursor.execute("CREATE INDEX idx_irs_score ON identity_risk_simulations(simulation_score DESC)")
+        cursor.execute("CREATE INDEX idx_irs_created ON identity_risk_simulations(created_at DESC)")
+
+        # RLS
+        cursor.execute("ALTER TABLE identity_risk_simulations ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""
+            CREATE POLICY irs_strict_sel ON identity_risk_simulations FOR SELECT
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY irs_strict_ins ON identity_risk_simulations FOR INSERT
+                WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY irs_strict_upd ON identity_risk_simulations FOR UPDATE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+        cursor.execute("""
+            CREATE POLICY irs_strict_del ON identity_risk_simulations FOR DELETE
+                USING (organization_id = current_setting('app.current_organization_id', true)::integer)
+        """)
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON identity_risk_simulations TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_064_risk_simulations_ensured = True
+
+    def _run_migration_065_integration_events(self):
+        """Phase 30: Create integration_events + integration_configs tables."""
+        if Database._migration_065_integration_events_ensured:
+            return
+        cursor = self._cursor()
+        cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'integration_events'")
+        if cursor.fetchone():
+            cursor.close()
+            Database._migration_065_integration_events_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE integration_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                event_type VARCHAR(60) NOT NULL CHECK (event_type IN (
+                    'incident', 'threat', 'governance_action', 'risk_prediction'
+                )),
+                destination VARCHAR(60) NOT NULL CHECK (destination IN (
+                    'slack', 'jira', 'servicenow', 'siem'
+                )),
+                payload JSONB DEFAULT '{}',
+                status VARCHAR(20) DEFAULT 'pending' CHECK (status IN (
+                    'pending', 'sent', 'failed', 'skipped'
+                )),
+                error_message TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE integration_configs (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL,
+                integration_type VARCHAR(60) NOT NULL CHECK (integration_type IN (
+                    'slack', 'jira', 'servicenow', 'siem'
+                )),
+                enabled BOOLEAN DEFAULT FALSE,
+                config JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (organization_id, integration_type)
+            )
+        """)
+
+        # Indexes
+        cursor.execute("CREATE INDEX idx_ie_org ON integration_events(organization_id)")
+        cursor.execute("CREATE INDEX idx_ie_type ON integration_events(event_type)")
+        cursor.execute("CREATE INDEX idx_ie_dest ON integration_events(destination)")
+        cursor.execute("CREATE INDEX idx_ie_status ON integration_events(status)")
+        cursor.execute("CREATE INDEX idx_ie_created ON integration_events(created_at DESC)")
+        cursor.execute("CREATE INDEX idx_ic_org ON integration_configs(organization_id)")
+
+        # RLS on integration_events
+        cursor.execute("ALTER TABLE integration_events ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY ie_strict_sel ON integration_events FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ie_strict_ins ON integration_events FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ie_strict_upd ON integration_events FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ie_strict_del ON integration_events FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        # RLS on integration_configs
+        cursor.execute("ALTER TABLE integration_configs ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY ic_strict_sel ON integration_configs FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ic_strict_ins ON integration_configs FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ic_strict_upd ON integration_configs FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ic_strict_del ON integration_configs FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON integration_events TO auditgraph_app")
+        cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON integration_configs TO auditgraph_app")
+        cursor.execute("GRANT USAGE, SELECT ON SEQUENCE integration_configs_id_seq TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_065_integration_events_ensured = True
+
+    # ── Migration 066: Identity Governance Analytics ────────────────────────
+
+    def _run_migration_066_governance_analytics(self):
+        """Phase 31: identity_governance_metrics + identity_governance_trends tables.
+        Idempotent — checks information_schema before creating. Runs as admin (BYPASSRLS)."""
+        if Database._migration_066_governance_analytics_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'identity_governance_metrics'
+            )
+        """)
+        if cursor.fetchone()[0]:
+            cursor.close()
+            Database._migration_066_governance_analytics_ensured = True
+            return
+
+        # Table: identity_governance_metrics
+        cursor.execute("""
+            CREATE TABLE identity_governance_metrics (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                metric_type VARCHAR(60) NOT NULL CHECK (metric_type IN (
+                    'privilege_drift_rate',
+                    'stale_credentials_ratio',
+                    'guest_privilege_ratio',
+                    'inactive_identity_ratio'
+                )),
+                metric_value NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                sample_size INTEGER NOT NULL DEFAULT 0,
+                affected_count INTEGER NOT NULL DEFAULT 0,
+                metadata JSONB DEFAULT '{}',
+                computed_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_igm_org ON identity_governance_metrics(organization_id)")
+        cursor.execute("CREATE INDEX idx_igm_connection ON identity_governance_metrics(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_igm_metric_type ON identity_governance_metrics(metric_type)")
+        cursor.execute("CREATE INDEX idx_igm_computed_at ON identity_governance_metrics(computed_at DESC)")
+
+        cursor.execute("ALTER TABLE identity_governance_metrics ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY igm_strict_sel ON identity_governance_metrics FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY igm_strict_ins ON identity_governance_metrics FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY igm_strict_upd ON identity_governance_metrics FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY igm_strict_del ON identity_governance_metrics FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE ON identity_governance_metrics TO auditgraph_app")
+
+        # Table: identity_governance_trends
+        cursor.execute("""
+            CREATE TABLE identity_governance_trends (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                metric_type VARCHAR(60) NOT NULL CHECK (metric_type IN (
+                    'privilege_drift_rate',
+                    'stale_credentials_ratio',
+                    'guest_privilege_ratio',
+                    'inactive_identity_ratio'
+                )),
+                previous_value NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                current_value NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                change_pct NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                trend_direction VARCHAR(20) NOT NULL CHECK (trend_direction IN (
+                    'increasing', 'stable', 'decreasing'
+                )),
+                period_start TIMESTAMPTZ NOT NULL,
+                period_end TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                computed_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_igt_org ON identity_governance_trends(organization_id)")
+        cursor.execute("CREATE INDEX idx_igt_connection ON identity_governance_trends(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_igt_metric_type ON identity_governance_trends(metric_type)")
+        cursor.execute("CREATE INDEX idx_igt_computed_at ON identity_governance_trends(computed_at DESC)")
+
+        cursor.execute("ALTER TABLE identity_governance_trends ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY igt_strict_sel ON identity_governance_trends FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY igt_strict_ins ON identity_governance_trends FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY igt_strict_upd ON identity_governance_trends FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY igt_strict_del ON identity_governance_trends FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE ON identity_governance_trends TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_066_governance_analytics_ensured = True
+
+    # ── Migration 067: AI Security Strategy Advisor ────────────────────────
+
+    def _run_migration_067_security_strategy(self):
+        """Phase 32: security_strategy_recommendations table.
+        Idempotent — checks information_schema before creating. Runs as admin (BYPASSRLS)."""
+        if Database._migration_067_security_strategy_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'security_strategy_recommendations'
+            )
+        """)
+        if cursor.fetchone()[0]:
+            cursor.close()
+            Database._migration_067_security_strategy_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE security_strategy_recommendations (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                recommendation_type VARCHAR(60) NOT NULL CHECK (recommendation_type IN (
+                    'reduce_privileged_roles',
+                    'rotate_credentials',
+                    'remove_unused_identities',
+                    'limit_guest_privileges'
+                )),
+                risk_reduction_score FLOAT NOT NULL DEFAULT 0,
+                implementation_effort VARCHAR(20) NOT NULL CHECK (implementation_effort IN (
+                    'low', 'medium', 'high'
+                )),
+                priority VARCHAR(20) NOT NULL CHECK (priority IN (
+                    'critical', 'high', 'medium', 'low'
+                )),
+                title VARCHAR(255) NOT NULL,
+                description TEXT,
+                metadata JSONB DEFAULT '{}',
+                status VARCHAR(20) DEFAULT 'open' CHECK (status IN (
+                    'open', 'acknowledged', 'implemented', 'dismissed'
+                )),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_ssr_org ON security_strategy_recommendations(organization_id)")
+        cursor.execute("CREATE INDEX idx_ssr_connection ON security_strategy_recommendations(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_ssr_type ON security_strategy_recommendations(recommendation_type)")
+        cursor.execute("CREATE INDEX idx_ssr_priority ON security_strategy_recommendations(priority)")
+        cursor.execute("CREATE INDEX idx_ssr_status ON security_strategy_recommendations(status)")
+        cursor.execute("CREATE INDEX idx_ssr_created ON security_strategy_recommendations(created_at DESC)")
+        cursor.execute("""CREATE UNIQUE INDEX idx_ssr_dedup
+            ON security_strategy_recommendations(cloud_connection_id, recommendation_type)
+            WHERE status = 'open'""")
+
+        cursor.execute("ALTER TABLE security_strategy_recommendations ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY ssr_strict_sel ON security_strategy_recommendations FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ssr_strict_ins ON security_strategy_recommendations FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ssr_strict_upd ON security_strategy_recommendations FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY ssr_strict_del ON security_strategy_recommendations FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE ON security_strategy_recommendations TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_067_security_strategy_ensured = True
+
+    # ── Migration 068: Identity Security Command Center ────────────────────
+
+    def _run_migration_068_security_command_center(self):
+        """Phase 33: identity_security_posture table.
+        Idempotent — checks information_schema before creating. Runs as admin (BYPASSRLS)."""
+        if Database._migration_068_security_command_center_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'identity_security_posture'
+            )
+        """)
+        if cursor.fetchone()[0]:
+            cursor.close()
+            Database._migration_068_security_command_center_ensured = True
+            return
+
+        cursor.execute("""
+            CREATE TABLE identity_security_posture (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id INTEGER NOT NULL,
+                cloud_connection_id INTEGER NOT NULL,
+                risk_score FLOAT NOT NULL DEFAULT 0,
+                incident_count INTEGER NOT NULL DEFAULT 0,
+                prediction_count INTEGER NOT NULL DEFAULT 0,
+                governance_violation_count INTEGER NOT NULL DEFAULT 0,
+                strategy_recommendation_count INTEGER NOT NULL DEFAULT 0,
+                threat_event_count INTEGER NOT NULL DEFAULT 0,
+                active_identity_count INTEGER NOT NULL DEFAULT 0,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX idx_isp_org ON identity_security_posture(organization_id)")
+        cursor.execute("CREATE INDEX idx_isp_connection ON identity_security_posture(cloud_connection_id)")
+        cursor.execute("CREATE INDEX idx_isp_risk ON identity_security_posture(risk_score DESC)")
+        cursor.execute("CREATE INDEX idx_isp_created ON identity_security_posture(created_at DESC)")
+
+        cursor.execute("ALTER TABLE identity_security_posture ENABLE ROW LEVEL SECURITY")
+        cursor.execute("""CREATE POLICY isp_strict_sel ON identity_security_posture FOR SELECT
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY isp_strict_ins ON identity_security_posture FOR INSERT
+            WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY isp_strict_upd ON identity_security_posture FOR UPDATE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+        cursor.execute("""CREATE POLICY isp_strict_del ON identity_security_posture FOR DELETE
+            USING (organization_id = current_setting('app.current_organization_id', true)::integer)""")
+
+        cursor.execute("GRANT SELECT, INSERT, UPDATE ON identity_security_posture TO auditgraph_app")
+
+        self._commit()
+        cursor.close()
+        Database._migration_068_security_command_center_ensured = True
+
+    # ── Snapshot Job Reliability Methods ───────────────────────────────────
+
+    def update_snapshot_job_heartbeat(self, job_id):
+        """Update heartbeat timestamp for a running job."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE snapshot_jobs
+            SET last_heartbeat_at = NOW()
+            WHERE id = %s AND status = 'running'
+        """, (job_id,))
+        self._commit()
+        cursor.close()
+
+    def get_zombie_snapshot_jobs(self, stale_minutes=5):
+        """Find running jobs whose heartbeat is stale (zombie detection)."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                   status, stage, progress, retry_count, max_retries,
+                   last_heartbeat_at, started_at, error_message
+            FROM snapshot_jobs
+            WHERE status = 'running'
+              AND last_heartbeat_at IS NOT NULL
+              AND last_heartbeat_at < NOW() - INTERVAL '%s minutes'
+        """, (stale_minutes,))
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r['id'] = str(r['id'])
+            for ts_key in ('last_heartbeat_at', 'started_at'):
+                if r.get(ts_key):
+                    r[ts_key] = r[ts_key].isoformat()
+            results.append(r)
+        return results
+
+    def get_runtime_exceeded_jobs(self, max_runtime_minutes=30):
+        """Find running jobs that have exceeded the runtime limit."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                   status, stage, progress, started_at
+            FROM snapshot_jobs
+            WHERE status = 'running'
+              AND started_at IS NOT NULL
+              AND started_at < NOW() - INTERVAL '%s minutes'
+        """, (max_runtime_minutes,))
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r['id'] = str(r['id'])
+            if r.get('started_at'):
+                r['started_at'] = r['started_at'].isoformat()
+            results.append(r)
+        return results
+
+    def retry_snapshot_job(self, job_id):
+        """Reset a failed job to queued for retry. Increments retry_count."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE snapshot_jobs
+            SET status = 'queued',
+                retry_count = retry_count + 1,
+                error_message = NULL,
+                error_type = NULL,
+                completed_at = NULL,
+                started_at = NULL,
+                last_heartbeat_at = NULL,
+                stage = NULL,
+                progress = 0
+            WHERE id = %s AND status = 'failed'
+              AND retry_count < max_retries
+            RETURNING retry_count
+        """, (job_id,))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return row[0] if row else None
+
+    def get_retryable_failed_jobs(self):
+        """Find failed jobs eligible for automatic retry."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, organization_id, cloud_connection_id, retry_count, max_retries,
+                   error_type, error_message
+            FROM snapshot_jobs
+            WHERE status = 'failed'
+              AND retry_count < max_retries
+              AND error_type IN ('throttling', 'network_timeout', 'temporary_auth_failure')
+              AND completed_at > NOW() - INTERVAL '1 hour'
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r['id'] = str(r['id'])
+            results.append(r)
+        return results
+
+    def update_snapshot_job_metrics(self, job_id, identities=0, resources=0, subscriptions=0):
+        """Record discovery metrics on a job."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE snapshot_jobs
+            SET identities_discovered = %s,
+                resources_discovered = %s,
+                subscriptions_discovered = %s,
+                duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::integer
+            WHERE id = %s
+        """, (identities, resources, subscriptions, job_id))
+        self._commit()
+        cursor.close()
+
+    def get_snapshot_history(self, connection_id=None, org_id=None, limit=10):
+        """Get snapshot job history for a connection or organization."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if connection_id:
+            cursor.execute("""
+                SELECT sj.id AS job_id, sj.status, sj.stage, sj.progress,
+                       sj.started_at, sj.completed_at, sj.duration_seconds,
+                       sj.identities_discovered, sj.resources_discovered,
+                       sj.subscriptions_discovered, sj.retry_count, sj.error_message,
+                       sj.error_type, sj.scan_mode,
+                       cc.label AS connection_label, cc.cloud AS connection_cloud
+                FROM snapshot_jobs sj
+                LEFT JOIN cloud_connections cc ON sj.cloud_connection_id = cc.id
+                WHERE sj.cloud_connection_id = %s
+                ORDER BY sj.created_at DESC
+                LIMIT %s
+            """, (connection_id, limit))
+        elif org_id:
+            cursor.execute("""
+                SELECT sj.id AS job_id, sj.status, sj.stage, sj.progress,
+                       sj.cloud_connection_id,
+                       sj.started_at, sj.completed_at, sj.duration_seconds,
+                       sj.identities_discovered, sj.resources_discovered,
+                       sj.subscriptions_discovered, sj.retry_count, sj.error_message,
+                       sj.error_type, sj.scan_mode,
+                       cc.label AS connection_label, cc.cloud AS connection_cloud
+                FROM snapshot_jobs sj
+                LEFT JOIN cloud_connections cc ON sj.cloud_connection_id = cc.id
+                WHERE sj.organization_id = %s
+                ORDER BY sj.created_at DESC
+                LIMIT %s
+            """, (org_id, limit))
+        else:
+            cursor.close()
+            return []
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            r = dict(row)
+            r['job_id'] = str(r['job_id'])
+            for ts_key in ('started_at', 'completed_at'):
+                if r.get(ts_key):
+                    r[ts_key] = r[ts_key].isoformat()
+            results.append(r)
+        return results
+
+    # ── Continuous Discovery Methods ──────────────────────────────────────
+
+    def get_connections_due_for_discovery(self):
+        """Get cloud connections that are enabled for continuous discovery and
+        are due for their next scan based on their interval.
+        Returns connections where:
+          - discovery_enabled = true
+          - status = 'connected'
+          - No active snapshot job exists
+          - Enough time has passed since last_snapshot_started_at (or never scanned)
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT cc.*, cc.metadata
+            FROM cloud_connections cc
+            WHERE cc.discovery_enabled = true
+              AND cc.status = 'connected'
+              AND NOT EXISTS (
+                  SELECT 1 FROM snapshot_jobs sj
+                  WHERE sj.cloud_connection_id = cc.id
+                    AND sj.status IN ('queued', 'running')
+              )
+              AND (
+                  cc.last_snapshot_started_at IS NULL
+                  OR cc.last_snapshot_started_at < NOW() - (cc.discovery_interval_minutes || ' minutes')::interval
+              )
+            ORDER BY cc.last_snapshot_started_at ASC NULLS FIRST
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            r = dict(row)
+            if isinstance(r.get('metadata'), str):
+                import json as _json
+                try:
+                    r['metadata'] = _json.loads(r['metadata'])
+                except Exception:
+                    r['metadata'] = {}
+            for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at',
+                       'last_snapshot_started_at', 'last_snapshot_completed_at'):
+                if r.get(ts):
+                    r[ts] = r[ts].isoformat()
+            results.append(r)
+        return results
+
+    def update_discovery_settings(self, connection_id, discovery_enabled, discovery_interval_minutes):
+        """Update continuous discovery settings for a connection."""
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        params = [discovery_enabled, discovery_interval_minutes, connection_id]
+        if self._organization_id is not None:
+            params.append(self._organization_id)
+            org_clause = " AND organization_id = %s"
+        else:
+            org_clause = ""
+        cursor.execute(f"""
+            UPDATE cloud_connections
+            SET discovery_enabled = %s,
+                discovery_interval_minutes = %s,
+                updated_at = NOW()
+            WHERE id = %s{org_clause}
+            RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if not row:
+            return None
+        result = dict(row)
+        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at',
+                    'last_snapshot_started_at', 'last_snapshot_completed_at'):
+            if result.get(ts):
+                result[ts] = result[ts].isoformat()
+        return result
+
+    def update_snapshot_timestamps(self, connection_id, started=False, completed=False):
+        """Update last_snapshot_started_at and/or last_snapshot_completed_at."""
+        parts = []
+        if started:
+            parts.append("last_snapshot_started_at = NOW()")
+        if completed:
+            parts.append("last_snapshot_completed_at = NOW()")
+        if not parts:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute(f"""
+            UPDATE cloud_connections SET {', '.join(parts)}
+            WHERE id = %s
+        """, (connection_id,))
+        self._commit()
+        cursor.close()
+
     def reconcile_subscriptions(self, organization_id):
-        """FIX1C.1: Identify and soft-delete subscriptions whose cloud_connection_id
-        is NULL (legacy sync artifacts), points to a deleted connector, or belongs to
-        a different org. Also resets usage counters for the org.
+        """Identify and soft-delete subscriptions whose cloud_connection_id
+        points to a deleted connector or belongs to a different org.
+        Also resets usage counters for the org.
         Returns dict with counts of reconciled items.
+        Note: cloud_connection_id IS NULL is impossible post-migration 037 (NOT NULL constraint).
         """
         self._ensure_cloud_subscriptions_table()
         self._ensure_cloud_connections_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Step 1: Find orphaned subs — no connector, connector deleted, or connector belongs to different org
+        # Step 1: Find orphaned subs — connector was deleted, or connector belongs to different org
         cursor.execute("""
             SELECT s.id, s.account_id, s.account_name, s.cloud, s.monitored,
                    s.cloud_connection_id, c.organization_id AS conn_org_id
@@ -10009,9 +12579,8 @@ class Database:
             WHERE s.organization_id = %s
               AND s.deleted = false
               AND (
-                  s.cloud_connection_id IS NULL  -- legacy sync artifact, never linked to connector
-                  OR c.id IS NULL  -- connector was deleted
-                  OR c.organization_id != s.organization_id  -- connector belongs to different org
+                  c.id IS NULL  -- connector was deleted (FK CASCADE should prevent, but defense-in-depth)
+                  OR c.organization_id != s.organization_id  -- connector belongs to different org (trigger should prevent, but defense-in-depth)
               )
         """, (organization_id,))
         orphaned = [dict(r) for r in cursor.fetchall()]
@@ -10064,6 +12633,2512 @@ class Database:
                 for r in orphaned
             ],
         }
+
+    # ── Risk Rules & Findings CRUD ────────────────────────────────────────────
+
+    def get_risk_rules(self, enabled_only=False):
+        """Get risk rules (system-wide, no RLS needed)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if enabled_only:
+            cursor.execute("SELECT * FROM risk_rules WHERE enabled = true ORDER BY id")
+        else:
+            cursor.execute("SELECT * FROM risk_rules ORDER BY id")
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def save_risk_findings(self, connection_id, org_id, findings):
+        """UPSERT risk findings with dedup on open findings."""
+        from psycopg2.extras import RealDictCursor
+        import json as _json
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        for f in findings:
+            cursor.execute("""
+                INSERT INTO risk_findings
+                    (organization_id, cloud_connection_id, rule_id, severity,
+                     identity_id, resource_id, metadata, status, detected_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', NOW())
+                ON CONFLICT (cloud_connection_id, rule_id, COALESCE(identity_id, ''), COALESCE(resource_id, ''))
+                    WHERE status = 'open'
+                DO UPDATE SET
+                    detected_at = NOW(),
+                    severity = EXCLUDED.severity,
+                    metadata = EXCLUDED.metadata
+            """, (
+                org_id, connection_id, f['rule_id'], f['severity'],
+                f.get('identity_id'), f.get('resource_id'),
+                _json.dumps(f.get('metadata', {})),
+            ))
+        self._commit()
+        cursor.close()
+
+    def get_risk_findings(self, limit=50, offset=0, connection_id=None,
+                          severity=None, status=None):
+        """Get risk findings with optional filters, joined to risk_rules."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+
+        if connection_id:
+            conditions.append("rf.cloud_connection_id = %s")
+            params.append(connection_id)
+        if severity:
+            conditions.append("rf.severity = %s")
+            params.append(severity)
+        if status:
+            conditions.append("rf.status = %s")
+            params.append(status)
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        # Order by severity priority then detected_at DESC
+        cursor.execute(f"""
+            SELECT rf.*, rr.rule_key, rr.rule_name, rr.rule_type
+            FROM risk_findings rf
+            LEFT JOIN risk_rules rr ON rr.id = rf.rule_id
+            {where}
+            ORDER BY
+                CASE rf.severity
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4
+                    WHEN 'info' THEN 5
+                END,
+                rf.detected_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = cursor.fetchall()
+        cursor.close()
+
+        results = []
+        for r in rows:
+            d = dict(r)
+            d['id'] = str(d['id'])
+            if d.get('detected_at'):
+                d['detected_at'] = d['detected_at'].isoformat()
+            if d.get('resolved_at'):
+                d['resolved_at'] = d['resolved_at'].isoformat()
+            results.append(d)
+        return results
+
+    def get_risk_finding_by_id(self, finding_id):
+        """Get a single risk finding by UUID."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT rf.*, rr.rule_key, rr.rule_name, rr.rule_type
+            FROM risk_findings rf
+            LEFT JOIN risk_rules rr ON rr.id = rf.rule_id
+            WHERE rf.id = %s
+        """, (finding_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        d = dict(row)
+        d['id'] = str(d['id'])
+        if d.get('detected_at'):
+            d['detected_at'] = d['detected_at'].isoformat()
+        if d.get('resolved_at'):
+            d['resolved_at'] = d['resolved_at'].isoformat()
+        return d
+
+    def update_risk_finding_status(self, finding_id, status, changed_by=None):
+        """Update risk finding status; set resolved_at/by if resolving."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if status == 'resolved':
+            cursor.execute("""
+                UPDATE risk_findings
+                SET status = %s, resolved_at = NOW(), resolved_by = %s
+                WHERE id = %s
+                RETURNING *
+            """, (status, changed_by, finding_id))
+        else:
+            cursor.execute("""
+                UPDATE risk_findings
+                SET status = %s
+                WHERE id = %s
+                RETURNING *
+            """, (status, finding_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if not row:
+            return None
+        d = dict(row)
+        d['id'] = str(d['id'])
+        if d.get('detected_at'):
+            d['detected_at'] = d['detected_at'].isoformat()
+        if d.get('resolved_at'):
+            d['resolved_at'] = d['resolved_at'].isoformat()
+        return d
+
+    def get_risk_findings_stats(self):
+        """Summary stats: total, open, by_severity, by_rule_type."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute("SELECT COUNT(*) AS total FROM risk_findings")
+        total = cursor.fetchone()['total']
+
+        cursor.execute("SELECT COUNT(*) AS open FROM risk_findings WHERE status = 'open'")
+        open_count = cursor.fetchone()['open']
+
+        cursor.execute("""
+            SELECT severity, COUNT(*) AS count
+            FROM risk_findings WHERE status = 'open'
+            GROUP BY severity
+        """)
+        by_severity = {r['severity']: r['count'] for r in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT rr.rule_type, COUNT(*) AS count
+            FROM risk_findings rf
+            JOIN risk_rules rr ON rr.id = rf.rule_id
+            WHERE rf.status = 'open'
+            GROUP BY rr.rule_type
+        """)
+        by_rule_type = {r['rule_type']: r['count'] for r in cursor.fetchall()}
+
+        cursor.close()
+        return {
+            'total': total,
+            'open': open_count,
+            'by_severity': by_severity,
+            'by_rule_type': by_rule_type,
+        }
+
+    # ── Graph Node & Edge CRUD ────────────────────────────────────────────────
+
+    def create_graph_node(self, org_id, connection_id, node_type, external_id,
+                          display_name=None, metadata=None):
+        """Insert a graph node, returning its UUID. Skips on dedup conflict."""
+        import json as _json
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO graph_nodes
+                (organization_id, cloud_connection_id, node_type, external_id, display_name, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (cloud_connection_id, node_type, external_id) DO NOTHING
+            RETURNING id
+        """, (org_id, connection_id, node_type, external_id,
+              display_name, _json.dumps(metadata or {})))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return str(row['id']) if row else None
+
+    def create_graph_edge(self, org_id, connection_id, source_node_id,
+                          target_node_id, edge_type, metadata=None):
+        """Insert a graph edge, returning its UUID."""
+        import json as _json
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO graph_edges
+                (organization_id, cloud_connection_id, source_node_id, target_node_id, edge_type, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (org_id, connection_id, source_node_id, target_node_id,
+              edge_type, _json.dumps(metadata or {})))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return str(row['id']) if row else None
+
+    def clear_graph(self, connection_id):
+        """Delete all graph nodes and edges for a connection (edges cascade)."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM graph_nodes WHERE cloud_connection_id = %s", (connection_id,))
+        self._commit()
+        cursor.close()
+
+    def get_identity_access_graph(self, identity_external_id):
+        """Get resources accessible by an identity via graph traversal.
+
+        Follows: identity -[assigned_role]-> role -[grants_access]-> resource
+        """
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT DISTINCT res.external_id, res.display_name, res.metadata
+            FROM graph_nodes ident
+            JOIN graph_edges e1 ON e1.source_node_id = ident.id AND e1.edge_type = 'assigned_role'
+            JOIN graph_nodes role_node ON role_node.id = e1.target_node_id
+            JOIN graph_edges e2 ON e2.source_node_id = role_node.id AND e2.edge_type = 'grants_access'
+            JOIN graph_nodes res ON res.id = e2.target_node_id
+            WHERE ident.node_type = 'identity'
+              AND ident.external_id = %s
+        """, (identity_external_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_resource_identity_access(self, resource_external_id):
+        """Get identities that have access to a resource via graph traversal.
+
+        Follows: resource <-[grants_access]- role <-[assigned_role]- identity
+        """
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT DISTINCT ident.external_id, ident.display_name, ident.metadata,
+                   role_node.display_name AS role_name
+            FROM graph_nodes res
+            JOIN graph_edges e2 ON e2.target_node_id = res.id AND e2.edge_type = 'grants_access'
+            JOIN graph_nodes role_node ON role_node.id = e2.source_node_id
+            JOIN graph_edges e1 ON e1.target_node_id = role_node.id AND e1.edge_type = 'assigned_role'
+            JOIN graph_nodes ident ON ident.id = e1.source_node_id AND ident.node_type = 'identity'
+            WHERE res.node_type = 'resource'
+              AND res.external_id = %s
+        """, (resource_external_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_escalation_findings(self, identity_external_id=None):
+        """Get escalation-type risk findings, optionally filtered by identity."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if identity_external_id:
+            cursor.execute("""
+                SELECT rf.*, rr.rule_key, rr.rule_name, rr.rule_type
+                FROM risk_findings rf
+                LEFT JOIN risk_rules rr ON rr.id = rf.rule_id
+                WHERE rf.identity_id = %s
+                  AND rf.metadata->>'finding_category' = 'privilege_escalation'
+                ORDER BY
+                    CASE rf.severity
+                        WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3 ELSE 4
+                    END,
+                    rf.detected_at DESC
+            """, (identity_external_id,))
+        else:
+            cursor.execute("""
+                SELECT rf.*, rr.rule_key, rr.rule_name, rr.rule_type
+                FROM risk_findings rf
+                LEFT JOIN risk_rules rr ON rr.id = rf.rule_id
+                WHERE rf.metadata->>'finding_category' = 'privilege_escalation'
+                ORDER BY
+                    CASE rf.severity
+                        WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3 ELSE 4
+                    END,
+                    rf.detected_at DESC
+            """)
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d['id'] = str(d['id'])
+            if d.get('detected_at'):
+                d['detected_at'] = d['detected_at'].isoformat()
+            if d.get('resolved_at'):
+                d['resolved_at'] = d['resolved_at'].isoformat()
+            results.append(d)
+        return results
+
+    def get_nhi_findings(self):
+        """Get NHI-category risk findings."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT rf.*, rr.rule_key, rr.rule_name, rr.rule_type
+            FROM risk_findings rf
+            LEFT JOIN risk_rules rr ON rr.id = rf.rule_id
+            WHERE rf.metadata->>'finding_category' = 'nhi_security'
+            ORDER BY
+                CASE rf.severity
+                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3 ELSE 4
+                END,
+                rf.detected_at DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d['id'] = str(d['id'])
+            if d.get('detected_at'):
+                d['detected_at'] = d['detected_at'].isoformat()
+            if d.get('resolved_at'):
+                d['resolved_at'] = d['resolved_at'].isoformat()
+            results.append(d)
+        return results
+
+    # ── Dashboard Summary & Credential Inventory ─────────────────────────────
+
+    def get_dashboard_summary(self):
+        """Compute executive dashboard metrics."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Identity counts by category (latest run per connection)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total_identities,
+                COUNT(*) FILTER (WHERE identity_category = 'human_user') AS users,
+                COUNT(*) FILTER (WHERE identity_category = 'service_principal') AS service_principals,
+                COUNT(*) FILTER (WHERE identity_category IN ('managed_identity_system', 'managed_identity_user')) AS managed_identities,
+                COUNT(*) FILTER (WHERE identity_category = 'guest') AS guests
+            FROM identities i
+            WHERE i.discovery_run_id IN (
+                SELECT DISTINCT ON (cloud_connection_id) id
+                FROM discovery_runs
+                WHERE status = 'completed'
+                ORDER BY cloud_connection_id, id DESC
+            )
+        """)
+        identity_row = cursor.fetchone()
+
+        # Risk findings by severity (open only)
+        cursor.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE severity = 'critical') AS critical_findings,
+                COUNT(*) FILTER (WHERE severity = 'high') AS high_findings,
+                COUNT(*) FILTER (WHERE severity = 'medium') AS medium_findings,
+                COUNT(*) FILTER (WHERE severity = 'low') AS low_findings
+            FROM risk_findings
+            WHERE status = 'open'
+        """)
+        findings_row = cursor.fetchone()
+
+        # NHI-specific metrics
+        cursor.execute("""
+            SELECT COUNT(*) AS cnt FROM risk_findings
+            WHERE status = 'open' AND metadata->>'finding_category' = 'nhi_security'
+              AND metadata->>'reason' LIKE '%%no expiration%%'
+        """)
+        secrets_no_expiry = cursor.fetchone()['cnt']
+
+        cursor.execute("""
+            SELECT COUNT(*) AS cnt FROM risk_findings
+            WHERE status = 'open' AND metadata->>'finding_category' = 'nhi_security'
+              AND metadata->>'reason' LIKE '%%older than 180%%'
+        """)
+        secrets_old = cursor.fetchone()['cnt']
+
+        cursor.execute("""
+            SELECT COUNT(*) AS cnt FROM risk_findings
+            WHERE status = 'open' AND metadata->>'finding_category' = 'nhi_security'
+              AND metadata->>'reason' LIKE '%%no sign-in%%'
+        """)
+        unused_spns = cursor.fetchone()['cnt']
+
+        # Escalation metrics
+        cursor.execute("""
+            SELECT COUNT(DISTINCT identity_id) AS cnt FROM risk_findings
+            WHERE status = 'open' AND metadata->>'finding_category' = 'privilege_escalation'
+        """)
+        attack_path_identities = cursor.fetchone()['cnt']
+
+        # Credential inventory stats
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total_credentials,
+                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at < NOW()) AS expired_credentials,
+                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at >= NOW() AND expires_at < NOW() + INTERVAL '30 days') AS expiring_soon_credentials
+            FROM identity_credentials
+        """)
+        cred_row = cursor.fetchone()
+
+        cursor.close()
+
+        # Risk score: critical*10 + high*5 + medium*2
+        critical = findings_row['critical_findings'] or 0
+        high = findings_row['high_findings'] or 0
+        medium = findings_row['medium_findings'] or 0
+        risk_score = (critical * 10) + (high * 5) + (medium * 2)
+
+        return {
+            'total_identities': identity_row['total_identities'] or 0,
+            'users': identity_row['users'] or 0,
+            'service_principals': identity_row['service_principals'] or 0,
+            'managed_identities': identity_row['managed_identities'] or 0,
+            'guests': identity_row['guests'] or 0,
+            'critical_findings': critical,
+            'high_findings': high,
+            'medium_findings': medium,
+            'low_findings': findings_row['low_findings'] or 0,
+            'risk_score': risk_score,
+            'secrets_without_expiry': secrets_no_expiry,
+            'secrets_older_than_180_days': secrets_old,
+            'unused_service_principals': unused_spns,
+            'identities_with_attack_paths': attack_path_identities,
+            'total_credentials': cred_row['total_credentials'] or 0,
+            'expired_credentials': cred_row['expired_credentials'] or 0,
+            'expiring_soon_credentials': cred_row['expiring_soon_credentials'] or 0,
+        }
+
+    def save_identity_credential(self, org_id, connection_id, identity_id,
+                                  credential_type, created_at=None,
+                                  expires_at=None, last_used_at=None,
+                                  metadata=None):
+        """Upsert a credential record for an identity."""
+        import json as _json
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO identity_credentials
+                (organization_id, cloud_connection_id, identity_id, credential_type,
+                 created_at, expires_at, last_used_at, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (cloud_connection_id, identity_id, credential_type, COALESCE(created_at, '1970-01-01'::timestamptz))
+            DO UPDATE SET
+                expires_at = EXCLUDED.expires_at,
+                last_used_at = EXCLUDED.last_used_at,
+                metadata = EXCLUDED.metadata,
+                discovered_at = NOW()
+        """, (org_id, connection_id, identity_id, credential_type,
+              created_at, expires_at, last_used_at,
+              _json.dumps(metadata or {})))
+        self._commit()
+        cursor.close()
+
+    def get_credential_stats(self):
+        """Get credential inventory summary stats."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at < NOW()) AS expired,
+                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at >= NOW() AND expires_at < NOW() + INTERVAL '30 days') AS expiring_soon,
+                COUNT(*) FILTER (WHERE expires_at IS NULL) AS no_expiry
+            FROM identity_credentials
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else {'total': 0, 'expired': 0, 'expiring_soon': 0, 'no_expiry': 0}
+
+    # ── Policy Recommendation CRUD ─────────────────────────────────────────
+
+    def save_policy_recommendations(self, connection_id, org_id, recommendations):
+        """Upsert policy recommendations with dedup on connection+type+identity."""
+        import json as _json
+        cursor = self.conn.cursor()
+        for rec in recommendations:
+            cursor.execute("""
+                INSERT INTO policy_recommendations
+                    (organization_id, cloud_connection_id, finding_id, identity_id,
+                     resource_id, recommendation_type, severity, description,
+                     recommended_action, confidence_score, metadata, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'open')
+                ON CONFLICT (cloud_connection_id, recommendation_type, COALESCE(identity_id, ''))
+                    WHERE status IN ('open', 'accepted')
+                DO UPDATE SET
+                    updated_at = NOW(),
+                    severity = EXCLUDED.severity,
+                    description = EXCLUDED.description,
+                    recommended_action = EXCLUDED.recommended_action,
+                    confidence_score = EXCLUDED.confidence_score,
+                    metadata = EXCLUDED.metadata
+            """, (
+                org_id, connection_id,
+                rec.get('finding_id'), rec.get('identity_id'),
+                rec.get('resource_id'), rec['recommendation_type'],
+                rec['severity'], rec.get('description'),
+                rec.get('recommended_action'), rec.get('confidence_score', 80),
+                _json.dumps(rec.get('metadata', {})),
+            ))
+        self._commit()
+        cursor.close()
+
+    def get_policy_recommendations(self, connection_id=None, severity=None, status=None, limit=200, offset=0):
+        """Get policy recommendations with optional filters."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if connection_id:
+            conditions.append("pr.cloud_connection_id = %s")
+            params.append(connection_id)
+        if severity:
+            conditions.append("pr.severity = %s")
+            params.append(severity)
+        if status:
+            conditions.append("pr.status = %s")
+            params.append(status)
+        where = " AND ".join(conditions) if conditions else "1=1"
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT pr.id, pr.organization_id, pr.cloud_connection_id,
+                   pr.finding_id, pr.identity_id, pr.resource_id,
+                   pr.recommendation_type, pr.severity, pr.description,
+                   pr.recommended_action, pr.confidence_score,
+                   pr.metadata, pr.status, pr.created_at, pr.updated_at
+            FROM policy_recommendations pr
+            WHERE {where}
+            ORDER BY
+                CASE pr.severity
+                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5
+                END,
+                pr.created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_policy_recommendation_by_id(self, rec_id):
+        """Get a single policy recommendation by UUID."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, organization_id, cloud_connection_id,
+                   finding_id, identity_id, resource_id,
+                   recommendation_type, severity, description,
+                   recommended_action, confidence_score,
+                   metadata, status, created_at, updated_at
+            FROM policy_recommendations WHERE id = %s
+        """, (rec_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def update_policy_recommendation_status(self, rec_id, new_status):
+        """Update status of a policy recommendation."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE policy_recommendations
+            SET status = %s, updated_at = NOW()
+            WHERE id = %s
+        """, (new_status, rec_id))
+        self._commit()
+        cursor.close()
+
+    def get_policy_recommendation_stats(self):
+        """Get summary stats for policy recommendations."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'open') AS open,
+                COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open') AS critical,
+                COUNT(*) FILTER (WHERE severity = 'high' AND status = 'open') AS high,
+                COUNT(*) FILTER (WHERE severity = 'medium' AND status = 'open') AS medium,
+                COUNT(*) FILTER (WHERE severity = 'low' AND status = 'open') AS low
+            FROM policy_recommendations
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else {'total': 0, 'open': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+
+    # ── Auto Remediation CRUD ──────────────────────────────────────────────
+
+    def create_auto_remediation_action(self, org_id, connection_id, recommendation_id,
+                                        action_type, status='pending', requested_by=None,
+                                        metadata=None):
+        """Create a new auto remediation action."""
+        import json as _json
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO auto_remediation_actions
+                (organization_id, cloud_connection_id, recommendation_id,
+                 action_type, status, requested_by, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (org_id, connection_id, recommendation_id,
+              action_type, status, requested_by,
+              _json.dumps(metadata or {})))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_auto_remediation_action_by_id(self, action_id):
+        """Get a single remediation action by UUID."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT a.*, pr.recommendation_type, pr.description AS rec_description
+            FROM auto_remediation_actions a
+            LEFT JOIN policy_recommendations pr ON pr.id = a.recommendation_id
+            WHERE a.id = %s
+        """, (action_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_auto_remediation_actions(self, status=None, connection_id=None, limit=200, offset=0):
+        """Get remediation actions with optional filters."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if status:
+            conditions.append("a.status = %s")
+            params.append(status)
+        if connection_id:
+            conditions.append("a.cloud_connection_id = %s")
+            params.append(connection_id)
+        where = " AND ".join(conditions) if conditions else "1=1"
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT a.*, pr.recommendation_type, pr.description AS rec_description
+            FROM auto_remediation_actions a
+            LEFT JOIN policy_recommendations pr ON pr.id = a.recommendation_id
+            WHERE {where}
+            ORDER BY a.created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def update_auto_remediation_action(self, action_id, status=None,
+                                        approved_by=None, result_message=None):
+        """Update a remediation action's status and metadata."""
+        sets = []
+        params = []
+        if status:
+            sets.append("status = %s")
+            params.append(status)
+            if status == 'completed' or status == 'failed':
+                sets.append("executed_at = NOW()")
+        if approved_by:
+            sets.append("approved_by = %s")
+            params.append(approved_by)
+        if result_message is not None:
+            sets.append("result_message = %s")
+            params.append(result_message)
+        if not sets:
+            return
+        params.append(action_id)
+        cursor = self.conn.cursor()
+        cursor.execute(f"""
+            UPDATE auto_remediation_actions
+            SET {', '.join(sets)}
+            WHERE id = %s
+        """, params)
+        self._commit()
+        cursor.close()
+
+    def get_auto_remediation_stats(self):
+        """Get remediation action summary stats."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                COUNT(*) FILTER (WHERE status = 'approved') AS approved,
+                COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed
+            FROM auto_remediation_actions
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else {'total': 0, 'pending': 0, 'approved': 0, 'completed': 0, 'failed': 0}
+
+    # ── Attack Simulation CRUD ─────────────────────────────────────────────
+
+    def create_attack_simulation(self, org_id, connection_id, identity_id,
+                                  simulation_type='identity_compromise',
+                                  max_depth=6, blast_radius=0, metadata=None):
+        """Create an attack simulation record."""
+        import json as _json
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO attack_simulations
+                (organization_id, cloud_connection_id, identity_id,
+                 simulation_type, max_depth, blast_radius, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (org_id, connection_id, identity_id,
+              simulation_type, max_depth, blast_radius,
+              _json.dumps(metadata or {})))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def save_attack_sim_paths(self, simulation_id, paths):
+        """Save attack paths for a simulation."""
+        import json as _json
+        cursor = self.conn.cursor()
+        for p in paths:
+            cursor.execute("""
+                INSERT INTO attack_sim_paths
+                    (simulation_id, path_index, source_identity,
+                     target_resource, path_length, path_nodes, risk_level)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (simulation_id, p['path_index'], p['source_identity'],
+                  p['target_resource'], p['path_length'],
+                  _json.dumps(p.get('path_nodes', [])),
+                  p.get('risk_level', 'medium')))
+        self._commit()
+        cursor.close()
+
+    def get_attack_simulation_by_id(self, simulation_id):
+        """Get a simulation with its attack paths."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM attack_simulations WHERE id = %s", (simulation_id,))
+        sim = cursor.fetchone()
+        if not sim:
+            cursor.close()
+            return None
+        sim = dict(sim)
+        cursor.execute("""
+            SELECT * FROM attack_sim_paths
+            WHERE simulation_id = %s
+            ORDER BY path_index
+        """, (simulation_id,))
+        sim['paths'] = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return sim
+
+    def get_attack_simulations(self, connection_id=None, identity_id=None, limit=50):
+        """List attack simulations."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        if identity_id:
+            conditions.append("identity_id = %s")
+            params.append(identity_id)
+        where = " AND ".join(conditions) if conditions else "1=1"
+        params.append(limit)
+        cursor.execute(f"""
+            SELECT id, organization_id, cloud_connection_id, identity_id,
+                   simulation_type, max_depth, blast_radius, metadata, created_at
+            FROM attack_simulations
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    # ── Security Benchmark CRUD ────────────────────────────────────────────
+
+    def save_tenant_posture_metrics(self, org_id, risk_score=0, critical_findings=0,
+                                     high_findings=0, blast_radius_avg=0.0,
+                                     nhi_exposure=0, escalation_paths=0,
+                                     identity_count=0):
+        """Save a snapshot of tenant posture metrics."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO tenant_posture_metrics
+                (organization_id, risk_score, critical_findings, high_findings,
+                 blast_radius_avg, nhi_exposure, escalation_paths, identity_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (org_id, risk_score, critical_findings, high_findings,
+              blast_radius_avg, nhi_exposure, escalation_paths, identity_count))
+        self._commit()
+        cursor.close()
+
+    def get_latest_tenant_posture(self, org_id):
+        """Get the latest posture metrics for a tenant."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM tenant_posture_metrics
+            WHERE organization_id = %s
+            ORDER BY created_at DESC LIMIT 1
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_all_tenant_posture_latest(self):
+        """Get latest posture for ALL tenants (admin only, bypasses RLS).
+
+        Used for benchmark aggregation. Returns one row per org.
+        """
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT DISTINCT ON (organization_id)
+                organization_id, risk_score, critical_findings, high_findings,
+                blast_radius_avg, nhi_exposure, escalation_paths, identity_count,
+                created_at
+            FROM tenant_posture_metrics
+            ORDER BY organization_id, created_at DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def upsert_security_benchmark(self, metric_name, metric_value, sample_size=0,
+                                   percentile_25=None, percentile_50=None,
+                                   percentile_75=None):
+        """Upsert an aggregated security benchmark metric."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO security_benchmarks
+                (metric_name, metric_value, sample_size,
+                 percentile_25, percentile_50, percentile_75, computed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (metric_name) DO UPDATE SET
+                metric_value = EXCLUDED.metric_value,
+                sample_size = EXCLUDED.sample_size,
+                percentile_25 = EXCLUDED.percentile_25,
+                percentile_50 = EXCLUDED.percentile_50,
+                percentile_75 = EXCLUDED.percentile_75,
+                computed_at = NOW()
+        """, (metric_name, metric_value, sample_size,
+              percentile_25, percentile_50, percentile_75))
+        self._commit()
+        cursor.close()
+
+    def get_security_benchmarks(self):
+        """Get all aggregated security benchmarks as a dict keyed by metric_name."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM security_benchmarks")
+        rows = cursor.fetchall()
+        cursor.close()
+        return {r['metric_name']: dict(r) for r in rows}
+
+    # ── Security Advisor CRUD ────────────────────────────────────────────────
+
+    def save_security_advisor_report(self, org_id, risk_score, benchmark_percentile,
+                                      top_risks, recommended_actions, risk_reduction_estimate,
+                                      metadata=None):
+        """Insert a security advisor report row."""
+        import json as _json
+        cursor = self.conn.cursor(cursor_factory=__import__('psycopg2.extras', fromlist=['RealDictCursor']).RealDictCursor)
+        cursor.execute("""
+            INSERT INTO security_advisor_reports
+                (organization_id, risk_score, benchmark_percentile, top_risks,
+                 recommended_actions, risk_reduction_estimate, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (org_id, risk_score, benchmark_percentile,
+              _json.dumps(top_risks), _json.dumps(recommended_actions),
+              risk_reduction_estimate, _json.dumps(metadata or {})))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_security_advisor_reports(self, limit=10):
+        """Get recent security advisor reports (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM security_advisor_reports
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_latest_security_advisor_report(self):
+        """Get the most recent security advisor report (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM security_advisor_reports
+            ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    # ── Graph Visualization Cache CRUD ────────────────────────────────────────
+
+    def save_graph_visualization_cache(self, org_id, connection_id, graph_type, graph_data):
+        """Insert a graph visualization cache entry."""
+        import json as _json
+        cursor = self.conn.cursor(cursor_factory=__import__('psycopg2.extras', fromlist=['RealDictCursor']).RealDictCursor)
+        cursor.execute("""
+            INSERT INTO graph_visualization_cache
+                (organization_id, cloud_connection_id, graph_type, graph_data)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+        """, (org_id, connection_id, graph_type, _json.dumps(graph_data)))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_graph_visualization_cache(self, connection_id, graph_type):
+        """Get the latest cached graph for a connection and type."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM graph_visualization_cache
+            WHERE cloud_connection_id = %s AND graph_type = %s
+            ORDER BY created_at DESC LIMIT 1
+        """, (connection_id, graph_type))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_graph_visualizations(self, graph_type=None, limit=10):
+        """Get recent graph visualizations (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if graph_type:
+            cursor.execute("""
+                SELECT * FROM graph_visualization_cache
+                WHERE graph_type = %s
+                ORDER BY created_at DESC LIMIT %s
+            """, (graph_type, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM graph_visualization_cache
+                ORDER BY created_at DESC LIMIT %s
+            """, (limit,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    # ── Risk Forecast CRUD ─────────────────────────────────────────────────────
+
+    def save_risk_forecast(self, org_id, forecast_window_days, current_risk_score,
+                           predicted_risk_score, trend_direction, drivers=None):
+        """Insert a risk forecast record."""
+        import json as _json
+        cursor = self.conn.cursor(cursor_factory=__import__('psycopg2.extras', fromlist=['RealDictCursor']).RealDictCursor)
+        cursor.execute("""
+            INSERT INTO risk_forecasts
+                (organization_id, forecast_window_days, current_risk_score,
+                 predicted_risk_score, trend_direction, drivers)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (org_id, forecast_window_days, current_risk_score,
+              predicted_risk_score, trend_direction, _json.dumps(drivers or [])))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_risk_forecasts(self, window_days=None, limit=10):
+        """Get recent risk forecasts (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if window_days:
+            cursor.execute("""
+                SELECT * FROM risk_forecasts
+                WHERE forecast_window_days = %s
+                ORDER BY created_at DESC LIMIT %s
+            """, (window_days, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM risk_forecasts
+                ORDER BY created_at DESC LIMIT %s
+            """, (limit,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_latest_risk_forecast(self, window_days=None):
+        """Get the most recent risk forecast (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if window_days:
+            cursor.execute("""
+                SELECT * FROM risk_forecasts
+                WHERE forecast_window_days = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (window_days,))
+        else:
+            cursor.execute("""
+                SELECT * FROM risk_forecasts
+                ORDER BY created_at DESC LIMIT 1
+            """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    # ── Generated Policy CRUD ─────────────────────────────────────────────────
+
+    def save_generated_policy(self, org_id, connection_id, identity_id,
+                              cloud_provider, policy_type, generated_policy,
+                              confidence_score=0.0):
+        """Insert or update a generated policy (org-scoped via RLS).
+        Upserts on (connection_id, identity_id, policy_type) WHERE status='pending'.
+        """
+        import json
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO generated_policies
+                (organization_id, cloud_connection_id, identity_id, cloud_provider,
+                 policy_type, generated_policy, confidence_score)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (cloud_connection_id, identity_id, policy_type)
+                WHERE status = 'pending'
+            DO UPDATE SET
+                generated_policy = EXCLUDED.generated_policy,
+                confidence_score = EXCLUDED.confidence_score,
+                created_at = NOW()
+            RETURNING *
+        """, (org_id, connection_id, identity_id, cloud_provider,
+              policy_type, json.dumps(generated_policy), confidence_score))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_generated_policies(self, identity_id=None, connection_id=None,
+                               status=None, limit=50, offset=0):
+        """Get generated policies with optional filters (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if identity_id:
+            conditions.append("identity_id = %s")
+            params.append(identity_id)
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM generated_policies {where}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+        return rows
+
+    def get_generated_policy_by_identity(self, identity_id):
+        """Get the latest pending generated policy for an identity (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM generated_policies
+            WHERE identity_id = %s AND status = 'pending'
+            ORDER BY created_at DESC LIMIT 1
+        """, (identity_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            row = dict(row)
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+        return row
+
+    def update_generated_policy_status(self, policy_id, status):
+        """Update the status of a generated policy (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE generated_policies SET status = %s
+            WHERE id = %s RETURNING *
+        """, (status, policy_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if row:
+            row = dict(row)
+            row['id'] = str(row['id'])
+        return row
+
+    def get_generated_policies_stats(self):
+        """Get generated policy summary stats (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                COUNT(*) FILTER (WHERE status = 'applied') AS applied,
+                COUNT(*) FILTER (WHERE status = 'dismissed') AS dismissed,
+                COUNT(*) FILTER (WHERE policy_type = 'least_privilege') AS least_privilege,
+                COUNT(*) FILTER (WHERE policy_type = 'role_replacement') AS role_replacement,
+                ROUND(AVG(confidence_score)::numeric, 2) AS avg_confidence
+            FROM generated_policies
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else {}
+
+    # ── Identity Threat Events CRUD ───────────────────────────────────────────
+
+    def save_identity_threat_events(self, events):
+        """Bulk insert threat events (org-scoped via RLS)."""
+        import json
+        from psycopg2.extras import RealDictCursor
+        if not events:
+            return []
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        saved = []
+        for ev in events:
+            cursor.execute("""
+                INSERT INTO identity_threat_events
+                    (organization_id, cloud_connection_id, identity_id,
+                     event_type, severity, description, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING *
+            """, (
+                ev['organization_id'], ev['cloud_connection_id'],
+                ev.get('identity_id'), ev['event_type'], ev['severity'],
+                ev.get('description', ''), json.dumps(ev.get('metadata', {})),
+            ))
+            row = cursor.fetchone()
+            if row:
+                saved.append(dict(row))
+        self._commit()
+        cursor.close()
+        return saved
+
+    def get_identity_threat_events(self, event_type=None, severity=None,
+                                   status=None, limit=50, offset=0):
+        """Get threat events with optional filters (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if event_type:
+            conditions.append("event_type = %s")
+            params.append(event_type)
+        if severity:
+            conditions.append("severity = %s")
+            params.append(severity)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM identity_threat_events {where}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+        return rows
+
+    def get_identity_threat_events_stats(self):
+        """Get threat event summary stats (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'open') AS open,
+                COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                COUNT(*) FILTER (WHERE severity = 'high') AS high,
+                COUNT(*) FILTER (WHERE severity = 'medium') AS medium,
+                COUNT(*) FILTER (WHERE severity = 'low') AS low,
+                COUNT(*) FILTER (WHERE event_type = 'privilege_escalation') AS privilege_escalation,
+                COUNT(*) FILTER (WHERE event_type = 'credential_creation') AS credential_creation,
+                COUNT(*) FILTER (WHERE event_type = 'suspicious_login') AS suspicious_login,
+                COUNT(*) FILTER (WHERE event_type = 'policy_change') AS policy_change
+            FROM identity_threat_events
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else {}
+
+    def update_identity_threat_event_status(self, event_id, status):
+        """Update the status of a threat event (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE identity_threat_events SET status = %s
+            WHERE id = %s RETURNING *
+        """, (status, event_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if row:
+            row = dict(row)
+            row['id'] = str(row['id'])
+        return row
+
+    # ── Identity Data Lake CRUD ───────────────────────────────────────────────
+
+    def save_identity_activity_events(self, events):
+        """Bulk insert identity activity events (org-scoped via RLS)."""
+        import json
+        from psycopg2.extras import RealDictCursor
+        if not events:
+            return []
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        saved = []
+        for ev in events:
+            cursor.execute("""
+                INSERT INTO identity_activity_events
+                    (organization_id, cloud_connection_id, identity_id, event_type, metadata)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING *
+            """, (
+                ev['organization_id'], ev['cloud_connection_id'],
+                ev.get('identity_id'), ev['event_type'],
+                json.dumps(ev.get('metadata', {})),
+            ))
+            row = cursor.fetchone()
+            if row:
+                saved.append(dict(row))
+        self._commit()
+        cursor.close()
+        return saved
+
+    def get_identity_activity_events(self, identity_id=None, event_type=None,
+                                     limit=50, offset=0):
+        """Get identity activity events with optional filters (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if identity_id:
+            conditions.append("identity_id = %s")
+            params.append(identity_id)
+        if event_type:
+            conditions.append("event_type = %s")
+            params.append(event_type)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM identity_activity_events {where}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+        return rows
+
+    def save_identity_role_history(self, records):
+        """Bulk insert identity role history records (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        if not records:
+            return []
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        saved = []
+        for rec in records:
+            cursor.execute("""
+                INSERT INTO identity_role_history
+                    (organization_id, identity_id, role_name, scope)
+                VALUES (%s, %s, %s, %s)
+                RETURNING *
+            """, (
+                rec['organization_id'], rec['identity_id'],
+                rec['role_name'], rec.get('scope'),
+            ))
+            row = cursor.fetchone()
+            if row:
+                saved.append(dict(row))
+        self._commit()
+        cursor.close()
+        return saved
+
+    def get_identity_role_history(self, identity_id, limit=100):
+        """Get role history for an identity (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM identity_role_history
+            WHERE identity_id = %s
+            ORDER BY assigned_at DESC LIMIT %s
+        """, (identity_id, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            if row.get('assigned_at'):
+                row['assigned_at'] = row['assigned_at'].isoformat()
+            if row.get('revoked_at'):
+                row['revoked_at'] = row['revoked_at'].isoformat()
+        return rows
+
+    def save_identity_access_history(self, records):
+        """Bulk insert identity access history records (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        if not records:
+            return []
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        saved = []
+        for rec in records:
+            cursor.execute("""
+                INSERT INTO identity_access_history
+                    (organization_id, identity_id, resource_id, action)
+                VALUES (%s, %s, %s, %s)
+                RETURNING *
+            """, (
+                rec['organization_id'], rec['identity_id'],
+                rec.get('resource_id'), rec.get('action'),
+            ))
+            row = cursor.fetchone()
+            if row:
+                saved.append(dict(row))
+        self._commit()
+        cursor.close()
+        return saved
+
+    def get_identity_access_history(self, identity_id, limit=100):
+        """Get access history for an identity (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM identity_access_history
+            WHERE identity_id = %s
+            ORDER BY access_time DESC LIMIT %s
+        """, (identity_id, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            if row.get('access_time'):
+                row['access_time'] = row['access_time'].isoformat()
+        return rows
+
+    # ── Attack Replay CRUD ────────────────────────────────────────────────────
+
+    def save_attack_incident(self, incident):
+        """Save an attack incident (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO identity_attack_incidents
+                (organization_id, identity_id, incident_type, severity,
+                 start_time, end_time, summary)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            incident['organization_id'], incident['identity_id'],
+            incident['incident_type'], incident['severity'],
+            incident.get('start_time'), incident.get('end_time'),
+            incident.get('summary', ''),
+        ))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if row:
+            row = dict(row)
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+            if row.get('start_time'):
+                row['start_time'] = row['start_time'].isoformat()
+            if row.get('end_time'):
+                row['end_time'] = row['end_time'].isoformat()
+        return row
+
+    def save_attack_replay_steps(self, incident_id, steps):
+        """Save replay steps for an incident."""
+        import json
+        from psycopg2.extras import RealDictCursor
+        if not steps:
+            return []
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        saved = []
+        for step in steps:
+            cursor.execute("""
+                INSERT INTO identity_attack_replay_steps
+                    (incident_id, step_index, event_type, event_time,
+                     description, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *
+            """, (
+                incident_id, step['step_index'], step['event_type'],
+                step.get('event_time'), step.get('description', ''),
+                json.dumps(step.get('metadata', {})),
+            ))
+            row = cursor.fetchone()
+            if row:
+                saved.append(dict(row))
+        self._commit()
+        cursor.close()
+        return saved
+
+    def get_attack_incidents(self, identity_id=None, incident_type=None,
+                             status=None, limit=50, offset=0):
+        """Get attack incidents with optional filters (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if identity_id:
+            conditions.append("identity_id = %s")
+            params.append(identity_id)
+        if incident_type:
+            conditions.append("incident_type = %s")
+            params.append(incident_type)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM identity_attack_incidents {where}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            for ts in ('created_at', 'start_time', 'end_time'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+        return rows
+
+    def get_attack_incident(self, incident_id):
+        """Get a single attack incident by ID (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM identity_attack_incidents WHERE id = %s
+        """, (incident_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            row = dict(row)
+            row['id'] = str(row['id'])
+            for ts in ('created_at', 'start_time', 'end_time'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+        return row
+
+    def get_attack_replay_steps(self, incident_id):
+        """Get replay steps for an incident ordered by step_index."""
+        import json
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM identity_attack_replay_steps
+            WHERE incident_id = %s
+            ORDER BY step_index
+        """, (incident_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for row in rows:
+            row['id'] = str(row['id'])
+            row['incident_id'] = str(row['incident_id'])
+            if row.get('event_time'):
+                row['event_time'] = row['event_time'].isoformat()
+        return rows
+
+    def get_attack_incidents_stats(self):
+        """Get attack incident summary stats (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'open') AS open,
+                COUNT(*) FILTER (WHERE status = 'investigating') AS investigating,
+                COUNT(*) FILTER (WHERE status = 'resolved') AS resolved,
+                COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                COUNT(*) FILTER (WHERE severity = 'high') AS high,
+                COUNT(*) FILTER (WHERE incident_type = 'privilege_escalation_attack') AS privilege_escalation_attack,
+                COUNT(*) FILTER (WHERE incident_type = 'credential_compromise') AS credential_compromise,
+                COUNT(*) FILTER (WHERE incident_type = 'lateral_movement') AS lateral_movement,
+                COUNT(*) FILTER (WHERE incident_type = 'resource_exposure') AS resource_exposure
+            FROM identity_attack_incidents
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else {}
+
+    def update_attack_incident_status(self, incident_id, status):
+        """Update the status of an attack incident (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE identity_attack_incidents SET status = %s
+            WHERE id = %s RETURNING *
+        """, (status, incident_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if row:
+            row = dict(row)
+            row['id'] = str(row['id'])
+            for ts in ('created_at', 'start_time', 'end_time'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+        return row
+
+    # ── Phase 24: Security Response Actions CRUD ───────────────────────────
+
+    def save_security_response_action(self, action):
+        """Insert a security response action (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor, Json
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO security_response_actions
+                (organization_id, incident_id, identity_id, response_action, status, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            action['organization_id'],
+            action.get('incident_id'),
+            action.get('identity_id'),
+            action['response_action'],
+            action.get('status', 'pending'),
+            Json(action.get('metadata', {})),
+        ))
+        row = dict(cursor.fetchone())
+        self._commit()
+        cursor.close()
+        row['id'] = str(row['id'])
+        if row.get('incident_id'):
+            row['incident_id'] = str(row['incident_id'])
+        for ts in ('created_at', 'approved_at', 'executed_at'):
+            if row.get(ts):
+                row[ts] = row[ts].isoformat()
+        return row
+
+    def get_security_response_actions(self, status=None, incident_id=None, limit=50, offset=0):
+        """List security response actions with optional filters (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        if incident_id:
+            conditions.append("incident_id = %s")
+            params.append(incident_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT * FROM security_response_actions
+            {where}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        """, params)
+        rows = []
+        for r in cursor.fetchall():
+            row = dict(r)
+            row['id'] = str(row['id'])
+            if row.get('incident_id'):
+                row['incident_id'] = str(row['incident_id'])
+            for ts in ('created_at', 'approved_at', 'executed_at'):
+                if row.get(ts):
+                    row[ts] = row[ts].isoformat()
+            rows.append(row)
+        cursor.close()
+        return rows
+
+    def get_security_response_action(self, action_id):
+        """Get a single security response action by ID (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM security_response_actions WHERE id = %s", (action_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        row = dict(row)
+        row['id'] = str(row['id'])
+        if row.get('incident_id'):
+            row['incident_id'] = str(row['incident_id'])
+        for ts in ('created_at', 'approved_at', 'executed_at'):
+            if row.get(ts):
+                row[ts] = row[ts].isoformat()
+        return row
+
+    def update_security_response_action(self, action_id, status, approved_by=None, metadata_update=None):
+        """Update status of a security response action (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor, Json
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        set_parts = ["status = %s"]
+        params = [status]
+        if status == 'approved' and approved_by:
+            set_parts.append("approved_by = %s")
+            params.append(approved_by)
+            set_parts.append("approved_at = NOW()")
+        if status == 'executed':
+            set_parts.append("executed_at = NOW()")
+        if metadata_update:
+            set_parts.append("metadata = metadata || %s")
+            params.append(Json(metadata_update))
+        params.append(action_id)
+        cursor.execute(f"""
+            UPDATE security_response_actions
+            SET {', '.join(set_parts)}
+            WHERE id = %s RETURNING *
+        """, params)
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if not row:
+            return None
+        row = dict(row)
+        row['id'] = str(row['id'])
+        if row.get('incident_id'):
+            row['incident_id'] = str(row['incident_id'])
+        for ts in ('created_at', 'approved_at', 'executed_at'):
+            if row.get(ts):
+                row[ts] = row[ts].isoformat()
+        return row
+
+    def get_security_response_actions_stats(self):
+        """Get summary stats for security response actions (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN status = 'executed' THEN 1 ELSE 0 END) AS executed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+            FROM security_response_actions
+        """)
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return {k: int(v or 0) for k, v in row.items()}
+
+    def get_security_response_action_count_recent(self, org_id):
+        """Count response actions created in the last hour (for rate limiting)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT COUNT(*) AS cnt FROM security_response_actions
+            WHERE created_at > NOW() - INTERVAL '1 hour'
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return int(row['cnt']) if row else 0
+
+    # ── Phase 25: Copilot Queries CRUD ─────────────────────────────────
+
+    def save_copilot_query(self, org_id, user_id, query, response, context=None):
+        """Save a copilot query and response (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor, Json
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO copilot_queries (organization_id, user_id, query, response, context)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+        """, (org_id, user_id, query, response, Json(context or {})))
+        row = dict(cursor.fetchone())
+        self._commit()
+        cursor.close()
+        row['id'] = str(row['id'])
+        if row.get('created_at'):
+            row['created_at'] = row['created_at'].isoformat()
+        return row
+
+    def get_copilot_queries(self, user_id=None, limit=20, offset=0):
+        """List copilot queries with optional user filter (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if user_id:
+            conditions.append("user_id = %s")
+            params.append(user_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT * FROM copilot_queries
+            {where}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        """, params)
+        rows = []
+        for r in cursor.fetchall():
+            row = dict(r)
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+            rows.append(row)
+        cursor.close()
+        return rows
+
+    def get_copilot_query_by_id(self, query_id):
+        """Get a single copilot query by ID (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM copilot_queries WHERE id = %s", (query_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        row = dict(row)
+        row['id'] = str(row['id'])
+        if row.get('created_at'):
+            row['created_at'] = row['created_at'].isoformat()
+        return row
+
+    # ── Phase 26: Attack Predictions CRUD ──────────────────────────────
+
+    def save_attack_prediction(self, prediction):
+        """Save an attack prediction (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor, Json
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO identity_attack_predictions
+                (organization_id, identity_id, prediction_score, risk_level,
+                 risk_drivers, recommended_actions, confidence)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            prediction['organization_id'],
+            prediction['identity_id'],
+            prediction['prediction_score'],
+            prediction['risk_level'],
+            Json(prediction.get('risk_drivers', [])),
+            Json(prediction.get('recommended_actions', [])),
+            prediction.get('confidence', 0),
+        ))
+        row = dict(cursor.fetchone())
+        self._commit()
+        cursor.close()
+        row['id'] = str(row['id'])
+        if row.get('created_at'):
+            row['created_at'] = row['created_at'].isoformat()
+        return row
+
+    def get_attack_predictions(self, risk_level=None, limit=50, offset=0):
+        """List attack predictions with optional filters (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if risk_level:
+            conditions.append("risk_level = %s")
+            params.append(risk_level)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT * FROM identity_attack_predictions
+            {where}
+            ORDER BY prediction_score DESC, created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = []
+        for r in cursor.fetchall():
+            row = dict(r)
+            row['id'] = str(row['id'])
+            if row.get('created_at'):
+                row['created_at'] = row['created_at'].isoformat()
+            rows.append(row)
+        cursor.close()
+        return rows
+
+    def get_attack_predictions_stats(self):
+        """Get summary stats for attack predictions (org-scoped via RLS)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN risk_level = 'critical' THEN 1 ELSE 0 END) AS critical,
+                SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high,
+                SUM(CASE WHEN risk_level = 'medium' THEN 1 ELSE 0 END) AS medium,
+                SUM(CASE WHEN risk_level = 'low' THEN 1 ELSE 0 END) AS low,
+                COALESCE(AVG(prediction_score), 0) AS avg_score
+            FROM identity_attack_predictions
+        """)
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return {
+            'total': int(row.get('total') or 0),
+            'critical': int(row.get('critical') or 0),
+            'high': int(row.get('high') or 0),
+            'medium': int(row.get('medium') or 0),
+            'low': int(row.get('low') or 0),
+            'avg_score': round(float(row.get('avg_score') or 0), 1),
+        }
+
+    # ── Phase 27: Graph Intelligence CRUD ─────────────────────────────────────
+
+    def save_graph_insights(self, connection_id, org_id, insights):
+        """UPSERT graph insights — dedup on (connection_id, identity_id)."""
+        cursor = self._cursor()
+        for ins in insights:
+            cursor.execute("""
+                INSERT INTO identity_graph_insights
+                    (organization_id, cloud_connection_id, identity_id, identity_name,
+                     identity_category, centrality_score, blast_radius, trust_chain_length,
+                     resource_reachability, privilege_concentration, risk_level,
+                     insight_summary, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (cloud_connection_id, identity_id)
+                DO UPDATE SET
+                    centrality_score = EXCLUDED.centrality_score,
+                    blast_radius = EXCLUDED.blast_radius,
+                    trust_chain_length = EXCLUDED.trust_chain_length,
+                    resource_reachability = EXCLUDED.resource_reachability,
+                    privilege_concentration = EXCLUDED.privilege_concentration,
+                    risk_level = EXCLUDED.risk_level,
+                    insight_summary = EXCLUDED.insight_summary,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = NOW()
+            """, (
+                org_id, connection_id, ins['identity_id'], ins.get('identity_name', ''),
+                ins.get('identity_category', ''), ins['centrality_score'],
+                ins['blast_radius'], ins['trust_chain_length'],
+                ins['resource_reachability'], ins['privilege_concentration'],
+                ins['risk_level'], ins['insight_summary'],
+                __import__('json').dumps(ins.get('metadata', {})),
+            ))
+        self._commit()
+        cursor.close()
+
+    def get_graph_insights(self, limit=50, offset=0, risk_level=None, connection_id=None):
+        """Retrieve graph insights with optional filters, ordered by centrality DESC."""
+        cursor = self._cursor()
+        conditions = []
+        params = []
+        if risk_level:
+            conditions.append("risk_level = %s")
+            params.append(risk_level)
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT id, organization_id, cloud_connection_id, identity_id, identity_name,
+                   identity_category, centrality_score, blast_radius, trust_chain_length,
+                   resource_reachability, privilege_concentration, risk_level,
+                   insight_summary, metadata, created_at, updated_at
+            FROM identity_graph_insights {where}
+            ORDER BY centrality_score DESC, blast_radius DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['id'] = str(r['id'])
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+            if r.get('updated_at'):
+                r['updated_at'] = r['updated_at'].isoformat()
+        return rows
+
+    def get_graph_insights_stats(self):
+        """Summary stats for graph insights."""
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE risk_level = 'critical') AS critical,
+                COUNT(*) FILTER (WHERE risk_level = 'high') AS high,
+                COUNT(*) FILTER (WHERE risk_level = 'medium') AS medium,
+                COUNT(*) FILTER (WHERE risk_level = 'low') AS low,
+                COALESCE(AVG(centrality_score), 0) AS avg_centrality,
+                COALESCE(AVG(blast_radius), 0) AS avg_blast_radius,
+                COALESCE(MAX(centrality_score), 0) AS max_centrality
+            FROM identity_graph_insights
+        """)
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return {
+            'total': int(row.get('total') or 0),
+            'critical': int(row.get('critical') or 0),
+            'high': int(row.get('high') or 0),
+            'medium': int(row.get('medium') or 0),
+            'low': int(row.get('low') or 0),
+            'avg_centrality': round(float(row.get('avg_centrality') or 0), 3),
+            'avg_blast_radius': round(float(row.get('avg_blast_radius') or 0), 1),
+            'max_centrality': round(float(row.get('max_centrality') or 0), 3),
+        }
+
+    # ── Phase 28: Governance Actions CRUD ─────────────────────────────────────
+
+    def save_governance_actions(self, connection_id, org_id, actions):
+        """UPSERT governance actions — dedup on pending (connection, identity, action)."""
+        cursor = self._cursor()
+        for a in actions:
+            cursor.execute("""
+                INSERT INTO identity_governance_actions
+                    (organization_id, cloud_connection_id, identity_id, identity_name,
+                     identity_category, governance_action, reason, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (cloud_connection_id, identity_id, governance_action)
+                    WHERE status = 'pending'
+                DO UPDATE SET
+                    reason = EXCLUDED.reason,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = NOW()
+            """, (
+                org_id, connection_id, a['identity_id'], a.get('identity_name', ''),
+                a.get('identity_category', ''), a['governance_action'],
+                a.get('reason', ''),
+                __import__('json').dumps(a.get('metadata', {})),
+            ))
+        self._commit()
+        cursor.close()
+
+    def get_governance_actions(self, limit=50, offset=0, status=None, action=None, connection_id=None):
+        """Retrieve governance actions with optional filters."""
+        cursor = self._cursor()
+        conditions = []
+        params = []
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        if action:
+            conditions.append("governance_action = %s")
+            params.append(action)
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT id, organization_id, cloud_connection_id, identity_id, identity_name,
+                   identity_category, governance_action, status, reason, metadata,
+                   created_at, updated_at
+            FROM identity_governance_actions {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['id'] = str(r['id'])
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+            if r.get('updated_at'):
+                r['updated_at'] = r['updated_at'].isoformat()
+        return rows
+
+    def get_governance_actions_stats(self):
+        """Summary stats for governance actions."""
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                COUNT(*) FILTER (WHERE status = 'approved') AS approved,
+                COUNT(*) FILTER (WHERE status = 'executed') AS executed,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                COUNT(*) FILTER (WHERE governance_action = 'downgrade_privileged_role') AS privilege_drift,
+                COUNT(*) FILTER (WHERE governance_action = 'disable_unused_identity') AS unused_identity,
+                COUNT(*) FILTER (WHERE governance_action = 'rotate_old_credential') AS stale_credential,
+                COUNT(*) FILTER (WHERE governance_action = 'remove_guest_privilege') AS guest_privilege
+            FROM identity_governance_actions
+        """)
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return {
+            'total': int(row.get('total') or 0),
+            'pending': int(row.get('pending') or 0),
+            'approved': int(row.get('approved') or 0),
+            'executed': int(row.get('executed') or 0),
+            'failed': int(row.get('failed') or 0),
+            'by_action': {
+                'privilege_drift': int(row.get('privilege_drift') or 0),
+                'unused_identity': int(row.get('unused_identity') or 0),
+                'stale_credential': int(row.get('stale_credential') or 0),
+                'guest_privilege': int(row.get('guest_privilege') or 0),
+            },
+        }
+
+    def update_governance_action_status(self, action_id, status):
+        """Update the status of a governance action."""
+        cursor = self._cursor()
+        cursor.execute("""
+            UPDATE identity_governance_actions
+            SET status = %s, updated_at = NOW()
+            WHERE id = %s
+        """, (status, action_id))
+        self._commit()
+        cursor.close()
+
+    # ── Phase 29: Risk Simulation CRUD ────────────────────────────────────────
+
+    def save_risk_simulation(self, org_id, sim):
+        """Insert a risk simulation result."""
+        cursor = self._cursor()
+        cursor.execute("""
+            INSERT INTO identity_risk_simulations
+                (organization_id, cloud_connection_id, identity_id, identity_name,
+                 identity_category, simulation_type, exposed_resources,
+                 exposed_identities, escalation_paths, simulation_score,
+                 risk_level, impact_summary, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            org_id, sim.get('cloud_connection_id'), sim['identity_id'],
+            sim.get('identity_name', ''), sim.get('identity_category', ''),
+            sim['simulation_type'], sim['exposed_resources'],
+            sim['exposed_identities'], sim['escalation_paths'],
+            sim['simulation_score'], sim['risk_level'],
+            sim.get('impact_summary', ''),
+            __import__('json').dumps(sim.get('metadata', {})),
+        ))
+        self._commit()
+        cursor.close()
+
+    def get_risk_simulations(self, limit=50, offset=0, simulation_type=None, identity_id=None):
+        """Retrieve risk simulations with optional filters."""
+        cursor = self._cursor()
+        conditions = []
+        params = []
+        if simulation_type:
+            conditions.append("simulation_type = %s")
+            params.append(simulation_type)
+        if identity_id:
+            conditions.append("identity_id = %s")
+            params.append(identity_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT id, organization_id, cloud_connection_id, identity_id, identity_name,
+                   identity_category, simulation_type, exposed_resources,
+                   exposed_identities, escalation_paths, simulation_score,
+                   risk_level, impact_summary, metadata, created_at
+            FROM identity_risk_simulations {where}
+            ORDER BY simulation_score DESC, created_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['id'] = str(r['id'])
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
+    def get_risk_simulations_stats(self):
+        """Summary stats for risk simulations."""
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE risk_level = 'critical') AS critical,
+                COUNT(*) FILTER (WHERE risk_level = 'high') AS high,
+                COUNT(*) FILTER (WHERE risk_level = 'medium') AS medium,
+                COUNT(*) FILTER (WHERE risk_level = 'low') AS low,
+                COALESCE(AVG(simulation_score), 0) AS avg_score,
+                COALESCE(AVG(exposed_resources), 0) AS avg_exposed_resources,
+                COALESCE(MAX(simulation_score), 0) AS max_score
+            FROM identity_risk_simulations
+        """)
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return {
+            'total': int(row.get('total') or 0),
+            'critical': int(row.get('critical') or 0),
+            'high': int(row.get('high') or 0),
+            'medium': int(row.get('medium') or 0),
+            'low': int(row.get('low') or 0),
+            'avg_score': round(float(row.get('avg_score') or 0), 1),
+            'avg_exposed_resources': round(float(row.get('avg_exposed_resources') or 0), 1),
+            'max_score': round(float(row.get('max_score') or 0), 1),
+        }
+
+    # ── Phase 30: Integration Events CRUD ─────────────────────────────────────
+
+    def save_integration_event(self, org_id, event):
+        """Insert an integration event record."""
+        cursor = self._cursor()
+        cursor.execute("""
+            INSERT INTO integration_events
+                (organization_id, event_type, destination, payload, status, error_message)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            org_id, event['event_type'], event['destination'],
+            __import__('json').dumps(event.get('payload', {})),
+            event.get('status', 'pending'), event.get('error_message'),
+        ))
+        self._commit()
+        cursor.close()
+
+    def get_integration_events(self, limit=50, offset=0, event_type=None, destination=None, status=None):
+        """Retrieve integration events with optional filters."""
+        cursor = self._cursor()
+        conditions = []
+        params = []
+        if event_type:
+            conditions.append("event_type = %s")
+            params.append(event_type)
+        if destination:
+            conditions.append("destination = %s")
+            params.append(destination)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT id, organization_id, event_type, destination, payload,
+                   status, error_message, created_at
+            FROM integration_events {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            r['id'] = str(r['id'])
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
+    def get_integration_events_stats(self):
+        """Summary stats for integration events."""
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'sent') AS sent,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                COUNT(*) FILTER (WHERE destination = 'slack') AS slack,
+                COUNT(*) FILTER (WHERE destination = 'jira') AS jira,
+                COUNT(*) FILTER (WHERE destination = 'servicenow') AS servicenow,
+                COUNT(*) FILTER (WHERE destination = 'siem') AS siem
+            FROM integration_events
+        """)
+        row = dict(cursor.fetchone())
+        cursor.close()
+        return {
+            'total': int(row.get('total') or 0),
+            'sent': int(row.get('sent') or 0),
+            'failed': int(row.get('failed') or 0),
+            'pending': int(row.get('pending') or 0),
+            'by_destination': {
+                'slack': int(row.get('slack') or 0),
+                'jira': int(row.get('jira') or 0),
+                'servicenow': int(row.get('servicenow') or 0),
+                'siem': int(row.get('siem') or 0),
+            },
+        }
+
+    def get_integration_configs(self, org_id=None):
+        """Get integration configs. If org_id not provided, uses RLS context."""
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT id, organization_id, integration_type, enabled, config,
+                   created_at, updated_at
+            FROM integration_configs
+            ORDER BY integration_type
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+            if r.get('updated_at'):
+                r['updated_at'] = r['updated_at'].isoformat()
+        return rows
+
+    def upsert_integration_config(self, org_id, integration_type, enabled, config):
+        """Create or update an integration config."""
+        cursor = self._cursor()
+        cursor.execute("""
+            INSERT INTO integration_configs (organization_id, integration_type, enabled, config)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (organization_id, integration_type)
+            DO UPDATE SET enabled = EXCLUDED.enabled, config = EXCLUDED.config, updated_at = NOW()
+        """, (org_id, integration_type, enabled, __import__('json').dumps(config)))
+        self._commit()
+        cursor.close()
+
+    # ── Security Posture CRUD ────────────────────────────────────────────────
+
+    def save_security_posture(self, connection_id, org_id, posture):
+        """Insert a security posture snapshot."""
+        cursor = self._cursor()
+        cursor.execute("""
+            INSERT INTO identity_security_posture
+                (organization_id, cloud_connection_id, risk_score,
+                 incident_count, prediction_count, governance_violation_count,
+                 strategy_recommendation_count, threat_event_count,
+                 active_identity_count, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (org_id, connection_id, posture['risk_score'],
+              posture['incident_count'], posture['prediction_count'],
+              posture['governance_violation_count'],
+              posture['strategy_recommendation_count'],
+              posture.get('threat_event_count', 0),
+              posture.get('active_identity_count', 0),
+              __import__('json').dumps(posture.get('metadata', {}))))
+        self._commit()
+        cursor.close()
+
+    def get_security_posture(self, limit=20, offset=0, connection_id=None):
+        """Get security posture snapshots."""
+        cursor = self._cursor(dict_cursor=True)
+        conditions = []
+        params = []
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM identity_security_posture
+            {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_security_posture_latest(self):
+        """Get the most recent security posture snapshot."""
+        cursor = self._cursor(dict_cursor=True)
+        cursor.execute("""
+            SELECT * FROM identity_security_posture
+            ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def get_security_posture_stats(self):
+        """Get security posture summary stats."""
+        cursor = self._cursor(dict_cursor=True)
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_snapshots,
+                COALESCE(AVG(risk_score), 0) as avg_risk_score,
+                COALESCE(MAX(risk_score), 0) as max_risk_score,
+                COALESCE(MIN(risk_score), 0) as min_risk_score,
+                COALESCE(SUM(incident_count), 0) as total_incidents,
+                COALESCE(SUM(prediction_count), 0) as total_predictions,
+                COALESCE(SUM(governance_violation_count), 0) as total_violations,
+                COALESCE(SUM(strategy_recommendation_count), 0) as total_recommendations
+            FROM identity_security_posture
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        stats = dict(row) if row else {}
+        for key in ('avg_risk_score', 'max_risk_score', 'min_risk_score'):
+            if key in stats:
+                stats[key] = round(float(stats[key]), 1)
+        return stats
+
+    # ── Strategy Recommendations CRUD ─────────────────────────────────────────
+
+    def save_strategy_recommendations(self, connection_id, org_id, recommendations):
+        """Upsert strategy recommendations (dedup on connection + type where open)."""
+        cursor = self._cursor()
+        for rec in recommendations:
+            cursor.execute("""
+                INSERT INTO security_strategy_recommendations
+                    (organization_id, cloud_connection_id, recommendation_type,
+                     risk_reduction_score, implementation_effort, priority,
+                     title, description, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (cloud_connection_id, recommendation_type) WHERE status = 'open'
+                DO UPDATE SET risk_reduction_score = EXCLUDED.risk_reduction_score,
+                    implementation_effort = EXCLUDED.implementation_effort,
+                    priority = EXCLUDED.priority,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    metadata = EXCLUDED.metadata,
+                    created_at = NOW()
+            """, (org_id, connection_id, rec['recommendation_type'],
+                  rec['risk_reduction_score'], rec['implementation_effort'],
+                  rec['priority'], rec['title'], rec.get('description', ''),
+                  __import__('json').dumps(rec.get('metadata', {}))))
+        self._commit()
+        cursor.close()
+
+    def get_strategy_recommendations(self, limit=50, offset=0, priority=None, status=None, connection_id=None):
+        """Get strategy recommendations with optional filters."""
+        cursor = self._cursor(dict_cursor=True)
+        conditions = []
+        params = []
+        if priority:
+            conditions.append("priority = %s")
+            params.append(priority)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM security_strategy_recommendations
+            {where}
+            ORDER BY CASE priority
+                WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+                risk_reduction_score DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_strategy_recommendations_stats(self):
+        """Get strategy recommendations summary stats."""
+        cursor = self._cursor(dict_cursor=True)
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'open') as open,
+                COUNT(*) FILTER (WHERE status = 'implemented') as implemented,
+                COUNT(*) FILTER (WHERE priority = 'critical') as critical,
+                COUNT(*) FILTER (WHERE priority = 'high') as high,
+                COALESCE(AVG(risk_reduction_score) FILTER (WHERE status = 'open'), 0) as avg_risk_reduction
+            FROM security_strategy_recommendations
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        stats = dict(row) if row else {'total': 0, 'open': 0, 'implemented': 0,
+                                        'critical': 0, 'high': 0, 'avg_risk_reduction': 0}
+        stats['avg_risk_reduction'] = round(float(stats.get('avg_risk_reduction', 0)), 1)
+        return stats
+
+    def update_strategy_recommendation_status(self, rec_id, status):
+        """Update a strategy recommendation status."""
+        cursor = self._cursor()
+        cursor.execute("""
+            UPDATE security_strategy_recommendations
+            SET status = %s WHERE id = %s
+        """, (status, rec_id))
+        self._commit()
+        cursor.close()
+
+    # ── Governance Analytics CRUD ──────────────────────────────────────────────
+
+    def save_governance_metrics(self, connection_id, org_id, metrics):
+        """Insert governance metrics rows."""
+        cursor = self._cursor()
+        for m in metrics:
+            cursor.execute("""
+                INSERT INTO identity_governance_metrics
+                    (organization_id, cloud_connection_id, metric_type, metric_value,
+                     sample_size, affected_count, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (org_id, connection_id, m['metric_type'], m['metric_value'],
+                  m['sample_size'], m['affected_count'],
+                  __import__('json').dumps(m.get('metadata', {}))))
+        self._commit()
+        cursor.close()
+
+    def save_governance_trends(self, connection_id, org_id, trends):
+        """Insert governance trend rows."""
+        cursor = self._cursor()
+        for t in trends:
+            cursor.execute("""
+                INSERT INTO identity_governance_trends
+                    (organization_id, cloud_connection_id, metric_type, previous_value,
+                     current_value, change_pct, trend_direction, period_start, period_end)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (org_id, connection_id, t['metric_type'], t['previous_value'],
+                  t['current_value'], t['change_pct'], t['trend_direction'],
+                  t['period_start'], t['period_end']))
+        self._commit()
+        cursor.close()
+
+    def get_governance_metrics(self, limit=50, offset=0, connection_id=None, metric_type=None):
+        """Get governance metrics with optional filters."""
+        cursor = self._cursor(dict_cursor=True)
+        conditions = []
+        params = []
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        if metric_type:
+            conditions.append("metric_type = %s")
+            params.append(metric_type)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM identity_governance_metrics
+            {where}
+            ORDER BY computed_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_governance_metrics_stats(self):
+        """Get governance metrics summary stats."""
+        cursor = self._cursor(dict_cursor=True)
+        cursor.execute("""
+            SELECT metric_type, metric_value, sample_size, affected_count, computed_at
+            FROM identity_governance_metrics
+            WHERE computed_at = (
+                SELECT MAX(computed_at) FROM identity_governance_metrics igm2
+                WHERE igm2.metric_type = identity_governance_metrics.metric_type
+            )
+            ORDER BY metric_type
+        """)
+        latest = cursor.fetchall()
+
+        stats = {
+            'total_metrics': len(latest),
+            'by_type': {},
+        }
+        for row in latest:
+            stats['by_type'][row['metric_type']] = {
+                'value': float(row['metric_value']),
+                'sample_size': row['sample_size'],
+                'affected_count': row['affected_count'],
+                'computed_at': row['computed_at'].isoformat() if row['computed_at'] else None,
+            }
+        cursor.close()
+        return stats
+
+    def get_governance_trends(self, limit=50, offset=0, connection_id=None, metric_type=None):
+        """Get governance trends with optional filters."""
+        cursor = self._cursor(dict_cursor=True)
+        conditions = []
+        params = []
+        if connection_id:
+            conditions.append("cloud_connection_id = %s")
+            params.append(connection_id)
+        if metric_type:
+            conditions.append("metric_type = %s")
+            params.append(metric_type)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(f"""
+            SELECT * FROM identity_governance_trends
+            {where}
+            ORDER BY computed_at DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = cursor.fetchall()
+        cursor.close()
+        return [dict(r) for r in rows]
+
+    def get_governance_trends_stats(self):
+        """Get governance trends summary stats."""
+        cursor = self._cursor(dict_cursor=True)
+        cursor.execute("""
+            SELECT metric_type, trend_direction, change_pct, current_value, previous_value, computed_at
+            FROM identity_governance_trends
+            WHERE computed_at = (
+                SELECT MAX(computed_at) FROM identity_governance_trends igt2
+                WHERE igt2.metric_type = identity_governance_trends.metric_type
+            )
+            ORDER BY metric_type
+        """)
+        latest = cursor.fetchall()
+
+        stats = {
+            'total_trends': len(latest),
+            'by_type': {},
+            'increasing': 0,
+            'stable': 0,
+            'decreasing': 0,
+        }
+        for row in latest:
+            direction = row['trend_direction']
+            stats[direction] = stats.get(direction, 0) + 1
+            stats['by_type'][row['metric_type']] = {
+                'direction': direction,
+                'change_pct': float(row['change_pct']),
+                'current_value': float(row['current_value']),
+                'previous_value': float(row['previous_value']),
+                'computed_at': row['computed_at'].isoformat() if row['computed_at'] else None,
+            }
+        cursor.close()
+        return stats
 
     # ── Organization CRUD ─────────────────────────────────────────────────────
 
@@ -10936,6 +16011,36 @@ class Database:
                 result[ts] = result[ts].isoformat()
         return result
 
+    def find_or_create_cloud_connection(self, organization_id, azure_directory_id, label=None,
+                                         source_azure_directory_id=None, source_connection_label=None):
+        """Find existing connection for Azure tenant or create one. Returns connection dict."""
+        self._ensure_cloud_connections_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM cloud_connections
+            WHERE organization_id = %s AND cloud = 'azure' AND azure_directory_id = %s
+        """, (organization_id, azure_directory_id))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            result = dict(row)
+            for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+                if result.get(ts):
+                    result[ts] = result[ts].isoformat()
+            return result
+        # Create new connection for this tenant (status defaults to 'pending')
+        metadata = {'auto_discovered': True}
+        if source_azure_directory_id:
+            metadata['discovered_via'] = source_azure_directory_id
+        if source_connection_label:
+            metadata['discovered_via_label'] = source_connection_label
+        return self.create_cloud_connection(
+            organization_id, 'azure',
+            label or f'Azure Tenant {azure_directory_id[:8]}...',
+            azure_directory_id=azure_directory_id,
+            connection_type='entra',
+            metadata=metadata)
+
     def get_cloud_connections(self, organization_id, cloud=None, include_secrets=False):
         """Get all cloud connections for an organization, with computed sub/identity counts.
         Set include_secrets=True to keep client_secret in metadata (for scheduler use).
@@ -10946,9 +16051,9 @@ class Database:
         query = """
             SELECT cc.*,
                 COALESCE((SELECT COUNT(*) FROM cloud_subscriptions cs
-                          WHERE cs.cloud_connection_id = cc.id AND cs.monitored = true), 0) AS sub_count,
+                          WHERE cs.cloud_connection_id = cc.id AND cs.monitored = true AND cs.deleted = false), 0) AS sub_count,
                 COALESCE((SELECT COUNT(*) FROM cloud_subscriptions cs
-                          WHERE cs.cloud_connection_id = cc.id AND cs.monitored = false), 0) AS discovered_count
+                          WHERE cs.cloud_connection_id = cc.id AND cs.monitored = false AND cs.deleted = false), 0) AS discovered_count
             FROM cloud_connections cc
             WHERE cc.organization_id = %s
         """
@@ -10961,7 +16066,8 @@ class Database:
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for row in rows:
-            for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+            for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at',
+                       'last_snapshot_started_at', 'last_snapshot_completed_at'):
                 if row.get(ts):
                     row[ts] = row[ts].isoformat()
             if not include_secrets:
@@ -10985,7 +16091,8 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at',
+                    'last_snapshot_started_at', 'last_snapshot_completed_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
@@ -10994,7 +16101,9 @@ class Database:
         """Update a cloud connection."""
         self._ensure_cloud_connections_table()
         allowed = {'label', 'status', 'display_order', 'last_test_at', 'last_test_status',
-                   'last_discovery_at', 'metadata', 'azure_directory_id', 'client_id'}
+                   'last_discovery_at', 'metadata', 'azure_directory_id', 'client_id',
+                   'discovery_enabled', 'discovery_interval_minutes',
+                   'last_snapshot_started_at', 'last_snapshot_completed_at'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_cloud_connection_by_id(connection_id)
@@ -11021,7 +16130,8 @@ class Database:
         if not row:
             return None
         result = dict(row)
-        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at'):
+        for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at',
+                    'last_snapshot_started_at', 'last_snapshot_completed_at'):
             if result.get(ts):
                 result[ts] = result[ts].isoformat()
         return result
@@ -11046,7 +16156,8 @@ class Database:
     _cloud_subscriptions_ensured = False
 
     def _ensure_cloud_subscriptions_table(self):
-        """Create cloud_subscriptions table if it doesn't exist."""
+        """Create cloud_subscriptions table if it doesn't exist.
+        Phase 1 multi-tenant: cloud_connection_id is NOT NULL, unique on (cloud_connection_id, account_id)."""
         if Database._cloud_subscriptions_ensured:
             return
         cursor = self.conn.cursor()
@@ -11062,14 +16173,17 @@ class Database:
                 activated_at TIMESTAMPTZ,
                 activated_by INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(organization_id, cloud, account_id)
+                cloud_connection_id INTEGER NOT NULL,
+                UNIQUE(cloud_connection_id, account_id)
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_org ON cloud_subscriptions(organization_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_cloud ON cloud_subscriptions(cloud)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cloud_subs_connection ON cloud_subscriptions(cloud_connection_id)")
         # Billing columns
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS rate_cents INTEGER NOT NULL DEFAULT 6900")
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS discovered_at TIMESTAMPTZ DEFAULT NOW()")
+        # Legacy compat: if table existed before migration 037, cloud_connection_id may be nullable
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS cloud_connection_id INTEGER")
         # FIX1C.1: Soft-delete columns (migration 024) — needed by activate/deactivate queries
         cursor.execute("ALTER TABLE cloud_subscriptions ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT false")
@@ -11087,7 +16201,8 @@ class Database:
         Sources: identity_subscription_access (individual rows) and
         discovery_runs (comma-separated fallback). Only runs when the
         table has no non-deleted rows for the given organization.
-        FIX1C.1: Excludes deleted rows from count check.
+        Post-migration 037: cloud_connection_id is required. Rows without a
+        determinable connection_id are skipped (legacy artifacts).
         """
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor()
@@ -11102,9 +16217,10 @@ class Database:
             return  # Already populated
 
         # Source 1: identity_subscription_access (clean individual records)
+        # Include cloud_connection_id from discovery_runs for the NOT NULL requirement
         if organization_id is not None and organization_id > 0:
             cursor.execute("""
-                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.organization_id
+                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.organization_id, dr.cloud_connection_id
                 FROM identity_subscription_access isa
                 JOIN discovery_runs dr ON dr.id = isa.discovery_run_id
                 WHERE dr.organization_id = %s
@@ -11112,7 +16228,7 @@ class Database:
             """, (organization_id,))
         else:
             cursor.execute("""
-                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.organization_id
+                SELECT DISTINCT isa.subscription_id, isa.subscription_name, dr.organization_id, dr.cloud_connection_id
                 FROM identity_subscription_access isa
                 JOIN discovery_runs dr ON dr.id = isa.discovery_run_id
                 WHERE isa.subscription_id IS NOT NULL AND isa.subscription_id != ''
@@ -11121,17 +16237,29 @@ class Database:
 
         inserted = set()
         for row in isa_rows:
-            sub_id, sub_name, run_tid = row[0], row[1], row[2]
+            sub_id, sub_name, run_tid, conn_id = row[0], row[1], row[2], row[3] if len(row) > 3 else None
             effective_tid = run_tid or (organization_id if organization_id and organization_id > 0 else 1)
-            key = (effective_tid, sub_id)
+            # Skip rows without a connection_id — can't satisfy NOT NULL constraint
+            if not conn_id:
+                # Try to find a matching connection for this org
+                cursor.execute("""
+                    SELECT id FROM cloud_connections
+                    WHERE organization_id = %s AND cloud = 'azure'
+                    ORDER BY created_at ASC LIMIT 1
+                """, (effective_tid,))
+                cc_row = cursor.fetchone()
+                conn_id = cc_row[0] if cc_row else None
+            if not conn_id:
+                continue  # No connection found — skip this legacy artifact
+            key = (conn_id, sub_id)
             if key in inserted:
                 continue
             try:
                 cursor.execute("""
-                    INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
-                    VALUES (%s, 'azure', %s, %s, 'discovered')
-                    ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
-                """, (effective_tid, sub_id, sub_name or sub_id))
+                    INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status, cloud_connection_id)
+                    VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                    ON CONFLICT (cloud_connection_id, account_id) DO NOTHING
+                """, (effective_tid, sub_id, sub_name or sub_id, conn_id))
                 inserted.add(key)
             except Exception:
                 self._rollback()
@@ -11140,13 +16268,13 @@ class Database:
         if not inserted:
             if organization_id is not None and organization_id > 0:
                 cursor.execute("""
-                    SELECT DISTINCT subscription_id, subscription_name, organization_id
+                    SELECT DISTINCT subscription_id, subscription_name, organization_id, cloud_connection_id
                     FROM discovery_runs
                     WHERE organization_id = %s AND subscription_id IS NOT NULL AND subscription_id != ''
                 """, (organization_id,))
             else:
                 cursor.execute("""
-                    SELECT DISTINCT subscription_id, subscription_name, organization_id
+                    SELECT DISTINCT subscription_id, subscription_name, organization_id, cloud_connection_id
                     FROM discovery_runs
                     WHERE subscription_id IS NOT NULL AND subscription_id != ''
                 """)
@@ -11154,20 +16282,32 @@ class Database:
                 sub_ids = row[0].split(',')
                 sub_names = (row[1] or '').split(', ')
                 run_tid = row[2] or (organization_id if organization_id and organization_id > 0 else 1)
+                conn_id = row[3] if len(row) > 3 else None
+                # Try to find a matching connection if not set on the run
+                if not conn_id:
+                    cursor.execute("""
+                        SELECT id FROM cloud_connections
+                        WHERE organization_id = %s AND cloud = 'azure'
+                        ORDER BY created_at ASC LIMIT 1
+                    """, (run_tid,))
+                    cc_row = cursor.fetchone()
+                    conn_id = cc_row[0] if cc_row else None
+                if not conn_id:
+                    continue  # No connection found — skip
                 for i, sid in enumerate(sub_ids):
                     sid = sid.strip()
                     if not sid:
                         continue
                     sname = sub_names[i].strip() if i < len(sub_names) else sid
-                    key = (run_tid, sid)
+                    key = (conn_id, sid)
                     if key in inserted:
                         continue
                     try:
                         cursor.execute("""
-                            INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
-                            VALUES (%s, 'azure', %s, %s, 'discovered')
-                            ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
-                        """, (run_tid, sid, sname))
+                            INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status, cloud_connection_id)
+                            VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                            ON CONFLICT (cloud_connection_id, account_id) DO NOTHING
+                        """, (run_tid, sid, sname, conn_id))
                         inserted.add(key)
                     except Exception:
                         self._rollback()
@@ -11179,10 +16319,14 @@ class Database:
         """Insert discovered subscriptions for a connection.
         subs_list: list of {'id': sub_id, 'name': display_name}
         Returns count of inserted rows.
+        cloud_connection_id is required (NOT NULL constraint post-migration 037).
+        organization_id is kept for denormalization but auto-synced by trigger.
         """
         self._ensure_cloud_subscriptions_table()
         if not subs_list:
             return 0
+        if not connection_id:
+            raise ValueError("cloud_connection_id is required for insert_discovered_subscriptions")
         cursor = self.conn.cursor()
         inserted = 0
         rate = 6900 if cloud == 'azure' else (7900 if cloud == 'aws' else 7400)
@@ -11196,9 +16340,8 @@ class Database:
                     INSERT INTO cloud_subscriptions
                         (organization_id, cloud, account_id, account_name, status, cloud_connection_id, rate_cents)
                     VALUES (%s, %s, %s, %s, 'discovered', %s, %s)
-                    ON CONFLICT (organization_id, cloud, account_id)
-                    DO UPDATE SET cloud_connection_id = EXCLUDED.cloud_connection_id,
-                                  account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
+                    ON CONFLICT (cloud_connection_id, account_id)
+                    DO UPDATE SET account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
                 """, (organization_id, cloud, sub_id, sub_name, connection_id, rate))
                 inserted += 1
             except Exception:
@@ -11207,9 +16350,10 @@ class Database:
         cursor.close()
         return inserted
 
-    def get_cloud_subscriptions(self, organization_id, cloud=None):
+    def get_cloud_subscriptions(self, organization_id, cloud=None, connection_id=None):
         """List cloud subscriptions for an organization with connection_label. None = superadmin (all).
-        FIX1C.1: Excludes soft-deleted subscriptions."""
+        Optional connection_id filter for per-connection scoping.
+        Excludes soft-deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         self._ensure_cloud_connections_table()
         self.sync_cloud_subscriptions(organization_id)
@@ -11217,12 +16361,19 @@ class Database:
         if self._organization_id is not None:
             self.set_organization_context(self._organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if organization_id is not None:
+        if connection_id is not None:
+            # Per-connection scoping (most specific filter)
+            query = """SELECT cs.*, cc.label AS connection_label
+                       FROM cloud_subscriptions cs
+                       LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
+                       WHERE cs.cloud_connection_id = %s AND cs.deleted = false"""
+            params: list = [connection_id]
+        elif organization_id is not None:
             query = """SELECT cs.*, cc.label AS connection_label
                        FROM cloud_subscriptions cs
                        LEFT JOIN cloud_connections cc ON cc.id = cs.cloud_connection_id
                        WHERE cs.organization_id = %s AND cs.deleted = false"""
-            params: list = [organization_id]
+            params = [organization_id]
         else:
             query = """SELECT cs.*, cc.label AS connection_label
                        FROM cloud_subscriptions cs
@@ -11242,16 +16393,27 @@ class Database:
                     r[ts] = r[ts].isoformat()
         return rows
 
-    def get_subscription_stats(self, organization_id):
+    def get_subscription_stats(self, organization_id, connection_id=None):
         """Summary counts for cloud subscriptions. None = superadmin (all).
-        FIX1C.1: Excludes soft-deleted subscriptions."""
+        Optional connection_id for per-connection stats.
+        Excludes soft-deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         self.sync_cloud_subscriptions(organization_id)
         # Re-apply RLS context after sync (which commits, resetting SET LOCAL)
         if self._organization_id is not None:
             self.set_organization_context(self._organization_id)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if organization_id is not None:
+        if connection_id is not None:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE monitored = true) as active,
+                    COUNT(*) FILTER (WHERE monitored = false) as discovered,
+                    COUNT(DISTINCT cloud) as clouds
+                FROM cloud_subscriptions
+                WHERE cloud_connection_id = %s AND deleted = false
+            """, (connection_id,))
+        elif organization_id is not None:
             cursor.execute("""
                 SELECT
                     COUNT(*) as total,
@@ -11276,16 +16438,19 @@ class Database:
         return row
 
     def activate_cloud_subscription(self, sub_id, user_id, organization_id=None):
-        """Activate a subscription for monitoring, scoped by organization.
-        FIX1C.1: Refuses to activate deleted subscriptions."""
+        """Activate a subscription for monitoring, validated through cloud_connections JOIN.
+        Refuses to activate deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if organization_id is not None:
+            # Validate subscription belongs to org via cloud_connections JOIN
             cursor.execute("""
-                UPDATE cloud_subscriptions
+                UPDATE cloud_subscriptions cs
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE id = %s AND organization_id = %s AND deleted = false
-                RETURNING *
+                FROM cloud_connections cc
+                WHERE cs.id = %s AND cs.cloud_connection_id = cc.id
+                  AND cc.organization_id = %s AND cs.deleted = false
+                RETURNING cs.*
             """, (user_id, sub_id, organization_id))
         else:
             cursor.execute("""
@@ -11307,15 +16472,18 @@ class Database:
 
     def activate_all_cloud_subscriptions(self, user_id, organization_id=None):
         """Activate all discovered (unmonitored) subscriptions for an organization.
-        FIX1C.1: Skips deleted subscriptions."""
+        Validates through cloud_connections JOIN. Skips deleted subscriptions."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if organization_id is not None:
+            # JOIN through cloud_connections for org validation
             cursor.execute("""
-                UPDATE cloud_subscriptions
+                UPDATE cloud_subscriptions cs
                 SET monitored = true, status = 'active', activated_at = NOW(), activated_by = %s
-                WHERE organization_id = %s AND monitored = false AND deleted = false
-                RETURNING *
+                FROM cloud_connections cc
+                WHERE cs.cloud_connection_id = cc.id
+                  AND cc.organization_id = %s AND cs.monitored = false AND cs.deleted = false
+                RETURNING cs.*
             """, (user_id, organization_id))
         else:
             cursor.execute("""
@@ -11334,21 +16502,24 @@ class Database:
         return rows
 
     def deactivate_cloud_subscription(self, sub_id, organization_id=None):
-        """Stop monitoring a subscription, scoped by organization."""
+        """Stop monitoring a subscription, validated through cloud_connections JOIN."""
         self._ensure_cloud_subscriptions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         if organization_id is not None:
+            # JOIN through cloud_connections for org validation
             cursor.execute("""
-                UPDATE cloud_subscriptions
+                UPDATE cloud_subscriptions cs
                 SET monitored = false, status = 'inactive'
-                WHERE id = %s AND organization_id = %s
-                RETURNING *
+                FROM cloud_connections cc
+                WHERE cs.id = %s AND cs.cloud_connection_id = cc.id
+                  AND cc.organization_id = %s AND cs.deleted = false
+                RETURNING cs.*
             """, (sub_id, organization_id))
         else:
             cursor.execute("""
                 UPDATE cloud_subscriptions
                 SET monitored = false, status = 'inactive'
-                WHERE id = %s
+                WHERE id = %s AND deleted = false
                 RETURNING *
             """, (sub_id,))
         row = cursor.fetchone()

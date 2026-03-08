@@ -9,6 +9,12 @@ interface CloudConnection {
   cloud: string;
   azure_directory_id: string;
   status: string;
+  metadata?: {
+    auto_discovered?: boolean;
+    discovered_via?: string;
+    discovered_via_label?: string;
+    [key: string]: unknown;
+  };
 }
 
 interface ConnectionContextType {

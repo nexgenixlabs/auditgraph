@@ -11,6 +11,7 @@ import { ComplianceSettingsTab } from '../components/settings/ComplianceSettings
 import { GovernanceTab } from '../components/settings/GovernanceTab';
 import { AdvancedTab } from '../components/settings/AdvancedTab';
 import { IntegrationsTab } from '../components/settings/IntegrationsTab';
+import type { CloudConnection } from '../components/settings/types';
 
 interface CloudProviderConfig {
   enabled: boolean;
@@ -344,14 +345,7 @@ export default function Settings() {
   const isAdmin = user?.role === 'admin';
 
   // Cloud connections (multi-directory)
-  const [cloudConnections, setCloudConnections] = useState<Array<{
-    id: number; cloud: string; label: string; status: string;
-    azure_directory_id: string | null; client_id: string | null;
-    last_test_status: string | null; last_discovery_at: string | null;
-    created_at: string;
-    sub_count?: number;
-    discovered_count?: number;
-  }>>([]);
+  const [cloudConnections, setCloudConnections] = useState<CloudConnection[]>([]);
   const [showAddWizard, setShowAddWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState(0);
   const [wizardCloud, setWizardCloud] = useState('azure');
@@ -364,6 +358,9 @@ export default function Settings() {
   const [wizardTestResult, setWizardTestResult] = useState<{ status: string; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
   const [wizardSaving, setWizardSaving] = useState(false);
   const [scanningConnId, setScanningConnId] = useState<number | null>(null);
+
+  // Phase 3: Active snapshot jobs per connection
+  const [activeJobs, setActiveJobs] = useState<Record<number, any>>({});
 
   // Phase 85: Organization onboarding stage
   const [orgStage, setOrgStage] = useState<string>('active');
@@ -397,6 +394,36 @@ export default function Settings() {
       .catch(() => {});
   }
   useEffect(() => { fetchConnections(); }, []);
+
+  // Phase 3: Poll active snapshot jobs for connections
+  useEffect(() => {
+    const connIds = Object.keys(activeJobs).map(Number);
+    if (connIds.length === 0) return;
+
+    const poll = async () => {
+      const next: Record<number, any> = {};
+      for (const cid of connIds) {
+        try {
+          const r = await fetch(`/api/discovery/jobs/${cid}`);
+          if (r.ok) {
+            const d = await r.json();
+            if (d.active_job) {
+              next[cid] = d.active_job;
+            }
+            // If no active_job, job completed — don't add to next, refresh connections
+          }
+        } catch { /* ignore */ }
+      }
+      setActiveJobs(next);
+      // If any jobs disappeared (completed), refresh connections list
+      if (Object.keys(next).length < connIds.length) {
+        fetchConnections();
+      }
+    };
+
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
+  }, [Object.keys(activeJobs).join(',')]);
 
   async function handleWizardTest() {
     setWizardTesting(true);
@@ -489,6 +516,10 @@ export default function Settings() {
       });
       if (res.ok) {
         setSuccess('Snapshot capture started for this connection.');
+        // Seed activeJobs so polling starts immediately
+        setActiveJobs(prev => ({ ...prev, [connId]: { status: 'queued', stage: null, progress: 0 } }));
+      } else if (res.status === 409) {
+        setError('A scan is already in progress for this connection.');
       } else {
         setError('Failed to trigger snapshot');
       }
@@ -496,6 +527,24 @@ export default function Settings() {
       setError('Failed to trigger snapshot');
     } finally {
       setScanningConnId(null);
+    }
+  }
+
+  async function handleUpdateDiscoverySettings(connId: number, enabled: boolean, intervalMinutes: number) {
+    try {
+      const res = await fetch(`/api/discovery/settings/${connId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discovery_enabled: enabled, discovery_interval_minutes: intervalMinutes }),
+      });
+      if (res.ok) {
+        fetchConnections();
+        setSuccess(enabled ? 'Continuous discovery enabled.' : 'Continuous discovery disabled.');
+      } else {
+        setError('Failed to update discovery settings');
+      }
+    } catch {
+      setError('Failed to update discovery settings');
     }
   }
 
@@ -1855,6 +1904,7 @@ export default function Settings() {
               wizardTestResult={wizardTestResult}
               wizardSaving={wizardSaving}
               scanningConnId={scanningConnId}
+              activeJobs={activeJobs}
               connectionTestResult={connectionTestResult}
               testingConnection={testingConnection}
               unlocking={unlocking}
@@ -1863,6 +1913,7 @@ export default function Settings() {
               resetWizard={resetWizard}
               handleDeleteConnection={handleDeleteConnection}
               handleRunScan={handleRunScan}
+              handleUpdateDiscoverySettings={handleUpdateDiscoverySettings}
               handleTestConnection={handleTestConnection}
               handleSaveAndUnlock={handleSaveAndUnlock}
               update={update}
