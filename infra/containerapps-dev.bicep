@@ -76,6 +76,18 @@ param clientJwtSecret string
 @description('Admin user password (synced on every startup)')
 param adminPassword string = ''
 
+// ── Azure Discovery Credentials (for auto-seeding cloud connections) ────────
+
+@description('Azure Entra Directory ID to monitor')
+param azureDirectoryId string = ''
+
+@description('Azure SP Client ID for discovery')
+param azureClientId string = ''
+
+@secure()
+@description('Azure SP Client Secret for discovery')
+param azureClientSecret string = ''
+
 // ── Optional Parameters ─────────────────────────────────────────────────────
 
 @description('CORS allowed origins')
@@ -148,6 +160,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'admin-jwt-secret', value: adminJwtSecret }
         { name: 'client-jwt-secret', value: clientJwtSecret }
         { name: 'admin-password', value: adminPassword }
+        { name: 'azure-client-secret', value: azureClientSecret }
       ]
     }
     template: {
@@ -179,6 +192,9 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'CORS_ORIGINS', value: corsOrigins }
             { name: 'ALLOW_DEMO', value: 'true' }
             { name: 'DEFAULT_ORG_SLUG', value: 'azurecredits' }
+            { name: 'DEV_AZURE_DIRECTORY_ID', value: azureDirectoryId }
+            { name: 'AZURE_CLIENT_ID', value: azureClientId }
+            { name: 'AZURE_CLIENT_SECRET', secretRef: 'azure-client-secret' }
           ]
           probes: [
             {

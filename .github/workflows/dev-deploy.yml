@@ -194,6 +194,9 @@ jobs:
             adminJwtSecret=${{ secrets.DEV_ADMIN_JWT_SECRET }}
             clientJwtSecret=${{ secrets.DEV_CLIENT_JWT_SECRET }}
             adminPassword=${{ secrets.DEV_ADMIN_PASSWORD }}
+            azureDirectoryId=${{ secrets.DEV_AZURE_DIRECTORY_ID }}
+            azureClientId=${{ secrets.DEV_AZURE_CLIENT_ID }}
+            azureClientSecret=${{ secrets.DEV_AZURE_CLIENT_SECRET }}
 
       - name: Wait for container apps to be running
         run: |

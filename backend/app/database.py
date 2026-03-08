@@ -5524,6 +5524,54 @@ class Database:
                 self._commit()
                 logger.info("azadmin user created (org_id=%s)", org_id)
 
+            # ── Step 3: Auto-seed cloud connection from env vars ─────────
+            # DEV_AZURE_DIRECTORY_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET
+            # If all three are set, connection is auto-configured as 'connected'.
+            # If only directory ID is set, connection created as 'pending'.
+            azure_dir_id = os.getenv('DEV_AZURE_DIRECTORY_ID')
+            azure_client_id = os.getenv('AZURE_CLIENT_ID')
+            azure_client_secret = os.getenv('AZURE_CLIENT_SECRET')
+
+            if azure_dir_id:
+                self._ensure_cloud_connections_table()
+                cursor.execute(
+                    "SELECT id, status FROM cloud_connections WHERE organization_id = %s AND azure_directory_id = %s",
+                    (org_id, azure_dir_id)
+                )
+                existing_conn = cursor.fetchone()
+                conn_label = os.getenv('DEV_AZURE_CONN_LABEL', 'AzureCredits Primary')
+                has_full_creds = bool(azure_client_id and azure_client_secret)
+                conn_status = 'connected' if has_full_creds else 'pending'
+                metadata = {}
+                if azure_client_secret:
+                    metadata['client_secret'] = azure_client_secret
+
+                if existing_conn:
+                    conn_id = existing_conn[0]
+                    # Sync credentials on every startup (in case secret rotated)
+                    import json as _json
+                    cursor.execute(
+                        "UPDATE cloud_connections SET client_id = %s, metadata = %s, status = %s, label = %s WHERE id = %s",
+                        (azure_client_id, _json.dumps(metadata), conn_status, conn_label, conn_id)
+                    )
+                    self._commit()
+                    logger.info("Cloud connection synced (id=%s, dir=%s, status=%s)", conn_id, azure_dir_id[:8], conn_status)
+                else:
+                    import json as _json
+                    cursor.execute("""
+                        INSERT INTO cloud_connections (
+                            organization_id, cloud, connection_type, label,
+                            azure_directory_id, client_id, status, metadata
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        org_id, 'azure', 'entra', conn_label,
+                        azure_dir_id, azure_client_id, conn_status, _json.dumps(metadata)
+                    ))
+                    self._commit()
+                    logger.info("Cloud connection created (dir=%s, status=%s)", azure_dir_id[:8], conn_status)
+            else:
+                logger.info("DEV_AZURE_DIRECTORY_ID not set — skipping cloud connection seed")
+
         except Exception as e:
             logger.error("Dev tenant seed failed: %s", e)
             try:
