@@ -209,7 +209,7 @@ jobs:
                 -n "$APP_NAME" -g ${{ env.RG }} \
                 --query "[0].properties.healthState" -o tsv 2>/dev/null || echo "Unknown")
               echo "  Attempt $i: runningState=$STATE healthState=$HEALTH"
-              if [ "$STATE" = "Running" ] && [ "$HEALTH" = "Healthy" ]; then
+              if ( [ "$STATE" = "Running" ] || [ "$STATE" = "RunningAtMaxScale" ] ) && [ "$HEALTH" = "Healthy" ]; then
                 echo "  ✓ $APP_NAME is running and healthy"
                 break
               fi
