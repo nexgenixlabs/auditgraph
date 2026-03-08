@@ -2988,7 +2988,8 @@ def create_app():
         # Phase 8: Ensure platform operations tables
         db._ensure_platform_ops_tables()
 
-        # Demo tenant: seed demo org + users (idempotent)
+        # Seed tenants: AzureCredits org + azadmin (local/dev), Demo org + demo users (all)
+        db.seed_dev_tenant()
         db.seed_demo_tenant()
 
     finally:

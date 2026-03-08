@@ -5441,6 +5441,95 @@ class Database:
         finally:
             cursor.close()
 
+    # ── Dev Tenant Seeding (AzureCredits org + azadmin) ─────────────
+
+    def seed_dev_tenant(self):
+        """Create the AzureCredits organization + azadmin user for dev environments.
+
+        Mirrors the local development setup so dev/QA/staging environments
+        have the same org structure as localhost. Idempotent — safe to call
+        on every startup.
+
+        Runs for APP_ENV in (local, dev). Skipped in qa/stg/prod.
+        """
+        from app.config import IS_DEV
+        if not IS_DEV:
+            return
+
+        import bcrypt as bcrypt_lib
+
+        self._ensure_users_table()
+        self._ensure_organizations_table()
+        cursor = self.conn.cursor()
+        logger = logging.getLogger('auditgraph.startup')
+
+        try:
+            # ── Step 1: Ensure 'azurecredits' organization exists ──────
+            cursor.execute(
+                "SELECT id FROM organizations WHERE slug = %s", ('azurecredits',)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                org_id = row[0]
+                logger.info("AzureCredits organization already exists (id=%s)", org_id)
+            else:
+                cursor.execute("""
+                    INSERT INTO organizations (name, slug, plan, enabled)
+                    VALUES ('AzureCredits', 'azurecredits', 'pro', true)
+                    RETURNING id
+                """)
+                org_id = cursor.fetchone()[0]
+                self._commit()
+                logger.info("AzureCredits organization created (id=%s)", org_id)
+
+            # Mark onboarding as completed
+            self.save_settings({
+                'onboarding_completed': 'true',
+                'org_name': 'AzureCredits',
+            }, organization_id=org_id)
+
+            # ── Step 2: Ensure 'azadmin' user exists ───────────────────
+            cursor.execute(
+                "SELECT id FROM users WHERE username = %s", ('azadmin',)
+            )
+            existing = cursor.fetchone()
+
+            password = os.getenv('DEV_TENANT_PASSWORD', 'Test@12345678')
+            password_hash = bcrypt_lib.hashpw(
+                password.encode('utf-8'), bcrypt_lib.gensalt()
+            ).decode('utf-8')
+
+            if existing:
+                # Sync password + org assignment
+                cursor.execute(
+                    "UPDATE users SET password_hash = %s, organization_id = %s WHERE username = %s",
+                    (password_hash, org_id, 'azadmin')
+                )
+                self._commit()
+                logger.info("azadmin user synced (org_id=%s)", org_id)
+            else:
+                cursor.execute("""
+                    INSERT INTO users (
+                        username, password_hash, display_name, role,
+                        organization_id, is_superadmin, auth_provider, enabled
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    'azadmin', password_hash, 'AzureCredits Admin', 'admin',
+                    org_id, False, 'local', True
+                ))
+                self._commit()
+                logger.info("azadmin user created (org_id=%s)", org_id)
+
+        except Exception as e:
+            logger.error("Dev tenant seed failed: %s", e)
+            try:
+                self._rollback()
+            except Exception:
+                pass
+        finally:
+            cursor.close()
+
     # ── Demo Tenant Seeding ─────────────────────────────────────────
 
     def seed_demo_tenant(self):
