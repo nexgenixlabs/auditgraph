@@ -9,7 +9,7 @@ env:
   RG: eus2-ag-nonprod-rg
   ACR: auditgraphcr
   ACR_SERVER: auditgraphcr.azurecr.io
-  CAE: dev-cae
+  CAE: dev-cae-ext
   API_APP: auditgraph-api-dev
   CLIENT_APP: auditgraph-app-dev
   ADMIN_APP: auditgraph-admin-dev

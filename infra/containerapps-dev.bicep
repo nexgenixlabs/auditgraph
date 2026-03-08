@@ -12,7 +12,7 @@
 // ── Parameters ──────────────────────────────────────────────────────────────
 
 @description('Existing Container Apps Environment name')
-param environmentName string = 'dev-cae'
+param environmentName string = 'dev-cae-ext'
 
 @description('Azure Container Registry login server')
 param acrLoginServer string = 'auditgraphcr.azurecr.io'
