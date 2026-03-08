@@ -5339,20 +5339,20 @@ class Database:
     # ── Local-only bootstrap ─────────────────────────────────────────
 
     def seed_local_admin(self):
-        """Create a known local admin user for development.
+        """Create the 'admin' superadmin user for local/dev environments.
 
         SAFETY:
-        - Runs ONLY when APP_ENV == 'local' (checked at call site AND here)
-        - Idempotent: skips if 'admin' user already exists with correct org
+        - Runs for APP_ENV in (local, dev) — mirrors local structure in dev
+        - Idempotent: syncs password + org on every startup
         - Cleans broken rows: deletes users with NULL/empty username
         - Uses bcrypt (same hashing as production login in handlers.py)
         - Uses admin DB connection (no RLS on users table)
-        - Does NOT run in dev/stg/prod
+        - Does NOT run in qa/stg/prod
 
         Called from main.py create_app() after ensure_default_admin().
         """
-        from app.config import IS_LOCAL
-        if not IS_LOCAL:
+        from app.config import IS_DEV
+        if not IS_DEV:
             return
 
         import bcrypt as bcrypt_lib
@@ -5398,15 +5398,18 @@ class Database:
 
             if existing:
                 user_id, existing_org = existing
-                # Fix org assignment if it drifted
-                if existing_org != default_org_id:
-                    cursor.execute(
-                        "UPDATE users SET organization_id = %s WHERE id = %s",
-                        (default_org_id, user_id)
-                    )
-                    self._commit()
-                    logger.info("Local bootstrap: fixed admin org_id → %s", default_org_id)
-                logger.info("Local admin already exists (id=%s)", user_id)
+                # Sync password + org on every startup for consistency
+                password_hash = bcrypt_lib.hashpw(
+                    'Admin@123'.encode('utf-8'),
+                    bcrypt_lib.gensalt()
+                ).decode('utf-8')
+                cursor.execute(
+                    "UPDATE users SET password_hash = %s, organization_id = %s, "
+                    "is_superadmin = true, portal_role = %s WHERE id = %s",
+                    (password_hash, default_org_id, 'superadmin', user_id)
+                )
+                self._commit()
+                logger.info("admin user synced (id=%s, org_id=%s)", user_id, default_org_id)
             else:
                 # Hash password using same bcrypt method as production login
                 password_hash = bcrypt_lib.hashpw(

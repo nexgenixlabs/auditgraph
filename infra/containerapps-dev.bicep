@@ -152,6 +152,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'ADMIN_PASSWORD', secretRef: 'admin-password' }
             { name: 'CORS_ORIGINS', value: corsOrigins }
             { name: 'ALLOW_DEMO', value: 'true' }
+            { name: 'DEFAULT_ORG_SLUG', value: 'azurecredits' }
           ]
           probes: [
             {

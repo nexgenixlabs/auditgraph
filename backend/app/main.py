@@ -2973,8 +2973,7 @@ def create_app():
     db = Database()
     try:
         db.ensure_default_admin()
-        if IS_LOCAL:
-            db.seed_local_admin()
+        db.seed_local_admin()  # admin user — runs for local + dev
         db.seed_compliance_frameworks()
         db.seed_compliance_root_causes()
         db._migrate_compliance_controls_v2()

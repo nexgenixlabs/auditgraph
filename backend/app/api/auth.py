@@ -89,6 +89,39 @@ def _derive_org_slug() -> str | None:
     return None
 
 
+def _resolve_login_org_slug() -> str | None:
+    """Resolve organization slug from Origin header for login-time tenant isolation.
+
+    Domain patterns:
+      demo.auditgraph.ai       → 'demo'        (slug = subdomain)
+      client1.auditgraph.ai    → 'client1'      (slug = subdomain)
+      dev.app.auditgraph.ai    → DEFAULT_ORG_SLUG env var (env-prefixed portal)
+      localhost:3000            → None           (no restriction in local dev)
+    """
+    origin = request.headers.get('Origin', '') or ''
+    if not origin:
+        return None
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(origin).hostname or '').lower()
+    except Exception:
+        return None
+    if host in ('localhost', '127.0.0.1'):
+        return None
+    if not host.endswith('.auditgraph.ai'):
+        return None
+    parts = host.split('.')
+    # {slug}.auditgraph.ai → slug (e.g. demo.auditgraph.ai → 'demo')
+    if len(parts) == 3:
+        subdomain = parts[0]
+        if subdomain not in ('app', 'api', 'admin', 'www'):
+            return subdomain
+    # {env}.app.auditgraph.ai → use DEFAULT_ORG_SLUG (e.g. dev.app.auditgraph.ai)
+    if len(parts) == 4 and parts[1] == 'app':
+        return os.getenv('DEFAULT_ORG_SLUG')
+    return None
+
+
 # ── Token generation ──
 
 def generate_access_token(user: dict, portal: str = 'client', org_slug: str | None = None) -> str:

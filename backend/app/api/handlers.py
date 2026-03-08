@@ -6946,6 +6946,24 @@ def auth_login():
             if not user.get('is_superadmin') and portal_role not in ('superadmin', 'poweradmin', 'billing', 'reader'):
                 return jsonify({'error': 'Access denied. This portal is for platform administrators only.'}), 403
 
+        # Domain-based tenant isolation: restrict login by origin domain
+        # Each client domain maps to exactly one org (e.g. demo.auditgraph.ai → demo org)
+        from app.api.auth import _resolve_login_org_slug
+        if portal == 'client':
+            origin_org_slug = _resolve_login_org_slug()
+            if origin_org_slug:
+                origin_org = db.get_organization_by_slug(origin_org_slug)
+                if origin_org and user.get('organization_id') != origin_org['id']:
+                    try:
+                        _log(db, 'auth_failed',
+                             f'Login blocked: "{username}" (org {user.get("org_name")}) '
+                             f'tried to access {origin_org_slug} domain',
+                             {'username': username, 'user_org': user.get('org_name'),
+                              'target_org': origin_org.get('name'), 'ip': request.remote_addr})
+                    except Exception:
+                        pass
+                    return jsonify({'error': 'You do not have access to this organization'}), 403
+
         # Phase 53: Tenant-scoped login enforcement
         if org_slug:
             target_org = db.get_organization_by_slug(org_slug)
