@@ -70,6 +70,12 @@ param adminJwtSecret string
 @description('Client portal JWT secret')
 param clientJwtSecret string
 
+// ── App Admin Bootstrap ───────────────────────────────────────────────────────
+
+@secure()
+@description('Admin user password (synced on every startup)')
+param adminPassword string = ''
+
 // ── Optional Parameters ─────────────────────────────────────────────────────
 
 @description('CORS allowed origins')
@@ -115,6 +121,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'jwt-secret', value: jwtSecret }
         { name: 'admin-jwt-secret', value: adminJwtSecret }
         { name: 'client-jwt-secret', value: clientJwtSecret }
+        { name: 'admin-password', value: adminPassword }
       ]
     }
     template: {
@@ -142,6 +149,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'JWT_SECRET', secretRef: 'jwt-secret' }
             { name: 'ADMIN_JWT_SECRET', secretRef: 'admin-jwt-secret' }
             { name: 'CLIENT_JWT_SECRET', secretRef: 'client-jwt-secret' }
+            { name: 'ADMIN_PASSWORD', secretRef: 'admin-password' }
             { name: 'CORS_ORIGINS', value: corsOrigins }
             { name: 'ALLOW_DEMO', value: 'true' }
           ]

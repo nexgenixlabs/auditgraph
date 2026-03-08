@@ -193,6 +193,7 @@ jobs:
             jwtSecret=${{ secrets.DEV_JWT_SECRET }}
             adminJwtSecret=${{ secrets.DEV_ADMIN_JWT_SECRET }}
             clientJwtSecret=${{ secrets.DEV_CLIENT_JWT_SECRET }}
+            adminPassword=${{ secrets.DEV_ADMIN_PASSWORD }}
 
       - name: Wait for container apps to be running
         run: |

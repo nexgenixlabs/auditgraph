@@ -5261,13 +5261,18 @@ class Database:
         cursor.close()
 
     def ensure_default_admin(self):
-        """Create default admin user if no users exist."""
+        """Create default admin user if no users exist, or sync password if ADMIN_PASSWORD is set."""
         import bcrypt as bcrypt_lib
         self._ensure_users_table()
+        logger = logging.getLogger('auditgraph.startup')
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM users")
         count = cursor.fetchone()[0]
         cursor.close()
+
+        username = os.getenv('ADMIN_USERNAME', 'techadmin')
+        configured_password = os.getenv('ADMIN_PASSWORD')
+
         if count == 0:
             # Get default organization_id
             default_org_id = None
@@ -5279,8 +5284,7 @@ class Database:
                 cursor2.close()
             except Exception:
                 pass
-            username = os.getenv('ADMIN_USERNAME', 'techadmin')
-            password = os.getenv('ADMIN_PASSWORD')
+            password = configured_password
             if not password:
                 import secrets as _secrets
                 password = _secrets.token_urlsafe(16)
@@ -5300,6 +5304,37 @@ class Database:
                 self.log_activity('auth', f'Default admin user "{username}" created on first startup', {'username': username})
             except Exception:
                 pass
+        elif configured_password:
+            # Users exist but ADMIN_PASSWORD env var is set — ensure admin
+            # user exists with the configured password (idempotent sync).
+            try:
+                cursor2 = self.conn.cursor()
+                cursor2.execute("SELECT id FROM users WHERE username = %s", (username,))
+                row = cursor2.fetchone()
+                hashed = bcrypt_lib.hashpw(configured_password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
+                if row:
+                    cursor2.execute(
+                        "UPDATE users SET password_hash = %s WHERE username = %s",
+                        (hashed, username)
+                    )
+                    self._commit()
+                    logger.info("Admin password synced for '%s' from ADMIN_PASSWORD env var", username)
+                else:
+                    # Admin user doesn't exist yet — create it
+                    default_org_id = None
+                    try:
+                        cursor2.execute("SELECT id FROM organizations ORDER BY id LIMIT 1")
+                        org_row = cursor2.fetchone()
+                        default_org_id = org_row[0] if org_row else None
+                    except Exception:
+                        pass
+                    self.create_user(username, hashed, 'Administrator', 'admin', organization_id=default_org_id)
+                    cursor2.execute("UPDATE users SET is_superadmin = true WHERE username = %s", (username,))
+                    self._commit()
+                    logger.info("Admin user '%s' created from ADMIN_PASSWORD env var", username)
+                cursor2.close()
+            except Exception as e:
+                logger.warning("Failed to sync admin password: %s", e)
 
     # ── Local-only bootstrap ─────────────────────────────────────────
 
