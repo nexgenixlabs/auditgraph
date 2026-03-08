@@ -2994,6 +2994,9 @@ def create_app():
     finally:
         db.close()
 
+    # Bulk GRANT: ensure app user can access all tables created by admin user
+    Database.grant_app_user_access()
+
     # Validate tenant index coverage (warning-only, does not block startup)
     idx_report = Database.validate_tenant_index_coverage()
     if not idx_report.get('skipped'):

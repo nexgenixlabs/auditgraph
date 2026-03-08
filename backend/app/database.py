@@ -5688,6 +5688,45 @@ class Database:
         finally:
             cursor.close()
 
+    # ── Bulk GRANT for app user (dual-user RLS architecture) ────────
+
+    @classmethod
+    def grant_app_user_access(cls):
+        """Grant SELECT/INSERT/UPDATE/DELETE on ALL tables and sequences to the app user.
+
+        The dual-user RLS architecture means:
+        - Admin user (BYPASSRLS) creates all tables during DDL
+        - App user (NOBYPASSRLS) needs explicit GRANT to access them
+        - RLS policies restrict what the app user can see
+
+        This must run ONCE after all DDL/seed methods complete.
+        Called from create_app() in main.py.
+        """
+        from app.config import DB_USER, DB_ADMIN_USER
+        if DB_USER == DB_ADMIN_USER:
+            return  # Single-user mode (local dev), no GRANTs needed
+
+        logger = logging.getLogger('auditgraph.startup')
+        db = cls()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("SAVEPOINT grant_all")
+            try:
+                cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {DB_USER}")
+                cursor.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {DB_USER}")
+                # Ensure future tables created by admin also get granted
+                cursor.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {DB_USER}")
+                cursor.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {DB_USER}")
+                cursor.execute("RELEASE SAVEPOINT grant_all")
+                db._commit()
+                logger.info("Bulk GRANT: app user '%s' granted access to all tables and sequences", DB_USER)
+            except Exception as e:
+                cursor.execute("ROLLBACK TO SAVEPOINT grant_all")
+                logger.error("Bulk GRANT failed: %s", e)
+            cursor.close()
+        finally:
+            db.close()
+
     # ── Phase 32: Compliance Frameworks ──────────────────────────────
 
     def _ensure_compliance_tables(self):
@@ -16154,15 +16193,6 @@ class Database:
                 cursor.execute("RELEASE SAVEPOINT rls_policy")
             except Exception:
                 cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
-        # Grant app user access (dual-user RLS architecture)
-        from app.config import DB_USER
-        cursor.execute("SAVEPOINT grant_check")
-        try:
-            cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON cloud_connections TO {DB_USER}")
-            cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE cloud_connections_id_seq TO {DB_USER}")
-            cursor.execute("RELEASE SAVEPOINT grant_check")
-        except Exception:
-            cursor.execute("ROLLBACK TO SAVEPOINT grant_check")
         self._commit()
         cursor.close()
         Database._cloud_connections_ensured = True
@@ -16376,15 +16406,6 @@ class Database:
         # Backfill rates by cloud
         cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7900 WHERE cloud = 'aws' AND rate_cents = 6900")
         cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7400 WHERE cloud = 'gcp' AND rate_cents = 6900")
-        # Grant app user access (dual-user RLS architecture)
-        from app.config import DB_USER
-        cursor.execute("SAVEPOINT grant_check")
-        try:
-            cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON cloud_subscriptions TO {DB_USER}")
-            cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE cloud_subscriptions_id_seq TO {DB_USER}")
-            cursor.execute("RELEASE SAVEPOINT grant_check")
-        except Exception:
-            cursor.execute("ROLLBACK TO SAVEPOINT grant_check")
         self._commit()
         cursor.close()
         Database._cloud_subscriptions_ensured = True
