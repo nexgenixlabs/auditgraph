@@ -16154,6 +16154,15 @@ class Database:
                 cursor.execute("RELEASE SAVEPOINT rls_policy")
             except Exception:
                 cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
+        # Grant app user access (dual-user RLS architecture)
+        from app.config import DB_USER
+        cursor.execute("SAVEPOINT grant_check")
+        try:
+            cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON cloud_connections TO {DB_USER}")
+            cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE cloud_connections_id_seq TO {DB_USER}")
+            cursor.execute("RELEASE SAVEPOINT grant_check")
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT grant_check")
         self._commit()
         cursor.close()
         Database._cloud_connections_ensured = True
@@ -16367,6 +16376,15 @@ class Database:
         # Backfill rates by cloud
         cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7900 WHERE cloud = 'aws' AND rate_cents = 6900")
         cursor.execute("UPDATE cloud_subscriptions SET rate_cents = 7400 WHERE cloud = 'gcp' AND rate_cents = 6900")
+        # Grant app user access (dual-user RLS architecture)
+        from app.config import DB_USER
+        cursor.execute("SAVEPOINT grant_check")
+        try:
+            cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON cloud_subscriptions TO {DB_USER}")
+            cursor.execute(f"GRANT USAGE, SELECT ON SEQUENCE cloud_subscriptions_id_seq TO {DB_USER}")
+            cursor.execute("RELEASE SAVEPOINT grant_check")
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT grant_check")
         self._commit()
         cursor.close()
         Database._cloud_subscriptions_ensured = True
