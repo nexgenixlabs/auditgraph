@@ -5528,9 +5528,10 @@ class Database:
             # DEV_AZURE_DIRECTORY_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET
             # If all three are set, connection is auto-configured as 'connected'.
             # If only directory ID is set, connection created as 'pending'.
-            azure_dir_id = os.getenv('DEV_AZURE_DIRECTORY_ID')
-            azure_client_id = os.getenv('AZURE_CLIENT_ID')
-            azure_client_secret = os.getenv('AZURE_CLIENT_SECRET')
+            azure_dir_id = (os.getenv('DEV_AZURE_DIRECTORY_ID') or '').strip() or None
+            azure_client_id = (os.getenv('AZURE_CLIENT_ID') or '').strip() or None
+            _raw_secret = (os.getenv('AZURE_CLIENT_SECRET') or '').strip()
+            azure_client_secret = _raw_secret if _raw_secret and _raw_secret != 'not-configured' else None
 
             if azure_dir_id:
                 self._ensure_cloud_connections_table()

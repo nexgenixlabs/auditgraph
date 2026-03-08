@@ -160,7 +160,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'admin-jwt-secret', value: adminJwtSecret }
         { name: 'client-jwt-secret', value: clientJwtSecret }
         { name: 'admin-password', value: adminPassword }
-        { name: 'azure-client-secret', value: azureClientSecret }
+        { name: 'azure-client-secret', value: empty(azureClientSecret) ? 'not-configured' : azureClientSecret }
       ]
     }
     template: {
