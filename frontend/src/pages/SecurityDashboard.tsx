@@ -502,129 +502,61 @@ const SecurityDashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [executing, setExecuting] = useState<string | null>(null);
 
+  /** Safely fetch a URL — returns parsed JSON or null on any error. */
+  const safeFetch = async (url: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return await res.json();
+    } catch { /* endpoint may not exist yet */ }
+    return null;
+  };
+
   const fetchData = async () => {
     try {
-      const [summaryRes, recsRes, simsRes, benchRes, advisorRes, cloudRes, forecastRes, policiesRes, threatsRes, activityRes, incidentsRes, responseRes, predictionsRes, graphInsightsRes, governanceRes, riskSimRes, integrationsRes, govMetricsRes, govTrendsRes, strategyRes, commandCenterRes] = await Promise.all([
-        fetch('/api/dashboard/summary'),
-        fetch('/api/security/recommendations?status=open'),
-        fetch('/api/security/attack-simulations'),
-        fetch('/api/security/benchmark'),
-        fetch('/api/security/advisor'),
-        fetch('/api/security/cloud-summary'),
-        fetch('/api/security/risk-forecast'),
-        fetch('/api/security/generated-policies?status=pending'),
-        fetch('/api/security/threat-events?status=open'),
-        fetch('/api/security/activity-events?limit=20'),
-        fetch('/api/security/incidents?status=open'),
-        fetch('/api/security/response-actions'),
-        fetch('/api/security/attack-predictions'),
-        fetch('/api/security/graph-insights'),
-        fetch('/api/security/governance-actions'),
-        fetch('/api/security/risk-simulations'),
-        fetch('/api/security/integrations'),
-        fetch('/api/security/governance-metrics'),
-        fetch('/api/security/governance-trends'),
-        fetch('/api/security/strategy-advisor'),
-        fetch('/api/security/command-center'),
+      // Core endpoints (implemented and reliable)
+      const [summaryData, cloudData, dashboardData] = await Promise.all([
+        safeFetch('/api/dashboard/summary'),
+        safeFetch('/api/security/cloud-summary'),
+        safeFetch('/api/security/dashboard'),
       ]);
-      if (summaryRes.ok) {
-        const data = await summaryRes.json();
-        setSummary(data);
+
+      if (summaryData) setSummary(summaryData as unknown as DashboardSummary);
+      if (cloudData) setCloudSummary((cloudData as Record<string, unknown>).providers as CloudProviderSummary[] || []);
+      if (dashboardData) {
+        const posture = (dashboardData as Record<string, unknown>).posture as Record<string, unknown> | undefined;
+        if (posture) {
+          setSecurityPosture(posture as unknown as SecurityPosture);
+        }
       }
-      if (recsRes.ok) {
-        const data = await recsRes.json();
-        setRecommendations(data.recommendations || []);
-        setRecStats(data.stats || null);
-      }
-      if (simsRes.ok) {
-        const data = await simsRes.json();
-        setSimulations(data.simulations || []);
-      }
-      if (benchRes.ok) {
-        const data = await benchRes.json();
-        if (!data.error) setBenchmark(data);
-      }
-      if (advisorRes.ok) {
-        const data = await advisorRes.json();
-        setAdvisor(data);
-      }
-      if (cloudRes.ok) {
-        const data = await cloudRes.json();
-        setCloudSummary(data.providers || []);
-      }
-      if (forecastRes.ok) {
-        const data = await forecastRes.json();
-        setForecast(data);
-      }
-      if (policiesRes.ok) {
-        const data = await policiesRes.json();
-        setGeneratedPolicies(data.policies || []);
-        setPolicyStats(data.stats || null);
-      }
-      if (threatsRes.ok) {
-        const data = await threatsRes.json();
-        setThreatEvents(data.events || []);
-        setThreatStats(data.stats || null);
-      }
-      if (activityRes.ok) {
-        const data = await activityRes.json();
-        setActivityEvents(data.events || []);
-      }
-      if (incidentsRes.ok) {
-        const data = await incidentsRes.json();
-        setIncidents(data.incidents || []);
-        setIncidentStats(data.stats || null);
-      }
-      if (responseRes.ok) {
-        const data = await responseRes.json();
-        setResponseActions(data.actions || []);
-        setResponseStats(data.stats || null);
-      }
-      if (predictionsRes.ok) {
-        const data = await predictionsRes.json();
-        setPredictions(data.predictions || []);
-        setPredictionStats(data.stats || null);
-      }
-      if (graphInsightsRes.ok) {
-        const data = await graphInsightsRes.json();
-        setGraphInsights(data.insights || []);
-        setGraphInsightStats(data.stats || null);
-      }
-      if (governanceRes.ok) {
-        const data = await governanceRes.json();
-        setGovernanceActions(data.actions || []);
-        setGovernanceStats(data.stats || null);
-      }
-      if (riskSimRes.ok) {
-        const data = await riskSimRes.json();
-        setRiskSimulations(data.simulations || []);
-        setRiskSimStats(data.stats || null);
-      }
-      if (integrationsRes.ok) {
-        const data = await integrationsRes.json();
-        setIntegrationEvents(data.events || []);
-        setIntegrationStats(data.stats || null);
-      }
-      if (govMetricsRes.ok) {
-        const data = await govMetricsRes.json();
-        setGovMetrics(data.metrics || []);
-        setGovMetricStats(data.stats || null);
-      }
-      if (govTrendsRes.ok) {
-        const data = await govTrendsRes.json();
-        setGovTrends(data.trends || []);
-        setGovTrendStats(data.stats || null);
-      }
-      if (strategyRes.ok) {
-        const data = await strategyRes.json();
-        setStrategyRecs(data.recommendations || []);
-        setStrategyStats(data.stats || null);
-      }
-      if (commandCenterRes.ok) {
-        const data = await commandCenterRes.json();
-        setSecurityPosture(data.posture || null);
-        setPostureStats(data.stats || null);
-      }
+
+      // Optional analytics endpoints — each wrapped independently so failures
+      // never block the dashboard from rendering.
+      const optionalFetches: Array<{ url: string; handler: (data: Record<string, unknown>) => void }> = [
+        { url: '/api/security/recommendations?status=open', handler: d => { setRecommendations((d.recommendations || []) as Recommendation[]); setRecStats((d.stats || null) as RecommendationStats | null); } },
+        { url: '/api/security/attack-simulations', handler: d => setSimulations((d.simulations || []) as AttackSimulation[]) },
+        { url: '/api/security/benchmark', handler: d => { if (!d.error) setBenchmark(d as unknown as BenchmarkData); } },
+        { url: '/api/security/advisor', handler: d => setAdvisor(d as unknown as AdvisorReport) },
+        { url: '/api/security/risk-forecast', handler: d => setForecast(d as unknown as RiskForecast) },
+        { url: '/api/security/generated-policies?status=pending', handler: d => { setGeneratedPolicies((d.policies || []) as GeneratedPolicy[]); setPolicyStats((d.stats || null) as PolicyStats | null); } },
+        { url: '/api/security/threat-events?status=open', handler: d => { setThreatEvents((d.events || []) as ThreatEvent[]); setThreatStats((d.stats || null) as ThreatStats | null); } },
+        { url: '/api/security/activity-events?limit=20', handler: d => setActivityEvents((d.events || []) as ActivityEvent[]) },
+        { url: '/api/security/incidents?status=open', handler: d => { setIncidents((d.incidents || []) as AttackIncident[]); setIncidentStats((d.stats || null) as IncidentStats | null); } },
+        { url: '/api/security/response-actions', handler: d => { setResponseActions((d.actions || []) as ResponseAction[]); setResponseStats((d.stats || null) as ResponseActionStats | null); } },
+        { url: '/api/security/attack-predictions', handler: d => { setPredictions((d.predictions || []) as AttackPrediction[]); setPredictionStats((d.stats || null) as PredictionStats | null); } },
+        { url: '/api/security/graph-insights', handler: d => { setGraphInsights((d.insights || []) as GraphInsight[]); setGraphInsightStats((d.stats || null) as GraphInsightStats | null); } },
+        { url: '/api/security/governance-actions', handler: d => { setGovernanceActions((d.actions || []) as GovernanceAction[]); setGovernanceStats((d.stats || null) as GovernanceStats | null); } },
+        { url: '/api/security/risk-simulations', handler: d => { setRiskSimulations((d.simulations || []) as RiskSimulation[]); setRiskSimStats((d.stats || null) as RiskSimulationStats | null); } },
+        { url: '/api/security/integrations', handler: d => { setIntegrationEvents((d.events || []) as IntegrationEvent[]); setIntegrationStats((d.stats || null) as IntegrationStats | null); } },
+        { url: '/api/security/governance-metrics', handler: d => { setGovMetrics((d.metrics || []) as GovernanceMetric[]); setGovMetricStats((d.stats || null) as GovernanceMetricStats | null); } },
+        { url: '/api/security/governance-trends', handler: d => { setGovTrends((d.trends || []) as GovernanceTrend[]); setGovTrendStats((d.stats || null) as GovernanceTrendStats | null); } },
+        { url: '/api/security/strategy-advisor', handler: d => { setStrategyRecs((d.recommendations || []) as StrategyRecommendation[]); setStrategyStats((d.stats || null) as StrategyStats | null); } },
+        { url: '/api/security/command-center', handler: d => { if (d.posture) setSecurityPosture(d.posture as unknown as SecurityPosture); if (d.stats) setPostureStats(d.stats as unknown as PostureStats); } },
+      ];
+
+      await Promise.all(optionalFetches.map(async ({ url, handler }) => {
+        const data = await safeFetch(url);
+        if (data) handler(data);
+      }));
     } catch (err) {
       console.error('Failed to fetch dashboard data:', err);
     } finally {

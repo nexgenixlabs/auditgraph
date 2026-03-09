@@ -22665,26 +22665,371 @@ def get_security_benchmark_handler():
 
 
 def get_graph_visualization_handler():
-    """GET /api/graph/visualization — get full IAM graph for a connection."""
+    """GET /api/graph/visualization — enriched graph with tooltips, attack paths, risk levels.
+
+    Returns nodes with labels, risk_level, tooltip metadata.
+    Detects attack paths (identity → high-priv role → subscription/resource).
+    Enforces max_nodes=120, max_edges=200.
+    """
+    MAX_NODES = 120
+    MAX_EDGES = 200
+    HIGH_PRIV_ROLES = {'Owner', 'User Access Administrator', 'Contributor'}
+
     db = _db()
     try:
-        org_id = _org_id()
         connection_id = request.args.get('connection_id')
         if not connection_id:
             return jsonify({'error': 'connection_id is required'}), 400
         connection_id = int(connection_id)
 
-        # Try cached first
-        cached = db.get_graph_visualization_cache(connection_id, 'identity_graph')
-        if cached:
-            cached['id'] = str(cached['id'])
-            return jsonify(cached.get('graph_data', {}))
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Generate on the fly
-        from app.engines.graph_visualizer import GraphVisualizer
-        visualizer = GraphVisualizer(db)
-        result = visualizer.generate_identity_graph(connection_id, org_id)
-        return jsonify(result)
+        try:
+            cursor.execute("""
+                SELECT source_id, target_id, edge_type
+                FROM identity_graph_edges
+                WHERE connection_id = %s
+            """, (connection_id,))
+            rows = cursor.fetchall()
+        except Exception:
+            rows = []
+
+        if not rows:
+            cursor.close()
+            return jsonify({'nodes': [], 'edges': [], 'attack_paths': [], 'truncated': False})
+
+        # Collect unique node IDs and infer types
+        node_ids = set()
+        for r in rows:
+            node_ids.add(r['source_id'])
+            node_ids.add(r['target_id'])
+
+        def _infer_type(nid):
+            if nid.startswith('role:'):
+                return 'role'
+            if '/resourceGroups/' in nid or '/providers/' in nid:
+                return 'resource'
+            if nid.startswith('/subscriptions/'):
+                return 'subscription'
+            if nid.startswith('user_'):
+                return 'identity'
+            if nid.startswith('spn_'):
+                return 'service_principal'
+            if nid.startswith('mi_'):
+                return 'managed_identity'
+            if nid.startswith('sub_'):
+                return 'subscription'
+            return 'identity'
+
+        # ── Enrich identities ──────────────────────────────────────────
+        identity_ids = [nid for nid in node_ids
+                        if _infer_type(nid) in ('identity', 'service_principal', 'managed_identity')]
+        identity_meta = {}  # id → {display_name, category, risk_level, risk_score, ...}
+        if identity_ids:
+            try:
+                cursor.execute("""
+                    SELECT DISTINCT ON (identity_id)
+                           identity_id, display_name, identity_category,
+                           risk_level, risk_score, credential_count,
+                           credential_risk, activity_status
+                    FROM identities
+                    WHERE identity_id = ANY(%s)
+                    ORDER BY identity_id, discovery_run_id DESC
+                """, (identity_ids,))
+                for r in cursor.fetchall():
+                    identity_meta[r['identity_id']] = dict(r)
+            except Exception:
+                pass
+
+        # ── Enrich subscriptions ───────────────────────────────────────
+        sub_guid_map = {}  # nid → guid
+        for nid in node_ids:
+            if _infer_type(nid) == 'subscription' and nid.startswith('/subscriptions/'):
+                parts = nid.strip('/').split('/')
+                if len(parts) >= 2:
+                    sub_guid_map[nid] = parts[1]
+        sub_labels = {}
+        if sub_guid_map:
+            try:
+                cursor.execute("""
+                    SELECT account_id, account_name
+                    FROM cloud_subscriptions
+                    WHERE account_id = ANY(%s)
+                """, (list(sub_guid_map.values()),))
+                for r in cursor.fetchall():
+                    sub_labels[r['account_id']] = r['account_name']
+            except Exception:
+                pass
+
+        # ── Build adjacency maps for tooltip enrichment ────────────────
+        # role → list of identity labels that have it
+        role_identities = {}  # role_nid → [identity_label, ...]
+        # role → list of scope nids it grants access to
+        role_scopes = {}      # role_nid → [target_nid, ...]
+        # resource/sub → list of (identity_label, role_label) that can access
+        resource_accessors = {}  # nid → [(identity_label, role_label), ...]
+        # identity → list of role labels
+        identity_roles = {}   # identity_nid → [role_label, ...]
+        # identity → set of subscription nids
+        identity_subs = {}    # identity_nid → set of sub nids
+
+        for r in rows:
+            src, tgt, etype = r['source_id'], r['target_id'], r['edge_type']
+            if etype == 'assigned_role':
+                role_identities.setdefault(tgt, [])
+                src_label = (identity_meta.get(src, {}).get('display_name') or src[:16])
+                role_identities[tgt].append(src_label)
+                role_label = tgt.split(':', 1)[1] if ':' in tgt else tgt
+                identity_roles.setdefault(src, []).append(role_label)
+            elif etype == 'grants_access':
+                role_scopes.setdefault(src, []).append(tgt)
+            elif etype == 'contains_resource':
+                pass  # sub→resource containment
+
+        # Build resource accessor map by tracing role→scope + identity→role
+        for role_nid, scope_nids in role_scopes.items():
+            role_label = role_nid.split(':', 1)[1] if ':' in role_nid else role_nid
+            for ident_label in role_identities.get(role_nid, []):
+                for scope_nid in scope_nids:
+                    resource_accessors.setdefault(scope_nid, []).append((ident_label, role_label))
+                    # Track identity→subscription
+                    if _infer_type(scope_nid) == 'subscription':
+                        for r2 in rows:
+                            if r2['edge_type'] == 'assigned_role' and r2['target_id'] == role_nid:
+                                identity_subs.setdefault(r2['source_id'], set()).add(scope_nid)
+
+        cursor.close()
+
+        # ── Detect attack paths ────────────────────────────────────────
+        # Attack path: identity -assigned_role→ high-priv-role -grants_access→ sub/resource
+        attack_path_edges = set()  # set of (source, target) tuples that are on attack paths
+        attack_path_nodes = set()  # node ids on attack paths
+        attack_paths = []          # list of {identity, role, target, identity_label, ...}
+
+        # Index edges
+        assigned_edges = {}  # identity_id → [(role_nid, ...)]
+        grants_edges = {}    # role_nid → [target_nid, ...]
+        for r in rows:
+            if r['edge_type'] == 'assigned_role':
+                assigned_edges.setdefault(r['source_id'], []).append(r['target_id'])
+            elif r['edge_type'] == 'grants_access':
+                grants_edges.setdefault(r['source_id'], []).append(r['target_id'])
+
+        for ident_id, role_nids in assigned_edges.items():
+            for role_nid in role_nids:
+                role_name = role_nid.split(':', 1)[1] if ':' in role_nid else role_nid
+                if role_name not in HIGH_PRIV_ROLES:
+                    continue
+                for target_nid in grants_edges.get(role_nid, []):
+                    ttype = _infer_type(target_nid)
+                    if ttype in ('subscription', 'resource'):
+                        # This is an attack path
+                        attack_path_edges.add((ident_id, role_nid))
+                        attack_path_edges.add((role_nid, target_nid))
+                        attack_path_nodes.update([ident_id, role_nid, target_nid])
+                        ident_label = identity_meta.get(ident_id, {}).get('display_name') or ident_id[:16]
+                        target_label = sub_labels.get(sub_guid_map.get(target_nid, ''), '') or target_nid.rstrip('/').split('/')[-1]
+                        attack_paths.append({
+                            'identity': ident_id,
+                            'identity_label': ident_label,
+                            'role': role_name,
+                            'target': target_nid,
+                            'target_label': target_label,
+                            'target_type': ttype,
+                        })
+
+        # ── Build node labels and risk levels ──────────────────────────
+        def _label(nid):
+            ntype = _infer_type(nid)
+            if ntype == 'role':
+                return nid.split(':', 1)[1] if ':' in nid else nid
+            if ntype in ('identity', 'service_principal', 'managed_identity'):
+                return identity_meta.get(nid, {}).get('display_name') or (nid[:12] + '...' if len(nid) > 16 else nid)
+            if ntype == 'subscription':
+                guid = sub_guid_map.get(nid, '')
+                return sub_labels.get(guid, guid[:12] + '...' if guid else nid)
+            if ntype == 'resource':
+                segments = nid.rstrip('/').split('/')
+                return segments[-1] if segments else nid
+            return nid
+
+        def _risk_level(nid):
+            ntype = _infer_type(nid)
+            if ntype in ('identity', 'service_principal', 'managed_identity'):
+                lvl = identity_meta.get(nid, {}).get('risk_level', 'low')
+                return lvl if lvl and lvl != 'info' else 'low'
+            if ntype == 'role':
+                role_name = nid.split(':', 1)[1] if ':' in nid else nid
+                if role_name in ('Owner', 'User Access Administrator'):
+                    return 'critical'
+                if role_name == 'Contributor':
+                    return 'high'
+                return 'low'
+            if ntype == 'subscription':
+                # High if any high-priv identity has access
+                accessors = resource_accessors.get(nid, [])
+                for _, rl in accessors:
+                    if rl in HIGH_PRIV_ROLES:
+                        return 'high'
+                return 'medium' if accessors else 'low'
+            if ntype == 'resource':
+                accessors = resource_accessors.get(nid, [])
+                for _, rl in accessors:
+                    if rl in HIGH_PRIV_ROLES:
+                        return 'high'
+                return 'low'
+            return 'low'
+
+        def _final_type(nid):
+            base = _infer_type(nid)
+            if base in ('identity', 'service_principal', 'managed_identity'):
+                meta = identity_meta.get(nid, {})
+                cat = meta.get('identity_category', '')
+                if cat and 'service_principal' in cat:
+                    return 'service_principal'
+                if cat and 'managed_identity' in cat:
+                    return 'managed_identity'
+                if cat == 'guest':
+                    return 'guest'
+                return 'identity'
+            return base
+
+        def _tooltip(nid):
+            """Build rich tooltip metadata per node type."""
+            ntype = _infer_type(nid)
+            if ntype in ('identity', 'service_principal', 'managed_identity'):
+                meta = identity_meta.get(nid, {})
+                roles_list = identity_roles.get(nid, [])
+                subs_list = []
+                for snid in identity_subs.get(nid, set()):
+                    guid = sub_guid_map.get(snid, '')
+                    subs_list.append(sub_labels.get(guid, guid[:20]))
+                return {
+                    'name': meta.get('display_name') or nid,
+                    'identity_type': meta.get('identity_category', '').replace('_', ' '),
+                    'roles': roles_list[:10],
+                    'subscriptions': subs_list[:5],
+                    'credential_count': meta.get('credential_count', 0) or 0,
+                    'credential_risk': meta.get('credential_risk') or 'none',
+                    'risk_score': meta.get('risk_score', 0) or 0,
+                    'activity_status': meta.get('activity_status') or 'unknown',
+                }
+            if ntype == 'role':
+                role_name = nid.split(':', 1)[1] if ':' in nid else nid
+                priv = 'owner' if role_name == 'Owner' else (
+                    'admin' if role_name == 'User Access Administrator' else (
+                        'contributor' if role_name == 'Contributor' else 'reader'))
+                scopes = role_scopes.get(nid, [])
+                scope_labels = []
+                for s in scopes[:5]:
+                    if _infer_type(s) == 'subscription':
+                        g = sub_guid_map.get(s, '')
+                        scope_labels.append(sub_labels.get(g, s.split('/')[-1]))
+                    else:
+                        scope_labels.append(s.rstrip('/').split('/')[-1])
+                return {
+                    'role_name': role_name,
+                    'privilege_level': priv,
+                    'scopes': scope_labels,
+                    'identity_count': len(role_identities.get(nid, [])),
+                    'identities': role_identities.get(nid, [])[:8],
+                }
+            if ntype == 'resource':
+                segments = nid.rstrip('/').split('/')
+                res_name = segments[-1] if segments else nid
+                # Infer resource type from ARM path
+                res_type = ''
+                if '/Microsoft.Storage/' in nid:
+                    res_type = 'Storage Account'
+                elif '/Microsoft.KeyVault/' in nid:
+                    res_type = 'Key Vault'
+                elif '/Microsoft.Compute/' in nid:
+                    res_type = 'Virtual Machine'
+                elif '/providers/' in nid:
+                    prov_parts = nid.split('/providers/')[-1].split('/')
+                    res_type = prov_parts[0] if prov_parts else ''
+                accessors_list = resource_accessors.get(nid, [])
+                return {
+                    'resource_name': res_name,
+                    'resource_type': res_type,
+                    'accessor_count': len(accessors_list),
+                    'accessors': [{'identity': a[0], 'role': a[1]} for a in accessors_list[:8]],
+                }
+            if ntype == 'subscription':
+                guid = sub_guid_map.get(nid, '')
+                name = sub_labels.get(guid, guid)
+                accessors_list = resource_accessors.get(nid, [])
+                high_priv = sum(1 for _, rl in accessors_list if rl in HIGH_PRIV_ROLES)
+                return {
+                    'subscription_name': name,
+                    'identity_count': len(accessors_list),
+                    'high_privilege_count': high_priv,
+                }
+            return {}
+
+        # ── Build edges with metadata ──────────────────────────────────
+        edges = []
+        for r in rows:
+            src, tgt, etype = r['source_id'], r['target_id'], r['edge_type']
+            is_attack = (src, tgt) in attack_path_edges
+            src_label = _label(src)
+            tgt_label = _label(tgt)
+            role_label = ''
+            scope_label = ''
+            if etype == 'assigned_role':
+                role_label = tgt.split(':', 1)[1] if ':' in tgt else tgt
+            elif etype == 'grants_access':
+                role_label = src.split(':', 1)[1] if ':' in src else src
+                scope_label = tgt_label
+            edge_obj = {
+                'source': src,
+                'target': tgt,
+                'type': etype,
+                'is_attack_path': is_attack,
+                'tooltip': {
+                    'relationship': etype.replace('_', ' '),
+                    'source_label': src_label,
+                    'target_label': tgt_label,
+                    'role': role_label,
+                    'scope': scope_label,
+                },
+            }
+            edges.append(edge_obj)
+
+        # ── Build final nodes ──────────────────────────────────────────
+        nodes = []
+        for nid in sorted(node_ids):
+            nodes.append({
+                'id': nid,
+                'type': _final_type(nid),
+                'label': _label(nid),
+                'risk_level': _risk_level(nid),
+                'is_attack_path': nid in attack_path_nodes,
+                'tooltip': _tooltip(nid),
+            })
+
+        # ── Enforce limits ─────────────────────────────────────────────
+        truncated = False
+        if len(nodes) > MAX_NODES:
+            nodes = nodes[:MAX_NODES]
+            truncated = True
+            kept_ids = {n['id'] for n in nodes}
+            edges = [e for e in edges if e['source'] in kept_ids and e['target'] in kept_ids]
+        if len(edges) > MAX_EDGES:
+            edges = edges[:MAX_EDGES]
+            truncated = True
+
+        logger.info("Graph visualization: %d nodes, %d edges, %d attack paths for connection %s",
+                     len(nodes), len(edges), len(attack_paths), connection_id)
+
+        return jsonify({
+            'nodes': nodes,
+            'edges': edges,
+            'attack_paths': attack_paths,
+            'attack_path_count': len(attack_paths),
+            'truncated': truncated,
+        })
     finally:
         db.close()
 
@@ -23339,6 +23684,149 @@ def get_cloud_risk_summary_handler():
             'providers': list(providers.values()),
             'total_providers': len(providers),
         })
+    finally:
+        db.close()
+
+
+def get_security_dashboard_handler():
+    """GET /api/security/dashboard — aggregated security posture dashboard.
+
+    Returns the latest posture snapshot from identity_security_posture.
+    If the table is empty, returns safe defaults instead of erroring.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Try to get latest posture snapshot
+        try:
+            cursor.execute("""
+                SELECT id, connection_id, risk_score, findings_count,
+                       high_severity, medium_severity, low_severity, created_at
+                FROM identity_security_posture
+                ORDER BY created_at DESC
+                LIMIT 1
+            """)
+            posture = cursor.fetchone()
+        except Exception:
+            posture = None
+
+        # Try to get graph edge counts
+        try:
+            cursor.execute("""
+                SELECT edge_type, COUNT(*) AS count
+                FROM identity_graph_edges
+                GROUP BY edge_type
+            """)
+            edge_rows = cursor.fetchall()
+            graph_edges = {r['edge_type']: r['count'] for r in edge_rows}
+            total_edges = sum(graph_edges.values())
+        except Exception:
+            graph_edges = {}
+            total_edges = 0
+
+        # Try to get recent findings count
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                       COUNT(*) FILTER (WHERE severity = 'high') AS high,
+                       COUNT(*) FILTER (WHERE severity = 'medium') AS medium,
+                       COUNT(*) FILTER (WHERE severity = 'low') AS low
+                FROM security_findings
+                WHERE status = 'open'
+            """)
+            findings_summary = cursor.fetchone()
+        except Exception:
+            findings_summary = {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+
+        cursor.close()
+
+        if posture:
+            posture_data = {
+                'risk_score': posture['risk_score'],
+                'findings_count': posture['findings_count'],
+                'high_severity': posture['high_severity'],
+                'medium_severity': posture['medium_severity'],
+                'low_severity': posture['low_severity'],
+                'last_computed': posture['created_at'].isoformat() if posture['created_at'] else None,
+            }
+        else:
+            posture_data = {
+                'risk_score': 0,
+                'findings_count': 0,
+                'high_severity': 0,
+                'medium_severity': 0,
+                'low_severity': 0,
+                'last_computed': None,
+            }
+
+        return jsonify({
+            'posture': posture_data,
+            'findings': {
+                'total': findings_summary['total'] or 0,
+                'critical': findings_summary['critical'] or 0,
+                'high': findings_summary['high'] or 0,
+                'medium': findings_summary['medium'] or 0,
+                'low': findings_summary['low'] or 0,
+            },
+            'graph': {
+                'total_edges': total_edges,
+                'edge_types': graph_edges,
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_security_findings_handler():
+    """GET /api/security/findings — list security findings.
+
+    Returns all open findings from the security_findings table.
+    Never raises exceptions; returns empty list on any error.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            org_id = _org_id()
+            cursor.execute("""
+                SELECT id, title, finding_type, severity,
+                       entity_id, organization_id,
+                       description, status, created_at
+                FROM security_findings
+                WHERE status = 'open' AND organization_id = %s
+                ORDER BY
+                    CASE severity
+                        WHEN 'critical' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3
+                        ELSE 4
+                    END,
+                    created_at DESC
+            """, (org_id,))
+            rows = cursor.fetchall()
+            findings = []
+            for r in rows:
+                findings.append({
+                    'id': str(r['id']),
+                    'title': r['title'] or r['finding_type'] or '',
+                    'severity': r['severity'] or 'low',
+                    'resource': r['entity_id'] or '',
+                    'connection_id': r['organization_id'],
+                    'description': r['description'] or '',
+                    'status': r['status'] or 'open',
+                    'created_at': r['created_at'].isoformat() if r.get('created_at') else None,
+                })
+        except Exception:
+            findings = []
+        cursor.close()
+        return jsonify({'findings': findings})
+    except Exception:
+        return jsonify({'findings': []})
     finally:
         db.close()
 

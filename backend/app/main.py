@@ -365,6 +365,8 @@ from app.api.handlers import (
     process_copilot_query_handler,
     get_copilot_history_handler,
     get_cloud_risk_summary_handler,
+    get_security_findings_handler,
+    get_security_dashboard_handler,
     get_graph_visualization_handler,
     get_identity_graph_handler,
     get_attack_path_graph_handler,
@@ -467,6 +469,22 @@ def _run_full_schema(db_init):
     db_init._commit()
     cursor.close()
     print("  ✓ Full schema: all tables ensured (CREATE TABLE IF NOT EXISTS)")
+
+
+def _run_derived_tables(db_init):
+    """Run migrations 070-071 to create derived data tables.
+    All statements use CREATE TABLE/INDEX IF NOT EXISTS — safe to run on every startup.
+    """
+    import pathlib
+    migrations_dir = pathlib.Path(__file__).parent.parent / 'migrations'
+    for sql_file in ['070_identity_graph_edges.sql', '071_security_posture.sql']:
+        sql_path = migrations_dir / sql_file
+        if sql_path.exists():
+            cursor = db_init.conn.cursor()
+            cursor.execute(sql_path.read_text())
+            db_init._commit()
+            cursor.close()
+    print("  ✓ Derived tables: identity_graph_edges + identity_security_posture ensured")
 
 
 def _run_schema_sync(conn):
@@ -702,6 +720,7 @@ def create_app():
             ) or _db_init._commit()),
             ('core schema (migration 001)', lambda: _run_core_schema(_db_init)),
             ('full schema (migration 100)', lambda: _run_full_schema(_db_init)),
+            ('derived tables (070-071)', lambda: _run_derived_tables(_db_init)),
             ('cloud_connections table', lambda: _db_init._ensure_cloud_connections_table()),
             ('cloud_subscriptions table', lambda: _db_init._ensure_cloud_subscriptions_table()),
             ('entitlements tables', lambda: _db_init._ensure_entitlements_tables()),
@@ -2921,9 +2940,17 @@ def create_app():
     def copilot_history():
         return get_copilot_history_handler()
 
+    @app.get("/api/security/findings")
+    def security_findings_list():
+        return get_security_findings_handler()
+
     @app.get("/api/security/cloud-summary")
     def cloud_risk_summary():
         return get_cloud_risk_summary_handler()
+
+    @app.get("/api/security/dashboard")
+    def security_dashboard():
+        return get_security_dashboard_handler()
 
     # -----------------------
     # Phase 16: Graph Visualization

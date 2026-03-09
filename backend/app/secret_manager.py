@@ -8,7 +8,7 @@ all environments:
     stg/prod   → Azure Key Vault (via DefaultAzureCredential)
 
 Usage:
-    from app.secrets import get_secret
+    from app.secret_manager import get_secret
 
     db_password = get_secret('DB_PASSWORD')
     jwt_key = get_secret('ADMIN_JWT_SECRET')

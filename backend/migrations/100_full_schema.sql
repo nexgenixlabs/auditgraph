@@ -813,6 +813,19 @@ CREATE TABLE IF NOT EXISTS identities (
     privilege_tier character varying(20)
 );
 
+CREATE TABLE IF NOT EXISTS identity_graph_edges (
+    id SERIAL PRIMARY KEY,
+    connection_id INT NOT NULL,
+    source_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_graph_conn ON identity_graph_edges(connection_id);
+CREATE INDEX IF NOT EXISTS idx_graph_source ON identity_graph_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_graph_target ON identity_graph_edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_graph_edge_type ON identity_graph_edges(edge_type);
+
 CREATE TABLE IF NOT EXISTS identity_group_members (
     id integer NOT NULL,
     group_id integer NOT NULL,
@@ -877,6 +890,17 @@ CREATE TABLE IF NOT EXISTS identity_subscription_access (
     discovered_at timestamp with time zone DEFAULT now(),
     discovery_run_id bigint,
     organization_id integer
+);
+
+CREATE TABLE IF NOT EXISTS identity_security_posture (
+    id SERIAL PRIMARY KEY,
+    connection_id INT,
+    risk_score INT,
+    findings_count INT,
+    high_severity INT,
+    medium_severity INT,
+    low_severity INT,
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS invoice_documents (

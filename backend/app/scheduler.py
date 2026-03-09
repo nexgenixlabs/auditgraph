@@ -733,6 +733,18 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         _track_job('security_findings', db_org_id,
                    _run_security_findings, current_run_id, db)
 
+        # Identity graph edges (identity→role→scope)
+        _track_job('identity_graph_builder', db_org_id,
+                   _run_identity_graph_builder, db_org_id, db)
+
+        # Connection-scoped security findings (3 rules)
+        _track_job('security_findings_engine', db_org_id,
+                   _run_security_findings_engine, db_org_id, db)
+
+        # Security posture aggregation (from findings)
+        _track_job('security_posture', db_org_id,
+                   _run_security_posture, db_org_id, db)
+
         # Phase 3: Attack path analysis (tracked by Phase 8)
         _track_job('attack_paths', db_org_id,
                    _run_attack_path_analysis, current_run_id, db)
@@ -1453,6 +1465,58 @@ def _run_iam_graph_build(db_org_id, db):
         logger.info(f"IAM graph: {total_nodes} nodes, {total_edges} edges for org {db_org_id}")
     except Exception as e:
         logger.error(f"IAM graph build failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_identity_graph_builder(db_org_id, db):
+    """Build identity graph edges for all connected connections."""
+    try:
+        from app.engines.identity_graph_builder import build_identity_graph
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        total_edges = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                result = build_identity_graph(conn['id'], db)
+                total_edges += result.get('edge_count', 0)
+        logger.info(f"Identity graph builder: {total_edges} edges for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Identity graph builder failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_security_findings_engine(db_org_id, db):
+    """Run connection-scoped security findings engine for all connections."""
+    try:
+        from app.engines.security_findings_engine import generate_security_findings
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        total_findings = 0
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                result = generate_security_findings(conn['id'], db)
+                total_findings += result.get('findings_count', 0)
+        logger.info(f"Security findings engine (connection): {total_findings} finding(s) for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Security findings engine (connection) failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_security_posture(db_org_id, db):
+    """Compute security posture snapshots for all connected connections."""
+    try:
+        from app.engines.security_posture_engine import compute_security_posture
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id)
+        admin_db.close()
+        for conn in connections:
+            if conn.get('status') == 'connected':
+                compute_security_posture(conn['id'], db)
+        logger.info(f"Security posture computed for org {db_org_id}")
+    except Exception as e:
+        logger.error(f"Security posture computation failed for org {db_org_id}: {e}")
         logger.exception(e)
 
 
