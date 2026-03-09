@@ -43,44 +43,43 @@ def generate_security_findings(connection_id, db):
         ORDER BY id DESC LIMIT 1
     """, (connection_id,))
     row = cursor.fetchone()
+    run_id = row['id'] if row else None
 
-    # Fallback: if no run by connection_id, try latest run with role_assignments
-    if not row:
-        logger.info(f"No run for connection {connection_id} by cloud_connection_id, trying fallback")
-        try:
-            cursor.execute("""
-                SELECT DISTINCT dr.id
-                FROM discovery_runs dr
-                JOIN identities i ON i.discovery_run_id = dr.id
-                JOIN role_assignments ra ON ra.identity_db_id = i.id
-                WHERE dr.status = 'completed'
-                ORDER BY dr.id DESC
-                LIMIT 1
-            """)
-            row = cursor.fetchone()
-        except Exception:
-            pass
-
-    if not row:
-        cursor.close()
-        logger.debug(f"No completed run with assignments for connection {connection_id}, skipping")
-        return {'findings_count': 0}
-
-    run_id = row['id']
-
-    # Fetch role assignments with identity metadata
-    cursor.execute("""
-        SELECT i.identity_id,
-               i.display_name,
-               i.identity_category,
-               ra.role_name,
-               ra.scope
-        FROM role_assignments ra
-        JOIN identities i ON i.id = ra.identity_db_id
-        WHERE i.discovery_run_id = %s
-          AND i.is_microsoft_system = FALSE
-    """, (run_id,))
+    if run_id:
+        # Fetch role assignments for this specific run
+        cursor.execute("""
+            SELECT i.identity_id,
+                   i.display_name,
+                   i.identity_category,
+                   ra.role_name,
+                   ra.scope
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND i.is_microsoft_system = FALSE
+        """, (run_id,))
+    else:
+        # Fallback: get ALL role assignments regardless of run
+        logger.info(f"No run for connection {connection_id}, using org-wide role assignments")
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id, ra.role_name, ra.scope)
+                   i.identity_id,
+                   i.display_name,
+                   i.identity_category,
+                   ra.role_name,
+                   ra.scope
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.is_microsoft_system = FALSE
+            ORDER BY i.identity_id, ra.role_name, ra.scope, i.discovery_run_id DESC NULLS LAST
+        """)
     assignments = cursor.fetchall()
+
+    # If no run_id, try to find one for org_id lookup
+    if not run_id:
+        cursor.execute("SELECT id FROM discovery_runs WHERE status = 'completed' ORDER BY id DESC LIMIT 1")
+        r = cursor.fetchone()
+        run_id = r['id'] if r else 0
 
     if not assignments:
         cursor.close()

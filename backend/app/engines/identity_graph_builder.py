@@ -47,44 +47,38 @@ def build_identity_graph(connection_id, db):
         ORDER BY id DESC LIMIT 1
     """, (connection_id,))
     row = cursor.fetchone()
+    run_id = row['id'] if row else None
 
-    # Fallback: if no run found by connection_id, try latest completed run
-    # that actually has role_assignments (handles dev/migration scenarios)
-    if not row:
-        logger.info(f"No run for connection {connection_id} by cloud_connection_id, trying org-wide fallback")
-        try:
-            cursor.execute("""
-                SELECT DISTINCT dr.id
-                FROM discovery_runs dr
-                JOIN identities i ON i.discovery_run_id = dr.id
-                JOIN role_assignments ra ON ra.identity_db_id = i.id
-                WHERE dr.status = 'completed'
-                ORDER BY dr.id DESC
-                LIMIT 1
-            """)
-            row = cursor.fetchone()
-        except Exception:
-            pass
-
-    if not row:
-        cursor.close()
-        logger.debug(f"No completed run with role assignments for connection {connection_id}, skipping")
-        return {'edge_count': 0}
-
-    run_id = row['id']
-
-    # Fetch role assignments joined with identities
-    cursor.execute("""
-        SELECT i.identity_id,
-               i.display_name,
-               ra.role_name,
-               ra.scope,
-               ra.scope_type
-        FROM role_assignments ra
-        JOIN identities i ON i.id = ra.identity_db_id
-        WHERE i.discovery_run_id = %s
-    """, (run_id,))
-    assignments = cursor.fetchall()
+    if run_id:
+        # Fetch role assignments for this specific run
+        cursor.execute("""
+            SELECT i.identity_id,
+                   i.display_name,
+                   ra.role_name,
+                   ra.scope,
+                   ra.scope_type
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+        """, (run_id,))
+        assignments = cursor.fetchall()
+    else:
+        # Fallback: get ALL role assignments regardless of run
+        # (handles dev/migration scenarios where cloud_connection_id isn't set)
+        logger.info(f"No run for connection {connection_id}, using org-wide role assignments")
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id, ra.role_name, ra.scope)
+                   i.identity_id,
+                   i.display_name,
+                   ra.role_name,
+                   ra.scope,
+                   ra.scope_type
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.is_microsoft_system = FALSE
+            ORDER BY i.identity_id, ra.role_name, ra.scope, i.discovery_run_id DESC NULLS LAST
+        """)
+        assignments = cursor.fetchall()
 
     if not assignments:
         cursor.close()
