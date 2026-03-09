@@ -817,13 +817,45 @@ class Database:
             """)
             tables = cursor.fetchall()
 
+            # Reassign ownership of tables we don't own so ALTER TABLE works
+            cursor.execute("SELECT current_user")
+            current_user = cursor.fetchone()[0]
+            for table_name, _ in tables:
+                try:
+                    cursor.execute(f'ALTER TABLE "{table_name}" OWNER TO {current_user}')
+                except Exception:
+                    admin_conn.rollback()  # reset transaction after error
+
+            # Re-query after ownership fix (transaction may have been reset)
+            cursor.execute("""
+                SELECT c.relname, c.relforcerowsecurity
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_attribute a ON a.attrelid = c.oid
+                WHERE n.nspname = 'public'
+                  AND c.relkind = 'r'
+                  AND a.attname = 'organization_id'
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                ORDER BY c.relname
+            """)
+            tables = cursor.fetchall()
+
             enforced = 0
             already = 0
+            skipped = 0
             for table_name, force_rls in tables:
                 if not force_rls:
-                    cursor.execute(f'ALTER TABLE "{table_name}" FORCE ROW LEVEL SECURITY')
-                    enforced += 1
-                    logger.info("FORCE RLS applied to table: %s", table_name)
+                    try:
+                        cursor.execute(f'SAVEPOINT rls_{table_name}')
+                        cursor.execute(f'ALTER TABLE "{table_name}" FORCE ROW LEVEL SECURITY')
+                        cursor.execute(f'RELEASE SAVEPOINT rls_{table_name}')
+                        enforced += 1
+                        logger.info("FORCE RLS applied to table: %s", table_name)
+                    except Exception as te:
+                        cursor.execute(f'ROLLBACK TO SAVEPOINT rls_{table_name}')
+                        skipped += 1
+                        logger.warning("Could not FORCE RLS on %s (owner mismatch?): %s", table_name, te)
                 else:
                     already += 1
 
@@ -843,19 +875,28 @@ class Database:
             """)
             missing_rls = cursor.fetchall()
             for table_name, _ in missing_rls:
-                cursor.execute(f'ALTER TABLE "{table_name}" ENABLE ROW LEVEL SECURITY')
-                logger.warning("RLS was DISABLED on tenant table: %s — now enabled", table_name)
+                try:
+                    cursor.execute(f'SAVEPOINT rls_en_{table_name}')
+                    cursor.execute(f'ALTER TABLE "{table_name}" ENABLE ROW LEVEL SECURITY')
+                    cursor.execute(f'RELEASE SAVEPOINT rls_en_{table_name}')
+                    logger.warning("RLS was DISABLED on tenant table: %s — now enabled", table_name)
+                except Exception as te:
+                    cursor.execute(f'ROLLBACK TO SAVEPOINT rls_en_{table_name}')
+                    logger.warning("Could not ENABLE RLS on %s: %s", table_name, te)
 
             admin_conn.commit()
             cursor.close()
 
             logger.info(
-                "enforce_force_rls: %d tables enforced, %d already enforced, %d total tenant tables",
-                enforced, already, len(tables),
+                "enforce_force_rls: %d tables enforced, %d already enforced, %d skipped, %d total tenant tables",
+                enforced, already, skipped, len(tables),
             )
         except psycopg2.OperationalError as e:
             import logging
             logging.getLogger(__name__).warning("enforce_force_rls skipped — DB not reachable: %s", e)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("enforce_force_rls error (non-fatal): %s", e)
         finally:
             if admin_conn:
                 admin_conn.close()
