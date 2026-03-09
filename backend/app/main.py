@@ -447,11 +447,65 @@ def _run_core_schema(db_init):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org ON discovery_runs(organization_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_connection ON discovery_runs(cloud_connection_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org_status ON discovery_runs(organization_id, status)")
-    # Identities columns added after initial migration (used by discovery engine + demo seeder)
-    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS risk_score INTEGER DEFAULT 0")
-    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS credential_count INTEGER DEFAULT 0")
-    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS owner_count INTEGER DEFAULT 0")
-    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS cloud VARCHAR(50) DEFAULT 'azure'")
+    # Identities columns added after initial migration.
+    # Dev DB only has migration 001 columns; all others must be added here.
+    _identity_cols = [
+        ("risk_score", "INTEGER DEFAULT 0"),
+        ("credential_count", "INTEGER DEFAULT 0"),
+        ("owner_count", "INTEGER DEFAULT 0"),
+        ("cloud", "VARCHAR(50) DEFAULT 'azure'"),
+        ("risk_factors", "JSONB DEFAULT '[]'::jsonb"),
+        ("app_owner_org_id", "TEXT"),
+        ("permission_plane", "VARCHAR(50)"),
+        ("deleted_at", "TIMESTAMPTZ"),
+        ("blast_radius_score", "NUMERIC(7,2) DEFAULT 0"),
+        ("upn", "VARCHAR(500)"),
+        ("employee_id_entra", "VARCHAR(255)"),
+        ("department", "VARCHAR(255)"),
+        ("manager_id", "VARCHAR(255)"),
+        ("manager_upn", "VARCHAR(500)"),
+        ("job_title", "VARCHAR(255)"),
+        ("account_category", "VARCHAR(50)"),
+        # Multi-cloud normalized fields
+        ("identity_type_normalized", "VARCHAR(100)"),
+        ("canonical_name", "TEXT"),
+        ("principal_id", "TEXT"),
+        ("tenant_or_org_id", "TEXT"),
+        ("source_normalized", "VARCHAR(50) DEFAULT 'entra'"),
+        ("is_federated", "BOOLEAN DEFAULT false"),
+        ("status", "VARCHAR(50) DEFAULT 'active'"),
+        ("last_seen_auth", "TIMESTAMPTZ"),
+        ("organization_id", "INTEGER"),
+        # Credential & exposure fields
+        ("next_expiry", "TIMESTAMPTZ"),
+        ("credential_risk", "VARCHAR(20)"),
+        ("credential_age_days", "INTEGER"),
+        ("credential_risk_score", "INTEGER DEFAULT 0"),
+        ("owner_display_name", "TEXT"),
+        ("owner_status", "VARCHAR(50)"),
+        ("api_permission_count", "INTEGER DEFAULT 0"),
+        ("app_role_count", "INTEGER DEFAULT 0"),
+        # Subscription & PIM fields
+        ("additional_subscription_count", "INTEGER DEFAULT 0"),
+        ("pim_eligible_count", "INTEGER DEFAULT 0"),
+        ("ca_coverage_status", "VARCHAR(30)"),
+        ("ca_mfa_enforced", "BOOLEAN"),
+        ("privilege_tier", "VARCHAR(20)"),
+        # Scoring fields
+        ("lifecycle_state", "VARCHAR(50)"),
+        ("lifecycle_score", "INTEGER DEFAULT 0"),
+        ("exposure_score", "NUMERIC(7,2) DEFAULT 0"),
+        ("visibility_score", "NUMERIC(7,2) DEFAULT 0"),
+        ("privilege_score", "NUMERIC(7,2) DEFAULT 0"),
+        ("exposure_subscore", "NUMERIC(7,2) DEFAULT 0"),
+        ("activity_confidence", "VARCHAR(20)"),
+        ("has_permanent_assignment", "BOOLEAN DEFAULT false"),
+        ("effective_scope_flag", "VARCHAR(30)"),
+        ("can_escalate", "BOOLEAN DEFAULT false"),
+        ("cross_subscription", "BOOLEAN DEFAULT false"),
+    ]
+    for col_name, col_type in _identity_cols:
+        cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
     db_init._commit()
     cursor.close()
 
