@@ -10348,8 +10348,8 @@ def create_organization_handler():
         return jsonify({'error': 'slug must be alphanumeric (hyphens and underscores allowed)'}), 400
     if len(slug) > 100:
         return jsonify({'error': 'slug must be 100 characters or less'}), 400
-    if plan not in ('free', 'trial', 'pro', 'enterprise'):
-        return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
+    if plan not in ('free', 'trial', 'pro'):
+        return jsonify({'error': 'plan must be free, trial, or pro'}), 400
 
     # Phase 85: Optional onboarding fields
     primary_cloud = str(data.get('primary_cloud', '')).strip().lower() or None
@@ -10428,7 +10428,7 @@ def create_organization_handler():
             # Auto-enable primary cloud in cloud_providers
             if primary_cloud:
                 cp = settings.get('cloud_providers', {})
-                cp[primary_cloud] = {'enabled': True, 'plan': plan if plan in ('pro', 'enterprise') else 'pro'}
+                cp[primary_cloud] = {'enabled': True, 'plan': 'pro' if plan == 'pro' else 'pro'}
                 settings['cloud_providers'] = cp
             db.update_organization(org['id'], settings=settings)
             org = db.get_organization_by_id(org['id'])
@@ -10480,8 +10480,8 @@ def update_organization_handler(organization_id):
             updates['name'] = name
         if 'plan' in data:
             plan = str(data['plan']).strip().lower()
-            if plan not in ('free', 'trial', 'pro', 'enterprise'):
-                return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
+            if plan not in ('free', 'trial', 'pro'):
+                return jsonify({'error': 'plan must be free, trial, or pro'}), 400
             updates['plan'] = plan
         if 'enabled' in data:
             updates['enabled'] = bool(data['enabled'])
@@ -17040,7 +17040,6 @@ TIER_LIMITS = {
     'free': {'max_identities': 50, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso']},
     'trial': {'max_identities': 500, 'trial_days': 14, 'blocked_features': []},
     'pro': {'max_identities': None, 'blocked_features': []},
-    'enterprise': {'max_identities': None, 'blocked_features': []},
 }
 
 
@@ -18744,8 +18743,8 @@ def update_admin_organization_plan(organization_id):
     try:
         data = request.get_json(silent=True) or {}
         new_plan = data.get('plan')
-        if new_plan not in ('free', 'trial', 'pro', 'enterprise'):
-            return jsonify({'error': 'Invalid plan. Must be free, trial, pro, or enterprise.'}), 400
+        if new_plan not in ('free', 'trial', 'pro'):
+            return jsonify({'error': 'Invalid plan. Must be free, trial, or pro.'}), 400
 
         org = db.get_organization_by_id(organization_id)
         if not org:
@@ -22664,6 +22663,95 @@ def get_security_benchmark_handler():
         db.close()
 
 
+def get_graph_debug_handler():
+    """GET /api/graph/debug — diagnostic endpoint for graph data pipeline.
+
+    Returns counts and sample data from each step of the graph building pipeline.
+    """
+    db = _db()
+    try:
+        connection_id = request.args.get('connection_id')
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        diag = {}
+
+        # 1. Cloud connections
+        cursor.execute("SELECT id, status, provider FROM cloud_connections")
+        diag['cloud_connections'] = [dict(r) for r in cursor.fetchall()]
+
+        # 2. Discovery runs
+        cursor.execute("SELECT id, cloud_connection_id, status, organization_id FROM discovery_runs ORDER BY id DESC LIMIT 5")
+        diag['recent_discovery_runs'] = [dict(r) for r in cursor.fetchall()]
+
+        # 3. Identities count + sample
+        cursor.execute("SELECT COUNT(*) as cnt FROM identities")
+        diag['identities_count'] = cursor.fetchone()['cnt']
+        cursor.execute("SELECT id, identity_id, display_name, discovery_run_id, is_microsoft_system FROM identities LIMIT 5")
+        diag['identities_sample'] = [dict(r) for r in cursor.fetchall()]
+
+        # 4. Role assignments count + sample
+        cursor.execute("SELECT COUNT(*) as cnt FROM role_assignments")
+        diag['role_assignments_count'] = cursor.fetchone()['cnt']
+        cursor.execute("SELECT id, identity_db_id, role_name, scope FROM role_assignments LIMIT 5")
+        diag['role_assignments_sample'] = [dict(r) for r in cursor.fetchall()]
+
+        # 5. role_assignments with non-NULL identity_db_id
+        cursor.execute("SELECT COUNT(*) as cnt FROM role_assignments WHERE identity_db_id IS NOT NULL")
+        diag['role_assignments_with_identity_db_id'] = cursor.fetchone()['cnt']
+
+        # 6. The actual JOIN the engine uses
+        cursor.execute("""
+            SELECT COUNT(*) as cnt
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.is_microsoft_system = FALSE
+        """)
+        diag['join_count_non_microsoft'] = cursor.fetchone()['cnt']
+
+        cursor.execute("""
+            SELECT COUNT(*) as cnt
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+        """)
+        diag['join_count_all'] = cursor.fetchone()['cnt']
+
+        # 7. identity_graph_edges count
+        cursor.execute("SELECT COUNT(*) as cnt FROM identity_graph_edges")
+        diag['identity_graph_edges_count'] = cursor.fetchone()['cnt']
+
+        # 8. If connection_id provided, check specifics
+        if connection_id:
+            cid = int(connection_id)
+            cursor.execute("""
+                SELECT id FROM discovery_runs
+                WHERE cloud_connection_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (cid,))
+            row = cursor.fetchone()
+            diag['connection_latest_run'] = dict(row) if row else None
+
+            if row:
+                run_id = row['id']
+                cursor.execute("""
+                    SELECT COUNT(*) as cnt
+                    FROM role_assignments ra
+                    JOIN identities i ON i.id = ra.identity_db_id
+                    WHERE i.discovery_run_id = %s
+                """, (run_id,))
+                diag['connection_run_join_count'] = cursor.fetchone()['cnt']
+
+            cursor.execute("SELECT COUNT(*) as cnt FROM identity_graph_edges WHERE connection_id = %s", (cid,))
+            diag['connection_graph_edges'] = cursor.fetchone()['cnt']
+
+        cursor.close()
+        return jsonify(diag)
+    except Exception as e:
+        logger.exception(f"Graph debug failed: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
 def get_graph_visualization_handler():
     """GET /api/graph/visualization — enriched graph with tooltips, attack paths, risk levels.
 
@@ -24542,7 +24630,23 @@ def get_platform_health_handler():
         job_total = len(recent_jobs)
         job_failed = sum(1 for j in recent_jobs if j.get('status') == 'failed')
         job_running = sum(1 for j in recent_jobs if j.get('status') == 'running')
+        job_queued = sum(1 for j in recent_jobs if j.get('status') == 'queued')
         failure_rate = db.get_job_failure_rate(hours=24)
+
+        # Snapshot & discovery stats (Phase 5)
+        snapshot_stats = db.get_snapshot_stats(hours=24)
+        discovery_stats = db.get_discovery_stats(hours=24)
+
+        # Scheduler health
+        scheduler_running = False
+        active_jobs_count = 0
+        try:
+            from app.scheduler import scheduler as _sched
+            if _sched:
+                scheduler_running = _sched.running
+                active_jobs_count = len(_sched.get_jobs()) if scheduler_running else 0
+        except Exception:
+            pass
 
         from app.engines.platform_health import MAX_JOB_FAILURE_RATE
         overall = 'healthy'
@@ -24566,9 +24670,285 @@ def get_platform_health_handler():
                 'running': job_running,
                 'failure_rate_24h': round(failure_rate, 4),
             },
+            'job_queue': {
+                'queued': job_queued,
+                'running': job_running,
+            },
+            'snapshot_stats': snapshot_stats,
+            'discovery_stats': discovery_stats,
+            'worker_health': {
+                'scheduler_running': scheduler_running,
+                'active_jobs_count': active_jobs_count,
+            },
         })
     finally:
         db.close()
+
+
+# ── Admin Alerts (Phase 2) ────────────────────────────────────────────────
+def get_admin_alerts_handler():
+    """GET /api/admin/alerts — recent failed jobs/snapshots for alerting."""
+    db = Database(_admin_reason='admin_alerts')
+    try:
+        failures = db.get_recent_failures(limit=50)
+        return jsonify({'alerts': failures, 'total': len(failures)})
+    finally:
+        db.close()
+
+
+# ── Tenant Operations (Phase 3) ──────────────────────────────────────────
+def admin_trigger_tenant_snapshot(organization_id):
+    """POST /api/admin/tenants/<id>/snapshot — trigger discovery for a tenant."""
+    import threading
+    from app.scheduler import trigger_manual_discovery
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_trigger_snapshot')
+    try:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'trigger_snapshot',
+                           target_organization_id=organization_id,
+                           details={'reason': reason},
+                           ip_address=request.remote_addr)
+    finally:
+        db.close()
+
+    def _run():
+        try:
+            trigger_manual_discovery(db_org_id=organization_id, org_name=org.get('name'))
+        except Exception as e:
+            logger.error("Admin snapshot trigger failed for org %s: %s", organization_id, e)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return jsonify({'message': f'Snapshot triggered for {org.get("name")}', 'organization_id': organization_id}), 202
+
+
+def admin_rebuild_tenant_graph(organization_id):
+    """POST /api/admin/tenants/<id>/rebuild-graph — rebuild graph for a tenant."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_rebuild_graph')
+    try:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'rebuild_graph',
+                           target_organization_id=organization_id,
+                           details={'reason': reason},
+                           ip_address=request.remote_addr)
+
+        # Clear and rebuild graph visualization cache
+        try:
+            db.conn.cursor().execute(
+                "DELETE FROM graph_visualization_cache WHERE organization_id = %s",
+                (organization_id,))
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+
+        return jsonify({'message': f'Graph rebuild initiated for {org.get("name")}',
+                        'organization_id': organization_id}), 202
+    finally:
+        db.close()
+
+
+def admin_disable_tenant(organization_id):
+    """POST /api/admin/tenants/<id>/disable — disable a tenant."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_disable_tenant')
+    try:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        db.update_organization(organization_id, enabled=False)
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'disable_tenant',
+                           target_organization_id=organization_id,
+                           details={'reason': reason},
+                           ip_address=request.remote_addr)
+
+        return jsonify({'message': f'Tenant {org.get("name")} disabled', 'organization_id': organization_id})
+    finally:
+        db.close()
+
+
+def admin_suspend_tenant(organization_id):
+    """POST /api/admin/tenants/<id>/suspend — suspend billing for a tenant."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_suspend_tenant')
+    try:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        cursor = db.conn.cursor()
+        cursor.execute(
+            "UPDATE organizations SET billing_status = 'suspended' WHERE id = %s",
+            (organization_id,))
+        db.conn.commit()
+        cursor.close()
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'suspend_tenant',
+                           target_organization_id=organization_id,
+                           details={'reason': reason, 'previous_billing_status': org.get('billing_status')},
+                           ip_address=request.remote_addr)
+
+        return jsonify({'message': f'Tenant {org.get("name")} suspended', 'organization_id': organization_id})
+    finally:
+        db.close()
+
+
+def admin_reset_tenant_discovery(organization_id):
+    """POST /api/admin/tenants/<id>/reset-discovery — delete all discovery data. Superadmin only."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+    confirm = data.get('confirm', '')
+
+    db = Database(_admin_reason='admin_reset_discovery')
+    try:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        if confirm != org.get('name'):
+            return jsonify({'error': 'Confirmation text does not match tenant name'}), 400
+
+        counts = db.clear_tenant_discovery_data(organization_id)
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'reset_discovery',
+                           target_organization_id=organization_id,
+                           details={'reason': reason, 'deleted': counts},
+                           ip_address=request.remote_addr)
+
+        return jsonify({'message': f'Discovery data cleared for {org.get("name")}',
+                        'deleted': counts})
+    finally:
+        db.close()
+
+
+# ── Platform Operations (Phase 4) ────────────────────────────────────────
+def admin_flush_cache():
+    """POST /api/admin/platform/flush-cache — clear visualization cache + reset metrics."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_flush_cache')
+    try:
+        cursor = db.conn.cursor()
+        try:
+            cursor.execute("DELETE FROM graph_visualization_cache")
+            cache_count = cursor.rowcount
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            cache_count = 0
+        finally:
+            cursor.close()
+
+        # Reset MetricsCollector
+        try:
+            from app.metrics import MetricsCollector
+            MetricsCollector.instance().reset()
+        except Exception:
+            pass
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'flush_cache',
+                           details={'reason': reason, 'cache_entries_cleared': cache_count},
+                           ip_address=request.remote_addr)
+
+        return jsonify({'message': 'Cache flushed', 'cache_entries_cleared': cache_count})
+    finally:
+        db.close()
+
+
+def admin_rebuild_all_graphs():
+    """POST /api/admin/platform/rebuild-graphs — rebuild graphs for all enabled tenants."""
+    import threading
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_rebuild_graphs')
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT id, name FROM organizations WHERE enabled = true")
+        orgs = cursor.fetchall()
+        cursor.close()
+
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'rebuild_all_graphs',
+                           details={'reason': reason, 'tenant_count': len(orgs)},
+                           ip_address=request.remote_addr)
+    finally:
+        db.close()
+
+    def _rebuild():
+        admin_db = Database(_admin_reason='rebuild_all_graphs_bg')
+        try:
+            cursor = admin_db.conn.cursor()
+            cursor.execute("DELETE FROM graph_visualization_cache")
+            admin_db.conn.commit()
+            cursor.close()
+        except Exception:
+            admin_db.conn.rollback()
+        finally:
+            admin_db.close()
+
+    thread = threading.Thread(target=_rebuild, daemon=True)
+    thread.start()
+    return jsonify({'message': f'Graph rebuild started for {len(orgs)} tenants'}), 202
+
+
+def admin_restart_workers():
+    """POST /api/admin/platform/restart-workers — stop + restart APScheduler."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+
+    db = Database(_admin_reason='admin_restart_workers')
+    try:
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        db.log_admin_audit(user_id, 'restart_workers',
+                           details={'reason': reason},
+                           ip_address=request.remote_addr)
+    finally:
+        db.close()
+
+    try:
+        from app.scheduler import scheduler as _sched
+        if _sched and _sched.running:
+            _sched.shutdown(wait=False)
+            _sched.start()
+            return jsonify({'message': 'Scheduler restarted'})
+        else:
+            return jsonify({'error': 'Scheduler not available'}), 503
+    except Exception as e:
+        return jsonify({'error': f'Failed to restart scheduler: {str(e)}'}), 500
 
 
 def get_system_jobs_handler():

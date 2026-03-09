@@ -368,6 +368,7 @@ from app.api.handlers import (
     get_security_findings_handler,
     get_security_dashboard_handler,
     get_graph_visualization_handler,
+    get_graph_debug_handler,
     get_identity_graph_handler,
     get_attack_path_graph_handler,
     get_attack_paths_list,
@@ -401,6 +402,16 @@ from app.api.handlers import (
     get_system_tenants_health_handler,
     get_system_tenant_health_detail_handler,
     get_system_metrics_handler,
+    # Admin SaaS Operator
+    get_admin_alerts_handler,
+    admin_trigger_tenant_snapshot,
+    admin_rebuild_tenant_graph,
+    admin_disable_tenant,
+    admin_suspend_tenant,
+    admin_reset_tenant_discovery,
+    admin_flush_cache,
+    admin_rebuild_all_graphs,
+    admin_restart_workers,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -1149,6 +1160,53 @@ def create_app():
     @require_portal_access()
     def admin_action_log():
         return get_admin_action_log()
+
+    # ── Admin Alerts & Tenant Operations ──────────────────────────
+    @app.get("/api/admin/alerts")
+    @require_portal_access()
+    def admin_alerts():
+        return get_admin_alerts_handler()
+
+    @app.post("/api/admin/tenants/<int:organization_id>/snapshot")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_snapshot_route(organization_id):
+        return admin_trigger_tenant_snapshot(organization_id)
+
+    @app.post("/api/admin/tenants/<int:organization_id>/rebuild-graph")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_rebuild_graph(organization_id):
+        return admin_rebuild_tenant_graph(organization_id)
+
+    @app.post("/api/admin/tenants/<int:organization_id>/disable")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_disable(organization_id):
+        return admin_disable_tenant(organization_id)
+
+    @app.post("/api/admin/tenants/<int:organization_id>/suspend")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_tenant_suspend(organization_id):
+        return admin_suspend_tenant(organization_id)
+
+    @app.post("/api/admin/tenants/<int:organization_id>/reset-discovery")
+    @require_portal_role('superadmin')
+    def admin_tenant_reset_discovery(organization_id):
+        return admin_reset_tenant_discovery(organization_id)
+
+    # ── Platform Operations ───────────────────────────────────────
+    @app.post("/api/admin/platform/flush-cache")
+    @require_portal_role('superadmin')
+    def admin_platform_flush_cache():
+        return admin_flush_cache()
+
+    @app.post("/api/admin/platform/rebuild-graphs")
+    @require_portal_role('superadmin')
+    def admin_platform_rebuild_graphs():
+        return admin_rebuild_all_graphs()
+
+    @app.post("/api/admin/platform/restart-workers")
+    @require_portal_role('superadmin')
+    def admin_platform_restart_workers():
+        return admin_restart_workers()
 
     # Phase 1B+1C: Admin impersonation
     @app.post("/api/admin/impersonate")
@@ -2955,6 +3013,10 @@ def create_app():
     # -----------------------
     # Phase 16: Graph Visualization
     # -----------------------
+    @app.get("/api/graph/debug")
+    def graph_debug():
+        return get_graph_debug_handler()
+
     @app.get("/api/graph/visualization")
     def graph_visualization():
         return get_graph_visualization_handler()
