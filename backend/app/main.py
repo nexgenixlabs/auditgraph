@@ -447,67 +447,49 @@ def _run_core_schema(db_init):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org ON discovery_runs(organization_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_connection ON discovery_runs(cloud_connection_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org_status ON discovery_runs(organization_id, status)")
-    # Identities columns added after initial migration.
-    # Dev DB only has migration 001 columns; all others must be added here.
-    _identity_cols = [
-        ("risk_score", "INTEGER DEFAULT 0"),
-        ("credential_count", "INTEGER DEFAULT 0"),
-        ("owner_count", "INTEGER DEFAULT 0"),
-        ("cloud", "VARCHAR(50) DEFAULT 'azure'"),
-        ("risk_factors", "JSONB DEFAULT '[]'::jsonb"),
-        ("app_owner_org_id", "TEXT"),
-        ("permission_plane", "VARCHAR(50)"),
-        ("deleted_at", "TIMESTAMPTZ"),
-        ("blast_radius_score", "NUMERIC(7,2) DEFAULT 0"),
-        ("upn", "VARCHAR(500)"),
-        ("employee_id_entra", "VARCHAR(255)"),
-        ("department", "VARCHAR(255)"),
-        ("manager_id", "VARCHAR(255)"),
-        ("manager_upn", "VARCHAR(500)"),
-        ("job_title", "VARCHAR(255)"),
-        ("account_category", "VARCHAR(50)"),
-        # Multi-cloud normalized fields
-        ("identity_type_normalized", "VARCHAR(100)"),
-        ("canonical_name", "TEXT"),
-        ("principal_id", "TEXT"),
-        ("tenant_or_org_id", "TEXT"),
-        ("source_normalized", "VARCHAR(50) DEFAULT 'entra'"),
-        ("is_federated", "BOOLEAN DEFAULT false"),
-        ("status", "VARCHAR(50) DEFAULT 'active'"),
-        ("last_seen_auth", "TIMESTAMPTZ"),
-        ("organization_id", "INTEGER"),
-        # Credential & exposure fields
-        ("next_expiry", "TIMESTAMPTZ"),
-        ("credential_risk", "VARCHAR(20)"),
-        ("credential_age_days", "INTEGER"),
-        ("credential_risk_score", "INTEGER DEFAULT 0"),
-        ("owner_display_name", "TEXT"),
-        ("owner_status", "VARCHAR(50)"),
-        ("api_permission_count", "INTEGER DEFAULT 0"),
-        ("app_role_count", "INTEGER DEFAULT 0"),
-        # Subscription & PIM fields
-        ("additional_subscription_count", "INTEGER DEFAULT 0"),
-        ("pim_eligible_count", "INTEGER DEFAULT 0"),
-        ("ca_coverage_status", "VARCHAR(30)"),
-        ("ca_mfa_enforced", "BOOLEAN"),
-        ("privilege_tier", "VARCHAR(20)"),
-        # Scoring fields
-        ("lifecycle_state", "VARCHAR(50)"),
-        ("lifecycle_score", "INTEGER DEFAULT 0"),
-        ("exposure_score", "NUMERIC(7,2) DEFAULT 0"),
-        ("visibility_score", "NUMERIC(7,2) DEFAULT 0"),
-        ("privilege_score", "NUMERIC(7,2) DEFAULT 0"),
-        ("exposure_subscore", "NUMERIC(7,2) DEFAULT 0"),
-        ("activity_confidence", "VARCHAR(20)"),
-        ("has_permanent_assignment", "BOOLEAN DEFAULT false"),
-        ("effective_scope_flag", "VARCHAR(30)"),
-        ("can_escalate", "BOOLEAN DEFAULT false"),
-        ("cross_subscription", "BOOLEAN DEFAULT false"),
-    ]
-    for col_name, col_type in _identity_cols:
-        cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
     db_init._commit()
     cursor.close()
+
+
+def _run_schema_sync(conn):
+    """Sync ALL table columns to match the expected schema (from localhost dump).
+
+    Uses the sync_schema script which embeds the full localhost schema as a CSV.
+    This ensures dev DB has every column that localhost has, without needing
+    to maintain manual ALTER TABLE lists.
+    """
+    import pathlib
+    script_path = pathlib.Path(__file__).parent.parent / 'scripts' / 'sync_schema.py'
+    if not script_path.exists():
+        print("  ⚠️ sync_schema.py not found — skipping schema sync")
+        return
+
+    # Import the sync module
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sync_schema", str(script_path))
+    sync_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync_mod)
+
+    # Load expected schema and compare
+    sync_mod._load_expected_schema()
+    current = sync_mod.get_current_schema(conn)
+
+    changes = sync_mod.compare_schemas(sync_mod.EXPECTED_COLUMNS, current)
+    n_missing_tables = len(changes["missing_tables"])
+    n_missing_cols = len(changes["missing_columns"])
+
+    if n_missing_tables == 0 and n_missing_cols == 0:
+        print(f"  ✓ Schema sync: all {len(sync_mod.EXPECTED_COLUMNS)} tables, "
+              f"{sum(len(c) for c in sync_mod.EXPECTED_COLUMNS.values())} columns in sync")
+        return
+
+    if n_missing_tables:
+        print(f"  ⚠️ Schema sync: {n_missing_tables} missing tables (will be created by _ensure_* methods)")
+
+    if n_missing_cols:
+        print(f"  📦 Schema sync: adding {n_missing_cols} missing columns...")
+        sync_mod.apply_changes(conn, changes, dry_run=False)
+        print(f"  ✓ Schema sync: {n_missing_cols} columns added")
 
 
 def create_app():
@@ -769,6 +751,16 @@ def create_app():
                     _db_init._rollback()
                 except Exception:
                     pass
+
+        # Schema sync: add any missing columns to match localhost schema
+        try:
+            _run_schema_sync(_db_init.conn)
+        except Exception as e:
+            print(f"  ⚠️ Schema sync error (non-fatal): {e}")
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
 
         # Performance indexes (each independently guarded)
         _perf_cursor = _db_init.conn.cursor()
