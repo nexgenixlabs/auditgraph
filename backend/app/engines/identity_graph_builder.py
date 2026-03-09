@@ -47,9 +47,28 @@ def build_identity_graph(connection_id, db):
         ORDER BY id DESC LIMIT 1
     """, (connection_id,))
     row = cursor.fetchone()
+
+    # Fallback: if no run found by connection_id, try latest completed run
+    # that actually has role_assignments (handles dev/migration scenarios)
+    if not row:
+        logger.info(f"No run for connection {connection_id} by cloud_connection_id, trying org-wide fallback")
+        try:
+            cursor.execute("""
+                SELECT DISTINCT dr.id
+                FROM discovery_runs dr
+                JOIN identities i ON i.discovery_run_id = dr.id
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE dr.status = 'completed'
+                ORDER BY dr.id DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+        except Exception:
+            pass
+
     if not row:
         cursor.close()
-        logger.debug(f"No completed run for connection {connection_id}, skipping graph build")
+        logger.debug(f"No completed run with role assignments for connection {connection_id}, skipping")
         return {'edge_count': 0}
 
     run_id = row['id']

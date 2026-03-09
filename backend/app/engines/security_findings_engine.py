@@ -36,16 +36,34 @@ def generate_security_findings(connection_id, db):
 
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-    # Find latest completed run
+    # Find latest completed run for this connection
     cursor.execute("""
         SELECT id FROM discovery_runs
         WHERE cloud_connection_id = %s AND status = 'completed'
         ORDER BY id DESC LIMIT 1
     """, (connection_id,))
     row = cursor.fetchone()
+
+    # Fallback: if no run by connection_id, try latest run with role_assignments
+    if not row:
+        logger.info(f"No run for connection {connection_id} by cloud_connection_id, trying fallback")
+        try:
+            cursor.execute("""
+                SELECT DISTINCT dr.id
+                FROM discovery_runs dr
+                JOIN identities i ON i.discovery_run_id = dr.id
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE dr.status = 'completed'
+                ORDER BY dr.id DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+        except Exception:
+            pass
+
     if not row:
         cursor.close()
-        logger.debug(f"No completed run for connection {connection_id}, skipping findings")
+        logger.debug(f"No completed run with assignments for connection {connection_id}, skipping")
         return {'findings_count': 0}
 
     run_id = row['id']
