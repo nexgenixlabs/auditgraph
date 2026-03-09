@@ -451,6 +451,24 @@ def _run_core_schema(db_init):
     cursor.close()
 
 
+def _run_full_schema(db_init):
+    """Run migration 100 SQL to create ALL tables (from localhost pg_dump).
+    All statements use CREATE TABLE IF NOT EXISTS — safe to run on every startup.
+    This ensures dev DB has every table that localhost has.
+    """
+    import pathlib
+    sql_path = pathlib.Path(__file__).parent.parent / 'migrations' / '100_full_schema.sql'
+    if not sql_path.exists():
+        print(f"  ⚠️ Full schema SQL not found at {sql_path}")
+        return
+    sql = sql_path.read_text()
+    cursor = db_init.conn.cursor()
+    cursor.execute(sql)
+    db_init._commit()
+    cursor.close()
+    print("  ✓ Full schema: all tables ensured (CREATE TABLE IF NOT EXISTS)")
+
+
 def _run_schema_sync(conn):
     """Sync ALL table columns to match the expected schema (from localhost dump).
 
@@ -683,6 +701,7 @@ def create_app():
                 "CREATE INDEX IF NOT EXISTS idx_settings_org ON settings(organization_id)"
             ) or _db_init._commit()),
             ('core schema (migration 001)', lambda: _run_core_schema(_db_init)),
+            ('full schema (migration 100)', lambda: _run_full_schema(_db_init)),
             ('cloud_connections table', lambda: _db_init._ensure_cloud_connections_table()),
             ('cloud_subscriptions table', lambda: _db_init._ensure_cloud_subscriptions_table()),
             ('entitlements tables', lambda: _db_init._ensure_entitlements_tables()),
