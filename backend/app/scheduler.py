@@ -741,9 +741,9 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         _track_job('security_findings_engine', db_org_id,
                    _run_security_findings_engine, db_org_id, db)
 
-        # Security posture aggregation (from findings)
-        _track_job('security_posture', db_org_id,
-                   _run_security_posture, db_org_id, db)
+        # Connection-scoped security posture aggregation (from findings)
+        _track_job('connection_security_posture', db_org_id,
+                   _run_connection_security_posture, db_org_id, db)
 
         # Phase 3: Attack path analysis (tracked by Phase 8)
         _track_job('attack_paths', db_org_id,
@@ -1504,8 +1504,8 @@ def _run_security_findings_engine(db_org_id, db):
         logger.exception(e)
 
 
-def _run_security_posture(db_org_id, db):
-    """Compute security posture snapshots for all connected connections."""
+def _run_connection_security_posture(db_org_id, db):
+    """Compute connection-scoped security posture snapshots from security_findings."""
     try:
         from app.engines.security_posture_engine import compute_security_posture
         admin_db = Database()
@@ -1514,9 +1514,9 @@ def _run_security_posture(db_org_id, db):
         for conn in connections:
             if conn.get('status') == 'connected':
                 compute_security_posture(conn['id'], db)
-        logger.info(f"Security posture computed for org {db_org_id}")
+        logger.info(f"Connection security posture computed for org {db_org_id}")
     except Exception as e:
-        logger.error(f"Security posture computation failed for org {db_org_id}: {e}")
+        logger.error(f"Connection security posture failed for org {db_org_id}: {e}")
         logger.exception(e)
 
 
