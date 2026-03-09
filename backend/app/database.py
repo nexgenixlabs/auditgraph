@@ -5877,6 +5877,8 @@ class Database:
 
     def _ensure_compliance_tables(self):
         """Create compliance_frameworks and compliance_controls tables if they don't exist."""
+        if not self._can_ddl():
+            return
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS compliance_frameworks (
@@ -6108,6 +6110,8 @@ class Database:
 
     def _ensure_agirs_scores_table(self):
         if Database._agirs_ensured:
+            return
+        if not self._can_ddl():
             return
         cursor = self.conn.cursor()
         try:
@@ -10742,7 +10746,9 @@ class Database:
         cursor.close()
 
     def get_active_snapshot_job(self, cloud_connection_id):
-        """Get the active (queued/running) job for a connection, if any."""
+        """Get the active (queued/running) job for a connection, if any.
+        Jobs older than 30 minutes are considered stale and ignored.
+        """
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT id, organization_id, cloud_connection_id, discovery_run_id,
@@ -10752,6 +10758,7 @@ class Database:
                    created_at, started_at, completed_at, last_heartbeat_at
             FROM snapshot_jobs
             WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
+              AND created_at > NOW() - INTERVAL '30 minutes'
             ORDER BY created_at DESC LIMIT 1
         """, (cloud_connection_id,))
         row = cursor.fetchone()
