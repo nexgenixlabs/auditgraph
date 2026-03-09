@@ -447,6 +447,11 @@ def _run_core_schema(db_init):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org ON discovery_runs(organization_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_connection ON discovery_runs(cloud_connection_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_discovery_runs_org_status ON discovery_runs(organization_id, status)")
+    # Identities columns added after initial migration (used by discovery engine + demo seeder)
+    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS risk_score INTEGER DEFAULT 0")
+    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS credential_count INTEGER DEFAULT 0")
+    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS owner_count INTEGER DEFAULT 0")
+    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS cloud VARCHAR(50) DEFAULT 'azure'")
     db_init._commit()
     cursor.close()
 

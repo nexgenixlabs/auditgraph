@@ -5782,6 +5782,33 @@ class Database:
         db = cls()
         try:
             cursor = db.conn.cursor()
+
+            # Reassign ownership of tables not owned by admin user so GRANTs work.
+            # Tables created by 'postgres' (e.g. via manual SQL) can't be GRANTed by admin.
+            cursor.execute("SELECT current_user")
+            current_user = cursor.fetchone()[0]
+            cursor.execute("""
+                SELECT c.relname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_roles r ON r.oid = c.relowner
+                WHERE n.nspname = 'public' AND c.relkind IN ('r', 'S')
+                  AND r.rolname != %s
+            """, (current_user,))
+            foreign_tables = [row[0] for row in cursor.fetchall()]
+            reassigned = 0
+            for tbl in foreign_tables:
+                try:
+                    cursor.execute(f'SAVEPOINT own_{reassigned}')
+                    cursor.execute(f'ALTER TABLE "{tbl}" OWNER TO {current_user}')
+                    cursor.execute(f'RELEASE SAVEPOINT own_{reassigned}')
+                    reassigned += 1
+                except Exception:
+                    cursor.execute(f'ROLLBACK TO SAVEPOINT own_{reassigned}')
+            if reassigned:
+                db._commit()
+                logger.info("Reassigned ownership of %d tables/sequences to '%s'", reassigned, current_user)
+
             cursor.execute("SAVEPOINT grant_all")
             try:
                 cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {DB_USER}")
