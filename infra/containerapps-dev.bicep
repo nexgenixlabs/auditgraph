@@ -115,11 +115,10 @@ resource certAdmin 'Microsoft.App/managedEnvironments/managedCertificates@2024-0
   parent: cae
   name: 'mc-dev-cae-ext-dev-admin-auditg-9679'
 }
-// NOTE: demo cert added after provisioning completes (managed cert can take up to 20min)
-// resource certDemo 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
-//   parent: cae
-//   name: 'mc-dev-cae-ext-demo-auditgraph--0226'
-// }
+resource certDemo 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
+  parent: cae
+  name: 'mc-dev-cae-ext-demo-auditgraph'
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // API Container App — auditgraph-api-dev
@@ -193,6 +192,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'ALLOW_DEMO', value: 'true' }
             { name: 'DEFAULT_ORG_SLUG', value: 'azurecredits' }
             { name: 'DEV_AZURE_DIRECTORY_ID', value: azureDirectoryId }
+            { name: 'AZURE_TENANT_ID', value: azureDirectoryId }
             { name: 'AZURE_CLIENT_ID', value: azureClientId }
             { name: 'AZURE_CLIENT_SECRET', secretRef: 'azure-client-secret' }
           ]
@@ -262,7 +262,11 @@ resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
             certificateId: certApp.id
             bindingType: 'SniEnabled'
           }
-          // demo.auditgraph.ai added after cert provisioning completes
+          {
+            name: 'demo.auditgraph.ai'
+            certificateId: certDemo.id
+            bindingType: 'SniEnabled'
+          }
         ]
       }
       registries: [

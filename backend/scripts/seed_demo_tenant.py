@@ -292,30 +292,54 @@ def clean_demo_data(db, org_id):
                 db.conn.rollback()
         cursor.execute("DELETE FROM discovery_runs WHERE organization_id = %s", (org_id,))
 
+    # Clean demo cloud connection (will be re-created)
+    try:
+        cursor.execute("DELETE FROM cloud_connections WHERE organization_id = %s AND label = 'Demo Environment'", (org_id,))
+    except Exception:
+        db.conn.rollback()
+
     db.conn.commit()
     cursor.close()
     logger.info("Cleaned existing demo data.")
 
 
-def seed_discovery_run(db, org_id):
+def seed_cloud_connection(db, org_id):
+    """Create a demo cloud connection so _latest_run_ids() can find demo runs."""
+    cursor = db.conn.cursor()
+    cursor.execute("""
+        INSERT INTO cloud_connections
+            (organization_id, cloud, connection_type, label,
+             azure_directory_id, status)
+        VALUES (%s, 'azure', 'entra', 'Demo Environment',
+                'demo-0000-0000-0000-000000000000', 'connected')
+        RETURNING id
+    """, (org_id,))
+    cc_id = cursor.fetchone()[0]
+    db.conn.commit()
+    cursor.close()
+    logger.info("Created cloud_connection id=%s for demo org", cc_id)
+    return cc_id
+
+
+def seed_discovery_run(db, org_id, cloud_connection_id):
     """Create a completed discovery run for the demo org."""
     cursor = db.conn.cursor()
     cursor.execute("""
         INSERT INTO discovery_runs
             (subscription_id, subscription_name, started_at, completed_at,
              status, total_identities, critical_count, high_count,
-             medium_count, low_count, organization_id)
-        VALUES (%s, %s, %s, %s, 'completed', 200, 18, 42, 85, 55, %s)
+             medium_count, low_count, organization_id, cloud_connection_id)
+        VALUES (%s, %s, %s, %s, 'completed', 200, 18, 42, 85, 55, %s, %s)
         RETURNING id
     """, (
         "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "AuditGraph Demo Subscription",
-        RUN_START, RUN_END, org_id,
+        RUN_START, RUN_END, org_id, cloud_connection_id,
     ))
     run_id = cursor.fetchone()[0]
     db.conn.commit()
     cursor.close()
-    logger.info("Created discovery_run id=%s", run_id)
+    logger.info("Created discovery_run id=%s (cloud_connection_id=%s)", run_id, cloud_connection_id)
     return run_id
 
 
@@ -1311,7 +1335,8 @@ def main():
 
         clean_demo_data(db, org_id)
 
-        run_id = seed_discovery_run(db, org_id)
+        cc_id = seed_cloud_connection(db, org_id)
+        run_id = seed_discovery_run(db, org_id, cc_id)
         identity_map = seed_identities(db, org_id, run_id)
         seed_credentials(db, identity_map, run_id)
         seed_role_assignments(db, identity_map, run_id)

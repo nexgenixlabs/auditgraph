@@ -463,7 +463,12 @@ def create_app():
 
     app = Flask(__name__)
     cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
-    CORS(app, resources={r"/*": {"origins": [o.strip() for o in cors_origins]}})
+    CORS(app, resources={r"/*": {
+        "origins": [o.strip() for o in cors_origins],
+        "allow_headers": ["Content-Type", "Authorization", "X-Portal-Context",
+                          "X-Organization-Id", "X-API-Key"],
+        "expose_headers": ["Content-Type"],
+    }})
 
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)

@@ -5679,6 +5679,34 @@ class Database:
                     u['username'], u['role'], demo_org_id,
                 )
 
+            # Auto-seed demo data if no discovery runs exist for this org
+            cursor.execute(
+                "SELECT COUNT(*) FROM discovery_runs WHERE organization_id = %s",
+                (demo_org_id,)
+            )
+            run_count = cursor.fetchone()[0]
+            if run_count == 0:
+                logger.info("No demo discovery runs found — running demo data seeder...")
+                cursor.close()
+                self.close()
+                try:
+                    import subprocess, sys
+                    script = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'seed_demo_tenant.py')
+                    if os.path.exists(script):
+                        result = subprocess.run(
+                            [sys.executable, script],
+                            capture_output=True, text=True, timeout=120
+                        )
+                        if result.returncode == 0:
+                            logger.info("Demo data seeder completed successfully")
+                        else:
+                            logger.error("Demo data seeder failed: %s", result.stderr[-500:] if result.stderr else 'unknown')
+                    else:
+                        logger.warning("Demo seeder script not found at %s", script)
+                except Exception as seed_err:
+                    logger.error("Demo data seeder error: %s", seed_err)
+                return  # connection already closed
+
         except Exception as e:
             logger.error("Demo tenant seeding failed: %s", e)
             try:
@@ -5686,7 +5714,10 @@ class Database:
             except Exception:
                 pass
         finally:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
     # ── Bulk GRANT for app user (dual-user RLS architecture) ────────
 

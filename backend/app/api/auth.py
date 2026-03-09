@@ -81,11 +81,23 @@ def _derive_portal() -> str:
 
 
 def _derive_org_slug() -> str | None:
-    """Extract organization slug from subdomain. aglabs.auditgraph.ai -> 'aglabs'."""
+    """Extract organization slug from subdomain. aglabs.auditgraph.ai -> 'aglabs'.
+
+    Multi-level subdomains like dev.api.auditgraph.ai are API hosts, not tenant
+    portals — return None so the middleware skips the issuer check.
+    """
     host = request.host.split(':')[0]
     parts = host.split('.')
-    if len(parts) >= 3 and parts[0] not in ('app', 'api', 'admin', 'www'):
+    # Skip infrastructure hosts: if 'api' appears anywhere it's a backend endpoint
+    reserved = ('app', 'api', 'admin', 'www', 'dev', 'staging')
+    if 'api' in parts:
+        return None
+    # {slug}.auditgraph.ai — direct tenant subdomain
+    if len(parts) == 3 and parts[0] not in reserved:
         return parts[0]
+    # {env}.{portal}.auditgraph.ai — env-prefixed portal, not a slug
+    if len(parts) >= 4:
+        return None
     return None
 
 
