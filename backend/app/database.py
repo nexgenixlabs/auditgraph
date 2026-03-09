@@ -471,6 +471,19 @@ class Database:
         if organization_id is not None:
             self.set_organization_context(organization_id)
 
+    def _can_ddl(self) -> bool:
+        """Check if this connection can run DDL (CREATE/ALTER TABLE).
+
+        In the dual-user architecture, only the admin user can run DDL.
+        The app user connection (used for tenant-scoped requests) does not
+        have CREATE/ALTER privileges.  _ensure_* methods should call this
+        and skip DDL when False — the tables must already exist from startup.
+        """
+        from app.config import DB_USER, DB_ADMIN_USER
+        if DB_USER == DB_ADMIN_USER:
+            return True  # Single-user mode (local dev)
+        return self._is_admin
+
     @staticmethod
     def _caller_hint():
         """Return the first non-database caller from the stack for diagnostics."""
@@ -4678,6 +4691,8 @@ class Database:
 
     def _ensure_notifications_table(self):
         """Create notifications table if it doesn't exist."""
+        if not self._can_ddl():
+            return
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
@@ -9246,6 +9261,8 @@ class Database:
 
     def _ensure_dashboard_preferences_table(self):
         """Create dashboard_preferences table if not exists."""
+        if not self._can_ddl():
+            return
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_preferences (
