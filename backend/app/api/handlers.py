@@ -22755,13 +22755,16 @@ def get_graph_debug_handler():
 def get_graph_visualization_handler():
     """GET /api/graph/visualization — enriched graph with tooltips, attack paths, risk levels.
 
+    Computes graph LIVE from role_assignments JOIN identities (no pipeline dependency).
     Returns nodes with labels, risk_level, tooltip metadata.
     Detects attack paths (identity → high-priv role → subscription/resource).
     Enforces max_nodes=120, max_edges=200.
     """
+    import re
     MAX_NODES = 120
     MAX_EDGES = 200
     HIGH_PRIV_ROLES = {'Owner', 'User Access Administrator', 'Contributor'}
+    _SUB_RE = re.compile(r'^/subscriptions/([^/]+)', re.IGNORECASE)
 
     db = _db()
     try:
@@ -22773,15 +22776,72 @@ def get_graph_visualization_handler():
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        try:
+        # ── Build edges LIVE from role_assignments ────────────────────
+        # Find latest completed run for this connection
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE cloud_connection_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (connection_id,))
+        run_row = cursor.fetchone()
+        run_id = run_row['id'] if run_row else None
+
+        if run_id:
             cursor.execute("""
-                SELECT source_id, target_id, edge_type
-                FROM identity_graph_edges
-                WHERE connection_id = %s
-            """, (connection_id,))
-            rows = cursor.fetchall()
-        except Exception:
-            rows = []
+                SELECT i.identity_id, i.display_name,
+                       ra.role_name, ra.scope, ra.scope_type
+                FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE i.discovery_run_id = %s
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+            """, (run_id,))
+        else:
+            # Fallback: all role assignments org-wide
+            cursor.execute("""
+                SELECT DISTINCT ON (i.identity_id, ra.role_name, ra.scope)
+                       i.identity_id, i.display_name,
+                       ra.role_name, ra.scope, ra.scope_type
+                FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE NOT COALESCE(i.is_microsoft_system, false)
+                ORDER BY i.identity_id, ra.role_name, ra.scope,
+                         i.discovery_run_id DESC NULLS LAST
+            """)
+
+        assignments = cursor.fetchall()
+        if not assignments:
+            cursor.close()
+            return jsonify({'nodes': [], 'edges': [], 'attack_paths': [], 'truncated': False})
+
+        # Build edge rows from assignments (same logic as identity_graph_builder)
+        rows = []
+        seen_edges = set()
+        for ra in assignments:
+            identity_id = ra['identity_id']
+            role_name = ra['role_name'] or 'Unknown Role'
+            scope = ra['scope'] or ''
+
+            # Edge 1: identity → role
+            key1 = (identity_id, f"role:{role_name}", 'assigned_role')
+            if key1 not in seen_edges:
+                seen_edges.add(key1)
+                rows.append({'source_id': identity_id, 'target_id': f"role:{role_name}", 'edge_type': 'assigned_role'})
+
+            # Edge 2: role → scope
+            if scope:
+                key2 = (f"role:{role_name}", scope, 'grants_access')
+                if key2 not in seen_edges:
+                    seen_edges.add(key2)
+                    rows.append({'source_id': f"role:{role_name}", 'target_id': scope, 'edge_type': 'grants_access'})
+
+            # Edge 3: subscription → scope (contains_resource)
+            m = _SUB_RE.match(scope or '')
+            sub_path = f"/subscriptions/{m.group(1)}" if m else ''
+            if sub_path and scope and sub_path != scope:
+                key3 = (sub_path, scope, 'contains_resource')
+                if key3 not in seen_edges:
+                    seen_edges.add(key3)
+                    rows.append({'source_id': sub_path, 'target_id': scope, 'edge_type': 'contains_resource'})
 
         if not rows:
             cursor.close()
