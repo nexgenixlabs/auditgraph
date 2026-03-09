@@ -5824,19 +5824,51 @@ class Database:
                 db._commit()
                 logger.info("Reassigned ownership of %d tables/sequences to '%s'", reassigned, current_user)
 
-            cursor.execute("SAVEPOINT grant_all")
+            # Per-table GRANTs (some tables may be owned by server admin, skip those)
+            cursor.execute("""
+                SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+            """)
+            all_tables = [row[0] for row in cursor.fetchall()]
+            granted = 0
+            skipped_tables = []
+            for tbl in all_tables:
+                try:
+                    cursor.execute(f'SAVEPOINT g_{granted}')
+                    cursor.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON "{tbl}" TO {DB_USER}')
+                    cursor.execute(f'RELEASE SAVEPOINT g_{granted}')
+                    granted += 1
+                except Exception:
+                    cursor.execute(f'ROLLBACK TO SAVEPOINT g_{granted}')
+                    skipped_tables.append(tbl)
+
+            # Per-sequence GRANTs
+            cursor.execute("""
+                SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public'
+            """)
+            for row in cursor.fetchall():
+                seq = row[0]
+                try:
+                    cursor.execute(f'SAVEPOINT gs')
+                    cursor.execute(f'GRANT USAGE, SELECT ON SEQUENCE "{seq}" TO {DB_USER}')
+                    cursor.execute(f'RELEASE SAVEPOINT gs')
+                except Exception:
+                    cursor.execute(f'ROLLBACK TO SAVEPOINT gs')
+
+            # Default privileges for future tables
             try:
-                cursor.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {DB_USER}")
-                cursor.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {DB_USER}")
-                # Ensure future tables created by admin also get granted
+                cursor.execute(f'SAVEPOINT dp')
                 cursor.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {DB_USER}")
                 cursor.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {DB_USER}")
-                cursor.execute("RELEASE SAVEPOINT grant_all")
-                db._commit()
-                logger.info("Bulk GRANT: app user '%s' granted access to all tables and sequences", DB_USER)
-            except Exception as e:
-                cursor.execute("ROLLBACK TO SAVEPOINT grant_all")
-                logger.error("Bulk GRANT failed: %s", e)
+                cursor.execute(f'RELEASE SAVEPOINT dp')
+            except Exception:
+                cursor.execute(f'ROLLBACK TO SAVEPOINT dp')
+
+            db._commit()
+            if skipped_tables:
+                logger.warning("Bulk GRANT: %d tables granted, %d skipped (ownership): %s",
+                               granted, len(skipped_tables), ', '.join(skipped_tables[:5]))
+            else:
+                logger.info("Bulk GRANT: app user '%s' granted access to %d tables", DB_USER, granted)
             cursor.close()
         finally:
             db.close()
