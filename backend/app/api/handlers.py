@@ -22676,7 +22676,7 @@ def get_graph_debug_handler():
         diag = {}
 
         # 1. Cloud connections
-        cursor.execute("SELECT id, status, provider FROM cloud_connections")
+        cursor.execute("SELECT id, status, cloud, label FROM cloud_connections")
         diag['cloud_connections'] = [dict(r) for r in cursor.fetchall()]
 
         # 2. Discovery runs
@@ -24622,6 +24622,7 @@ def get_platform_health_handler():
         total = len(tenants)
         healthy = sum(1 for t in tenants if t.get('status') == 'healthy')
         warning = sum(1 for t in tenants if t.get('status') == 'warning')
+        critical = sum(1 for t in tenants if t.get('status') == 'critical')
         stale = sum(1 for t in tenants if t.get('status') == 'stale')
         integrity_warnings = sum(1 for t in tenants if t.get('integrity_warning'))
 
@@ -24637,6 +24638,10 @@ def get_platform_health_handler():
         snapshot_stats = db.get_snapshot_stats(hours=24)
         discovery_stats = db.get_discovery_stats(hours=24)
 
+        # Phase 7: Snapshot runs stats + alert counts
+        snapshot_run_stats = db.get_snapshot_run_stats(hours=24)
+        alert_counts = db.get_snapshot_alert_counts()
+
         # Scheduler health
         scheduler_running = False
         active_jobs_count = 0
@@ -24650,9 +24655,9 @@ def get_platform_health_handler():
 
         from app.engines.platform_health import MAX_JOB_FAILURE_RATE
         overall = 'healthy'
-        if stale > 0 or failure_rate > MAX_JOB_FAILURE_RATE:
+        if stale > 0 or warning > 0 or failure_rate > MAX_JOB_FAILURE_RATE:
             overall = 'degraded'
-        if stale > total / 2 or failure_rate > 0.5:
+        if critical > 0 or stale > total / 2 or failure_rate > 0.5:
             overall = 'critical'
 
         return jsonify({
@@ -24661,6 +24666,7 @@ def get_platform_health_handler():
                 'total': total,
                 'healthy': healthy,
                 'warning': warning,
+                'critical': critical,
                 'stale': stale,
                 'integrity_warnings': integrity_warnings,
             },
@@ -24676,6 +24682,8 @@ def get_platform_health_handler():
             },
             'snapshot_stats': snapshot_stats,
             'discovery_stats': discovery_stats,
+            'snapshot_run_stats': snapshot_run_stats,
+            'alert_counts': alert_counts,
             'worker_health': {
                 'scheduler_running': scheduler_running,
                 'active_jobs_count': active_jobs_count,
@@ -24685,13 +24693,81 @@ def get_platform_health_handler():
         db.close()
 
 
-# ── Admin Alerts (Phase 2) ────────────────────────────────────────────────
+# ── Admin Alerts (Phase 2 + Phase 7) ─────────────────────────────────────
 def get_admin_alerts_handler():
-    """GET /api/admin/alerts — recent failed jobs/snapshots for alerting."""
+    """GET /api/admin/alerts — recent failures + snapshot alerts with severity."""
     db = Database(_admin_reason='admin_alerts')
     try:
-        failures = db.get_recent_failures(limit=50)
-        return jsonify({'alerts': failures, 'total': len(failures)})
+        severity = request.args.get('severity')
+        alert_type = request.args.get('type')  # 'all', 'failures', 'snapshot_alerts'
+
+        alerts = []
+
+        # Legacy failures (job_runs + discovery_runs)
+        if alert_type != 'snapshot_alerts':
+            failures = db.get_recent_failures(limit=30)
+            for f in failures:
+                f['severity'] = 'warning'  # Default severity for legacy failures
+                f['alert_source'] = 'failure'
+            alerts.extend(failures)
+
+        # Phase 7: Snapshot alerts with severity
+        if alert_type != 'failures':
+            snapshot_alerts = db.get_snapshot_alerts(
+                severity=severity,
+                acknowledged=False,
+                limit=30,
+            )
+            for sa in snapshot_alerts:
+                sa['alert_source'] = 'snapshot_alert'
+            alerts.extend(snapshot_alerts)
+
+        # Sort by created_at desc
+        alerts.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+
+        # Filter by severity if specified
+        if severity and alert_type != 'snapshot_alerts':
+            alerts = [a for a in alerts if a.get('severity') == severity]
+
+        alert_counts = db.get_snapshot_alert_counts()
+
+        return jsonify({
+            'alerts': alerts[:50],
+            'total': len(alerts),
+            'alert_counts': alert_counts,
+        })
+    finally:
+        db.close()
+
+
+def acknowledge_alert_handler(alert_id):
+    """POST /api/admin/alerts/<id>/acknowledge — acknowledge a snapshot alert."""
+    db = Database(_admin_reason='admin_acknowledge_alert')
+    try:
+        user = getattr(g, 'current_user', None)
+        user_id = user.get('id') if user else None
+        updated = db.acknowledge_snapshot_alert(alert_id, user_id)
+        if not updated:
+            return jsonify({'error': 'Alert not found or already acknowledged'}), 404
+        return jsonify({'ok': True})
+    finally:
+        db.close()
+
+
+def get_snapshot_runs_handler():
+    """GET /api/admin/snapshot-runs — list recent snapshot runs."""
+    db = Database(_admin_reason='admin_snapshot_runs')
+    try:
+        org_id = request.args.get('organization_id', type=int)
+        status = request.args.get('status')
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        runs = db.get_snapshot_runs(
+            organization_id=org_id, status=status,
+            limit=min(limit, 100), offset=offset,
+        )
+        stats = db.get_snapshot_run_stats(hours=24)
+        return jsonify({'runs': runs, 'stats': stats})
     finally:
         db.close()
 
