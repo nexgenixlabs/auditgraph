@@ -5735,14 +5735,17 @@ class Database:
                     u['username'], u['role'], demo_org_id,
                 )
 
-            # Auto-seed demo data if no discovery runs exist for this org
-            cursor.execute(
-                "SELECT COUNT(*) FROM discovery_runs WHERE organization_id = %s",
-                (demo_org_id,)
-            )
-            run_count = cursor.fetchone()[0]
-            if run_count == 0:
-                logger.info("No demo discovery runs found — running demo data seeder...")
+            # Auto-seed demo data if no identities exist for this org
+            # (Check identities, not just runs — a previous failed seed may have
+            # created a discovery_run but failed to insert identities)
+            cursor.execute("""
+                SELECT COUNT(*) FROM identities i
+                JOIN discovery_runs dr ON i.discovery_run_id = dr.id
+                WHERE dr.organization_id = %s
+            """, (demo_org_id,))
+            identity_count = cursor.fetchone()[0]
+            if identity_count == 0:
+                logger.info("No demo identities found (count=%d) — running demo data seeder...", identity_count)
                 cursor.close()
                 self.close()
                 try:
