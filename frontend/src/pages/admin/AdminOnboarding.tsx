@@ -208,7 +208,7 @@ export default function AdminOnboarding() {
         <div className="p-6 space-y-4">
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Plan</h3>
           <div className="flex gap-3">
-            {['free', 'trial', 'pro', 'enterprise'].map(p => (
+            {['free', 'trial', 'pro'].map(p => (
               <label key={p} className={`flex items-center gap-2 px-5 py-2.5 border rounded-lg cursor-pointer transition ${
                 form.plan === p ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-600 text-gray-300 hover:border-gray-500'
               }`}>
@@ -220,7 +220,7 @@ export default function AdminOnboarding() {
         </div>
 
         {/* Section 3: Subscription Term */}
-        {(form.plan === 'pro' || form.plan === 'enterprise') && (
+        {form.plan === 'pro' && (
           <div className="p-6 space-y-4">
             <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Subscription Term</h3>
             <div className="flex gap-3">

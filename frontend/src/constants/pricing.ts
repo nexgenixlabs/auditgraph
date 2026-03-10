@@ -13,17 +13,13 @@ export const CLOUD_PRICING: Record<string, Record<string, number>> = {
   gcp:   { pro: 849 },
 };
 
-// ── Enterprise Tier ─────────────────────────────────────────────────────────
-// Flat monthly base price — includes all clouds, all add-ons, unlimited users
-export const ENTERPRISE_BASE = 2499;
-
-// ── Paid Add-Ons (Pro tier only — Enterprise includes everything) ───────────
+// ── Paid Add-Ons (Pro tier only) ─────────────────────────────────────────────
 export const ADDON_PRICING: Record<string, { label: string; price: number; description: string }> = {
   extended_retention:     { label: 'Extended Retention (365 days)',      price: 149, description: 'Extend data retention from 90 to 365 days' },
   additional_users_5pack: { label: 'Additional Portal Users (5-pack)',  price: 49,  description: '+5 additional portal user seats' },
 };
 
-// ── Base Features (included with Pro/Enterprise/Trial — not Free) ───────────
+// ── Base Features (included with Pro/Trial — not Free) ───────────────────────
 export const BASE_FEATURES: Record<string, { label: string; description: string }> = {
   secret_monitoring:     { label: 'Secret Expiry Monitoring',       description: 'Continuous secret & credential expiry monitoring & notifications' },
   audit_reports:         { label: 'Audit-Ready PDF Reports',        description: 'SOC2, HIPAA, and PCI compliance audit reports' },
@@ -50,15 +46,6 @@ export const SUBSCRIPTION_TERMS = [
 
 export type SubscriptionTermValue = 0 | 1 | 3 | 5;
 
-// ── Enterprise Term Bundles ─────────────────────────────────────────────────
-// Enterprise gets extra value at longer commitments
-export const ENTERPRISE_BUNDLES: Record<number, string[]> = {
-  0: [],
-  1: ['Extended Retention'],
-  3: ['Extended Retention', 'Priority Support'],
-  5: ['Extended Retention', 'Priority Support', 'Custom Integration Hours'],
-};
-
 export function getTermDiscount(term: number): number {
   const t = SUBSCRIPTION_TERMS.find(s => s.value === term);
   return t ? t.discount : 0;
@@ -70,8 +57,8 @@ export function getTermLabel(term: number): string {
 }
 
 /** Effective monthly price after term discount */
-export function calculateDiscountedMonthly(cfg: CloudConfig, term: number, plan: string = 'pro'): number {
-  const base = calculateMonthlyTotal(cfg, plan);
+export function calculateDiscountedMonthly(cfg: CloudConfig, term: number): number {
+  const base = calculateMonthlyTotal(cfg);
   return Math.round(base * (1 - getTermDiscount(term)));
 }
 
@@ -85,13 +72,12 @@ export const CLOUD_LABELS: Record<string, { label: string; color: string; bg: st
 export const PLAN_TIERS = ['pro'] as const;
 
 // Overall account tiers
-export const ACCOUNT_TIERS = ['free', 'trial', 'pro', 'enterprise'] as const;
+export const ACCOUNT_TIERS = ['free', 'trial', 'pro'] as const;
 
 export const ACCOUNT_TIER_LABELS: Record<string, { label: string; color: string; bg: string }> = {
   free:       { label: 'Free',       color: 'text-gray-700',   bg: 'bg-gray-100' },
   trial:      { label: 'Trial',      color: 'text-amber-700',  bg: 'bg-amber-100' },
   pro:        { label: 'Pro',        color: 'text-blue-700',   bg: 'bg-blue-100' },
-  enterprise: { label: 'Enterprise', color: 'text-purple-700', bg: 'bg-purple-100' },
 };
 
 export interface CloudProviderConfig {
@@ -115,15 +101,12 @@ export function getCloudPrice(_cfg: CloudConfig, cloudKey: string): number {
 }
 
 /** Total monthly cost before term discounts */
-export function calculateMonthlyTotal(cfg: CloudConfig, plan: string = 'pro'): number {
-  if (plan === 'enterprise') return ENTERPRISE_BASE;
-  if (plan === 'free' || plan === 'trial') return 0;
+export function calculateMonthlyTotal(cfg: CloudConfig): number {
   return calculateCloudBaseTotal(cfg) + calculateAddonTotal(cfg);
 }
 
 /** Cloud infrastructure cost only */
-export function calculateCloudBaseTotal(cfg: CloudConfig, plan?: string): number {
-  if (plan === 'enterprise') return ENTERPRISE_BASE;
+export function calculateCloudBaseTotal(cfg: CloudConfig): number {
   let total = 0;
   for (const [key, provider] of Object.entries(cfg.cloud_providers)) {
     if (provider.enabled && CLOUD_PRICING[key]) {
@@ -133,9 +116,8 @@ export function calculateCloudBaseTotal(cfg: CloudConfig, plan?: string): number
   return total;
 }
 
-/** Add-on cost only (Pro tier — Enterprise includes all) */
-export function calculateAddonTotal(cfg: CloudConfig, plan?: string): number {
-  if (plan === 'enterprise') return 0;
+/** Add-on cost only */
+export function calculateAddonTotal(cfg: CloudConfig): number {
   let total = 0;
   for (const [addon, enabled] of Object.entries(cfg.addons)) {
     if (enabled && ADDON_PRICING[addon]) {
@@ -161,12 +143,11 @@ export const TIER_LIMITS: Record<string, { max_identities: number | null; trial_
   free: { max_identities: 50, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso'] },
   trial: { max_identities: 500, trial_days: 14, blocked_features: [] },
   pro: { max_identities: null, blocked_features: [] },
-  enterprise: { max_identities: null, blocked_features: [] },
 };
 
 // ── Per-Subscription Billing (cents-based) ────────────────────────────────
 export const SUB_RATES_CENTS: Record<string, number> = { azure: 6900, aws: 6900, gcp: 6900 };
-export const PLATFORM_FEE_CENTS: Record<string, number> = { free: 0, trial: 0, pro: 50000, enterprise: 50000 };
+export const PLATFORM_FEE_CENTS: Record<string, number> = { free: 0, trial: 0, pro: 50000 };
 
 /** Format cents as dollars (e.g. 6900 → "$69") */
 export function formatCents(cents: number): string {

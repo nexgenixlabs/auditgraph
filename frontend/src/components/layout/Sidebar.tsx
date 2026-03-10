@@ -104,12 +104,17 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#2563eb',
         items: [
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
+          { to: '/command-center', label: 'Command Center', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
           { to: '/drift', label: 'Drift History', icon: driftIcon },
           { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
           { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
+          { to: '/graph-findings', label: 'Attack Paths', icon: findingsIcon },
           { to: '/security-dashboard', label: 'Security Dashboard', icon: dashboardIcon },
           { to: '/identity-graph', label: 'Identity Graph', icon: dashboardIcon },
+          { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
+          { to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon },
+          { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
         ],
       },
       {
@@ -148,6 +153,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#64748b',
         items: [
           ...(isAdmin ? [{ to: '/settings/connections', label: 'Connectors', icon: connectorsIcon }] : []),
+          ...(isAdmin ? [{ to: '/organization/users', label: 'Team Members', icon: identityIcon }] : []),
           { to: '/activity', label: 'Audit Log', icon: activityIcon },
           ...(isAdmin ? [{ to: '/settings/general', label: 'Organization Settings', icon: settingsIcon }] : []),
         ],

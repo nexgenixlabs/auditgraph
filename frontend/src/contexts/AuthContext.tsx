@@ -5,7 +5,7 @@ interface User {
   id: number;
   username: string;
   display_name: string;
-  role: 'admin' | 'security_admin' | 'compliance' | 'reader';
+  role: 'admin' | 'security_admin' | 'security_analyst' | 'compliance' | 'reader';
   organization_id?: number;
   org_name?: string;
   is_superadmin?: boolean;
@@ -34,6 +34,8 @@ interface AuthContextValue {
   canManageSettings: boolean;
   canExportData: boolean;
   canManageRemediation: boolean;
+  canManageFindings: boolean;
+  canRunSimulations: boolean;
   canViewCompliance: boolean;
   canTriggerScans: boolean;
   isDemo: boolean;
@@ -424,10 +426,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     canManageConnections: role === 'admin' || role === 'security_admin',
     canManageUsers: role === 'admin',
     canManageSettings: role === 'admin',
-    canExportData: role === 'admin' || role === 'security_admin' || role === 'compliance',
-    canManageRemediation: role === 'admin' || role === 'security_admin',
+    canExportData: role === 'admin' || role === 'security_admin' || role === 'security_analyst' || role === 'compliance',
+    canManageRemediation: role === 'admin' || role === 'security_admin' || role === 'security_analyst',
+    canManageFindings: role === 'admin' || role === 'security_admin' || role === 'security_analyst',
+    canRunSimulations: role === 'admin' || role === 'security_admin' || role === 'security_analyst',
     canTriggerScans: role === 'admin' || role === 'security_admin',
-    canViewCompliance: role === 'admin' || role === 'security_admin' || role === 'compliance',
+    canViewCompliance: role === 'admin' || role === 'security_admin' || role === 'security_analyst' || role === 'compliance',
     isDemo: !!user?.is_demo,
     activeOrgId,
     activeOrgName,

@@ -14,22 +14,50 @@ export type IdentityCategory =
   | 'managed_identity_user'
   | 'human_user'
   | 'guest'
+  // AWS
+  | 'iam_user'
+  | 'iam_role'
+  | 'iam_service_linked_role'
+  // GCP
+  | 'gcp_service_account'
+  | 'gcp_user'
+  | 'gcp_group'
+  | 'gcp_domain'
+  | 'gcp_member'
   | 'unknown';
 
-export const IDENTITY_CATEGORIES: Record<string, { label: string; shortLabel: string; description: string }> = {
-  service_principal:      { label: 'Service Principal',      shortLabel: 'SPN',    description: 'App registrations & enterprise apps' },
-  managed_identity_user:  { label: 'User Managed Identity',  shortLabel: 'Usr MI', description: 'Reusable across resources' },
-  managed_identity_system:{ label: 'System Managed Identity', shortLabel: 'Sys MI', description: 'Azure-managed per resource' },
-  human_user:             { label: 'Human User',             shortLabel: 'Human',  description: 'Employees & members' },
-  guest:                  { label: 'Guest',                  shortLabel: 'Guest',  description: 'External collaborators' },
+export const IDENTITY_CATEGORIES: Record<string, { label: string; shortLabel: string; description: string; cloud?: string }> = {
+  // Azure
+  service_principal:        { label: 'Service Principal',      shortLabel: 'SPN',    description: 'App registrations & enterprise apps', cloud: 'azure' },
+  managed_identity_user:    { label: 'User Managed Identity',  shortLabel: 'Usr MI', description: 'Reusable across resources', cloud: 'azure' },
+  managed_identity_system:  { label: 'System Managed Identity', shortLabel: 'Sys MI', description: 'Azure-managed per resource', cloud: 'azure' },
+  human_user:               { label: 'Human User',             shortLabel: 'Human',  description: 'Employees & members', cloud: 'azure' },
+  guest:                    { label: 'Guest',                  shortLabel: 'Guest',  description: 'External collaborators', cloud: 'azure' },
+  // AWS
+  iam_user:                 { label: 'IAM User',              shortLabel: 'IAM',    description: 'AWS IAM user with console/API access', cloud: 'aws' },
+  iam_role:                 { label: 'IAM Role',              shortLabel: 'Role',   description: 'AWS IAM role assumable by principals', cloud: 'aws' },
+  iam_service_linked_role:  { label: 'Service-Linked Role',   shortLabel: 'SvcRole', description: 'AWS-managed role for services', cloud: 'aws' },
+  // GCP
+  gcp_service_account:      { label: 'Service Account',       shortLabel: 'SA',     description: 'GCP service account for workloads', cloud: 'gcp' },
+  gcp_user:                 { label: 'GCP User',              shortLabel: 'User',   description: 'Google Cloud user identity', cloud: 'gcp' },
+  gcp_group:                { label: 'GCP Group',             shortLabel: 'Group',  description: 'Google Cloud IAM group', cloud: 'gcp' },
+  gcp_domain:               { label: 'GCP Domain',            shortLabel: 'Domain', description: 'Google Workspace domain binding', cloud: 'gcp' },
+  gcp_member:               { label: 'GCP Member',            shortLabel: 'Member', description: 'Other GCP IAM member type', cloud: 'gcp' },
 };
 
 /** Categories shown in dashboard/overview (excludes system MI & unknown) */
 export const CATEGORY_DISPLAY_ORDER: IdentityCategory[] = [
+  // Azure
   'service_principal',
   'managed_identity_user',
   'human_user',
   'guest',
+  // AWS
+  'iam_user',
+  'iam_role',
+  // GCP
+  'gcp_service_account',
+  'gcp_user',
 ];
 
 export const CATEGORY_FILTER_OPTIONS: { value: IdentityCategory | 'all'; label: string }[] = [
@@ -52,10 +80,19 @@ export function normalizeCategoryFromBackend(raw?: any): IdentityCategory {
   const v = safeLower(raw).trim();
   if (!v) return 'unknown';
   if (v in IDENTITY_CATEGORIES || v === 'unknown') return v as IdentityCategory;
+  // Azure aliases
   if (v === 'user' || v === 'human user') return 'human_user';
   if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
   if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
   if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
+  // AWS aliases
+  if (v === 'iam user' || v === 'iamuser') return 'iam_user';
+  if (v === 'iam role' || v === 'iamrole') return 'iam_role';
+  if (v === 'service linked role' || v === 'iam_service_linked') return 'iam_service_linked_role';
+  // GCP aliases
+  if (v === 'service account' || v === 'serviceaccount') return 'gcp_service_account';
+  if (v === 'gcp user' || v === 'gcpuser') return 'gcp_user';
+  if (v === 'gcp group' || v === 'gcpgroup') return 'gcp_group';
   return 'unknown';
 }
 

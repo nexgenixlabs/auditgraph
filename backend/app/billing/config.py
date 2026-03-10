@@ -16,7 +16,6 @@ PLAN_PLATFORM_FEES = {
     'free': 0,
     'trial': 0,           # Waived during trial (full fee shown in UI)
     'pro': 50_000,         # $500/month
-    'enterprise': 50_000,  # $500/month
 }
 
 # Per-cloud rate overrides (defaults to SUBSCRIPTION_RATE_CENTS if not listed)
@@ -34,5 +33,4 @@ PLAN_LIMITS = {
     'free': {'max_active_subs': 1, 'max_identities': 50},
     'trial': {'max_active_subs': 5, 'max_identities': 500},
     'pro': {'max_active_subs': None, 'max_identities': None},
-    'enterprise': {'max_active_subs': None, 'max_identities': None},
 }

@@ -151,7 +151,6 @@ interface SettingsData {
   gcp_service_account_json: string;
   timezone: string;
   theme: string;
-  copilot_api_key: string;
 }
 
 interface StatusData {
@@ -2514,7 +2513,7 @@ export default function Settings() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
               <div className="flex gap-2">
-                {['admin', 'security_admin', 'compliance', 'reader'].map(role => (
+                {['admin', 'security_admin', 'security_analyst', 'compliance', 'reader'].map(role => (
                   <button
                     key={role}
                     onClick={() => setUserForm(prev => ({ ...prev, role }))}
@@ -2522,18 +2521,22 @@ export default function Settings() {
                       userForm.role === role
                         ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
                           : role === 'security_admin' ? 'bg-amber-600 text-white border-amber-600'
+                          : role === 'security_analyst' ? 'bg-cyan-600 text-white border-cyan-600'
                           : role === 'compliance' ? 'bg-green-600 text-white border-green-600'
                           : 'bg-blue-600 text-white border-blue-600'
                         : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                     }`}
                   >
-                    {role === 'security_admin' ? 'Security Admin' : role.charAt(0).toUpperCase() + role.slice(1)}
+                    {role === 'security_admin' ? 'Security Admin'
+                      : role === 'security_analyst' ? 'Security Analyst'
+                      : role.charAt(0).toUpperCase() + role.slice(1)}
                   </button>
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-1">
                 {userForm.role === 'admin' ? 'Full access: settings, users, billing, snapshots, rules'
                   : userForm.role === 'security_admin' ? 'Activate subscriptions, manage cloud connections, capture snapshots'
+                  : userForm.role === 'security_analyst' ? 'Manage findings, run simulations, export data'
                   : userForm.role === 'compliance' ? 'Read-only + compliance reports and access reviews'
                   : 'Read-only: view dashboards, identities, reports'}
               </p>
@@ -2650,7 +2653,7 @@ export default function Settings() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
                   <div className="flex gap-2">
-                    {['admin', 'security_admin', 'compliance', 'reader'].map(role => (
+                    {['admin', 'security_admin', 'security_analyst', 'compliance', 'reader'].map(role => (
                       <button
                         key={role}
                         onClick={() => setApiKeyForm(prev => ({ ...prev, role }))}
@@ -2658,12 +2661,15 @@ export default function Settings() {
                           apiKeyForm.role === role
                             ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
                               : role === 'security_admin' ? 'bg-amber-600 text-white border-amber-600'
+                              : role === 'security_analyst' ? 'bg-cyan-600 text-white border-cyan-600'
                               : role === 'compliance' ? 'bg-green-600 text-white border-green-600'
                               : 'bg-blue-600 text-white border-blue-600'
                             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                         }`}
                       >
-                        {role === 'security_admin' ? 'Security Admin' : role.charAt(0).toUpperCase() + role.slice(1)}
+                        {role === 'security_admin' ? 'Security Admin'
+                          : role === 'security_analyst' ? 'Security Analyst'
+                          : role.charAt(0).toUpperCase() + role.slice(1)}
                       </button>
                     ))}
                   </div>

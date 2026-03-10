@@ -17,15 +17,22 @@ MAX_SNAPSHOT_AGE_HOURS = 48        # stale after 48 h
 MAX_JOB_FAILURE_RATE = 0.25       # 25 %
 INTEGRITY_DROP_THRESHOLD = 0.50   # 50 % drop → warning
 
+# ── Job type constants (Phase 7) ─────────────────────────────────────
+DISCOVERY_JOB = 'discovery'
+GRAPH_BUILD_JOB = 'graph_build'
+FINDINGS_ANALYSIS_JOB = 'findings_analysis'
+RISK_SCORE_JOB = 'risk_score'
+
 # ── Valid constants ───────────────────────────────────────────────────
 VALID_JOB_TYPES = (
-    'discovery', 'security_findings', 'attack_paths',
+    DISCOVERY_JOB, GRAPH_BUILD_JOB, FINDINGS_ANALYSIS_JOB, RISK_SCORE_JOB,
+    'security_findings', 'attack_paths',
     'fix_recommendations', 'blast_radius', 'access_reviews',
     'report_generation',
 )
 
 VALID_JOB_STATUSES = ('queued', 'running', 'completed', 'failed')
-VALID_HEALTH_STATUSES = ('healthy', 'warning', 'stale')
+VALID_HEALTH_STATUSES = ('healthy', 'warning', 'critical', 'stale')
 
 
 class PlatformHealthEngine:
@@ -78,11 +85,23 @@ class PlatformHealthEngine:
 
         cursor.close()
 
-        # 6. Determine status
-        if snapshot_age_hours < 24:
-            status = 'healthy'
-        elif snapshot_age_hours < MAX_SNAPSHOT_AGE_HOURS:
+        # 5b. Failed snapshot_jobs in last 24h (Phase 7)
+        cursor = self.db.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM snapshot_jobs
+            WHERE organization_id = %s AND status = 'failed'
+              AND completed_at >= NOW() - INTERVAL '24 hours'
+        """, (organization_id,))
+        failures_24h = cursor.fetchone()[0] or 0
+        cursor.close()
+
+        # 6. Determine status (Phase 7: HEALTHY/WARNING/CRITICAL)
+        if snapshot_age_hours > 72 or failures_24h >= 3:
+            status = 'critical'
+        elif snapshot_age_hours > 24 or failures_24h >= 1:
             status = 'warning'
+        elif snapshot_age_hours < 24:
+            status = 'healthy'
         else:
             status = 'stale'
 

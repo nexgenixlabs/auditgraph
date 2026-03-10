@@ -1,3 +1,9 @@
+import pathlib as _pathlib
+from dotenv import load_dotenv
+# Load backend/.env relative to this file's location so it works
+# regardless of CWD (e.g. started from project root vs backend/)
+load_dotenv(_pathlib.Path(__file__).resolve().parent.parent / '.env')
+
 from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 from datetime import datetime
@@ -371,6 +377,10 @@ from app.api.handlers import (
     get_graph_debug_handler,
     get_identity_graph_handler,
     get_attack_path_graph_handler,
+    # Identity Graph Engine
+    get_graph_engine_attack_paths,
+    get_graph_engine_blast_radius,
+    get_graph_engine_escalation_paths,
     get_attack_paths_list,
     get_attack_path_detail,
     get_identity_persisted_attack_paths,
@@ -404,6 +414,8 @@ from app.api.handlers import (
     get_system_metrics_handler,
     # Admin SaaS Operator
     get_admin_alerts_handler,
+    acknowledge_alert_handler,
+    get_snapshot_runs_handler,
     admin_trigger_tenant_snapshot,
     admin_rebuild_tenant_graph,
     admin_disable_tenant,
@@ -412,6 +424,56 @@ from app.api.handlers import (
     admin_flush_cache,
     admin_rebuild_all_graphs,
     admin_restart_workers,
+    # Phase 8: Graph Attack Findings & Identity Risk Scores
+    get_graph_attack_findings_handler,
+    get_graph_attack_finding_detail_handler,
+    get_identity_risk_scores_handler,
+    run_graph_attack_analysis_handler,
+    # Phase 9: Security Posture Command Center
+    get_posture_score_handler,
+    get_risky_identities_handler,
+    get_remediation_priority_handler,
+    get_privileged_identities_handler,
+    get_security_events_handler,
+    # Phase 10: Remediation Workflow
+    assign_finding_handler,
+    update_finding_status_workflow_handler,
+    add_finding_comment_handler,
+    get_finding_comments_handler,
+    get_remediation_metrics_handler,
+    # Phase 11: Security Automation & Integrations
+    save_slack_integration_handler,
+    save_jira_integration_handler,
+    create_jira_ticket_handler,
+    get_report_posture_handler,
+    get_report_findings_handler,
+    get_report_remediation_handler,
+    # Phase 12: AI Security Copilot
+    copilot_query_handler,
+    copilot_security_summary_handler,
+    # AI Copilot Investigation Enhancement
+    copilot_investigate_handler,
+    copilot_graph_query_handler,
+    ai_health_handler,
+    # Phase 13: Self-Service Signup
+    auth_signup,
+    auth_verify_email,
+    get_plan_limits_handler,
+    # Phase 16: Continuous Identity Risk Monitoring
+    get_identity_exposures_handler,
+    get_privilege_drift_handler,
+    simulate_attack_path_handler,
+    # Phase 17: Enterprise Identity Integration
+    get_permission_matrix_handler,
+    oidc_login,
+    oidc_callback,
+    get_oidc_settings,
+    save_oidc_settings,
+    list_invitations_handler,
+    create_invitation_handler,
+    revoke_invitation_handler,
+    validate_invitation_handler,
+    accept_invitation_handler,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -548,6 +610,11 @@ def create_app():
 
     # Phase 4A: Startup secrets validation
     _validate_startup_secrets()
+
+    # AI Copilot env diagnostic
+    logger = logging.getLogger(__name__)
+    logger.info("Copilot API key loaded: %s", bool(os.getenv("ANTHROPIC_API_KEY")))
+    logger.info("Copilot model: %s", os.getenv("LLM_MODEL", "(default)"))
 
     app = Flask(__name__)
     cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
@@ -868,6 +935,11 @@ def create_app():
     def system_sla():
         return get_sla_metrics()
 
+    @app.get("/api/system/ai-health")
+    @require_role('admin')
+    def ai_health():
+        return ai_health_handler()
+
     @app.get("/api/system/resource-integrity")
     @require_role('admin')
     def resource_integrity():
@@ -880,6 +952,19 @@ def create_app():
     @rate_limit(max_requests=5, window_seconds=60)   # 5 attempts/min per IP
     def login():
         return auth_login()
+
+    @app.post("/api/auth/signup")
+    @rate_limit(max_requests=3, window_seconds=60)   # 3 signups/min per IP
+    def signup():
+        return auth_signup()
+
+    @app.post("/api/auth/verify-email")
+    def verify_email():
+        return auth_verify_email()
+
+    @app.get("/api/plan/limits")
+    def plan_limits():
+        return get_plan_limits_handler()
 
     @app.post("/api/auth/refresh")
     @rate_limit(max_requests=10, window_seconds=60)   # 10 refreshes/min per IP
@@ -1166,6 +1251,16 @@ def create_app():
     @require_portal_access()
     def admin_alerts():
         return get_admin_alerts_handler()
+
+    @app.post("/api/admin/alerts/<alert_id>/acknowledge")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_acknowledge_alert(alert_id):
+        return acknowledge_alert_handler(alert_id)
+
+    @app.get("/api/admin/snapshot-runs")
+    @require_portal_access()
+    def admin_snapshot_runs():
+        return get_snapshot_runs_handler()
 
     @app.post("/api/admin/tenants/<int:organization_id>/snapshot")
     @require_portal_role('superadmin', 'poweradmin')
@@ -1463,6 +1558,102 @@ def create_app():
     @require_feature('sso')
     def sso_parse_metadata_route():
         return parse_sso_metadata()
+
+    # -----------------------
+    # Phase 17: Permission Matrix
+    # -----------------------
+    @app.get("/api/auth/permissions")
+    def permissions_matrix():
+        return get_permission_matrix_handler()
+
+    # -----------------------
+    # Phase 17: OIDC SSO
+    # -----------------------
+    @app.get("/api/auth/oidc/login")
+    def oidc_login_route():
+        return oidc_login()
+
+    @app.get("/api/auth/oidc/callback")
+    def oidc_callback_route():
+        return oidc_callback()
+
+    @app.get("/api/settings/oidc")
+    @require_role('admin')
+    def oidc_settings_get():
+        return get_oidc_settings()
+
+    @app.post("/api/settings/oidc")
+    @require_role('admin')
+    @require_feature('oidc')
+    def oidc_settings_save():
+        return save_oidc_settings()
+
+    # -----------------------
+    # Phase 17: SCIM 2.0 Provisioning
+    # -----------------------
+    from app.api.scim import (
+        scim_list_users, scim_create_user, scim_get_user,
+        scim_replace_user, scim_patch_user, scim_delete_user,
+        scim_service_provider_config, scim_schemas,
+    )
+
+    @app.get("/api/scim/v2/Users")
+    def scim_users_list():
+        return scim_list_users()
+
+    @app.post("/api/scim/v2/Users")
+    def scim_users_create():
+        return scim_create_user()
+
+    @app.get("/api/scim/v2/Users/<int:user_id>")
+    def scim_users_get(user_id):
+        return scim_get_user(user_id)
+
+    @app.put("/api/scim/v2/Users/<int:user_id>")
+    def scim_users_replace(user_id):
+        return scim_replace_user(user_id)
+
+    @app.patch("/api/scim/v2/Users/<int:user_id>")
+    def scim_users_patch(user_id):
+        return scim_patch_user(user_id)
+
+    @app.delete("/api/scim/v2/Users/<int:user_id>")
+    def scim_users_delete(user_id):
+        return scim_delete_user(user_id)
+
+    @app.get("/api/scim/v2/ServiceProviderConfig")
+    def scim_sp_config():
+        return scim_service_provider_config()
+
+    @app.get("/api/scim/v2/Schemas")
+    def scim_schemas_route():
+        return scim_schemas()
+
+    # -----------------------
+    # Phase 17: User Invitations
+    # -----------------------
+    @app.get("/api/invitations")
+    @require_role('admin')
+    def invitations_list():
+        return list_invitations_handler()
+
+    @app.post("/api/invitations")
+    @require_role('admin')
+    def invitations_create():
+        return create_invitation_handler()
+
+    @app.delete("/api/invitations/<int:invitation_id>")
+    @require_role('admin')
+    def invitations_revoke(invitation_id):
+        return revoke_invitation_handler(invitation_id)
+
+    @app.get("/api/auth/validate-invitation")
+    def validate_invitation_route():
+        return validate_invitation_handler()
+
+    @app.post("/api/auth/accept-invitation")
+    def accept_invitation_route():
+        return accept_invitation_handler()
 
     # -----------------------
     # Service Account Governance (Phase 63)
@@ -2424,6 +2615,28 @@ def create_app():
     def copilot_suggestions_route():
         return copilot_suggestions()
 
+    # Phase 12: Context-aware copilot
+    @app.post("/api/copilot/query")
+    @require_feature('ai_copilot')
+    def copilot_query_route():
+        return copilot_query_handler()
+
+    @app.get("/api/copilot/security-summary")
+    @require_feature('ai_copilot')
+    def copilot_security_summary_route():
+        return copilot_security_summary_handler()
+
+    # AI Copilot Investigation Enhancement
+    @app.post("/api/copilot/investigate")
+    @require_feature('ai_copilot')
+    def copilot_investigate_route():
+        return copilot_investigate_handler()
+
+    @app.post("/api/copilot/graph-query")
+    @require_feature('ai_copilot')
+    def copilot_graph_query_route():
+        return copilot_graph_query_handler()
+
     # -----------------------
     # Phase 80: Identity Timeline
     # -----------------------
@@ -3043,6 +3256,135 @@ def create_app():
     @app.get("/api/identities/<identity_id>/persisted-attack-paths")
     def identity_persisted_attack_paths(identity_id):
         return get_identity_persisted_attack_paths(identity_id)
+
+    # -----------------------
+    # Phase 8: Graph Attack Findings & Identity Risk Scores
+    # -----------------------
+    @app.get("/api/graph-findings")
+    def graph_findings_list():
+        return get_graph_attack_findings_handler()
+
+    @app.get("/api/graph-findings/<int:finding_id>")
+    def graph_finding_detail(finding_id):
+        return get_graph_attack_finding_detail_handler(finding_id)
+
+    @app.get("/api/identity-risk-scores")
+    def identity_risk_scores():
+        return get_identity_risk_scores_handler()
+
+    @app.post("/api/graph-attack/analyze")
+    @require_role('admin', 'security_admin')
+    def graph_attack_analyze():
+        return run_graph_attack_analysis_handler()
+
+    # -----------------------
+    # Identity Graph Engine API
+    # -----------------------
+    @app.get("/api/graph/attack-paths")
+    def graph_engine_attack_paths():
+        return get_graph_engine_attack_paths()
+
+    @app.get("/api/graph/blast-radius")
+    def graph_engine_blast_radius():
+        return get_graph_engine_blast_radius()
+
+    @app.get("/api/graph/escalation-paths")
+    def graph_engine_escalation_paths():
+        return get_graph_engine_escalation_paths()
+
+    # -----------------------
+    # Phase 16: Continuous Identity Risk Monitoring
+    # -----------------------
+    @app.get("/api/identity-exposures")
+    def identity_exposures():
+        return get_identity_exposures_handler()
+
+    @app.get("/api/privilege-drift")
+    def privilege_drift():
+        return get_privilege_drift_handler()
+
+    @app.post("/api/attack-path/simulate")
+    def attack_path_simulate():
+        return simulate_attack_path_handler()
+
+    # -----------------------
+    # Phase 9: Security Posture Command Center
+    # -----------------------
+    @app.get("/api/posture-score")
+    def posture_score():
+        return get_posture_score_handler()
+
+    @app.get("/api/risky-identities")
+    def risky_identities():
+        return get_risky_identities_handler()
+
+    @app.get("/api/remediation-priority")
+    def remediation_priority():
+        return get_remediation_priority_handler()
+
+    @app.get("/api/privileged-identities")
+    def privileged_identities():
+        return get_privileged_identities_handler()
+
+    @app.get("/api/security-events")
+    def security_events():
+        return get_security_events_handler()
+
+    # -----------------------
+    # Phase 10: Remediation Workflow
+    # -----------------------
+    @app.post("/api/findings/<finding_id>/assign")
+    @require_role('admin', 'security_admin')
+    def finding_assign(finding_id):
+        return assign_finding_handler(finding_id)
+
+    @app.post("/api/findings/<finding_id>/status")
+    @require_role('admin', 'security_admin')
+    def finding_status_workflow(finding_id):
+        return update_finding_status_workflow_handler(finding_id)
+
+    @app.post("/api/findings/<finding_id>/comments")
+    @require_role('admin', 'security_admin', 'auditor')
+    def finding_comment_add(finding_id):
+        return add_finding_comment_handler(finding_id)
+
+    @app.get("/api/findings/<finding_id>/comments")
+    def finding_comments_list(finding_id):
+        return get_finding_comments_handler(finding_id)
+
+    @app.get("/api/remediation-metrics")
+    def remediation_metrics():
+        return get_remediation_metrics_handler()
+
+    # -----------------------
+    # Phase 11: Security Automation & Integrations
+    # -----------------------
+    @app.post("/api/integrations/slack")
+    @require_role('admin', 'security_admin')
+    def integration_slack():
+        return save_slack_integration_handler()
+
+    @app.post("/api/integrations/jira")
+    @require_role('admin', 'security_admin')
+    def integration_jira():
+        return save_jira_integration_handler()
+
+    @app.post("/api/findings/<finding_id>/jira")
+    @require_role('admin', 'security_admin')
+    def finding_jira_ticket(finding_id):
+        return create_jira_ticket_handler(finding_id)
+
+    @app.get("/api/reports/posture")
+    def report_posture():
+        return get_report_posture_handler()
+
+    @app.get("/api/reports/findings")
+    def report_findings():
+        return get_report_findings_handler()
+
+    @app.get("/api/reports/remediation")
+    def report_remediation():
+        return get_report_remediation_handler()
 
     # -----------------------
     # Fix Recommendations (Phase 4)

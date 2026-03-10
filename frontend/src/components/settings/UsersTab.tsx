@@ -66,10 +66,12 @@ export function UsersTab({
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
                         u.role === 'admin' ? 'bg-red-50 text-red-700' :
                         u.role === 'security_admin' ? 'bg-amber-50 text-amber-700' :
+                        u.role === 'security_analyst' ? 'bg-cyan-50 text-cyan-700' :
                         u.role === 'compliance' ? 'bg-green-50 text-green-700' :
                         'bg-blue-50 text-blue-700'
                       }`}>
-                        {u.role === 'security_admin' ? 'Security Admin' : u.role}
+                        {u.role === 'security_admin' ? 'Security Admin' :
+                         u.role === 'security_analyst' ? 'Security Analyst' : u.role}
                       </span>
                       {!u.enabled && (
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
@@ -132,7 +134,7 @@ export function UsersTab({
         )}
 
         <p className="text-xs text-gray-400">
-          Roles: Admin (full access), Security Admin (scan + remediation), Reader (read-only), Compliance (reports + compliance config). The last admin cannot be deleted or demoted.
+          Roles: Admin (full access), Security Admin (scan + remediation), Security Analyst (findings + simulations), Reader (read-only), Compliance (reports + compliance config). The last admin cannot be deleted or demoted.
         </p>
       </div>
     </>

@@ -23,55 +23,48 @@ export function ComplianceTab({ d }: ComplianceTabProps) {
   const allScores = d.compliance.frameworks.map(fw => fw.score);
   const allSameScore = allScores.length > 1 && allScores.every(s => s === allScores[0]);
 
-  // Rule 35: Export CSV handler
-  const handleExportAll = useCallback(() => {
-    const hasControls = d.compliance.frameworks.some(fw => fw.controls && fw.controls.length > 0);
+  // Enhanced export with 11 fields: Control ID, Name, Description, Status, Severity, Affected Identities, Resources, Evidence, Recommendation, Detection Timestamp, Last Evaluated
+  const exportCsv = useCallback((filename: string, frameworks: ComplianceFramework[]) => {
+    const hasControls = frameworks.some(fw => fw.controls && fw.controls.length > 0);
     if (hasControls) {
-      const header = 'Framework,Control ID,Control Name,Status,Severity,Evidence\n';
-      const rows = d.compliance.frameworks.flatMap(fw =>
-        (fw.controls || []).map(c =>
-          `"${fw.name}","${c.id}","${c.name.replace(/"/g, '""')}","${c.status}","${c.severity}","${(c.evidence || '').replace(/"/g, '""')}"`
-        )
+      const header = 'Framework,Control ID,Control Name,Description,Status,Severity,Affected Identities,Affected Resources,Evidence,Recommendation,Detection Timestamp,Last Evaluated\n';
+      const rows = frameworks.flatMap(fw =>
+        (fw.controls || []).map(c => {
+          const desc = c.name || '';
+          const affected = c.identityCount ?? 0;
+          const resources = fw.totalControls || 0;
+          const evidence = (c.evidence || '').replace(/"/g, '""');
+          const recommendation = (c.recommendation || (c.status === 'fail' ? `Review and remediate ${c.name} control` : 'No action required')).replace(/"/g, '""');
+          const detectedAt = c.detectedAt || '';
+          const lastEvaluatedAt = c.lastEvaluatedAt || '';
+          return `"${fw.name}","${c.id}","${c.name.replace(/"/g, '""')}","${desc.replace(/"/g, '""')}","${c.status}","${c.severity}",${affected},${resources},"${evidence}","${recommendation}","${detectedAt}","${lastEvaluatedAt}"`;
+        })
       ).join('\n');
       const blob = new Blob([header + rows], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'compliance_all_controls.csv'; a.click();
+      a.href = url; a.download = filename; a.click();
       URL.revokeObjectURL(url);
     } else {
-      const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
-      const rows = d.compliance.frameworks.map(fw =>
-        `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`
+      const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Identity Impact,Trend\n';
+      const rows = frameworks.map(fw =>
+        `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.identityImpactCount || 0},${fw.trend}`
       ).join('\n');
       const blob = new Blob([header + rows], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'compliance_frameworks.csv'; a.click();
-      URL.revokeObjectURL(url);
-    }
-  }, [d.compliance.frameworks]);
-
-  const handleExportSingle = useCallback((fw: ComplianceFramework) => {
-    if (fw.controls && fw.controls.length > 0) {
-      const header = 'Framework,Control ID,Control Name,Status,Severity,Evidence\n';
-      const rows = fw.controls.map(c =>
-        `"${fw.name}","${c.id}","${c.name.replace(/"/g, '""')}","${c.status}","${c.severity}","${(c.evidence || '').replace(/"/g, '""')}"`
-      ).join('\n');
-      const blob = new Blob([header + rows], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `${fw.id}_compliance_controls.csv`; a.click();
-      URL.revokeObjectURL(url);
-    } else {
-      const header = 'Framework,Type,Score,Total Controls,Failed Controls,Status,Trend\n';
-      const row = `"${fw.name}","${fw.type}",${fw.score},${fw.totalControls},${fw.failedControls},"${fw.status}",${fw.trend}`;
-      const blob = new Blob([header + row], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `${fw.id}_compliance.csv`; a.click();
+      a.href = url; a.download = filename; a.click();
       URL.revokeObjectURL(url);
     }
   }, []);
+
+  const handleExportAll = useCallback(() => {
+    exportCsv('compliance_evidence_export.csv', d.compliance.frameworks);
+  }, [d.compliance.frameworks, exportCsv]);
+
+  const handleExportSingle = useCallback((fw: ComplianceFramework) => {
+    exportCsv(`${fw.id}_compliance_evidence.csv`, [fw]);
+  }, [exportCsv]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -85,7 +78,7 @@ export function ComplianceTab({ d }: ComplianceTabProps) {
           marginLeft: 'auto', padding: '5px 12px', borderRadius: 5, fontSize: 10, fontWeight: 600,
           background: 'transparent', color: COLORS.textSecondary, border: `1px solid ${COLORS.border}`,
           cursor: 'pointer', fontFamily: FONT.ui,
-        }}>Export All</button>
+        }}>Export Evidence (CSV)</button>
       </div>
 
       {/* Rule 32: Informational note about identical scores */}
@@ -123,7 +116,7 @@ export function ComplianceTab({ d }: ComplianceTabProps) {
                     flex: 1, padding: '4px 8px', borderRadius: 4, fontSize: 9, fontWeight: 600,
                     background: 'transparent', color: COLORS.textSecondary, border: `1px solid ${COLORS.border}`,
                     cursor: 'pointer', fontFamily: FONT.ui,
-                  }}>Export</button>
+                  }}>Export Evidence</button>
                   <button onClick={() => navigate(`/compliance?framework=${encodeURIComponent(fw.name)}`)} style={{
                     flex: 1, padding: '4px 8px', borderRadius: 4, fontSize: 9, fontWeight: 600,
                     background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,

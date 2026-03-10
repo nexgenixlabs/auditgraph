@@ -407,6 +407,380 @@ export function SecurityTab({
           {ssoSaving ? 'Saving...' : 'Save SSO Settings'}
         </button>
       </div>
+
+      {/* Section 10: OIDC / OpenID Connect */}
+      <OidcSection />
+
+      {/* Section 11: SCIM Provisioning */}
+      <ScimSection />
     </>
+  );
+}
+
+
+/* ── Phase 17: OIDC Configuration Section ────────────────────────── */
+function OidcSection() {
+  const [config, setConfig] = React.useState({
+    oidc_enabled: 'false',
+    oidc_client_id: '',
+    oidc_client_secret: '',
+    oidc_discovery_url: '',
+    oidc_scopes: 'openid profile email',
+    oidc_role_claim: 'groups',
+    oidc_role_mapping: '',
+    oidc_default_role: 'reader',
+    oidc_jit_enabled: 'true',
+  });
+  const [presets, setPresets] = React.useState<Record<string, { label: string; discovery_url: string; default_scopes: string; role_claim: string }>>({});
+  const [saving, setSaving] = React.useState(false);
+  const [message, setMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [roleMappings, setRoleMappings] = React.useState<{ group: string; role: string }[]>([]);
+  const [loaded, setLoaded] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch('/api/settings/oidc')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data) {
+          const { presets: p, ...cfg } = data;
+          setConfig(prev => ({ ...prev, ...cfg }));
+          if (p) setPresets(p);
+          if (cfg.oidc_role_mapping) {
+            try {
+              const parsed = JSON.parse(cfg.oidc_role_mapping);
+              setRoleMappings(Object.entries(parsed).map(([group, role]) => ({ group, role: role as string })));
+            } catch { /* ignore */ }
+          }
+        }
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setMessage(null);
+    const mapping: Record<string, string> = {};
+    roleMappings.filter(m => m.group && m.role).forEach(m => { mapping[m.group] = m.role; });
+    const body = { ...config, oidc_role_mapping: JSON.stringify(mapping) };
+    try {
+      const res = await fetch('/api/settings/oidc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (res.ok) setMessage({ type: 'success', text: 'OIDC settings saved' });
+      else setMessage({ type: 'error', text: 'Failed to save' });
+    } catch { setMessage({ type: 'error', text: 'Network error' }); }
+    setSaving(false);
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-lg font-semibold text-gray-900">OIDC / OpenID Connect</div>
+          <p className="text-sm text-gray-500 mt-0.5">Configure SSO via OpenID Connect (Azure AD, Okta, Google)</p>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <span className="text-sm text-gray-600">{config.oidc_enabled === 'true' ? 'Enabled' : 'Disabled'}</span>
+          <button
+            onClick={() => setConfig(prev => ({ ...prev, oidc_enabled: prev.oidc_enabled === 'true' ? 'false' : 'true' }))}
+            className={`relative w-10 h-5 rounded-full transition ${config.oidc_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'}`}
+          >
+            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${config.oidc_enabled === 'true' ? 'translate-x-5' : 'translate-x-1'}`} />
+          </button>
+        </label>
+      </div>
+
+      {message && (
+        <div className={`rounded-lg p-3 text-sm ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+          {message.text}
+        </div>
+      )}
+
+      {/* Provider Presets */}
+      {Object.keys(presets).length > 0 && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Quick Setup</label>
+          <div className="flex gap-2">
+            {Object.entries(presets).map(([key, preset]) => (
+              <button
+                key={key}
+                onClick={() => setConfig(prev => ({
+                  ...prev,
+                  oidc_discovery_url: preset.discovery_url,
+                  oidc_scopes: preset.default_scopes,
+                  oidc_role_claim: preset.role_claim,
+                }))}
+                className="px-3 py-1.5 text-xs border rounded-lg hover:bg-gray-50 transition"
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Discovery URL</label>
+          <input
+            value={config.oidc_discovery_url}
+            onChange={e => setConfig(prev => ({ ...prev, oidc_discovery_url: e.target.value }))}
+            className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+            placeholder="https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+            <input
+              value={config.oidc_client_id}
+              onChange={e => setConfig(prev => ({ ...prev, oidc_client_id: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+            <input
+              type="password"
+              value={config.oidc_client_secret}
+              onChange={e => setConfig(prev => ({ ...prev, oidc_client_secret: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Scopes</label>
+            <input
+              value={config.oidc_scopes}
+              onChange={e => setConfig(prev => ({ ...prev, oidc_scopes: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Role Claim</label>
+            <input
+              value={config.oidc_role_claim}
+              onChange={e => setConfig(prev => ({ ...prev, oidc_role_claim: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+              placeholder="groups"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Role Mapping */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-sm font-medium text-gray-700">Role Mapping</label>
+          <button
+            onClick={() => setRoleMappings(prev => [...prev, { group: '', role: 'reader' }])}
+            className="text-xs text-blue-600 hover:text-blue-800"
+          >
+            + Add Mapping
+          </button>
+        </div>
+        {roleMappings.map((m, i) => (
+          <div key={i} className="flex gap-2 mb-2">
+            <input
+              value={m.group}
+              onChange={e => { const arr = [...roleMappings]; arr[i].group = e.target.value; setRoleMappings(arr); }}
+              className="flex-1 px-3 py-1.5 border rounded text-sm"
+              placeholder="IdP Group Name or ID"
+            />
+            <select
+              value={m.role}
+              onChange={e => { const arr = [...roleMappings]; arr[i].role = e.target.value; setRoleMappings(arr); }}
+              className="px-3 py-1.5 border rounded text-sm"
+            >
+              {['admin', 'security_admin', 'security_analyst', 'compliance', 'reader'].map(r => (
+                <option key={r} value={r}>{r === 'security_admin' ? 'Security Admin' : r === 'security_analyst' ? 'Security Analyst' : r.charAt(0).toUpperCase() + r.slice(1)}</option>
+              ))}
+            </select>
+            <button onClick={() => setRoleMappings(prev => prev.filter((_, j) => j !== i))} className="text-red-500 text-sm hover:text-red-700">Remove</button>
+          </div>
+        ))}
+      </div>
+
+      {/* JIT + Default Role */}
+      <div className="flex items-center gap-6">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={config.oidc_jit_enabled === 'true'}
+            onChange={e => setConfig(prev => ({ ...prev, oidc_jit_enabled: e.target.checked ? 'true' : 'false' }))}
+            className="w-4 h-4 rounded border-gray-300"
+          />
+          <span className="text-sm text-gray-700">JIT User Provisioning</span>
+        </label>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-700">Default Role:</span>
+          <select
+            value={config.oidc_default_role}
+            onChange={e => setConfig(prev => ({ ...prev, oidc_default_role: e.target.value }))}
+            className="px-2 py-1 border rounded text-sm"
+          >
+            {['admin', 'security_admin', 'security_analyst', 'compliance', 'reader'].map(r => (
+              <option key={r} value={r}>{r === 'security_admin' ? 'Security Admin' : r === 'security_analyst' ? 'Security Analyst' : r.charAt(0).toUpperCase() + r.slice(1)}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 transition"
+      >
+        {saving ? 'Saving...' : 'Save OIDC Settings'}
+      </button>
+    </div>
+  );
+}
+
+
+/* ── Phase 17: SCIM Provisioning Section ─────────────────────────── */
+function ScimSection() {
+  const [enabled, setEnabled] = React.useState(false);
+  const [tokenActive, setTokenActive] = React.useState(false);
+  const [generatedToken, setGeneratedToken] = React.useState<string | null>(null);
+  const [generating, setGenerating] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+
+  const baseUrl = typeof window !== 'undefined'
+    ? `${window.location.protocol}//${window.location.host}/api/scim/v2`
+    : '/api/scim/v2';
+
+  React.useEffect(() => {
+    fetch('/api/settings')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data) {
+          const settings = data.settings || data;
+          setEnabled(settings.scim_enabled === 'true');
+          setTokenActive(!!settings.scim_token_hash);
+        }
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+  }, []);
+
+  const handleToggle = async () => {
+    const newVal = !enabled;
+    setEnabled(newVal);
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scim_enabled: newVal ? 'true' : 'false' }),
+    });
+  };
+
+  const handleGenerateToken = async () => {
+    setGenerating(true);
+    try {
+      // Generate a random token, hash it, save the hash
+      const array = new Uint8Array(32);
+      crypto.getRandomValues(array);
+      const rawToken = Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
+
+      // Hash the token using SubtleCrypto
+      const encoder = new TextEncoder();
+      const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(rawToken));
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const tokenHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scim_token_hash: tokenHash }),
+      });
+
+      setGeneratedToken(rawToken);
+      setTokenActive(true);
+    } catch { /* ignore */ }
+    setGenerating(false);
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-lg font-semibold text-gray-900">SCIM Provisioning</div>
+          <p className="text-sm text-gray-500 mt-0.5">Automate user provisioning from your IdP via SCIM 2.0</p>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <span className="text-sm text-gray-600">{enabled ? 'Enabled' : 'Disabled'}</span>
+          <button
+            onClick={handleToggle}
+            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-blue-600' : 'bg-gray-300'}`}
+          >
+            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${enabled ? 'translate-x-5' : 'translate-x-1'}`} />
+          </button>
+        </label>
+      </div>
+
+      {/* SCIM Base URL */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">SCIM Base URL</label>
+        <div className="flex items-center gap-2">
+          <input
+            value={baseUrl}
+            readOnly
+            className="flex-1 px-3 py-2 border rounded-lg text-sm bg-gray-50 text-gray-600"
+          />
+          <button
+            onClick={() => navigator.clipboard.writeText(baseUrl)}
+            className="px-3 py-2 text-xs border rounded-lg hover:bg-gray-50 transition"
+          >
+            Copy
+          </button>
+        </div>
+      </div>
+
+      {/* Token Management */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">SCIM Bearer Token</label>
+        <div className="flex items-center gap-3">
+          <span className={`px-2 py-1 rounded text-xs font-medium ${tokenActive ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+            {tokenActive ? 'Active' : 'No token'}
+          </span>
+          <button
+            onClick={handleGenerateToken}
+            disabled={generating}
+            className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 transition"
+          >
+            {generating ? 'Generating...' : tokenActive ? 'Regenerate Token' : 'Generate Token'}
+          </button>
+        </div>
+      </div>
+
+      {/* Show generated token */}
+      {generatedToken && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+          <p className="text-sm font-medium text-amber-800 mb-2">Copy this token now — it won't be shown again</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 px-3 py-2 bg-white border rounded text-xs font-mono break-all">{generatedToken}</code>
+            <button
+              onClick={() => navigator.clipboard.writeText(generatedToken)}
+              className="px-3 py-2 text-xs bg-amber-600 text-white rounded hover:bg-amber-700 transition"
+            >
+              Copy
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Setup Instructions */}
+      <div className="bg-gray-50 rounded-lg p-4">
+        <h4 className="text-sm font-medium text-gray-700 mb-2">Setup Instructions</h4>
+        <div className="text-xs text-gray-500 space-y-2">
+          <p><strong>Azure AD / Entra ID:</strong> Enterprise Applications → Your App → Provisioning → Automatic → Tenant URL = SCIM Base URL, Secret Token = Bearer Token above</p>
+          <p><strong>Okta:</strong> Applications → Your App → Provisioning → SCIM Connection → Base URL = SCIM Base URL, Authentication = HTTP Header with token above</p>
+        </div>
+      </div>
+    </div>
   );
 }

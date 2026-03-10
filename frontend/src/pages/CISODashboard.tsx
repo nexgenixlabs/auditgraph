@@ -26,10 +26,12 @@ import { useAuth } from '../contexts/AuthContext';
 import {
   COLORS, getTierColor,
   getTier, getGrade, getSemanticColor,
-  type TenantData, type Remediation, type ComplianceFramework,
+  type TenantData, type Remediation, type ComplianceFramework, type DangerousIdentity,
 } from '../constants/ciso';
 import { formatDate } from '../utils/displayHelpers';
 import { FONT, ScoreRing, CISOBadge, ProgressBar, StatBox, SectionTitle, CISOCard, DN, pillarNav } from '../components/dashboard/ciso-shared';
+import { IdentityDrawerProvider, useIdentityDrawer } from '../contexts/IdentityDrawerContext';
+import { IdentityContextDrawer } from '../components/dashboard/IdentityContextDrawer';
 import { ExecutiveMetrics } from '../components/dashboard/executive/ExecutiveMetrics';
 import { HumanIdentityRiskTable } from '../components/dashboard/executive/HumanIdentityRiskTable';
 import { PhantomExposureTable } from '../components/dashboard/executive/PhantomExposureTable';
@@ -327,14 +329,23 @@ function CreateTicketModal({ rem, data, onClose }: { rem: Remediation; data: Ten
 
 // ─── Remediation Card ────────────────────────────────────────────
 
-function RemediationCard({ item, index, onPreview, onTicket }: {
-  item: Remediation; index: number;
+function RemediationCard({ item, index, data, onPreview, onTicket }: {
+  item: Remediation; index: number; data: TenantData;
   onPreview?: (r: Remediation) => void;
   onTicket?: (r: Remediation) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const navigate = useNavigate();
   const c = getSemanticColor(item.color) || COLORS.accent;
+  const currentScore = data.riskScore.current;
+  const afterScore = Math.min(100, currentScore + item.gain);
+
+  // Parse affected count
+  const affectedMatch = item.affected?.match(/^(\d+)/);
+  const affectedCount = affectedMatch ? parseInt(affectedMatch[1], 0) : 0;
+  const totalIds = data.tenant.identityCount || 1;
+  const riskContribution = totalIds > 0 ? Math.round((affectedCount / totalIds) * 100) : 0;
+
   return (
     <div
       onClick={() => setExpanded(!expanded)}
@@ -359,7 +370,9 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
         </div>
         <div style={{ textAlign: 'right' as const, flexShrink: 0 }}>
           <DN navigateTo={remediationNav(item.id)}><div style={{ fontSize: 18, fontWeight: 700, color: COLORS.success, fontFamily: FONT.mono }}>+{item.gain}</div></DN>
-          <DN navigateTo="/remediation"><div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>→ {item.projectedScore}</div></DN>
+          <div style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.mono }}>
+            {currentScore.toFixed(0)} {'\u2192'} {afterScore.toFixed(0)}
+          </div>
         </div>
         <CISOBadge label={item.risk} color={item.risk === 'HIGH' ? COLORS.danger : COLORS.success} />
         <CISOBadge label={item.automation} color={item.automation === 'Auto' ? COLORS.accent : COLORS.textMuted} />
@@ -373,12 +386,28 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
       </div>
       {expanded && (
         <div style={{ borderTop: `1px solid ${COLORS.border}`, marginTop: 14, paddingTop: 14 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+          {/* Score improvement preview bar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, padding: '8px 12px', borderRadius: 6, background: `${COLORS.success}08`, border: `1px solid ${COLORS.success}1a` }}>
+            <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Score Impact</span>
+            <div style={{ flex: 1, height: 6, borderRadius: 3, background: COLORS.border, position: 'relative', overflow: 'hidden' }}>
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${currentScore}%`, background: COLORS.warning, borderRadius: 3 }} />
+              <div style={{ position: 'absolute', left: `${currentScore}%`, top: 0, height: '100%', width: `${item.gain}%`, background: COLORS.success, borderRadius: '0 3px 3px 0' }} />
+            </div>
+            <span style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT.mono, color: COLORS.success }}>
+              {currentScore.toFixed(0)} {'\u2192'} {afterScore.toFixed(0)}
+            </span>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 10 }}>
             <div>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Affected</div>
               <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>
                 <DN navigateTo={remediationNav(item.id)}>{item.affected}</DN>
               </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Risk Share</div>
+              <div style={{ fontSize: 11, color: riskContribution > 20 ? COLORS.danger : COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{riskContribution}%</div>
             </div>
             <div>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, textTransform: 'uppercase' as const, letterSpacing: '0.08em', fontFamily: FONT.ui }}>Est. Effort</div>
@@ -397,22 +426,24 @@ function RemediationCard({ item, index, onPreview, onTicket }: {
               <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.mono, marginTop: 4 }}>{item.confidence != null ? `${item.confidence}%` : '\u2014'}</div>
             </div>
           </div>
+
+          {/* 3 action options: Apply, Ticket, Terraform */}
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-            <button onClick={(e) => { e.stopPropagation(); navigate(remediationNav(item.id)); }} style={{
+            <button onClick={(e) => { e.stopPropagation(); onPreview?.(item); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: COLORS.accent,
               color: '#fff', border: 'none', cursor: 'pointer', fontFamily: FONT.ui,
-            }}>View Affected Identities →</button>
-            <button onClick={(e) => { e.stopPropagation(); onPreview?.(item); }} style={{
+            }}>Apply Changes</button>
+            <button onClick={(e) => { e.stopPropagation(); onTicket?.(item); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: 'transparent', color: COLORS.text,
               border: `1px solid ${COLORS.borderAccent}`, cursor: 'pointer', fontFamily: FONT.ui,
-            }}>Preview Changes</button>
-            <button onClick={(e) => { e.stopPropagation(); onTicket?.(item); }} style={{
+            }}>Create Ticket</button>
+            <button onClick={(e) => { e.stopPropagation(); navigate(remediationNav(item.id)); }} style={{
               padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600,
               background: 'transparent', color: COLORS.textSecondary,
               border: `1px solid ${COLORS.border}`, cursor: 'pointer', fontFamily: FONT.ui,
-            }}>Create Ticket</button>
+            }}>Export Terraform</button>
           </div>
         </div>
       )}
@@ -794,6 +825,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
                 id: c.id, name: c.name, status: c.status,
                 severity: c.status === 'fail' ? 'high' : 'medium',
                 evidence: c.detail || '', recommendation: '', identityCount: 0,
+                detectedAt: c.detected_at || c.detectedAt || d.tenant.lastScan || '',
+                lastEvaluatedAt: c.last_evaluated_at || c.lastEvaluatedAt || d.tenant.lastScan || '',
               })),
             });
           }
@@ -1063,9 +1096,138 @@ function remediationNav(id: string): string {
   }
 }
 
+// ── Identity Composite Risk Score ──
+
+function computeCompositeRisk(id: DangerousIdentity): { score: number; drivers: { label: string; points: number }[] } {
+  const drivers: { label: string; points: number }[] = [];
+  let score = 0;
+  const factors = id.key_risk_factors || [];
+
+  // Privilege tier (0–30)
+  const tierPts = id.tier === 'T0' ? 30 : id.tier === 'T1' ? 20 : id.tier === 'T2' ? 8 : 0;
+  if (tierPts > 0) { score += tierPts; drivers.push({ label: `${id.tier} Privilege`, points: tierPts }); }
+
+  // Blast radius (0–25)
+  const brPts = Math.min(25, Math.round((id.blast_radius_score / 100) * 25));
+  if (brPts > 0) { score += brPts; drivers.push({ label: 'Blast Radius', points: brPts }); }
+
+  // Dormancy (0–15)
+  if (factors.some(f => /dormant|stale|never.used/i.test(f))) { score += 15; drivers.push({ label: 'Dormant Account', points: 15 }); }
+
+  // Credential exposure (0–15)
+  if (factors.some(f => /credential|secret|cert|expired|key/i.test(f))) { score += 15; drivers.push({ label: 'Credential Exposure', points: 15 }); }
+
+  // Attack path participation (0–10)
+  const apPts = id.risk_score >= 80 ? 10 : id.risk_score >= 60 ? 6 : id.risk_score >= 40 ? 3 : 0;
+  if (apPts > 0) { score += apPts; drivers.push({ label: 'Attack Path Risk', points: apPts }); }
+
+  // Ownership status (0–5)
+  if (factors.some(f => /unowned|orphan|no.owner/i.test(f))) { score += 5; drivers.push({ label: 'No Owner', points: 5 }); }
+
+  drivers.sort((a, b) => b.points - a.points);
+  return { score: Math.min(100, score), drivers };
+}
+
+function compositeLabel(score: number): { label: string; color: string } {
+  if (score >= 75) return { label: 'Critical', color: COLORS.danger };
+  if (score >= 50) return { label: 'High', color: '#FF8C42' };
+  if (score >= 25) return { label: 'Medium', color: COLORS.warning };
+  return { label: 'Low', color: COLORS.success };
+}
+
+function TopRiskIdentities({ identities }: { identities: DangerousIdentity[] }) {
+  const drawerCtx = useIdentityDrawer();
+
+  const scored = identities
+    .map(id => { const r = computeCompositeRisk(id); return { ...id, compositeScore: r.score, drivers: r.drivers }; })
+    .sort((a, b) => b.compositeScore - a.compositeScore)
+    .slice(0, 5);
+
+  if (scored.length === 0) return null;
+
+  return (
+    <CISOCard>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <SectionTitle>Top Risk Identities</SectionTitle>
+        <DN navigateTo="/identities?sort=risk_score&order=desc">
+          <span style={{ fontSize: 9, color: COLORS.accent, fontFamily: FONT.ui }}>View All →</span>
+        </DN>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {scored.map((id, i) => {
+          const { label, color } = compositeLabel(id.compositeScore);
+          const shortName = id.display_name?.split(/[@.]/)[0] || 'Unknown';
+          return (
+            <div
+              key={id.id}
+              onClick={() => drawerCtx?.openIdentity(id.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '8px 10px', borderRadius: 6, cursor: 'pointer',
+                transition: 'background 0.15s',
+                borderBottom: i < scored.length - 1 ? `1px solid ${COLORS.border}22` : 'none',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = COLORS.surfaceAlt || '#0f1729'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+            >
+              {/* Rank */}
+              <span style={{ fontSize: 10, fontWeight: 700, color: COLORS.textDim, fontFamily: FONT.mono, width: 16, textAlign: 'center', flexShrink: 0 }}>
+                {i + 1}
+              </span>
+
+              {/* Score ring */}
+              <div style={{
+                width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: `${color}15`, border: `2px solid ${color}`,
+                fontSize: 10, fontWeight: 700, fontFamily: FONT.mono, color,
+              }}>
+                {id.compositeScore}
+              </div>
+
+              {/* Name + drivers */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  textDecoration: 'underline', textDecorationStyle: 'dashed' as const, textUnderlineOffset: '3px',
+                }}>
+                  {shortName}
+                </div>
+                <div style={{ display: 'flex', gap: 4, marginTop: 3, flexWrap: 'wrap' }}>
+                  {id.drivers.slice(0, 3).map((dr, di) => (
+                    <span key={di} style={{
+                      fontSize: 8, fontWeight: 600, padding: '1px 5px', borderRadius: 3,
+                      background: `${color}10`, color: COLORS.textSecondary,
+                      border: `1px solid ${COLORS.border}`,
+                      fontFamily: FONT.ui, whiteSpace: 'nowrap',
+                    }}>
+                      {dr.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Risk badge */}
+              <span style={{
+                fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+                background: `${color}18`, color, border: `1px solid ${color}30`,
+                fontFamily: FONT.mono, flexShrink: 0,
+              }}>
+                {label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </CISOCard>
+  );
+}
+
 // ── Tab 1: Executive Summary ──
 
 function ExecSummaryTab({ d, onPreview: _onPreview, onTicket: _onTicket }: { d: TenantData; onPreview: (r: Remediation) => void; onTicket: (r: Remediation) => void }) {
+  const navigate = useNavigate();
   const agirs = d.agirs?.agirs;
   const score = agirs?.score ?? 0;
   const tier = agirs?.tier ?? 'Unknown';
@@ -1074,9 +1236,78 @@ function ExecSummaryTab({ d, onPreview: _onPreview, onTicket: _onTicket }: { d: 
   const workloadCount = useMemo(() => d.identityBreakdown.filter(ib => ib.type !== 'Human Users' && ib.type !== 'Guest Users').reduce((s, ib) => s + ib.count, 0), [d.identityBreakdown]);
   const t0Count = d.pillars[0]?.subMetrics?.[0]?.value ?? 0;
 
+  // Generate executive insight narrative
+  const topRisks = [...d.pillars].sort((a, b) => b.score - a.score).slice(0, 2);
+  const remGain = d.remediations.filter(r => r.type === 'identity-remediation').reduce((s, r) => s + r.gain, 0);
+  const insightText = score >= 80
+    ? `Your identity posture is strong at ${score.toFixed(1)}/100. Continue monitoring ${topRisks[0]?.name || 'key pillars'} to maintain resilience.`
+    : score >= 60
+    ? `Identity posture is developing (${score.toFixed(1)}/100). ${topRisks[0]?.name || 'Privilege'} is your highest risk area at ${topRisks[0]?.score || 0}%. Addressing top remediations could improve your score by +${remGain} points.`
+    : `Immediate attention required. Identity posture is ${score.toFixed(1)}/100 (${tier}). ${topRisks[0]?.name || 'Privilege'} scores ${topRisks[0]?.score || 0}% risk. ${d.kpis.dormantPrivileged.value} dormant privileged accounts and ${t0Count} T0 administrators represent significant blast radius.`;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* 5 Top Metric Cards — extracted to ExecutiveMetrics */}
+      {/* Executive Insight Card */}
+      <div style={{
+        background: `linear-gradient(135deg, ${COLORS.surfaceAlt}, ${COLORS.surface})`,
+        border: `1px solid ${COLORS.borderAccent}`,
+        borderRadius: 10, padding: '14px 18px',
+        borderLeft: `3px solid ${getSemanticColor(score >= 80 ? 'success' : score >= 60 ? 'warning' : 'danger') || COLORS.accent}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+            Executive Insight
+          </span>
+          <span style={{
+            fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 3,
+            background: `${getSemanticColor(score >= 80 ? 'success' : score >= 60 ? 'warning' : 'danger') || COLORS.accent}15`,
+            color: getSemanticColor(score >= 80 ? 'success' : score >= 60 ? 'warning' : 'danger') || COLORS.accent,
+            fontFamily: FONT.mono,
+          }}>
+            {tier}
+          </span>
+        </div>
+        <div style={{ fontSize: 12, color: COLORS.text, fontFamily: FONT.ui, lineHeight: 1.6 }}>
+          {insightText}
+        </div>
+
+        {/* Why This Matters */}
+        {(() => {
+          const matters: string[] = [];
+          const dormant = d.kpis.dormantPrivileged.value;
+          const unowned = d.agirs.nhiri?.phantom_breakdown?.orphaned ?? d.blastRadius.orphaned ?? 0;
+          const overPriv = d.pillars[0]?.subMetrics?.[0]?.value ?? 0;
+          const expiredCreds = d.agirs.nhiri?.phantom_breakdown?.expired_creds ?? 0;
+          const guestCount = d.identityBreakdown.find(ib => ib.type === 'Guest Users')?.count ?? 0;
+
+          if (dormant > 0) matters.push('Dormant privileged identities increase the risk of unauthorized access through forgotten accounts.');
+          if (unowned > 0) matters.push('Unowned service principals create unmanaged automation access that bypasses security reviews.');
+          if (overPriv > 0) matters.push('Reducing over-privileged accounts limits potential lateral movement across your environment.');
+          if (expiredCreds > 0) matters.push('Expired credentials on active identities signal stale configurations that may mask compromise.');
+          if (guestCount > 5) matters.push('External guest identities with role assignments expand your trust boundary beyond organizational control.');
+
+          if (matters.length === 0) {
+            matters.push('Continuous monitoring ensures privilege drift is detected before it becomes exploitable.');
+            matters.push('Maintaining ownership coverage enables timely response to identity-related incidents.');
+          }
+
+          return matters.length > 0 ? (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${COLORS.border}` }}>
+              <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 6 }}>
+                Why This Matters
+              </div>
+              {matters.slice(0, 3).map((m, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 3 }}>
+                  <span style={{ color: COLORS.textDim, fontSize: 10, lineHeight: '18px', flexShrink: 0 }}>{'\u2022'}</span>
+                  <span style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui, lineHeight: 1.5 }}>{m}</span>
+                </div>
+              ))}
+            </div>
+          ) : null;
+        })()}
+      </div>
+
+      {/* 5 Top Metric Cards — enhanced with projected score + benchmark */}
       <ExecutiveMetrics
         score={score}
         tier={tier}
@@ -1086,6 +1317,9 @@ function ExecSummaryTab({ d, onPreview: _onPreview, onTicket: _onTicket }: { d: 
         privilegedSubtitle={d.kpis.privilegedRoles.subtitle}
         workloadCount={workloadCount}
         t0Count={t0Count}
+        projectedScore={d.projection.remediated.score}
+        industryBenchmark={d.riskScore.industry}
+        pillars={d.pillars}
       />
 
       {/* 2-Column: HIRI + NHIRI Tables */}
@@ -1094,8 +1328,223 @@ function ExecSummaryTab({ d, onPreview: _onPreview, onTicket: _onTicket }: { d: 
         <PhantomExposureTable nhiri={d.agirs.nhiri} />
       </div>
 
+      {/* Top Risk Identities */}
+      <TopRiskIdentities identities={d.agirs.dangerous_identities || []} />
+
+      {/* Identity Attack Paths Widget — Mini Graph */}
+      {(() => {
+        const dangerous = d.agirs.dangerous_identities || [];
+        const pathCount = dangerous.length;
+        const topId = dangerous[0];
+
+        // Node type definitions
+        type NodeType = 'identity' | 'role' | 'resource' | 'privilege';
+        interface GraphNode { id: string; label: string; type: NodeType; tooltip: string; }
+        interface GraphEdge { from: string; to: string; }
+
+        const NODE_COLORS: Record<NodeType, string> = {
+          identity: '#3B82F6',
+          role: '#EF4444',
+          resource: '#A855F7',
+          privilege: '#F59E0B',
+        };
+
+        // Build graph nodes from top dangerous identity
+        const nodes: GraphNode[] = [];
+        const edges: GraphEdge[] = [];
+
+        if (topId) {
+          const factors = topId.key_risk_factors || [];
+          const hasPriv = factors.some((f: string) => /privilege|owner|admin|contributor/i.test(f));
+          const hasCred = factors.some((f: string) => /credential|secret|cert|key/i.test(f));
+
+          const roleName = hasPriv
+            ? (factors.find((f: string) => /owner/i.test(f)) ? 'Owner Role' : factors.find((f: string) => /admin/i.test(f)) ? 'Admin Role' : 'Contributor Role')
+            : 'Role Assignment';
+          const resourceName = hasCred ? 'Key Vault' : 'Resource Scope';
+          const privName = hasCred ? 'Secrets Access' : 'Data Access';
+
+          nodes.push(
+            { id: 'n0', label: topId.display_name?.split(/[@.]/)[0] || 'Identity', type: 'identity', tooltip: `Identity: ${topId.display_name || 'Unknown'}\nCategory: ${topId.identity_category}\nRisk: ${topId.risk_score}` },
+            { id: 'n1', label: roleName, type: 'role', tooltip: `Role: ${roleName}\nGrants escalation path through privilege assignment` },
+            { id: 'n2', label: resourceName, type: 'resource', tooltip: `Resource: ${resourceName}\nTarget resource in the escalation chain` },
+            { id: 'n3', label: privName, type: 'privilege', tooltip: `Privilege: ${privName}\nFinal privilege gained through this attack path` },
+          );
+          edges.push({ from: 'n0', to: 'n1' }, { from: 'n1', to: 'n2' }, { from: 'n2', to: 'n3' });
+        } else {
+          nodes.push(
+            { id: 'n0', label: 'User', type: 'identity', tooltip: 'Identity: User\nStarting point of the attack path' },
+            { id: 'n1', label: 'Contributor Role', type: 'role', tooltip: 'Role: Contributor\nGrants write access to resources' },
+            { id: 'n2', label: 'Key Vault', type: 'resource', tooltip: 'Resource: Key Vault\nContains secrets and keys' },
+            { id: 'n3', label: 'Secrets Access', type: 'privilege', tooltip: 'Privilege: Secrets Access\nAbility to read/write vault secrets' },
+          );
+          edges.push({ from: 'n0', to: 'n1' }, { from: 'n1', to: 'n2' }, { from: 'n2', to: 'n3' });
+        }
+
+        // Path risk level
+        let riskSignals = 0;
+        if (topId) {
+          if (topId.blast_radius_score >= 60) riskSignals += 2; else if (topId.blast_radius_score >= 30) riskSignals += 1;
+          if (topId.tier === 'T0') riskSignals += 2; else if (topId.tier === 'T1') riskSignals += 1;
+          if (nodes.some(n => /secret/i.test(n.label))) riskSignals += 2;
+          if (edges.length >= 3) riskSignals += 1;
+        }
+        const pathRisk = riskSignals >= 5 ? 'High' : riskSignals >= 2 ? 'Medium' : 'Low';
+        const pathRiskColor = pathRisk === 'High' ? COLORS.danger : pathRisk === 'Medium' ? COLORS.warning : COLORS.success;
+
+        // Check if topId is in the Top Risk Identities list
+        const topRiskIds = new Set(
+          dangerous
+            .map(di => ({ id: di.id, s: computeCompositeRisk(di).score }))
+            .sort((a, b) => b.s - a.s)
+            .slice(0, 5)
+            .map(x => x.id)
+        );
+        const identityHighlighted = !!topId && topRiskIds.has(topId.id);
+
+        // SVG layout constants
+        const svgW = 460;
+        const svgH = 100;
+        const nodeW = 90;
+        const nodeH = 32;
+        const spacing = (svgW - nodeW) / (nodes.length - 1);
+        const cy = svgH / 2;
+
+        const nodePositions = nodes.map((_, i) => ({
+          cx: nodeW / 2 + i * spacing,
+          cy,
+        }));
+
+        return (
+          <CISOCard>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 24 }}>
+              {/* Left: count + button */}
+              <div style={{ minWidth: 160 }}>
+                <SectionTitle>Identity Attack Paths</SectionTitle>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 8 }}>
+                  <DN navigateTo="/attack-simulator">
+                    <span style={{ fontSize: 32, fontWeight: 700, fontFamily: FONT.mono, color: pathCount > 0 ? COLORS.danger : COLORS.textDim }}>{pathCount}</span>
+                  </DN>
+                  <span style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui }}>paths detected</span>
+                </div>
+                <button onClick={() => navigate('/attack-simulator')} style={{
+                  marginTop: 12, padding: '6px 14px', borderRadius: 6, fontSize: 10, fontWeight: 600,
+                  background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
+                  cursor: 'pointer', fontFamily: FONT.ui,
+                }}>View Attack Paths</button>
+              </div>
+
+              {/* Right: mini graph visualization */}
+              <div style={{ flex: 1, padding: '4px 0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 9, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui }}>
+                    {topId ? 'Top Escalation Chain' : 'Example Path'}
+                  </span>
+                  {topId && (
+                    <span style={{
+                      fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 4,
+                      background: `${pathRiskColor}18`, color: pathRiskColor,
+                      border: `1px solid ${pathRiskColor}30`, fontFamily: FONT.mono,
+                    }}>
+                      {pathRisk}
+                    </span>
+                  )}
+                </div>
+                <svg width={svgW} height={svgH} style={{ display: 'block', cursor: topId ? 'pointer' : 'default' }}
+                  onClick={topId ? () => navigate(`/attack-simulator?identity=${topId.id}`) : undefined}>
+                  <defs>
+                    <marker id="ap-arrow" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+                      <path d="M0 0 L10 3.5 L0 7z" fill={COLORS.textDim} />
+                    </marker>
+                    {nodes.map((n) => {
+                      const c = NODE_COLORS[n.type];
+                      return (
+                        <radialGradient key={`g-${n.id}`} id={`ap-glow-${n.id}`} cx="50%" cy="50%" r="50%">
+                          <stop offset="0%" stopColor={c} stopOpacity="0.25" />
+                          <stop offset="100%" stopColor={c} stopOpacity="0.05" />
+                        </radialGradient>
+                      );
+                    })}
+                    {identityHighlighted && (
+                      <filter id="ap-highlight" x="-40%" y="-40%" width="180%" height="180%">
+                        <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
+                        <feFlood floodColor={NODE_COLORS.identity} floodOpacity="0.6" result="color" />
+                        <feComposite in="color" in2="blur" operator="in" result="glow" />
+                        <feMerge>
+                          <feMergeNode in="glow" />
+                          <feMergeNode in="SourceGraphic" />
+                        </feMerge>
+                      </filter>
+                    )}
+                  </defs>
+
+                  {/* Edges */}
+                  {edges.map((e, i) => {
+                    const fromIdx = nodes.findIndex(n => n.id === e.from);
+                    const toIdx = nodes.findIndex(n => n.id === e.to);
+                    if (fromIdx < 0 || toIdx < 0) return null;
+                    const x1 = nodePositions[fromIdx].cx + nodeW / 2;
+                    const y1 = nodePositions[fromIdx].cy;
+                    const x2 = nodePositions[toIdx].cx - nodeW / 2;
+                    const y2 = nodePositions[toIdx].cy;
+                    return (
+                      <line key={`e-${i}`} x1={x1} y1={y1} x2={x2} y2={y2}
+                        stroke={COLORS.textDim} strokeWidth={1.5} markerEnd="url(#ap-arrow)" />
+                    );
+                  })}
+
+                  {/* Nodes */}
+                  {nodes.map((n, i) => {
+                    const pos = nodePositions[i];
+                    const c = NODE_COLORS[n.type];
+                    const rx = pos.cx - nodeW / 2;
+                    const ry = pos.cy - nodeH / 2;
+                    const isHighlit = identityHighlighted && n.type === 'identity';
+                    return (
+                      <g key={n.id} filter={isHighlit ? 'url(#ap-highlight)' : undefined}>
+                        <title>{n.tooltip}</title>
+                        {/* Glow background */}
+                        <ellipse cx={pos.cx} cy={pos.cy} rx={nodeW / 2 + 6} ry={nodeH / 2 + 6}
+                          fill={`url(#ap-glow-${n.id})`} />
+                        {/* Node rect */}
+                        <rect x={rx} y={ry} width={nodeW} height={nodeH} rx={6}
+                          fill={isHighlit ? `${c}30` : `${c}18`} stroke={c}
+                          strokeWidth={isHighlit ? 2.5 : 1.5}
+                          style={{ cursor: topId ? 'pointer' : 'default' }} />
+                        {/* Type icon dot */}
+                        <circle cx={rx + 10} cy={pos.cy} r={3} fill={c} />
+                        {/* Label */}
+                        <text x={rx + 18} y={pos.cy + 1} fill={c} fontSize={9.5} fontWeight={600}
+                          fontFamily={FONT.ui} dominantBaseline="central"
+                          style={{ pointerEvents: 'none' }}>
+                          {n.label.length > 10 ? n.label.slice(0, 10) + '\u2026' : n.label}
+                        </text>
+                        {/* Type badge below */}
+                        <text x={pos.cx} y={ry + nodeH + 11} fill={COLORS.textMuted} fontSize={7.5}
+                          fontFamily={FONT.ui} textAnchor="middle" style={{ pointerEvents: 'none', textTransform: 'uppercase', letterSpacing: '0.06em' } as React.CSSProperties}>
+                          {n.type}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+                {topId && (
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui, marginTop: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Blast radius: {topId.blast_radius_score} · Risk score: {topId.risk_score}</span>
+                    <span onClick={() => navigate(`/attack-simulator?identity=${topId.id}`)}
+                      style={{ color: COLORS.accent, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dashed' as const, textUnderlineOffset: '2px' }}>
+                      Click graph to explore →
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </CISOCard>
+        );
+      })()}
+
       {/* Full-Width: GEI Table */}
-      <GovernanceEffectivenessTable gei={d.agirs.gei} />
+      <GovernanceEffectivenessTable gei={d.agirs.gei} maturity={d.compliance.maturity} />
     </div>
   );
 }
@@ -1105,6 +1554,25 @@ function ExecSummaryTab({ d, onPreview: _onPreview, onTicket: _onTicket }: { d: 
 // ── Tab 3: Action Plan ──
 // Rule 30 fix: Removed duplicate "Capture Snapshot" system-action from remediation list.
 // The snapshot button is rendered once at the top bar only.
+
+function ActionPlanTooltip({ text, children }: { text: string; children: React.ReactNode }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <span style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          background: '#0f172a', border: `1px solid ${COLORS.border}`, padding: '6px 10px',
+          borderRadius: 6, fontSize: 10, color: '#e2e8f0', maxWidth: 260, whiteSpace: 'normal',
+          zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', marginBottom: 6, pointerEvents: 'none',
+          fontFamily: FONT.ui, lineHeight: 1.4, fontWeight: 400,
+        }}>{text}</span>
+      )}
+    </span>
+  );
+}
 
 function ActionPlanTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: (r: Remediation) => void; onTicket: (r: Remediation) => void }) {
   const { withConnection } = useConnection();
@@ -1168,21 +1636,133 @@ function ActionPlanTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: (
 
       {/* Remediation cards */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {filtered.map((r, i) => <RemediationCard key={r.id} item={r} index={i} onPreview={onPreview} onTicket={onTicket} />)}
+        {filtered.map((r, i) => <RemediationCard key={r.id} item={r} index={i} data={d} onPreview={onPreview} onTicket={onTicket} />)}
       </div>
 
-      {/* Total bar */}
-      <div style={{
-        background: COLORS.successSoft, border: `1px solid ${COLORS.success}2e`,
-        borderRadius: 8, padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      }}>
-        <span style={{ fontSize: 12, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Total potential gain</span>
-        <DN navigateTo="/remediation">
-          <span style={{ fontSize: 18, fontWeight: 700, color: COLORS.success, fontFamily: FONT.mono }}>
-            +{totalGain} pts → {d.projection.remediated.score.toFixed(1)}
-          </span>
-        </DN>
-      </div>
+      {/* Remediation Impact Summary */}
+      <CISOCard style={{ borderLeft: `3px solid ${COLORS.success}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+              Remediation Impact Summary
+            </span>
+            {(() => {
+              // Confidence = f(data completeness, pillar coverage, identity graph depth)
+              const completeness = d.tenant.scanCompleteness || 0;
+              const pillarsCovered = d.pillars.filter(p => p.score > 0).length;
+              const hasBlastRadius = d.blastRadius.highRisk > 0 || d.blastRadius.lowRisk > 0;
+              const hasOwnership = (d.agirs.gei?.components || []).some(c => c.name === 'Ownership Coverage' && c.configured);
+              const hasPim = (d.agirs.gei?.components || []).some(c => c.name === 'PIM Adoption' && c.configured);
+
+              let signals = 0;
+              if (completeness >= 80) signals += 2; else if (completeness >= 50) signals += 1;
+              if (pillarsCovered >= 4) signals += 2; else if (pillarsCovered >= 2) signals += 1;
+              if (hasBlastRadius) signals += 1;
+              if (hasOwnership) signals += 1;
+              if (hasPim) signals += 1;
+
+              const level = signals >= 6 ? 'High' : signals >= 3 ? 'Medium' : 'Low';
+              const color = level === 'High' ? COLORS.success : level === 'Medium' ? COLORS.warning : COLORS.danger;
+              const tooltip = level === 'High'
+                ? 'Strong identity graph coverage — privilege reduction estimates are reliable'
+                : level === 'Medium'
+                ? 'Partial graph data — estimates are directionally accurate but may shift with fuller discovery'
+                : 'Limited graph data — run a full discovery scan to improve confidence';
+
+              return (
+                <span title={tooltip} style={{
+                  fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+                  background: `${color}18`, color, border: `1px solid ${color}30`,
+                  fontFamily: FONT.mono, cursor: 'help',
+                }}>
+                  {level} Confidence
+                </span>
+              );
+            })()}
+          </div>
+          <DN navigateTo="/remediation">
+            <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.success, fontFamily: FONT.mono }}>
+              +{totalGain} pts
+            </span>
+          </DN>
+        </div>
+        {/* Before / After comparison */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 16, alignItems: 'center' }}>
+          <div style={{ textAlign: 'center' as const, padding: '10px', borderRadius: 8, background: `${COLORS.danger}08`, border: `1px solid ${COLORS.danger}1a` }}>
+            <div style={{ fontSize: 9, color: COLORS.danger, textTransform: 'uppercase' as const, letterSpacing: 1, marginBottom: 4, fontFamily: FONT.mono }}>Current</div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.text, fontFamily: FONT.mono }}>{d.riskScore.current.toFixed(1)}</div>
+            <CISOBadge label={d.riskScore.tier} color={getTierColor(d.riskScore.tier)} />
+          </div>
+          <span style={{ fontSize: 20, color: COLORS.success, fontWeight: 700 }}>{'\u2192'}</span>
+          <div style={{ textAlign: 'center' as const, padding: '10px', borderRadius: 8, background: `${COLORS.success}08`, border: `1px solid ${COLORS.success}1a` }}>
+            <div style={{ fontSize: 9, color: COLORS.success, textTransform: 'uppercase' as const, letterSpacing: 1, marginBottom: 4, fontFamily: FONT.mono }}>After Remediation</div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.text, fontFamily: FONT.mono }}>{d.projection.remediated.score.toFixed(1)}</div>
+            <CISOBadge label={d.projection.remediated.tier} color={getTierColor(d.projection.remediated.tier)} />
+          </div>
+        </div>
+        <div style={{ marginTop: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+            {identityRemediations.length} remediations &middot; {identityRemediations.filter(r => r.automation === 'Auto').length} auto &middot; {identityRemediations.filter(r => r.productionImpact).length} prod impact
+          </div>
+        </div>
+
+        {/* Risk Reduction Explanation */}
+        {identityRemediations.length > 0 && (() => {
+          // Derive breakdown from remediation types
+          const privilegesRemoved = identityRemediations.filter(r =>
+            r.id === 'r1' || r.title.toLowerCase().includes('over-privileged') || r.title.toLowerCase().includes('reduce')
+          ).reduce((s, r) => { const m = r.affected?.match(/^(\d+)/); return s + (m ? parseInt(m[1], 10) : 0); }, 0);
+          const rolesDowngraded = identityRemediations.filter(r =>
+            r.id === 'r2' || r.id === 'r2b' || r.title.toLowerCase().includes('dormant') || r.title.toLowerCase().includes('revoke')
+          ).reduce((s, r) => { const m = r.affected?.match(/^(\d+)/); return s + (m ? parseInt(m[1], 10) : 0); }, 0);
+          const totalAffected = identityRemediations.reduce((s, r) => {
+            const m = r.affected?.match(/^(\d+)/);
+            return s + (m ? parseInt(m[1], 10) : 0);
+          }, 0);
+          const blastHigh = d.blastRadius.highRisk || 1;
+          const blastReduction = blastHigh > 0 ? Math.min(99, Math.round((totalAffected / blastHigh) * 100)) : 0;
+
+          return (
+            <div style={{
+              marginTop: 14, padding: '12px 16px', borderRadius: 8,
+              background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+                  Risk Reduction
+                </span>
+                <ActionPlanTooltip text="AuditGraph simulates identity graph changes to estimate risk reduction.">
+                  <span style={{ fontSize: 10, color: COLORS.textDim, cursor: 'help' }}>{'\u24D8'}</span>
+                </ActionPlanTooltip>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 2 }}>Privileges removed</div>
+                  <DN navigateTo="/identities?pillar=effective-privilege">
+                    <span style={{ fontSize: 18, fontWeight: 700, fontFamily: FONT.mono, color: privilegesRemoved > 0 ? COLORS.success : COLORS.textDim }}>{privilegesRemoved}</span>
+                  </DN>
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 2 }}>Roles downgraded</div>
+                  <DN navigateTo="/identities?activity_status=dormant_strict&privileged=true">
+                    <span style={{ fontSize: 18, fontWeight: 700, fontFamily: FONT.mono, color: rolesDowngraded > 0 ? COLORS.success : COLORS.textDim }}>{rolesDowngraded}</span>
+                  </DN>
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 2 }}>Blast radius reduction</div>
+                  <span style={{ fontSize: 18, fontWeight: 700, fontFamily: FONT.mono, color: blastReduction > 0 ? COLORS.success : COLORS.textDim }}>{blastReduction}%</span>
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 2 }}>Identities affected</div>
+                  <DN navigateTo="/identities">
+                    <span style={{ fontSize: 18, fontWeight: 700, fontFamily: FONT.mono, color: totalAffected > 0 ? COLORS.text : COLORS.textDim }}>{totalAffected}</span>
+                  </DN>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+      </CISOCard>
     </div>
   );
 }
@@ -1190,27 +1770,70 @@ function ActionPlanTab({ d, onPreview, onTicket }: { d: TenantData; onPreview: (
 // ── Tab 4: Control & Governance ──
 // Rule 31 fix: Governance ring displays raw effectivenessScore (e.g. "1"), not score*10.
 
+function ControlGovTooltip({ text, children }: { text: string; children: React.ReactNode }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <span style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          background: '#0f172a', border: `1px solid ${COLORS.border}`, padding: '6px 10px',
+          borderRadius: 6, fontSize: 10, color: '#e2e8f0', maxWidth: 260, whiteSpace: 'normal',
+          zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', marginBottom: 6, pointerEvents: 'none',
+          fontFamily: FONT.ui, lineHeight: 1.4, fontWeight: 400,
+        }}>{text}</span>
+      )}
+    </span>
+  );
+}
+
+const GOV_METRIC_TOOLTIPS: Record<string, string> = {
+  'Ownership Coverage': 'Percentage of service principals with a designated owner. Unowned SPNs lack accountability for access reviews and credential rotation.',
+  'PIM Enforcement': 'Percentage of privileged roles protected by PIM (just-in-time activation). Standing admin access without PIM is a primary attack vector.',
+  'Access Reviews': 'Completion of periodic access certifications for privileged identities. Reviews catch over-provisioned and orphaned role assignments.',
+  'Privileged Monitoring': 'Coverage of privileged identity monitoring via P2 telemetry. Without monitoring, compromised privileged accounts remain undetected.',
+};
+
+const MATURITY_DESCRIPTIONS: Record<string, string> = {
+  'Unknown': 'Governance controls not yet assessed. Configure ownership, PIM, and review policies to begin.',
+  'Ad-Hoc': 'Identity governance is reactive and inconsistent. Key controls are missing or manually executed.',
+  'Developing': 'Basic governance processes exist but lack consistency. Some controls automated, many gaps remain.',
+  'Managed': 'Governance processes are standardized and measured. Most controls operational with regular reviews.',
+  'Optimized': 'Governance is fully automated with continuous improvement. All controls operational and exceeding targets.',
+};
+
 function ControlGovernanceTab({ d }: { d: TenantData }) {
   const navigate = useNavigate();
+  const maturityDesc = MATURITY_DESCRIPTIONS[d.governance.maturityLevel] || MATURITY_DESCRIPTIONS['Unknown'];
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {/* Governance Metric Cards */}
+      {/* Governance Metric Cards — enhanced with tooltips */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
         {d.governance.metrics.map((m, i) => {
-          // v3.0.9: Trend arrow — compare value to target numerically
           const numVal = parseFloat(String(m.value).replace(/[^0-9.]/g, ''));
           const numTarget = parseFloat(String(m.target).replace(/[^0-9.]/g, ''));
-          const trendArrow = m.status === 'not-configured' ? '' : numVal >= numTarget ? '↑' : numVal >= numTarget * 0.7 ? '→' : '↓';
-          const trendColor = trendArrow === '↑' ? COLORS.success : trendArrow === '→' ? COLORS.warning : COLORS.danger;
+          const trendArrow = m.status === 'not-configured' ? '' : numVal >= numTarget ? '\u2191' : numVal >= numTarget * 0.7 ? '\u2192' : '\u2193';
+          const trendColor = trendArrow === '\u2191' ? COLORS.success : trendArrow === '\u2192' ? COLORS.warning : COLORS.danger;
           const govNav = m.label.toLowerCase().includes('access review') ? '/access-reviews' :
             m.label.toLowerCase().includes('owner') ? '/service-accounts' :
             m.label.toLowerCase().includes('rotation') || m.label.toLowerCase().includes('credential') ? '/key-vaults' :
             m.label.toLowerCase().includes('pim') || m.label.toLowerCase().includes('jit') ? '/identities?pillar=effective-privilege' :
             '/service-accounts';
           const navTarget = m.status !== 'not-configured' ? govNav : '/settings/governance';
+          const tooltip = GOV_METRIC_TOOLTIPS[m.label] || '';
           return (
           <CISOCard key={i}>
-            <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>{m.icon} {m.label}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.1em', color: COLORS.textSecondary, fontFamily: FONT.ui }}>{m.icon} {m.label}</span>
+              {tooltip && (
+                <ControlGovTooltip text={tooltip}>
+                  <span style={{ fontSize: 10, color: COLORS.textDim, cursor: 'help' }}>{'\u24D8'}</span>
+                </ControlGovTooltip>
+              )}
+            </div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
               <DN navigateTo={navTarget}>
                 <div style={{
@@ -1226,24 +1849,30 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
                 marginTop: 8, padding: '4px 10px', borderRadius: 4, fontSize: 10,
                 background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}30`,
                 cursor: 'pointer', fontFamily: FONT.ui,
-              }}>Configure →</button>
+              }}>Configure {'\u2192'}</button>
             )}
           </CISOCard>
           );
         })}
       </div>
 
-      {/* Two-column: Control Failures + Governance Ring */}
+      {/* Two-column: Control Failures + Governance Effectiveness */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
         <CISOCard>
           <SectionTitle>Control Failures</SectionTitle>
+          {d.governance.controlFailures.length === 0 && (
+            <div style={{ padding: '16px 0', textAlign: 'center' as const }}>
+              <div style={{ fontSize: 12, color: COLORS.success, fontFamily: FONT.ui, fontWeight: 600 }}>No control failures detected</div>
+              <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, marginTop: 4 }}>All preventive and operational controls are passing</div>
+            </div>
+          )}
           {d.governance.controlFailures.map((group, gi) => (
             <div key={gi} style={{ marginBottom: 16 }}>
               <div style={{
                 fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em',
                 color: group.type.includes('PREVENTIVE') ? COLORS.danger : COLORS.warning,
                 marginBottom: 8, fontFamily: FONT.ui,
-              }}>▸ {group.type}</div>
+              }}>{'\u25B8'} {group.type}</div>
               {group.items.map((item, ii) => {
                 const cfNav = item.label.toLowerCase().includes('pim') || item.label.toLowerCase().includes('privilege outside') ? '/identities?pillar=effective-privilege' :
                   item.label.toLowerCase().includes('disabled') || item.label.toLowerCase().includes('ghost') ? '/identities?status=disabled&hasRoles=true' :
@@ -1253,7 +1882,7 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
                   '/identities';
                 return (
                 <div key={ii} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: `1px solid ${COLORS.border}` }}>
-                  <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>● {item.label}</span>
+                  <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{'\u25CF'} {item.label}</span>
                   <DN navigateTo={cfNav}>
                     <span style={{ fontSize: 11, fontWeight: 600, fontFamily: FONT.mono, color: item.color }}>{item.count}</span>
                   </DN>
@@ -1265,9 +1894,7 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
 
         <CISOCard>
           <SectionTitle>Governance Effectiveness</SectionTitle>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
-            {/* Rule 31 fix: Use effectivenessScore directly for display,
-                ring arc uses score*10 for visual proportion but displayValue shows raw integer */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 14 }}>
             <ScoreRing
               score={d.governance.effectivenessScore * 10}
               size={80} strokeWidth={5}
@@ -1280,9 +1907,34 @@ function ControlGovernanceTab({ d }: { d: TenantData }) {
               </DN>
               <CISOBadge label={d.governance.effectivenessTier} color={getTierColor(d.governance.effectivenessTier)} />
               <div style={{ marginTop: 6 }}>
-                <CISOBadge label={d.governance.maturityLevel} color={COLORS.textMuted} />
+                <CISOBadge label={d.governance.maturityLevel} color={
+                  d.governance.maturityLevel === 'Optimized' ? COLORS.accent :
+                  d.governance.maturityLevel === 'Managed' ? COLORS.success :
+                  d.governance.maturityLevel === 'Developing' ? COLORS.warning :
+                  COLORS.textMuted
+                } />
               </div>
             </div>
+          </div>
+          {/* Maturity level description */}
+          <div style={{
+            padding: '10px 12px', borderRadius: 6, background: COLORS.surfaceAlt,
+            border: `1px solid ${COLORS.border}`,
+          }}>
+            <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textSecondary, fontFamily: FONT.ui, marginBottom: 4 }}>
+              Maturity: {d.governance.maturityLevel}
+            </div>
+            <div style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui, lineHeight: 1.5 }}>
+              {maturityDesc}
+            </div>
+          </div>
+          {/* Setup completion */}
+          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, textTransform: 'uppercase' as const }}>Setup</span>
+            <div style={{ flex: 1, height: 3, borderRadius: 2, background: COLORS.border }}>
+              <div style={{ height: '100%', borderRadius: 2, width: `${(d.governance.setupCompletion.configured / d.governance.setupCompletion.total) * 100}%`, background: COLORS.accent, transition: 'width 0.5s ease' }} />
+            </div>
+            <span style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.mono }}>{d.governance.setupCompletion.configured}/{d.governance.setupCompletion.total}</span>
           </div>
         </CISOCard>
       </div>
@@ -1331,86 +1983,92 @@ export default function CISODashboard() {
 
   if (loading) {
     return (
-      <div style={{
-        minHeight: 'calc(100vh - 56px)', background: COLORS.bg,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        borderRadius: '12px 0 0 0',
-      }}>
-        <div style={{ textAlign: 'center' as const }}>
-          <div style={{
-            width: 40, height: 40, borderRadius: '50%',
-            border: `3px solid ${COLORS.border}`, borderTopColor: COLORS.accent,
-            animation: 'spin 1s linear infinite', margin: '0 auto 12px',
-          }} />
-          <div style={{ fontSize: 12, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Loading Executive Summary...</div>
+      <IdentityDrawerProvider>
+        <div style={{
+          minHeight: 'calc(100vh - 56px)', background: COLORS.bg,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          borderRadius: '12px 0 0 0',
+        }}>
+          <div style={{ textAlign: 'center' as const }}>
+            <div style={{
+              width: 40, height: 40, borderRadius: '50%',
+              border: `3px solid ${COLORS.border}`, borderTopColor: COLORS.accent,
+              animation: 'spin 1s linear infinite', margin: '0 auto 12px',
+            }} />
+            <div style={{ fontSize: 12, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Loading Executive Summary...</div>
+          </div>
+          <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
         </div>
-        <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
-      </div>
+        <IdentityContextDrawer />
+      </IdentityDrawerProvider>
     );
   }
 
   return (
-    <div style={{ minHeight: 'calc(100vh - 56px)', background: COLORS.bg, fontFamily: FONT.ui, borderRadius: '12px 0 0 0' }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
+    <IdentityDrawerProvider>
+      <div style={{ minHeight: 'calc(100vh - 56px)', background: COLORS.bg, fontFamily: FONT.ui, borderRadius: '12px 0 0 0' }}>
+        <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }`}</style>
 
-      {/* Tab Bar */}
-      <div style={{
-        borderBottom: `1px solid ${COLORS.border}`, display: 'flex', padding: '0 24px',
-        background: COLORS.surface, borderRadius: '12px 0 0 0',
-      }}>
-        {TAB_CONFIG.map(t => (
-          <div key={t.id} onClick={() => setActiveTab(t.id)} style={{
-            padding: '12px 18px', cursor: 'pointer', fontSize: 12, fontFamily: FONT.ui,
-            color: activeTab === t.id ? COLORS.accent : COLORS.textMuted,
-            fontWeight: activeTab === t.id ? 600 : 400,
-            borderBottom: `2px solid ${activeTab === t.id ? COLORS.accent : 'transparent'}`,
-            transition: 'all 0.15s ease',
-          }}>
-            {t.label}
-          </div>
-        ))}
-
-        {/* Scan status indicator */}
+        {/* Tab Bar */}
         <div style={{
-          marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui,
+          borderBottom: `1px solid ${COLORS.border}`, display: 'flex', padding: '0 24px',
+          background: COLORS.surface, borderRadius: '12px 0 0 0',
         }}>
-          <span>Updated {formatDate(data.tenant.lastScan, 'No snapshot data')}</span>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success }} />
+          {TAB_CONFIG.map(t => (
+            <div key={t.id} onClick={() => setActiveTab(t.id)} style={{
+              padding: '12px 18px', cursor: 'pointer', fontSize: 12, fontFamily: FONT.ui,
+              color: activeTab === t.id ? COLORS.accent : COLORS.textMuted,
+              fontWeight: activeTab === t.id ? 600 : 400,
+              borderBottom: `2px solid ${activeTab === t.id ? COLORS.accent : 'transparent'}`,
+              transition: 'all 0.15s ease',
+            }}>
+              {t.label}
+            </div>
+          ))}
+
+          {/* Scan status indicator */}
+          <div style={{
+            marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
+            fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui,
+          }}>
+            <span>Updated {formatDate(data.tenant.lastScan, 'No snapshot data')}</span>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.success }} />
+          </div>
         </div>
-      </div>
 
-      {/* v3.0.9: Confidence / Data Completeness Banner */}
-      <div style={{
-        margin: '12px 24px 0', padding: '8px 14px', borderRadius: 8,
-        background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
-        display: 'flex', alignItems: 'center', gap: 16, fontSize: 10, fontFamily: FONT.ui,
-      }}>
-        <span style={{ color: COLORS.textSecondary }}>Data Completeness</span>
-        <div style={{ width: 80, height: 4, borderRadius: 2, background: COLORS.border, overflow: 'hidden' }}>
-          <div style={{ width: `${data.tenant.scanCompleteness}%`, height: '100%', background: data.tenant.scanCompleteness >= 80 ? COLORS.success : COLORS.warning, borderRadius: 2 }} />
+        {/* v3.0.9: Confidence / Data Completeness Banner */}
+        <div style={{
+          margin: '12px 24px 0', padding: '8px 14px', borderRadius: 8,
+          background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`,
+          display: 'flex', alignItems: 'center', gap: 16, fontSize: 10, fontFamily: FONT.ui,
+        }}>
+          <span style={{ color: COLORS.textSecondary }}>Data Completeness</span>
+          <div style={{ width: 80, height: 4, borderRadius: 2, background: COLORS.border, overflow: 'hidden' }}>
+            <div style={{ width: `${data.tenant.scanCompleteness}%`, height: '100%', background: data.tenant.scanCompleteness >= 80 ? COLORS.success : COLORS.warning, borderRadius: 2 }} />
+          </div>
+          <DN navigateTo="/settings/connections">
+            <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: data.tenant.scanCompleteness >= 80 ? COLORS.success : COLORS.warning }}>{data.tenant.scanCompleteness}%</span>
+          </DN>
+          <span style={{ color: COLORS.textDim }}>|</span>
+          <span style={{ color: COLORS.textSecondary }}>Confidence</span>
+          <CISOBadge label={data.tenant.scanConfidence || 'Unknown'} color={
+            data.tenant.scanConfidence?.toLowerCase() === 'high' ? COLORS.success :
+            data.tenant.scanConfidence?.toLowerCase() === 'medium' ? COLORS.warning : COLORS.textMuted
+          } />
+          <span style={{ color: COLORS.textDim }}>|</span>
+          <span style={{ color: COLORS.textSecondary }}>Sources: {data.tenant.sources?.join(', ') || 'Graph API'}</span>
         </div>
-        <DN navigateTo="/settings/connections">
-          <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: data.tenant.scanCompleteness >= 80 ? COLORS.success : COLORS.warning }}>{data.tenant.scanCompleteness}%</span>
-        </DN>
-        <span style={{ color: COLORS.textDim }}>|</span>
-        <span style={{ color: COLORS.textSecondary }}>Confidence</span>
-        <CISOBadge label={data.tenant.scanConfidence || 'Unknown'} color={
-          data.tenant.scanConfidence?.toLowerCase() === 'high' ? COLORS.success :
-          data.tenant.scanConfidence?.toLowerCase() === 'medium' ? COLORS.warning : COLORS.textMuted
-        } />
-        <span style={{ color: COLORS.textDim }}>|</span>
-        <span style={{ color: COLORS.textSecondary }}>Sources: {data.tenant.sources?.join(', ') || 'Graph API'}</span>
-      </div>
 
-      {/* Tab Content */}
-      <div style={{ padding: 24 }}>
-        {renderTab()}
-      </div>
+        {/* Tab Content */}
+        <div style={{ padding: 24 }}>
+          {renderTab()}
+        </div>
 
-      {/* v3.0.5 Panels */}
-      {previewRem && <PreviewChangesPanel rem={previewRem} data={data} onClose={() => setPreviewRem(null)} />}
-      {ticketRem && <CreateTicketModal rem={ticketRem} data={data} onClose={() => setTicketRem(null)} />}
-    </div>
+        {/* v3.0.5 Panels */}
+        {previewRem && <PreviewChangesPanel rem={previewRem} data={data} onClose={() => setPreviewRem(null)} />}
+        {ticketRem && <CreateTicketModal rem={ticketRem} data={data} onClose={() => setTicketRem(null)} />}
+      </div>
+      <IdentityContextDrawer />
+    </IdentityDrawerProvider>
   );
 }

@@ -24,6 +24,8 @@ export default function Login() {
   // Phase 54: SSO status
   const [ssoEnabled, setSsoEnabled] = useState(false);
   const [ssoForced, setSsoForced] = useState(false);
+  // Phase 17: OIDC status
+  const [oidcEnabled, setOidcEnabled] = useState(false);
 
   // Phase 78: Forced password change
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
@@ -43,6 +45,7 @@ export default function Login() {
         if (data) {
           setSsoEnabled(data.sso_enabled === true);
           setSsoForced(data.sso_force_sso === true);
+          setOidcEnabled(data.oidc_enabled === true);
         }
       })
       .catch(() => {});
@@ -212,8 +215,8 @@ export default function Login() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                    t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
                     t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
+                    t.plan === 'trial' ? 'bg-amber-100 text-amber-700' :
                     'bg-gray-100 text-gray-600'
                   }`}>{t.plan}</span>
                   <span className="text-gray-400 group-hover:text-blue-600 transition">{'\u2192'}</span>
@@ -341,22 +344,44 @@ export default function Login() {
             </div>
           )}
 
-          {/* Phase 54: SSO Button */}
-          {ssoEnabled && (
+          {/* Phase 54 + Phase 17: SSO Buttons (SAML and/or OIDC) */}
+          {(ssoEnabled || oidcEnabled) && (
             <>
-              <button
-                type="button"
-                onClick={() => {
-                  const slug = orgSlug || resolvedOrg?.slug;
-                  if (slug) window.location.href = `/api/auth/saml/login?tenant_slug=${encodeURIComponent(slug)}`;
-                }}
-                className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-blue-600 text-blue-600 hover:bg-blue-50 transition flex items-center justify-center gap-2"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-                Sign in with SSO
-              </button>
+              {ssoEnabled && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const slug = orgSlug || resolvedOrg?.slug;
+                    if (slug) window.location.href = `/api/auth/saml/login?tenant_slug=${encodeURIComponent(slug)}`;
+                  }}
+                  className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-blue-600 text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                  {oidcEnabled ? 'Sign in with SAML' : 'Sign in with SSO'}
+                </button>
+              )}
+              {oidcEnabled && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const slug = orgSlug || resolvedOrg?.slug;
+                    if (!slug) return;
+                    try {
+                      const res = await fetch(`/api/auth/oidc/login?org_slug=${encodeURIComponent(slug)}`);
+                      const data = await res.json();
+                      if (data.redirect_url) window.location.href = data.redirect_url;
+                    } catch { /* ignore */ }
+                  }}
+                  className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-indigo-600 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                  </svg>
+                  {ssoEnabled ? 'Sign in with SSO' : 'Sign in with SSO'}
+                </button>
+              )}
               {!ssoForced && (
                 <div className="flex items-center gap-3 text-xs text-gray-400">
                   <div className="flex-1 h-px bg-gray-200 dark:bg-slate-700" />
@@ -424,7 +449,14 @@ export default function Login() {
           )}
         </div>
 
-        <p className="text-center text-xs text-gray-400 mt-6">
+        <div className="text-center mt-6">
+          <span className="text-xs text-gray-500 dark:text-gray-400">Don't have an account? </span>
+          <button onClick={() => navigate('/signup')} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+            Sign up free
+          </button>
+        </div>
+
+        <p className="text-center text-xs text-gray-400 mt-3">
           Powered by AuditGraph
         </p>
       </div>

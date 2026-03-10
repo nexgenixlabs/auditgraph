@@ -5,6 +5,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { COLORS, getScoreColor, getGrade } from '../../constants/ciso';
+import { useIdentityDrawer } from '../../contexts/IdentityDrawerContext';
 
 // ─── Typography Helpers ──────────────────────────────────────────
 
@@ -140,12 +141,20 @@ export function CISOCard({ children, style }: { children: React.ReactNode; style
 
 export function DN({ children, navigateTo, tooltip }: { children: React.ReactNode; navigateTo?: string; tooltip?: string }) {
   const navigate = useNavigate();
+  const drawerCtx = useIdentityDrawer();
   if (!navigateTo) {
     return <span title={tooltip}>{children}</span>;
   }
   return (
     <span
-      onClick={(e) => { e.stopPropagation(); navigate(navigateTo); }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (drawerCtx && navigateTo.startsWith('/identities')) {
+          drawerCtx.openDrawer(navigateTo);
+        } else {
+          navigate(navigateTo);
+        }
+      }}
       title={tooltip || `Click to view details`}
       style={{
         textDecoration: 'underline', textDecorationStyle: 'dashed' as const,

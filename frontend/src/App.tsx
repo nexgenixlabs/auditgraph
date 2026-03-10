@@ -36,6 +36,7 @@ import AccessReviews from './pages/AccessReviews';
 import RoleMining from './pages/RoleMining';
 import IdentityGroups from './pages/IdentityGroups';
 import Login from './pages/Login';
+import Signup from './pages/Signup';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import LockedDashboard from './pages/LockedDashboard';
@@ -63,8 +64,15 @@ import SensitiveDataAccess from './pages/SensitiveDataAccess';
 import CISODashboard from './pages/CISODashboard';
 import RemediationCenter from './pages/RemediationCenter';
 import SecurityFindings from './pages/SecurityFindings';
+import GraphFindings from './pages/GraphFindings';
+import SecurityCommandCenter from './pages/SecurityCommandCenter';
 import SecurityDashboard from './pages/SecurityDashboard';
 import IdentityGraph from './pages/IdentityGraph';
+import IdentityExposures from './pages/IdentityExposures';
+import PrivilegeDrift from './pages/PrivilegeDrift';
+import AttackSimulator from './pages/AttackSimulator';
+import AcceptInvitation from './pages/AcceptInvitation';
+import OrganizationUsers from './pages/OrganizationUsers';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
 import Documentation from './pages/Documentation';
@@ -79,6 +87,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { OrganizationProvider, useOrganization } from './contexts/TenantContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { CopilotProvider, useCopilot } from './contexts/CopilotContext';
 import { isAdminHost } from './utils/hostDetection';
 // ConnectionSwitcher removed — scope selection now in TopBar
 
@@ -107,9 +116,9 @@ function ProtectedRoute({ children, requiredRole }: { children: React.ReactNode;
 function AppContent() {
   const { user, loading, isAdmin, isSuperAdmin, canManageConnections } = useAuth();
   const { loading: orgLoading, error: orgError } = useOrganization();
+  const { state: copilotState, openCopilot, closeCopilot } = useCopilot();
   const location = useLocation();
   const [searchOpen, setSearchOpen] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [orgStage, setTenantStage] = useState<string>('active');
 
@@ -217,6 +226,7 @@ function AppContent() {
       <Routes>
         {/* Login route - no nav bar */}
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
+        <Route path="/signup" element={user ? <Navigate to="/onboarding" replace /> : <Signup />} />
 
         {/* Phase 84: Password reset routes - public, no nav bar */}
         <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -224,6 +234,9 @@ function AppContent() {
 
         {/* Phase 54: SSO callback - no nav bar, no auth required */}
         <Route path="/sso-callback" element={<SsoCallback />} />
+
+        {/* Phase 17: Accept invitation - public, no nav bar */}
+        <Route path="/accept-invite" element={<AcceptInvitation />} />
 
         {/* Phase 5: Public legal & documentation pages */}
         <Route path="/privacy" element={<PrivacyPolicy />} />
@@ -255,7 +268,7 @@ function AppContent() {
             <DemoBanner />
             <div className="min-h-screen" style={{ backgroundColor: 'var(--bg-surface)' }}>
               {/* Top Bar */}
-              <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => setCopilotOpen(true)} />
+              <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => openCopilot()} />
 
               {/* Left Sidebar */}
               <Sidebar isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} locked={orgStage !== 'active'} canManageConnections={canManageConnections} />
@@ -263,8 +276,8 @@ function AppContent() {
               {/* Global Search Modal */}
               <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
 
-              {/* AI Security Copilot Panel (Phase 79) */}
-              <CopilotPanel open={copilotOpen} onClose={() => setCopilotOpen(false)} />
+              {/* AI Security Copilot Panel (Phase 79 + Investigation Enhancement) */}
+              <CopilotPanel open={copilotState.open} onClose={closeCopilot} />
 
               {/* Page Content */}
               <main className="min-h-screen w-full overflow-x-hidden" style={{ paddingLeft: 'var(--sidebar-width, 220px)', paddingTop: 'var(--header-height, 56px)' }}>
@@ -281,8 +294,13 @@ function AppContent() {
                   } />
                   <Route path="/remediation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationCenter /></ErrorBoundary>} />
                   <Route path="/security-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityFindings /></ErrorBoundary>} />
+                  <Route path="/graph-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><GraphFindings /></ErrorBoundary>} />
+                  <Route path="/command-center" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityCommandCenter /></ErrorBoundary>} />
                   <Route path="/security-dashboard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityDashboard /></ErrorBoundary>} />
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
+                  <Route path="/identity-exposures" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExposures /></ErrorBoundary>} />
+                  <Route path="/privilege-drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PrivilegeDrift /></ErrorBoundary>} />
+                  <Route path="/attack-simulator" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackSimulator /></ErrorBoundary>} />
                   <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
@@ -322,6 +340,7 @@ function AppContent() {
                       <ErrorBoundary><Settings /></ErrorBoundary>
                     </ProtectedRoute>
                   } />
+                  <Route path="/organization/users" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><OrganizationUsers /></ErrorBoundary>} />
                   <Route path="/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ActivityLog /></ErrorBoundary>} />
                   <Route path="/notifications" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NotificationCenter /></ErrorBoundary>} />
                   <Route path="/analytics" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><CrossTenantAnalytics /></ErrorBoundary>} />
@@ -342,7 +361,9 @@ function App() {
         <OrganizationProvider>
           <AuthProvider>
             <ConnectionProvider>
-              <AppContent />
+              <CopilotProvider>
+                <AppContent />
+              </CopilotProvider>
             </ConnectionProvider>
           </AuthProvider>
         </OrganizationProvider>

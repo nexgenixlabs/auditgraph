@@ -612,6 +612,47 @@ class EmailService:
         finally:
             loop.close()
 
+    def send_invitation_email(self, to_email, org_name, inviter_name, role, accept_url):
+        """Send a user invitation email."""
+        subject = f"You've been invited to join {org_name} on AuditGraph"
+        html_body = f"""
+        <div style="max-width:600px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;background:#0F172A;color:#E2E8F0;padding:32px;border-radius:12px;">
+            <div style="text-align:center;margin-bottom:24px;">
+                <h1 style="color:#60A5FA;margin:0;">AuditGraph</h1>
+            </div>
+            <div style="background:#1E293B;border-radius:8px;padding:24px;margin-bottom:24px;">
+                <h2 style="color:#F1F5F9;margin-top:0;">You're invited!</h2>
+                <p style="color:#94A3B8;line-height:1.6;">
+                    <strong style="color:#E2E8F0;">{inviter_name}</strong> has invited you to join
+                    <strong style="color:#E2E8F0;">{org_name}</strong> on AuditGraph as a
+                    <strong style="color:#60A5FA;">{role}</strong>.
+                </p>
+                <div style="text-align:center;margin:24px 0;">
+                    <a href="{accept_url}" style="display:inline-block;background:#2563EB;color:#FFFFFF;
+                       padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:600;">
+                        Accept Invitation
+                    </a>
+                </div>
+                <p style="color:#64748B;font-size:13px;">
+                    This invitation expires in 7 days. If you didn't expect this, you can ignore this email.
+                </p>
+            </div>
+            <div style="text-align:center;color:#475569;font-size:12px;">
+                AuditGraph Identity Risk Platform &mdash; <a href="https://auditgraph.ai" style="color:#94A3B8;">auditgraph.ai</a>
+            </div>
+        </div>
+        """
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        except Exception as e:
+            logger.error(f"Failed to send invitation email: {e}")
+            return False
+        finally:
+            loop.close()
+
     def _generate_executive_summary_html(
         self, stats: Dict, credential_health: Dict, conditional_access: Dict,
         remediation_summary: Dict, previous_run, org_name: str, collected_at: str

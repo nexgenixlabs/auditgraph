@@ -51,6 +51,9 @@ from app.engines.drift_detector import DriftDetector
 from app.engines.anomaly_detector import AnomalyDetector
 from app.services.email_service import EmailService
 from app.database import Database
+from app.engines.platform_health import (
+    DISCOVERY_JOB, GRAPH_BUILD_JOB, FINDINGS_ANALYSIS_JOB, RISK_SCORE_JOB,
+)
 from typing import Dict
 
 
@@ -121,7 +124,7 @@ def run_scheduled_discovery(scan_mode: str = 'deep'):
     for db_org_id, org_name in orgs:
         logger.info(f"▶ Running discovery for organization: {org_name} (id={db_org_id})")
         try:
-            _track_job('discovery', db_org_id,
+            _track_job(DISCOVERY_JOB, db_org_id,
                        _run_org_discovery, db_org_id, org_name, scan_mode)
         except Exception as e:
             logger.error(f"❌ Discovery FAILED for organization {org_name}: {str(e)}")
@@ -147,12 +150,14 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     Otherwise scan ALL connected connections for the organization.
     Requires at least one connected cloud_connection — legacy settings path is deprecated.
     """
+    import time as _time
+
     # Demo tenant guard — block real cloud discovery for demo orgs
     admin_db = Database()
     try:
         org = admin_db.get_organization_by_id(db_org_id)
         if org and org.get('is_demo'):
-            logger.info(f"  ⏭ Skipping discovery for demo organization '{org_name}' (is_demo=true)")
+            logger.info("SNAPSHOT_SKIP tenant_id=%d org=%s reason=demo_tenant", db_org_id, org_name)
             admin_db.close()
             return
         connections = admin_db.get_cloud_connections(db_org_id,
@@ -164,25 +169,132 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     if connection_id:
         connections = [c for c in connections if c['id'] == connection_id]
         if not connections:
-            logger.warning(f"  ⚠ Connection {connection_id} not found for organization {org_name}")
+            logger.warning("SNAPSHOT_SKIP tenant_id=%d org=%s reason=connection_not_found connection_id=%d",
+                          db_org_id, org_name, connection_id)
             return
 
     # Filter to only connected connections
     connected = [c for c in connections if c.get('status') == 'connected']
 
-    if connected:
-        logger.info(f"  Found {len(connected)} connected connection(s) for {org_name}")
-        for conn in connected:
-            _run_connection_discovery(db_org_id, org_name, conn, scan_mode)
-    else:
+    if not connected:
         logger.warning(
-            "  ⚠ No connected cloud_connections for org %s (id=%d). "
-            "Skipping discovery — configure a cloud connection first.",
-            org_name, db_org_id
+            "SNAPSHOT_SKIP tenant_id=%d org=%s reason=no_connected_connections",
+            db_org_id, db_org_id
         )
         return
 
-    logger.info(f"  ✅ Discovery completed for {org_name}")
+    # Phase 7: Create org-level snapshot_run
+    snapshot_run_id = None
+    try:
+        sr_db = Database()
+        snapshot_run_id = sr_db.create_snapshot_run(
+            organization_id=db_org_id,
+            scan_mode=scan_mode,
+            connections_total=len(connected),
+            triggered_by='scheduler',
+        )
+        sr_db.close()
+        logger.info("SNAPSHOT_RUN_START snapshot_run_id=%s tenant_id=%d org=%s connections=%d scan_mode=%s",
+                    snapshot_run_id, db_org_id, org_name, len(connected), scan_mode)
+    except Exception as e:
+        logger.warning("SNAPSHOT_RUN_CREATE_FAILED tenant_id=%d error=%s", db_org_id, str(e)[:200])
+
+    run_start = _time.monotonic()
+    conn_completed = 0
+    conn_failed = 0
+    total_identities = 0
+    total_spns = 0
+    total_roles = 0
+
+    for conn in connected:
+        try:
+            _run_connection_discovery(db_org_id, org_name, conn, scan_mode)
+            conn_completed += 1
+            # Collect metrics from the latest discovery run
+            try:
+                mdb = Database()
+                cursor = mdb.conn.cursor()
+                cursor.execute("""
+                    SELECT total_identities, critical_count, high_count
+                    FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                dr = cursor.fetchone()
+                if dr:
+                    total_identities += (dr[0] or 0)
+                # Count SPNs
+                cursor.execute("""
+                    SELECT COUNT(*) FROM identities
+                    WHERE discovery_run_id = (
+                        SELECT id FROM discovery_runs
+                        WHERE organization_id = %s AND status = 'completed'
+                        ORDER BY id DESC LIMIT 1
+                    ) AND identity_category = 'service_principal'
+                """, (db_org_id,))
+                spn_row = cursor.fetchone()
+                total_spns += (spn_row[0] or 0) if spn_row else 0
+                cursor.close()
+                mdb.close()
+            except Exception:
+                pass
+        except Exception as e:
+            conn_failed += 1
+            logger.error("SNAPSHOT_CONNECTION_FAILED tenant_id=%d org=%s connection_id=%d error=%s",
+                        db_org_id, org_name, conn['id'], str(e)[:200])
+
+    # Phase 7: Complete snapshot_run
+    elapsed = _time.monotonic() - run_start
+    run_status = 'failed' if conn_failed == len(connected) else 'completed'
+    error_msg = None
+    if conn_failed > 0:
+        error_msg = f"{conn_failed}/{len(connected)} connections failed"
+        if conn_completed > 0:
+            run_status = 'completed'  # partial success
+
+    if snapshot_run_id:
+        try:
+            sr_db = Database()
+            sr_db.complete_snapshot_run(
+                snapshot_run_id, status=run_status, error_message=error_msg,
+                identities_found=total_identities, spns_found=total_spns,
+                roles_found=total_roles, connections_completed=conn_completed,
+                connections_failed=conn_failed,
+            )
+            sr_db.close()
+            logger.info(
+                "SNAPSHOT_RUN_COMPLETE snapshot_run_id=%s tenant_id=%d status=%s "
+                "duration=%.1fs identities=%d spns=%d connections_ok=%d connections_fail=%d",
+                snapshot_run_id, db_org_id, run_status, elapsed,
+                total_identities, total_spns, conn_completed, conn_failed
+            )
+        except Exception as e:
+            logger.warning("SNAPSHOT_RUN_COMPLETE_FAILED snapshot_run_id=%s error=%s",
+                          snapshot_run_id, str(e)[:200])
+
+    # Phase 7: Create alert on failure
+    if conn_failed > 0:
+        severity = 'critical' if conn_failed == len(connected) else 'warning'
+        try:
+            alert_db = Database()
+            alert_db.create_snapshot_alert(
+                organization_id=db_org_id,
+                severity=severity,
+                message=f"Snapshot {'fully' if run_status == 'failed' else 'partially'} failed for {org_name}: {error_msg}",
+                alert_type='snapshot_failure',
+                snapshot_run_id=snapshot_run_id,
+                metadata={'connections_failed': conn_failed, 'connections_total': len(connected)},
+            )
+            alert_db.close()
+            logger.info("SNAPSHOT_ALERT_CREATED tenant_id=%d severity=%s snapshot_run_id=%s",
+                        db_org_id, severity, snapshot_run_id)
+        except Exception as e:
+            logger.warning("SNAPSHOT_ALERT_CREATE_FAILED tenant_id=%d error=%s", db_org_id, str(e)[:200])
+
+    if run_status == 'failed':
+        return  # Skip post-pipeline steps on total failure
+
+    logger.info("SNAPSHOT_COMPLETE tenant_id=%d org=%s duration=%.1fs", db_org_id, org_name, elapsed)
 
     # Log activity (with organization context)
     try:
@@ -428,20 +540,46 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
             conn_id, db_org_id, cloud, elapsed, str(e)[:200], error_type, is_retryable, job_id
         )
 
-        # Phase 4: Mark job failed with error classification
+        # Phase 4/7: Mark job failed with error classification + exponential backoff retry
         if job_id:
             try:
                 fdb = Database()
                 fdb.complete_snapshot_job(job_id, 'failed', str(e)[:500], error_type=error_type)
-                # Phase 4: Auto-retry for retryable errors
+                # Phase 7: Auto-retry with exponential backoff for retryable errors
                 if is_retryable:
-                    new_count = fdb.retry_snapshot_job(job_id)
-                    if new_count is not None:
-                        logger.info("  🔄 DISCOVERY_RETRY job=%s retry_count=%d error_type=%s",
-                                    job_id, new_count, error_type)
+                    retry_result = fdb.retry_snapshot_job_with_backoff(job_id)
+                    if retry_result:
+                        logger.info(
+                            "DISCOVERY_RETRY_SCHEDULED job=%s retry_count=%d "
+                            "delay_seconds=%d error_type=%s tenant_id=%d",
+                            job_id, retry_result['retry_count'],
+                            retry_result['delay_seconds'], error_type, db_org_id
+                        )
+                    else:
+                        logger.warning(
+                            "DISCOVERY_RETRY_EXHAUSTED job=%s tenant_id=%d error_type=%s",
+                            job_id, db_org_id, error_type
+                        )
+                # Phase 7: Create snapshot alert on connection failure
+                try:
+                    severity = 'critical' if not is_retryable else 'warning'
+                    fdb.create_snapshot_alert(
+                        organization_id=db_org_id,
+                        severity=severity,
+                        message=f"Discovery failed for connection '{label}' ({cloud}): {str(e)[:200]}",
+                        alert_type='connection_failure',
+                        snapshot_job_id=job_id,
+                        metadata={
+                            'connection_id': conn_id, 'cloud': cloud,
+                            'error_type': error_type, 'retryable': is_retryable,
+                            'duration_seconds': round(elapsed, 1),
+                        },
+                    )
+                except Exception:
+                    pass
                 fdb.close()
             except Exception as fe:
-                logger.warning(f"  ⚠ Failed to mark snapshot job as failed: {fe}")
+                logger.warning("DISCOVERY_FAIL_TRACK_ERROR job=%s error=%s", job_id, str(fe)[:200])
         raise
     finally:
         # Phase 4: Stop heartbeat thread
@@ -844,6 +982,18 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 33: Security command center posture
         _track_job('security_posture', db_org_id,
                    _run_security_posture, db_org_id, db)
+
+        # Phase 8 (v2): BFS graph attack engine (after graph intelligence)
+        _track_job('graph_attack_engine', db_org_id,
+                   _run_graph_attack_engine, current_run_id, db_org_id, db)
+
+        # Phase 9: Compute security posture score (after graph attack engine)
+        _track_job('posture_score', db_org_id,
+                   _run_posture_score, current_run_id, db_org_id, db)
+
+        # Phase 11: SLA breach check (after findings are persisted)
+        _track_job('sla_check', db_org_id,
+                   _run_sla_check, db_org_id, db)
 
         # Phase 51: Save compliance snapshot
         _save_compliance_snapshot(current_run_id, db)
@@ -1782,6 +1932,136 @@ def _run_identity_governance(db_org_id, db):
         logger.exception(e)
 
 
+def _run_graph_attack_engine(current_run_id, db_org_id, db):
+    """Phase 8 (v2): BFS graph attack path discovery + identity risk scoring."""
+    try:
+        import time as _time
+        from app.engines.graph_attack_engine import GraphAttackEngine
+        _t0 = _time.monotonic()
+        engine = GraphAttackEngine(db)
+        result = engine.analyze(db_org_id, current_run_id)
+        analysis_duration_ms = int((_time.monotonic() - _t0) * 1000)
+        # Persist results
+        db.upsert_identity_risk_scores(result['risk_scores'])
+        db.save_graph_attack_findings(result['findings'])
+
+        # Persist full graph snapshot for historical comparison
+        try:
+            snapshot = engine.graph.to_snapshot()
+            snap_result = db.persist_graph_snapshot(
+                db_org_id, current_run_id,
+                snapshot['nodes'], snapshot['edges'],
+                analysis_duration_ms=analysis_duration_ms,
+            )
+            logger.info(
+                "GRAPH_SNAPSHOT_PERSISTED org_id=%d run_id=%d nodes=%d edges=%d duration_ms=%d",
+                db_org_id, current_run_id,
+                snap_result['nodes'], snap_result['edges'],
+                analysis_duration_ms,
+            )
+        except Exception as snap_err:
+            logger.error("Graph snapshot persistence failed: %s", snap_err)
+
+        stats = result['stats']
+        logger.info(
+            "GRAPH_ATTACK_ENGINE org_id=%d run_id=%d paths=%d findings=%d scored=%d",
+            db_org_id, current_run_id,
+            stats['paths_discovered'], stats['findings_generated'],
+            stats['identities_scored'],
+        )
+        # Phase 10: Auto-resolve findings whose attack paths no longer exist
+        current_fps = {f['fingerprint'] for f in result['findings']}
+        resolved = db.auto_resolve_findings(db_org_id, current_run_id, current_fps)
+        if resolved > 0:
+            logger.info("FINDINGS_AUTO_RESOLVED org_id=%d count=%d", db_org_id, resolved)
+
+        # Phase 11: Backfill SLA deadlines on new findings
+        sla_count = db.backfill_finding_slas(db_org_id)
+        if sla_count > 0:
+            logger.info("SLA_BACKFILL org_id=%d count=%d", db_org_id, sla_count)
+
+        # Phase 11: Dispatch webhooks for new findings
+        if stats['findings_generated'] > 0:
+            db.dispatch_security_webhooks(db_org_id, 'finding.created', {
+                'count': stats['findings_generated'],
+                'run_id': current_run_id,
+            })
+        if stats['paths_discovered'] > 0:
+            db.dispatch_security_webhooks(db_org_id, 'attack_path.detected', {
+                'count': stats['paths_discovered'],
+                'run_id': current_run_id,
+            })
+
+        # Phase 11: Slack notification for critical findings
+        critical = [f for f in result['findings'] if f.get('severity') == 'critical']
+        if critical:
+            db.send_slack_notification(
+                db_org_id,
+                f":rotating_light: {len(critical)} critical finding(s) discovered in latest scan",
+            )
+
+        # Phase 11: Auto-create Jira tickets for critical findings
+        for finding in critical[:5]:  # Cap at 5 tickets per run
+            try:
+                db.create_jira_ticket(db_org_id, finding)
+            except Exception:
+                pass  # Non-blocking
+    except Exception as e:
+        logger.error(f"Graph attack engine failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_posture_score(current_run_id, db_org_id, db):
+    """Phase 9: Compute and persist security posture score for tenant."""
+    try:
+        result = db.compute_posture_score(db_org_id, current_run_id)
+        score = result.get('posture_score', 0)
+        logger.info("POSTURE_SCORE org_id=%d run_id=%d score=%d",
+                    db_org_id, current_run_id, score)
+        if score < 50:
+            db.record_security_event(
+                db_org_id, 'posture_degraded', 'warning',
+                f'Security posture score dropped to {score}/100',
+                f'Critical findings: {result.get("critical_findings", 0)}, '
+                f'Attack paths: {result.get("attack_paths_count", 0)}',
+            )
+            # Phase 11: Webhook + Slack for posture degradation
+            db.dispatch_security_webhooks(db_org_id, 'posture.score_changed', {
+                'score': score, 'run_id': current_run_id,
+            })
+            db.send_slack_notification(
+                db_org_id,
+                f":warning: Security posture score dropped to {score}/100",
+            )
+    except Exception as e:
+        logger.error(f"Posture score computation failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
+def _run_sla_check(db_org_id, db):
+    """Phase 11: Check for SLA breaches on open findings."""
+    try:
+        breached = db.check_sla_breaches(db_org_id)
+        if breached:
+            logger.info("SLA_BREACHED org_id=%d count=%d", db_org_id, len(breached))
+            for f in breached:
+                db.record_security_event(
+                    db_org_id, 'sla_breached', 'warning',
+                    f'SLA breached: {f["title"]} ({f["severity"]})',
+                    f'Deadline was {f["sla_deadline"]}',
+                    finding_id=f['id'],
+                    identity_id=f.get('identity_id'),
+                )
+            # Notify via Slack
+            db.send_slack_notification(
+                db_org_id,
+                f":clock1: {len(breached)} finding(s) have breached their SLA deadline",
+            )
+    except Exception as e:
+        logger.error(f"SLA check failed for org {db_org_id}: {e}")
+        logger.exception(e)
+
+
 def _run_integration_dispatch(db_org_id, db):
     """Phase 30: Dispatch security events to configured integrations."""
     try:
@@ -2220,6 +2500,13 @@ def run_data_retention():
                 except Exception:
                     pass  # Tables may not exist yet
 
+                # Graph snapshot retention
+                graph_days = int(db.get_system_setting('retention_graph_days', '90'))
+                try:
+                    results['graph_snapshots'] = db.cleanup_old_graph_snapshots(days=graph_days)
+                except Exception:
+                    pass  # Table may not exist yet
+
                 total = sum(results.values())
                 if total > 0:
                     db.log_activity('data_retention', f'Scheduled cleanup for {org_name}: {total} records deleted',
@@ -2598,6 +2885,17 @@ def start_scheduler():
         coalesce=True
     )
 
+    # Phase 13: Trial expiration check — daily at 05:00 UTC
+    scheduler.add_job(
+        func=run_trial_expiration,
+        trigger=CronTrigger(hour=5, minute=0),
+        id='trial_expiration',
+        name='Trial Expiration Check (Daily, 05:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Start the scheduler
     scheduler.start()
 
@@ -2678,6 +2976,7 @@ def _track_job(job_type: str, org_id: int, func, *args, **kwargs):
     completed or failed once it returns.  Non-blocking: if the
     tracking DB call itself fails we log and continue.
     """
+    import time as _time
     job_run = None
     db_track = None
     try:
@@ -2685,12 +2984,16 @@ def _track_job(job_type: str, org_id: int, func, *args, **kwargs):
         job_run = db_track.create_job_run(job_type, organization_id=org_id)
         db_track.close()
         db_track = None
+        logger.info("JOB_START job_id=%s job_type=%s tenant_id=%d",
+                    job_run['job_id'], job_type, org_id)
     except Exception as e:
-        logger.warning(f"Phase 8: failed to create job_run for {job_type}: {e}")
+        logger.warning("JOB_TRACK_FAILED action=create job_type=%s tenant_id=%d error=%s",
+                       job_type, org_id, str(e)[:200])
         if db_track:
             db_track.close()
 
     # Execute the actual engine function
+    job_start = _time.monotonic()
     result = None
     error = None
     try:
@@ -2699,6 +3002,7 @@ def _track_job(job_type: str, org_id: int, func, *args, **kwargs):
         error = str(e)[:500]
         raise  # Re-raise so outer handler sees it
     finally:
+        duration_s = round(_time.monotonic() - job_start, 1)
         if job_run:
             try:
                 db_track = Database()
@@ -2706,14 +3010,27 @@ def _track_job(job_type: str, org_id: int, func, *args, **kwargs):
                 db_track.complete_job_run(
                     str(job_run['job_id']), status=status, error_message=error,
                 )
-                # Log event (Part 11)
+                # Structured log (Phase 7)
+                if error:
+                    logger.error(
+                        "JOB_FAILED job_id=%s job_type=%s tenant_id=%d duration=%.1fs error=%s",
+                        job_run['job_id'], job_type, org_id, duration_s, error[:200]
+                    )
+                else:
+                    logger.info(
+                        "JOB_COMPLETE job_id=%s job_type=%s tenant_id=%d duration=%.1fs",
+                        job_run['job_id'], job_type, org_id, duration_s
+                    )
+                # Activity log
                 event = 'job_failed' if error else 'job_completed'
                 db_track.log_activity(event,
                     f'{job_type} job {status}' + (f': {error[:120]}' if error else ''),
-                    {'job_id': str(job_run['job_id']), 'job_type': job_type})
+                    {'job_id': str(job_run['job_id']), 'job_type': job_type,
+                     'duration_seconds': duration_s})
                 db_track.close()
             except Exception as te:
-                logger.warning(f"Phase 8: failed to complete job_run: {te}")
+                logger.warning("JOB_TRACK_FAILED action=complete job_type=%s error=%s",
+                               job_type, str(te)[:200])
                 if db_track:
                     db_track.close()
 
@@ -2757,9 +3074,27 @@ def _run_platform_health_check(current_run_id: int, org_id: int, db: Database):
 
         db.upsert_tenant_health(health)
         logger.info(
-            f"Phase 8: tenant_health updated for org={org_id} "
-            f"status={health['status']} snapshot_age={health['snapshot_age_hours']}h"
+            "TENANT_HEALTH_UPDATED tenant_id=%d status=%s snapshot_age=%dh "
+            "findings=%d critical=%d",
+            org_id, health['status'], health['snapshot_age_hours'],
+            health.get('findings_count', 0), health.get('critical_risks', 0)
         )
+
+        # Phase 7: Create alert if health is critical
+        if health['status'] == 'critical':
+            try:
+                alert_db = Database()
+                alert_db.create_snapshot_alert(
+                    organization_id=org_id,
+                    severity='critical',
+                    message=f"Tenant health is CRITICAL: snapshot age {health['snapshot_age_hours']}h",
+                    alert_type='health_critical',
+                    metadata={'snapshot_age_hours': health['snapshot_age_hours'],
+                              'findings_count': health.get('findings_count', 0)},
+                )
+                alert_db.close()
+            except Exception:
+                pass
 
         # Part 11: audit log
         try:
@@ -2801,6 +3136,35 @@ def trigger_manual_discovery(scan_mode: str = 'deep', db_org_id: int = None,
     else:
         logger.info(f"🔄 MANUAL DISCOVERY TRIGGERED for all organizations (mode={scan_mode})")
         run_scheduled_discovery(scan_mode=scan_mode)
+
+
+def run_trial_expiration():
+    """Phase 13: Check for expired trials and downgrade to free plan."""
+    from app.database import Database
+    db = Database(_admin_reason='trial_expiration: check expired trials')
+    try:
+        expired = db.expire_trials()
+        if expired:
+            for org in expired:
+                logger.info(f"Trial expired: {org['name']} (ID={org['id']}) → downgraded to free")
+                try:
+                    db.record_security_event(
+                        org_id=org['id'],
+                        event_type='trial_expired',
+                        severity='info',
+                        title=f'Trial expired for {org["name"]}',
+                        description='Organization downgraded from trial to free plan. '
+                                    'New discovery scans are disabled on the free plan.',
+                    )
+                except Exception:
+                    pass
+            logger.info(f"Trial expiration: {len(expired)} orgs downgraded to free")
+        else:
+            logger.debug("Trial expiration: no expired trials found")
+    except Exception as e:
+        logger.error(f"Trial expiration error: {e}")
+    finally:
+        db.close()
 
 
 # For testing the scheduler in isolation

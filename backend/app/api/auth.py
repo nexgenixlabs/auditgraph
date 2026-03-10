@@ -56,6 +56,10 @@ PUBLIC_PATHS = {
     '/api/auth/tenant-branding',  # backward compat
     '/api/auth/password-policy',
     '/api/billing/stripe-webhook',
+    '/api/auth/signup',
+    '/api/auth/verify-email',
+    '/api/auth/accept-invitation',
+    '/api/auth/validate-invitation',
 }
 
 
@@ -265,6 +269,14 @@ def auth_middleware():
     if request.path.startswith('/api/auth/saml/') or request.path == '/api/auth/sso-status':
         return None
 
+    # Phase 17: OIDC public endpoints
+    if request.path.startswith('/api/auth/oidc/'):
+        return None
+
+    # Phase 17: SCIM endpoints (use their own bearer token auth)
+    if request.path.startswith('/api/scim/'):
+        return None
+
     if not request.path.startswith('/api/'):
         return None
 
@@ -449,9 +461,10 @@ def auth_middleware():
 # Phase 1 Security Hardening: Role hierarchy — higher roles inherit lower permissions
 # owner > admin > security_admin > compliance > reader
 ROLE_HIERARCHY = {
-    'owner': {'owner', 'admin', 'security_admin', 'compliance', 'reader', 'auditor', 'viewer'},
-    'admin': {'admin', 'security_admin', 'compliance', 'reader', 'auditor', 'viewer'},
-    'security_admin': {'security_admin', 'compliance', 'reader', 'auditor', 'viewer'},
+    'owner': {'owner', 'admin', 'security_admin', 'security_analyst', 'compliance', 'reader', 'auditor', 'viewer'},
+    'admin': {'admin', 'security_admin', 'security_analyst', 'compliance', 'reader', 'auditor', 'viewer'},
+    'security_admin': {'security_admin', 'security_analyst', 'compliance', 'reader', 'auditor', 'viewer'},
+    'security_analyst': {'security_analyst', 'compliance', 'reader', 'viewer'},
     'compliance': {'compliance', 'reader', 'viewer'},
     'reader': {'reader', 'viewer'},
     # Backward compat aliases

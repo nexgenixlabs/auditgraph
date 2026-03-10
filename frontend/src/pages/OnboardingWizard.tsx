@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch'];
+const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch', 'Scanning'];
 
 interface TestResult {
   status: string;
@@ -39,6 +39,7 @@ export default function OnboardingWizard() {
   const [error, setError] = useState<string | null>(null);
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
   const [showChecklist, setShowChecklist] = useState(false);
+  const [scanProgress, setScanProgress] = useState<string[]>([]);
 
   // Load checklist on mount
   useEffect(() => {
@@ -114,9 +115,42 @@ export default function OnboardingWizard() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to save settings');
       }
-      // Trigger first snapshot
-      await fetch('/api/runs/trigger', { method: 'POST' });
-      navigate('/');
+      // Trigger first snapshot and show scanning step
+      setStep(6);
+      setScanProgress(['Saving configuration...']);
+
+      const triggerRes = await fetch('/api/runs/trigger', { method: 'POST' });
+      if (triggerRes.ok) {
+        setScanProgress(prev => [...prev, 'Discovery scan triggered']);
+        setScanProgress(prev => [...prev, 'Building identity graph...']);
+
+        // Poll for completion (check every 5s, up to 3 minutes)
+        let attempts = 0;
+        const maxAttempts = 36;
+        const poll = setInterval(async () => {
+          attempts++;
+          try {
+            const statusRes = await fetch('/api/onboarding/status');
+            if (statusRes.ok) {
+              const statusData = await statusRes.json();
+              if (statusData.snapshot_completed) {
+                clearInterval(poll);
+                setScanProgress(prev => [...prev, 'Running attack path analysis...', 'Computing posture score...', 'First scan complete!']);
+                setTimeout(() => navigate('/'), 2000);
+                return;
+              }
+            }
+          } catch { /* ignore */ }
+          if (attempts >= maxAttempts) {
+            clearInterval(poll);
+            setScanProgress(prev => [...prev, 'Scan is running in the background. You can view results when ready.']);
+            setTimeout(() => navigate('/'), 3000);
+          }
+        }, 5000);
+      } else {
+        setScanProgress(prev => [...prev, 'Scan triggered — results will appear on the dashboard.']);
+        setTimeout(() => navigate('/'), 3000);
+      }
     } catch (e: any) {
       setError(e?.message || 'Setup failed');
     } finally {
@@ -505,26 +539,79 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Navigation */}
-        <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-700">
-          <button
-            onClick={() => { setStep(step - 1); setError(null); }}
-            disabled={step === 0}
-            className="px-4 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition"
-          >
-            Back
-          </button>
+        {/* Step 6: Scanning Progress */}
+        {step === 6 && (
+          <div className="space-y-5">
+            <div>
+              <h2 className="text-xl font-bold text-white">First Discovery Scan</h2>
+              <p className="text-sm text-gray-400 mt-2">
+                AuditGraph is scanning your cloud environment. This may take a few minutes.
+              </p>
+            </div>
 
-          {step < 5 && (
+            {/* Progress animation */}
+            <div className="flex items-center justify-center py-4">
+              <div className="relative w-16 h-16">
+                <div className="absolute inset-0 border-4 border-gray-700 rounded-full" />
+                <div className="absolute inset-0 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            </div>
+
+            {/* Progress log */}
+            <div className="bg-gray-800 rounded-lg p-4 space-y-2">
+              {scanProgress.map((msg, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    i === scanProgress.length - 1 && !msg.includes('complete')
+                      ? 'bg-blue-400 animate-pulse'
+                      : msg.includes('complete') || msg.includes('Complete')
+                        ? 'bg-green-400'
+                        : 'bg-green-400'
+                  }`} />
+                  <span className={`text-sm ${
+                    msg.includes('complete') || msg.includes('Complete')
+                      ? 'text-green-400 font-medium'
+                      : 'text-gray-300'
+                  }`}>{msg}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="text-center text-xs text-gray-500">
+              You can close this page — the scan will continue in the background.
+            </div>
+
             <button
-              onClick={() => { setStep(step + 1); setError(null); }}
-              disabled={!canNext()}
-              className="px-6 py-2 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              onClick={() => navigate('/')}
+              className="w-full py-2.5 rounded-lg text-sm font-medium text-gray-300 border border-gray-600 hover:bg-gray-800 transition"
             >
-              Next
+              Go to Dashboard
             </button>
-          )}
-        </div>
+          </div>
+        )}
+
+        {/* Navigation — hidden during scanning */}
+        {step < 6 && (
+          <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-700">
+            <button
+              onClick={() => { setStep(step - 1); setError(null); }}
+              disabled={step === 0}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition"
+            >
+              Back
+            </button>
+
+            {step < 5 && (
+              <button
+                onClick={() => { setStep(step + 1); setError(null); }}
+                disabled={!canNext()}
+                className="px-6 py-2 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                Next
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Skip link */}

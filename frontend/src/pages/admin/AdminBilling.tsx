@@ -260,8 +260,8 @@ export default function AdminBilling() {
           <div className="text-xs text-gray-500 mt-1">Active Clients</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-purple-700">{planCounts.enterprise || 0}</div>
-          <div className="text-xs text-gray-500 mt-1">Enterprise Licenses</div>
+          <div className="text-2xl font-bold text-blue-700">{planCounts.pro || 0}</div>
+          <div className="text-xs text-gray-500 mt-1">Pro Licenses</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="text-2xl font-bold text-green-700">{formatCents(totalMrr)}</div>
@@ -277,11 +277,11 @@ export default function AdminBilling() {
       <div className="bg-white border border-gray-200 rounded-lg p-6">
         <h3 className="text-sm font-semibold text-gray-800 mb-4">Plan Distribution</h3>
         <div className="flex gap-6">
-          {['free', 'trial', 'pro', 'enterprise'].map(plan => {
+          {['free', 'trial', 'pro'].map(plan => {
             const count = planCounts[plan] || 0;
             const pct = tenants.length > 0 ? Math.round((count / tenants.length) * 100) : 0;
             const cfg = PLAN_LABELS[plan] || PLAN_LABELS.free;
-            const barColor = plan === 'enterprise' ? 'bg-purple-500' : plan === 'pro' ? 'bg-blue-500' : plan === 'trial' ? 'bg-amber-500' : 'bg-gray-400';
+            const barColor = plan === 'pro' ? 'bg-blue-500' : plan === 'trial' ? 'bg-amber-500' : 'bg-gray-400';
             const planMrr = summary?.by_plan?.[plan]?.mrr_cents ?? 0;
             return (
               <div key={plan} className="flex-1">

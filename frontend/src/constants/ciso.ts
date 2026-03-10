@@ -237,6 +237,8 @@ export interface ComplianceControl {
   evidence: string;
   recommendation: string;
   identityCount: number;
+  detectedAt: string;
+  lastEvaluatedAt: string;
 }
 
 export interface ComplianceFramework {

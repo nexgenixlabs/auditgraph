@@ -24,7 +24,6 @@ export interface SettingsData {
   gcp_service_account_json: string;
   timezone: string;
   theme: string;
-  copilot_api_key: string;
 }
 
 export interface StatusData {

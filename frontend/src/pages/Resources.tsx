@@ -2,17 +2,21 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import { useCopilot } from '../contexts/CopilotContext';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename, RESOURCE_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Types ────────────────────────────────────────────────────────
 
+type ResourceType = 'storage_account' | 'key_vault' | 'aws_s3_bucket' | 'aws_iam_role' | 'aws_lambda' |
+  'gcp_storage_bucket' | 'gcp_project' | 'gcp_compute_instance';
+
 interface ResourceRow {
   id: number;
   resource_id: string;
   name: string;
-  resource_type: 'storage_account' | 'key_vault';
+  resource_type: ResourceType;
   location: string;
   resource_group: string;
   subscription_id: string;
@@ -25,6 +29,8 @@ interface ResourceRow {
   created_at: string;
   risk_trend_delta?: number;
   risk_trend_direction?: 'up' | 'down' | 'stable';
+  identity_count?: number;
+  cloud?: string;
 }
 
 interface ResourceStats {
@@ -76,14 +82,37 @@ function RiskBadge({ level, score }: { level?: string; score?: number }) {
   );
 }
 
+const RESOURCE_TYPE_CONFIG: Record<string, { label: string; badge: string; cloud: string }> = {
+  storage_account:     { label: 'Storage Account',  badge: 'bg-blue-100 text-blue-700',   cloud: 'azure' },
+  key_vault:           { label: 'Key Vault',        badge: 'bg-purple-100 text-purple-700', cloud: 'azure' },
+  aws_s3_bucket:       { label: 'S3 Bucket',        badge: 'bg-amber-100 text-amber-700',  cloud: 'aws' },
+  aws_iam_role:        { label: 'IAM Role',         badge: 'bg-orange-100 text-orange-700', cloud: 'aws' },
+  aws_lambda:          { label: 'Lambda Function',  badge: 'bg-yellow-100 text-yellow-700', cloud: 'aws' },
+  gcp_storage_bucket:  { label: 'GCS Bucket',       badge: 'bg-red-100 text-red-700',     cloud: 'gcp' },
+  gcp_project:         { label: 'GCP Project',      badge: 'bg-rose-100 text-rose-700',   cloud: 'gcp' },
+  gcp_compute_instance:{ label: 'Compute Instance', badge: 'bg-pink-100 text-pink-700',   cloud: 'gcp' },
+};
+
 function ResourceTypeBadge({ type }: { type: string }) {
-  const isStorage = type === 'storage_account';
+  const config = RESOURCE_TYPE_CONFIG[type];
+  if (!config) {
+    return (
+      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-700">
+        {type.replace(/_/g, ' ')}
+      </span>
+    );
+  }
   return (
-    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-      isStorage ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-    }`}>
-      {isStorage ? 'Storage Account' : 'Key Vault'}
-    </span>
+    <div className="flex items-center gap-1">
+      <span className={`px-1 py-px rounded text-[8px] font-bold uppercase ${
+        config.cloud === 'aws' ? 'bg-amber-100 text-amber-800' :
+        config.cloud === 'gcp' ? 'bg-red-100 text-red-800' :
+        'bg-blue-100 text-blue-800'
+      }`}>{config.cloud}</span>
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${config.badge}`}>
+        {config.label}
+      </span>
+    </div>
   );
 }
 
@@ -124,7 +153,7 @@ function KeyIssuesBadges({ row }: { row: ResourceRow }) {
 // ─── Props ────────────────────────────────────────────────────────
 
 interface ResourcesProps {
-  lockedType?: 'storage_account' | 'key_vault';
+  lockedType?: ResourceType;
   pageTitle?: string;
   pageSubtitle?: string;
 }
@@ -136,6 +165,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
   const location = useLocation();
   const { withConnection, selectedConnectionId } = useConnection();
   const { user, activeOrgId, activeOrgName } = useAuth();
+  const { openCopilot } = useCopilot();
 
   const [resources, setResources] = useState<ResourceRow[]>([]);
   const [stats, setStats] = useState<ResourceStats | null>(null);
@@ -462,6 +492,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
                 <SortHeader label="Subscription" field="subscription_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Score" field="risk_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <th className="px-3 py-2.5 text-xs">Identities</th>
                 <th className="px-3 py-2.5 text-xs">Trend</th>
                 <th className="px-3 py-2.5 text-xs">Key Issues</th>
                 <th className="px-3 py-2.5 text-xs w-6"></th>
@@ -486,6 +517,13 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
                   <td className="px-3 py-2"><RiskBadge level={r.risk_level} /></td>
                   <td className="px-3 py-2 font-mono text-gray-700">{r.risk_score}</td>
                   <td className="px-3 py-2">
+                    {(r.identity_count ?? 0) > 0 ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-700">{r.identity_count}</span>
+                    ) : (
+                      <span className="text-[10px] text-gray-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
                     {r.risk_trend_direction === 'up' ? (
                       <span className="text-red-500 font-medium text-[11px]">{'\u2191'} +{r.risk_trend_delta}</span>
                     ) : r.risk_trend_direction === 'down' ? (
@@ -495,7 +533,24 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
                     )}
                   </td>
                   <td className="px-3 py-2"><KeyIssuesBadges row={r} /></td>
-                  <td className="px-3 py-2 text-gray-400">→</td>
+                  <td className="px-3 py-2">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openCopilot({
+                          contextType: 'resource',
+                          contextId: r.resource_id,
+                          contextLabel: r.name,
+                        });
+                      }}
+                      className="p-1 rounded text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700 transition"
+                      title="Investigate with Copilot"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                      </svg>
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -264,8 +264,8 @@ export default function CrossTenantAnalytics() {
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                      tenant.plan === 'enterprise' ? 'bg-purple-50 text-purple-700' :
                       tenant.plan === 'pro' ? 'bg-blue-50 text-blue-700' :
+                      tenant.plan === 'trial' ? 'bg-amber-50 text-amber-700' :
                       'bg-gray-100 text-gray-600'
                     }`}>
                       {tenant.plan}

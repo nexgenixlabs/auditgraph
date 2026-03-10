@@ -212,6 +212,20 @@ def _log(db, action_type, description, metadata=None):
     db.log_activity(action_type, description, metadata, user_id=uid, organization_id=tid)
 
 
+def _get_org_plan(db, org_id):
+    """Fetch the billing plan tier for an organization. Returns 'free' as default."""
+    if not org_id or org_id == -1:
+        return 'free'
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT plan FROM tenants WHERE id = %s", (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return (row[0] if row and row[0] else 'free')
+    except Exception:
+        return 'free'
+
+
 def _connection_id():
     """Read optional connection_id from query string."""
     val = request.args.get('connection_id')
@@ -1879,8 +1893,7 @@ def get_app_settings():
         # Mask secrets for API response
         if settings.get('azure_client_secret'):
             settings['azure_client_secret'] = '********'
-        if settings.get('copilot_api_key'):
-            settings['copilot_api_key'] = '********'
+        settings.pop('copilot_api_key', None)  # Platform-managed; don't expose to tenants
 
         # Check Azure credential configuration — org's own DB settings only.
         # Do NOT fall back to env vars; those are the system/admin credentials,
@@ -1931,7 +1944,6 @@ def save_app_settings():
         'retention_activity_days', 'retention_anomalies_days',
         'retention_soar_days', 'retention_notifications_days',
         'retention_enabled',
-        'copilot_api_key',
         'p2_telemetry_enabled',
         'retention_signin_events_days', 'retention_workload_anomalies_days',
         'posture_target',
@@ -1954,7 +1966,7 @@ def save_app_settings():
         value = str(value).strip()
 
         # Skip masked secrets — don't overwrite real secret with mask
-        if key in ('azure_client_secret', 'aws_secret_access_key', 'gcp_service_account_json', 'copilot_api_key') and value == '********':
+        if key in ('azure_client_secret', 'aws_secret_access_key', 'gcp_service_account_json') and value == '********':
             continue
 
         if key == 'discovery_interval_hours':
@@ -2095,6 +2107,26 @@ def trigger_discovery():
                 }), 409
         finally:
             admin_db.close()
+
+    # Phase 13: Plan limit enforcement
+    admin_db = Database(_admin_reason='trigger_discovery: plan limits')
+    try:
+        limits = admin_db.check_plan_limits(tid)
+        plan = limits.get('plan', 'free')
+        if plan == 'free':
+            return jsonify({
+                'error': 'Discovery is not available on the free plan. Upgrade to trial or pro.',
+                'plan': plan,
+            }), 403
+        if not limits.get('within_limits'):
+            return jsonify({
+                'error': f'Plan limit reached ({limits["identities"]}/{limits["max_identities"]} identities). '
+                         f'Upgrade your plan to continue.',
+                'plan': plan,
+                'limits': limits,
+            }), 403
+    finally:
+        admin_db.close()
 
     # Validate org has at least one connected cloud connection
     if not conn_id:
@@ -2952,7 +2984,13 @@ def _identity_list_select():
             END as effective_scope,
             COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
             COALESCE(i.permission_plane, 'entra_id') as permission_plane,
-            i.deleted_at
+            i.deleted_at,
+            (
+                SELECT COUNT(*)
+                FROM graph_attack_findings gaf
+                WHERE gaf.identity_id = i.id
+                  AND gaf.status IN ('open', 'acknowledged', 'in_progress')
+            ) as attack_path_count
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -3032,6 +3070,7 @@ def _map_identity_row(row):
             else "expiring" if (row[7] or "").lower() == "expiring_soon"
             else "ok"
         ),
+        "attack_path_count": int(row[46] or 0) if len(row) > 46 else 0,
     }
 
 
@@ -6875,7 +6914,22 @@ def get_remediation_dashboard_summary():
 # Phase 31: Authentication & User Management
 # ================================================================
 
-VALID_ROLES = {'owner', 'admin', 'security_admin', 'compliance', 'reader'}
+VALID_ROLES = {'owner', 'admin', 'security_admin', 'security_analyst', 'compliance', 'reader'}
+
+# Phase 17: Permission matrix — maps capabilities to roles that have them
+PERMISSION_MATRIX = {
+    'trigger_scans':          {'owner', 'admin', 'security_admin'},
+    'manage_connections':     {'owner', 'admin', 'security_admin'},
+    'manage_findings':        {'owner', 'admin', 'security_admin', 'security_analyst'},
+    'manage_remediation':     {'owner', 'admin', 'security_admin', 'security_analyst'},
+    'run_simulations':        {'owner', 'admin', 'security_admin', 'security_analyst'},
+    'configure_integrations': {'owner', 'admin', 'security_admin'},
+    'manage_users':           {'owner', 'admin'},
+    'manage_settings':        {'owner', 'admin'},
+    'export_data':            {'owner', 'admin', 'security_admin', 'security_analyst', 'compliance'},
+    'view_compliance':        {'owner', 'admin', 'security_admin', 'security_analyst', 'compliance'},
+    'view_all':               {'owner', 'admin', 'security_admin', 'security_analyst', 'compliance', 'reader'},
+}
 
 
 def auth_login():
@@ -7016,6 +7070,137 @@ def auth_login():
             'force_password_change': user.get('force_password_change', False),
         }
     })
+
+
+# ── Phase 13: Self-Service Signup ────────────────────────────────
+
+def auth_signup():
+    """POST /api/auth/signup — create organization + admin user."""
+    import re, secrets
+    data = request.get_json(silent=True) or {}
+    email = str(data.get('email', '')).strip().lower()
+    password = str(data.get('password', ''))
+    org_name = str(data.get('organization_name', '')).strip()
+
+    # Validation
+    if not email or '@' not in email or '.' not in email.split('@')[-1]:
+        return jsonify({'error': 'Valid email is required'}), 400
+    if len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
+    if not org_name or len(org_name) < 2:
+        return jsonify({'error': 'Organization name is required (min 2 characters)'}), 400
+    if len(org_name) > 100:
+        return jsonify({'error': 'Organization name too long (max 100 characters)'}), 400
+
+    db = Database(_admin_reason='auth_signup: create org + user')
+    try:
+        # Check existing user
+        existing = db.get_user_by_email(email)
+        if existing:
+            return jsonify({'error': 'An account with this email already exists'}), 409
+
+        # Hash password
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        # Create org + user atomically
+        result = db.signup_create_org_and_user(email, password_hash, org_name)
+        org = result['organization']
+        user = result['user']
+
+        # Generate email verification token
+        token = secrets.token_urlsafe(32)
+        db.save_email_verification_token(user['id'], token)
+
+        # Log signup event
+        try:
+            db.log_activity(
+                'signup', f'New signup: {email} / {org_name}',
+                {'email': email, 'org_name': org_name, 'plan': 'trial',
+                 'ip': request.remote_addr},
+                user_id=user['id'], organization_id=org['id'],
+            )
+        except Exception:
+            pass
+
+        # Auto-login: generate tokens
+        user_for_token = {
+            'id': user['id'],
+            'username': user['username'],
+            'role': user['role'],
+            'organization_id': org['id'],
+            'org_name': org['name'],
+            'org_slug': org['slug'],
+            'is_superadmin': False,
+            'portal_role': None,
+        }
+    finally:
+        db.close()
+
+    from app.api.auth import generate_access_token, generate_refresh_token
+    access_token = generate_access_token(user_for_token, portal='client', org_slug=org['slug'])
+    refresh_token = generate_refresh_token(user_for_token, portal='client')
+
+    return jsonify({
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'verification_token': token,
+        'user': {
+            'id': user['id'],
+            'username': user['username'],
+            'display_name': user['display_name'],
+            'role': user['role'],
+            'organization_id': org['id'],
+            'org_name': org['name'],
+            'org_slug': org['slug'],
+        },
+        'organization': {
+            'id': org['id'],
+            'name': org['name'],
+            'slug': org['slug'],
+            'plan': 'trial',
+            'trial_expires_at': org.get('trial_expires_at'),
+        },
+    }), 201
+
+
+def auth_verify_email():
+    """POST /api/auth/verify-email — verify email ownership via token."""
+    data = request.get_json(silent=True) or {}
+    token = str(data.get('token', '')).strip()
+
+    if not token:
+        return jsonify({'error': 'Verification token required'}), 400
+
+    db = Database(_admin_reason='auth_verify_email')
+    try:
+        user = db.verify_email_token(token)
+        if not user:
+            return jsonify({'error': 'Invalid or expired verification token'}), 400
+
+        try:
+            db.log_activity(
+                'email_verified', f'Email verified for user {user["username"]}',
+                {'user_id': user['id']},
+                user_id=user['id'], organization_id=user.get('organization_id'),
+            )
+        except Exception:
+            pass
+
+        return jsonify({'verified': True, 'user_id': user['id']})
+    finally:
+        db.close()
+
+
+def get_plan_limits_handler():
+    """GET /api/plan/limits — return current plan limits and usage."""
+    from flask import g
+    db = _db()
+    try:
+        org_id = _org_id()
+        result = db.check_plan_limits(org_id)
+        return jsonify(result)
+    finally:
+        db.close()
 
 
 def auth_refresh():
@@ -10591,6 +10776,7 @@ def get_organization_config():
     if not tid:
         # Superadmin without org context — default Azure-only
         return jsonify({
+            'plan': 'pro',
             'cloud_providers': {
                 'azure': {'enabled': True, 'plan': 'pro'},
                 'aws': {'enabled': False, 'plan': None},
@@ -11136,9 +11322,12 @@ def get_onboarding_status():
 
         done_count = sum(1 for c in checklist if c['done'])
 
+        snapshot_completed = checklist[3]['done'] if len(checklist) > 3 else False
+
         return jsonify({
             'onboarding_completed': completed,
             'azure_configured': azure_configured,
+            'snapshot_completed': snapshot_completed,
             'has_settings': bool(settings),
             'checklist': checklist,
             'checklist_progress': done_count,
@@ -12203,6 +12392,26 @@ def get_resources():
             r['network_classification'] = _classify_network(r)
             resources.append(r)
 
+        # Batch identity_count lookup (RBAC access per resource)
+        try:
+            resource_ids = [r['resource_id'] for r in resources if r.get('resource_id')]
+            if resource_ids:
+                cursor2 = db.conn.cursor(cursor_factory=RealDictCursor)
+                cursor2.execute("""
+                    SELECT res.rid, COUNT(DISTINCT ra.identity_db_id) as cnt
+                    FROM unnest(%s::text[]) AS res(rid)
+                    JOIN role_assignments ra ON (ra.scope = res.rid OR res.rid LIKE ra.scope || '/%%')
+                    JOIN identities i ON i.id = ra.identity_db_id AND i.discovery_run_id = ANY(%s)
+                    GROUP BY res.rid
+                """, [resource_ids, run_ids])
+                id_counts = {row['rid']: row['cnt'] for row in cursor2.fetchall()}
+                cursor2.close()
+                for r in resources:
+                    r['identity_count'] = id_counts.get(r.get('resource_id', ''), 0)
+        except Exception:
+            for r in resources:
+                r.setdefault('identity_count', 0)
+
         # Batch risk trend lookup (last 2 snapshots per resource for delta)
         try:
             resource_ids = [r['resource_id'] for r in resources if r.get('resource_id')]
@@ -12458,6 +12667,36 @@ def get_resource_detail(resource_id):
             resource['findings'] = db.get_resource_findings(resource_id, run_ids)
         except Exception:
             resource['findings'] = []
+
+        # Attack paths through this resource
+        try:
+            cursor2 = db.conn.cursor(cursor_factory=RealDictCursor)
+            cursor2.execute("""
+                SELECT gaf.id, gaf.finding_type, gaf.severity, gaf.title, gaf.status,
+                       gaf.identity_id, i.display_name as identity_name,
+                       i.identity_category, i.risk_level as identity_risk_level,
+                       gaf.attack_path
+                FROM graph_attack_findings gaf
+                LEFT JOIN identities i ON i.id = gaf.identity_id
+                WHERE gaf.status IN ('open', 'acknowledged', 'in_progress')
+                  AND gaf.attack_path::text LIKE %s
+                ORDER BY CASE gaf.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
+                         gaf.created_at DESC
+                LIMIT 20
+            """, [f'%{resource_id}%'])
+            paths = []
+            for row in cursor2.fetchall():
+                p = dict(row)
+                if p.get('attack_path') and isinstance(p['attack_path'], str):
+                    try:
+                        p['attack_path'] = json.loads(p['attack_path'])
+                    except Exception:
+                        pass
+                paths.append(p)
+            cursor2.close()
+            resource['attack_paths_through_resource'] = paths
+        except Exception:
+            resource['attack_paths_through_resource'] = []
 
         # Network classification
         resource['network_classification'] = _classify_network(resource)
@@ -14044,20 +14283,22 @@ def _get_base_url():
 
 def sso_status():
     """GET /api/auth/sso-status?org_slug=X — public endpoint.
-    Returns whether SSO is enabled for an organization."""
+    Returns whether SSO (SAML and/or OIDC) is enabled for an organization."""
     slug = request.args.get('org_slug', '').strip()
     if not slug:
-        return jsonify({'sso_enabled': False})
+        return jsonify({'sso_enabled': False, 'oidc_enabled': False})
     db = Database(_admin_reason='public endpoint — no auth context')
     try:
         org = db.get_organization_by_slug(slug)
         if not org or not org.get('enabled'):
-            return jsonify({'sso_enabled': False})
+            return jsonify({'sso_enabled': False, 'oidc_enabled': False})
         enabled = db.get_setting('sso_enabled', 'false', organization_id=org['id'])
         force = db.get_setting('sso_force_sso', 'false', organization_id=org['id'])
+        oidc_enabled = db.get_setting('oidc_enabled', 'false', organization_id=org['id'])
         return jsonify({
             'sso_enabled': enabled == 'true',
             'sso_force_sso': force == 'true',
+            'oidc_enabled': oidc_enabled == 'true',
         })
     finally:
         db.close()
@@ -17090,6 +17331,9 @@ def _check_tier_limits(db, organization_id):
 
 def copilot_chat():
     """POST /api/copilot/chat — send a message to the AI copilot."""
+    from app.ai.copilot_gateway import get_gateway
+    gateway = get_gateway()
+
     data = request.get_json(silent=True) or {}
     message = data.get('message', '').strip()
     conversation_id = data.get('conversation_id')
@@ -17097,19 +17341,24 @@ def copilot_chat():
     if not message:
         return jsonify({'error': 'Message is required'}), 400
 
+    service, svc_err = gateway.check_available()
+    if not service:
+        return jsonify({
+            'error': 'not_configured',
+            'response': svc_err,
+            'conversation_id': None,
+            'suggestions': [],
+        })
+
+    user_id = _current_user_id()
+    org_id = _org_id()
     db = _db()
     try:
-        api_key = db.get_setting('copilot_api_key', '', organization_id=_org_id())
-        if not api_key:
-            return jsonify({
-                'error': 'not_configured',
-                'response': 'Configure your Anthropic API key in Settings to use the Security Copilot.',
-                'conversation_id': None,
-                'suggestions': [],
-            })
-
-        user_id = _current_user_id()
-        organization_id = _org_id()
+        # Rate limit
+        plan = _get_org_plan(db, org_id)
+        allowed, rate_err = gateway.check_rate_limit(db, org_id, plan)
+        if not allowed:
+            return jsonify({'error': rate_err}), 429
 
         # Load or create conversation
         conv = None
@@ -17119,14 +17368,17 @@ def copilot_chat():
             if conv:
                 messages_history = conv.get('messages', [])
 
-        from app.services.copilot_service import CopilotService
-        service = CopilotService(api_key)
+        message = gateway.truncate_prompt(message)
 
         try:
             response_text = service.ask(message, messages_history, db)
         except Exception as e:
             logger.error(f"AI copilot service error: {e}", exc_info=True)
-            return jsonify({'error': 'AI service temporarily unavailable'}), 502
+            try:
+                db._rollback()
+            except Exception:
+                pass
+            return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
 
         # Save conversation
         messages_history.append({'role': 'user', 'content': message})
@@ -17136,10 +17388,11 @@ def copilot_chat():
             db.update_copilot_conversation(conversation_id, user_id, messages_history)
         else:
             title = message[:60] + ('...' if len(message) > 60 else '')
-            conv = db.create_copilot_conversation(user_id, organization_id, title, messages_history)
+            conv = db.create_copilot_conversation(user_id, org_id, title, messages_history)
             conversation_id = conv['id']
 
         suggestions = service.get_suggestions(db)
+        gateway.log_usage(db, org_id, user_id, 'chat')
 
         return jsonify({
             'response': response_text,
@@ -17165,14 +17418,15 @@ def copilot_conversations_list():
 
 def copilot_suggestions():
     """GET /api/copilot/suggestions — contextual quick-ask chips."""
+    from app.ai.copilot_gateway import get_gateway
+    gateway = get_gateway()
+
+    service, svc_err = gateway.check_available()
+    if not service:
+        return jsonify({'suggestions': [], 'configured': False})
+
     db = _db()
     try:
-        api_key = db.get_setting('copilot_api_key', '', organization_id=_org_id())
-        if not api_key:
-            return jsonify({'suggestions': [], 'configured': False})
-
-        from app.services.copilot_service import CopilotService
-        service = CopilotService(api_key)
         suggestions = service.get_suggestions(db)
         return jsonify({'suggestions': suggestions, 'configured': True})
     finally:
@@ -25593,6 +25847,307 @@ def get_report_remediation_handler():
         db.close()
 
 
+# ── Phase 12: AI Security Copilot — context-aware queries ────────
+
+def copilot_query_handler():
+    """POST /api/copilot/query — context-aware copilot query."""
+    from app.ai.copilot_gateway import get_gateway
+    gateway = get_gateway()
+
+    data = request.get_json(silent=True) or {}
+    question = (data.get('question') or '').strip()
+    context_type = data.get('context_type', '')  # finding, identity, general
+    context_id = data.get('context_id')
+
+    if not question:
+        return jsonify({'error': 'question is required'}), 400
+
+    service, svc_err = gateway.check_available()
+    if not service:
+        return jsonify({'error': svc_err}), 503
+
+    user_id = _current_user_id()
+    org_id = _org_id()
+    db = _db()
+    try:
+        plan = _get_org_plan(db, org_id)
+        allowed, rate_err = gateway.check_rate_limit(db, org_id, plan)
+        if not allowed:
+            return jsonify({'error': rate_err}), 429
+
+        question = gateway.truncate_prompt(question)
+        start = time.time()
+
+        # Build context based on type
+        if context_type == 'finding' and context_id:
+            finding = db.get_finding_context(int(context_id))
+            if not finding:
+                return jsonify({'error': 'Finding not found'}), 404
+
+            q_lower = question.lower()
+            if any(kw in q_lower for kw in ['explain', 'what does this mean', 'attack path', 'what is this']):
+                answer = service.explain_attack_path(finding)
+            elif any(kw in q_lower for kw in ['remediat', 'fix', 'resolve', 'how to', 'mitigat']):
+                answer = service.get_remediation_advice(finding)
+            else:
+                context = (
+                    gateway.build_tenant_context_prefix(org_id)
+                    + f"Finding: {finding.get('title', '')}\n"
+                    f"Type: {finding.get('finding_type', '')}\n"
+                    f"Severity: {finding.get('severity', '')}\n"
+                    f"Identity: {finding.get('identity_name', 'Unknown')} ({finding.get('identity_category', '')})\n"
+                    f"Description: {finding.get('description', '')}\n"
+                    f"Remediation: {finding.get('remediation', '')}"
+                )
+                answer = service.contextual_query(question, context)
+
+        elif context_type == 'translate':
+            result = service.translate_security_query(question)
+            gateway.log_usage(db, org_id, user_id, 'translate')
+            _log(db, 'copilot_query',
+                 f'Security query translation: {question[:100]}',
+                 {'context_type': 'translate', 'matched': result.get('matched')})
+            return jsonify({
+                'answer': f"**API Suggestion:** `{result['api']}`\n\n{result['description']}" if result['matched']
+                          else result['description'],
+                'translation': result,
+                'duration_ms': int((time.time() - start) * 1000),
+            })
+
+        else:
+            context = gateway.build_tenant_context_prefix(org_id) + service.gather_context(db)
+            answer = service.contextual_query(question, context)
+
+        duration_ms = int((time.time() - start) * 1000)
+        gateway.log_usage(db, org_id, user_id, 'query', latency_ms=duration_ms)
+        _log(db, 'copilot_query',
+             f'Copilot query ({context_type or "general"}): {question[:100]}',
+             {'context_type': context_type, 'context_id': context_id, 'duration_ms': duration_ms})
+
+        return jsonify({
+            'answer': answer,
+            'context_type': context_type,
+            'context_id': context_id,
+            'duration_ms': duration_ms,
+        })
+
+    except Exception as e:
+        logger.error(f"Copilot query error: {e}", exc_info=True)
+        try:
+            db._rollback()
+        except Exception:
+            pass
+        return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
+    finally:
+        db.close()
+
+
+def copilot_security_summary_handler():
+    """GET /api/copilot/security-summary — AI-generated tenant summary."""
+    from app.ai.copilot_gateway import get_gateway
+    gateway = get_gateway()
+
+    service, svc_err = gateway.check_available()
+    if not service:
+        return jsonify({'error': svc_err}), 503
+
+    user_id = _current_user_id()
+    org_id = _org_id()
+    db = _db()
+    try:
+        plan = _get_org_plan(db, org_id)
+        allowed, rate_err = gateway.check_rate_limit(db, org_id, plan)
+        if not allowed:
+            return jsonify({'error': rate_err}), 429
+
+        start = time.time()
+        context_data = db.get_security_summary_context(org_id)
+        summary = service.generate_security_summary(context_data)
+        duration_ms = int((time.time() - start) * 1000)
+
+        gateway.log_usage(db, org_id, user_id, 'security_summary', latency_ms=duration_ms)
+        _log(db, 'copilot_summary', 'Generated AI security summary', {'duration_ms': duration_ms})
+
+        return jsonify({
+            'summary': summary,
+            'context': context_data,
+            'duration_ms': duration_ms,
+        })
+    except Exception as e:
+        logger.error(f"Security summary error: {e}", exc_info=True)
+        try:
+            db._rollback()
+        except Exception:
+            pass
+        return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
+    finally:
+        db.close()
+
+
+# ── AI Copilot Investigation Handlers ────────────────────────────
+
+def copilot_investigate_handler():
+    """POST /api/copilot/investigate — structured investigation."""
+    from app.ai.copilot_gateway import get_gateway
+    gateway = get_gateway()
+
+    data = request.get_json(silent=True) or {}
+    inv_type = data.get('type', '')  # identity, resource, posture
+    target_id = data.get('target_id')
+    question = data.get('question', '').strip() or None
+
+    if inv_type not in ('identity', 'resource', 'posture'):
+        return jsonify({'error': 'type must be identity, resource, or posture'}), 400
+
+    service, svc_err = gateway.check_available()
+    if not service:
+        return jsonify({'error': svc_err}), 503
+
+    user_id = _current_user_id()
+    org_id = _org_id()
+    db = _db()
+    try:
+        plan = _get_org_plan(db, org_id)
+        allowed, rate_err = gateway.check_rate_limit(db, org_id, plan)
+        if not allowed:
+            return jsonify({'error': rate_err}), 429
+
+        start = time.time()
+
+        if inv_type == 'identity':
+            if not target_id:
+                return jsonify({'error': 'target_id required for identity investigation'}), 400
+            context = db.get_identity_investigation_context(int(target_id))
+            if not context:
+                return jsonify({'error': 'Identity not found'}), 404
+            result = service.investigate_identity(context, question)
+
+        elif inv_type == 'resource':
+            if not target_id:
+                return jsonify({'error': 'target_id required for resource investigation'}), 400
+            context = db.get_resource_investigation_context(str(target_id))
+            if not context:
+                return jsonify({'error': 'Resource not found'}), 404
+            result = service.investigate_resource(context, question)
+
+        else:  # posture
+            context = db.get_posture_analysis_context()
+            result = service.analyze_security_posture(context)
+
+        duration_ms = int((time.time() - start) * 1000)
+        result['duration_ms'] = duration_ms
+
+        gateway.log_usage(db, org_id, user_id, f'investigate_{inv_type}', latency_ms=duration_ms)
+        _log(db, 'copilot_investigation',
+             f'Copilot investigation ({inv_type}): {target_id or "tenant-wide"}',
+             {'type': inv_type, 'target_id': target_id, 'duration_ms': duration_ms})
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Copilot investigate error: {e}", exc_info=True)
+        try:
+            db._rollback()
+        except Exception:
+            pass
+        return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
+    finally:
+        db.close()
+
+
+def copilot_graph_query_handler():
+    """POST /api/copilot/graph-query — natural language graph query."""
+    from app.ai.copilot_gateway import get_gateway
+    from app.services.copilot_service import QUERY_TRANSLATIONS
+    gateway = get_gateway()
+
+    data = request.get_json(silent=True) or {}
+    query = (data.get('query') or '').strip()
+
+    if not query:
+        return jsonify({'error': 'query is required'}), 400
+
+    service, svc_err = gateway.check_available()
+    if not service:
+        return jsonify({'error': svc_err}), 503
+
+    user_id = _current_user_id()
+    org_id = _org_id()
+    db = _db()
+    try:
+        plan = _get_org_plan(db, org_id)
+        allowed, rate_err = gateway.check_rate_limit(db, org_id, plan)
+        if not allowed:
+            return jsonify({'error': rate_err}), 429
+
+        query = gateway.truncate_prompt(query)
+        start = time.time()
+
+        # Try to match a known query pattern
+        translation = service.translate_security_query(query)
+        query_type = None
+        result_data = None
+
+        if translation.get('matched'):
+            q_lower = query.lower()
+            for t in QUERY_TRANSLATIONS:
+                for p in t['patterns']:
+                    if p in q_lower:
+                        query_type = t.get('query_type', 'general')
+                        break
+                if query_type:
+                    break
+
+        # Gather context with tenant isolation prefix
+        context = gateway.build_tenant_context_prefix(org_id) + service.gather_context(db)
+        context += f"\n\nUser query: {query}"
+        if translation.get('matched'):
+            context += f"\nMatched API: {translation['api']}"
+            context += f"\nDescription: {translation['description']}"
+
+        answer = service.contextual_query(
+            f"Answer this security query using the available data: {query}",
+            context,
+        )
+
+        duration_ms = int((time.time() - start) * 1000)
+        gateway.log_usage(db, org_id, user_id, 'graph_query', latency_ms=duration_ms)
+        _log(db, 'copilot_graph_query',
+             f'Graph query: {query[:100]}',
+             {'query_type': query_type, 'matched': translation.get('matched', False),
+              'duration_ms': duration_ms})
+
+        return jsonify({
+            'answer': answer,
+            'data': result_data,
+            'query_type': query_type,
+            'translation': translation if translation.get('matched') else None,
+            'duration_ms': duration_ms,
+            'suggestions': [
+                "Who has access to our Key Vaults?",
+                "Show over-privileged identities",
+                "What are the latest anomalies?",
+                "Show lateral movement paths",
+            ],
+        })
+
+    except Exception as e:
+        logger.error(f"Copilot graph query error: {e}", exc_info=True)
+        try:
+            db._rollback()
+        except Exception:
+            pass
+        return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
+    finally:
+        db.close()
+
+
+def ai_health_handler():
+    """GET /api/system/ai-health — AI Copilot health status."""
+    from app.ai.copilot_gateway import get_gateway
+    return jsonify(get_gateway().health_check())
+
+
 def _to_csv(rows: list, filename: str):
     """Convert list of dicts to CSV response."""
     import csv, io
@@ -25609,3 +26164,988 @@ def _to_csv(rows: list, filename: str):
         'Content-Type': 'text/csv',
         'Content-Disposition': f'attachment; filename={filename}.csv',
     })
+
+
+# ================================================================
+# Phase 16: Continuous Identity Risk Monitoring
+# ================================================================
+
+EXPOSURE_TYPES = {
+    'dormant_privileged': {
+        'label': 'Dormant Privileged',
+        'severity': 'critical',
+        'description': 'Identity with privileged roles that has been inactive for 90+ days',
+    },
+    'long_lived_credential': {
+        'label': 'Long-Lived Credential',
+        'severity': 'high',
+        'description': 'Identity with credentials that have not been rotated in 90+ days',
+    },
+    'spn_secret_exposure': {
+        'label': 'SPN Secret Exposure',
+        'severity': 'high',
+        'description': 'Service principal with expired or expiring secrets',
+    },
+    'external_privileged': {
+        'label': 'External Privileged',
+        'severity': 'critical',
+        'description': 'Guest or external identity with elevated role assignments',
+    },
+    'orphaned_privileged': {
+        'label': 'Orphaned Privileged',
+        'severity': 'high',
+        'description': 'Privileged identity with no owner assignment',
+    },
+    'disabled_with_access': {
+        'label': 'Disabled with Access',
+        'severity': 'medium',
+        'description': 'Disabled or deleted identity still retaining active role assignments',
+    },
+}
+
+PRIVILEGED_ROLE_NAMES = {
+    'Global Administrator', 'Privileged Role Administrator', 'Owner',
+    'User Access Administrator', 'Application Administrator',
+    'Cloud Application Administrator', 'Contributor',
+    'Key Vault Administrator', 'Key Vault Secrets Officer',
+    'AdministratorAccess', 'IAMFullAccess', 'PowerUserAccess',
+    'roles/owner', 'roles/editor', 'roles/iam.securityAdmin',
+}
+
+
+def get_identity_exposures_handler():
+    """GET /api/identity-exposures — detect and list identity exposure risks."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'exposures': [], 'stats': {}, 'total': 0})
+
+        exposure_type_filter = request.args.get('exposure_type', '')
+        severity_filter = request.args.get('severity', '')
+        limit = request.args.get('limit', 100, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        exposures = []
+
+        # 1. Dormant privileged: stale/never_used identity with privileged roles
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
+                   i.activity_status, COALESCE(i.cloud, 'azure') as cloud,
+                   i.last_sign_in,
+                   array_agg(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL) as roles
+            FROM identities i
+            LEFT JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.activity_status IN ('stale', 'never_used')
+              AND ra.role_name = ANY(%s)
+            GROUP BY i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
+                     i.activity_status, i.cloud, i.last_sign_in
+        """, [run_ids, list(PRIVILEGED_ROLE_NAMES)])
+        for row in cursor.fetchall():
+            exposures.append({
+                'identity_id': row['id'],
+                'identity_name': row['display_name'],
+                'identity_category': row['identity_category'],
+                'cloud': row['cloud'],
+                'risk_level': row['risk_level'],
+                'risk_score': row['risk_score'],
+                'exposure_type': 'dormant_privileged',
+                'severity': 'critical',
+                'description': f"Dormant ({row['activity_status']}) identity with privileged roles: {', '.join(row['roles'] or [])}",
+                'last_sign_in': row['last_sign_in'].isoformat() if row.get('last_sign_in') else None,
+                'roles': row['roles'] or [],
+            })
+
+        # 2. Long-lived credentials (expired or credential_status indicates stale)
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
+                   i.credential_status, COALESCE(i.cloud, 'azure') as cloud,
+                   i.credential_count, i.expired_credential_count
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.credential_status IN ('expired', 'expiring_soon')
+              AND i.identity_category IN ('service_principal', 'iam_user', 'gcp_service_account')
+        """, [run_ids])
+        for row in cursor.fetchall():
+            sev = 'high' if row['credential_status'] == 'expired' else 'medium'
+            exposures.append({
+                'identity_id': row['id'],
+                'identity_name': row['display_name'],
+                'identity_category': row['identity_category'],
+                'cloud': row['cloud'],
+                'risk_level': row['risk_level'],
+                'risk_score': row['risk_score'],
+                'exposure_type': 'long_lived_credential',
+                'severity': sev,
+                'description': f"Credential status: {row['credential_status']}. "
+                               f"{row.get('expired_credential_count', 0)} expired of {row.get('credential_count', 0)} total.",
+                'credential_status': row['credential_status'],
+                'credential_count': row.get('credential_count', 0),
+                'expired_credential_count': row.get('expired_credential_count', 0),
+            })
+
+        # 3. SPN secret exposure (service principals with secrets)
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.risk_level, i.risk_score,
+                   COALESCE(i.cloud, 'azure') as cloud,
+                   i.credential_count, i.expired_credential_count
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.identity_category = 'service_principal'
+              AND i.expired_credential_count > 0
+        """, [run_ids])
+        for row in cursor.fetchall():
+            exposures.append({
+                'identity_id': row['id'],
+                'identity_name': row['display_name'],
+                'identity_category': 'service_principal',
+                'cloud': row['cloud'],
+                'risk_level': row['risk_level'],
+                'risk_score': row['risk_score'],
+                'exposure_type': 'spn_secret_exposure',
+                'severity': 'high',
+                'description': f"SPN has {row['expired_credential_count']} expired credentials out of {row['credential_count']} total.",
+                'credential_count': row.get('credential_count', 0),
+                'expired_credential_count': row.get('expired_credential_count', 0),
+            })
+
+        # 4. External privileged (guest/external with roles)
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
+                   COALESCE(i.cloud, 'azure') as cloud,
+                   array_agg(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL) as roles
+            FROM identities i
+            JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.identity_category IN ('guest', 'gcp_domain', 'gcp_member')
+              AND ra.role_name = ANY(%s)
+            GROUP BY i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score, i.cloud
+        """, [run_ids, list(PRIVILEGED_ROLE_NAMES)])
+        for row in cursor.fetchall():
+            exposures.append({
+                'identity_id': row['id'],
+                'identity_name': row['display_name'],
+                'identity_category': row['identity_category'],
+                'cloud': row['cloud'],
+                'risk_level': row['risk_level'],
+                'risk_score': row['risk_score'],
+                'exposure_type': 'external_privileged',
+                'severity': 'critical',
+                'description': f"External identity with privileged roles: {', '.join(row['roles'] or [])}",
+                'roles': row['roles'] or [],
+            })
+
+        # 5. Disabled with active access
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score,
+                   COALESCE(i.cloud, 'azure') as cloud,
+                   COUNT(ra.id) as role_count
+            FROM identities i
+            JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = ANY(%s)
+              AND (i.enabled = false OR i.deleted_at IS NOT NULL OR i.status IN ('disabled', 'deleted'))
+            GROUP BY i.id, i.display_name, i.identity_category, i.risk_level, i.risk_score, i.cloud
+        """, [run_ids])
+        for row in cursor.fetchall():
+            exposures.append({
+                'identity_id': row['id'],
+                'identity_name': row['display_name'],
+                'identity_category': row['identity_category'],
+                'cloud': row['cloud'],
+                'risk_level': row['risk_level'],
+                'risk_score': row['risk_score'],
+                'exposure_type': 'disabled_with_access',
+                'severity': 'medium',
+                'description': f"Disabled/deleted identity still has {row['role_count']} active role assignments.",
+                'role_count': row['role_count'],
+            })
+
+        cursor.close()
+
+        # Deduplicate by (identity_id, exposure_type)
+        seen = set()
+        unique_exposures = []
+        for e in exposures:
+            key = (e['identity_id'], e['exposure_type'])
+            if key not in seen:
+                seen.add(key)
+                unique_exposures.append(e)
+        exposures = unique_exposures
+
+        # Apply filters
+        if exposure_type_filter:
+            exposures = [e for e in exposures if e['exposure_type'] == exposure_type_filter]
+        if severity_filter:
+            exposures = [e for e in exposures if e['severity'] == severity_filter]
+
+        # Sort by severity (critical > high > medium > low)
+        sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        exposures.sort(key=lambda e: (sev_order.get(e['severity'], 99), -(e.get('risk_score') or 0)))
+
+        total = len(exposures)
+        paged = exposures[offset:offset + limit]
+
+        # Stats
+        stats = {}
+        for et in EXPOSURE_TYPES:
+            stats[et] = sum(1 for e in exposures if e['exposure_type'] == et)
+
+        return jsonify({
+            'exposures': paged,
+            'stats': stats,
+            'total': total,
+            'by_severity': {
+                'critical': sum(1 for e in exposures if e['severity'] == 'critical'),
+                'high': sum(1 for e in exposures if e['severity'] == 'high'),
+                'medium': sum(1 for e in exposures if e['severity'] == 'medium'),
+                'low': sum(1 for e in exposures if e['severity'] == 'low'),
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_privilege_drift_handler():
+    """GET /api/privilege-drift — compare identity privileges between snapshots."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        limit = request.args.get('limit', 100, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        change_type_filter = request.args.get('change_type', '')
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get latest two completed runs for this org
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY completed_at DESC LIMIT 2
+        """, [org_id])
+        runs = [r['id'] for r in cursor.fetchall()]
+
+        if len(runs) < 2:
+            cursor.close()
+            return jsonify({'changes': [], 'stats': {}, 'total': 0,
+                            'message': 'Need at least 2 completed discovery runs to detect drift.'})
+
+        current_run, previous_run = runs[0], runs[1]
+
+        changes = []
+
+        # Get role assignments for current and previous runs, grouped by identity
+        cursor.execute("""
+            SELECT i.id as identity_id, i.display_name, i.identity_category,
+                   COALESCE(i.cloud, 'azure') as cloud, i.risk_level, i.risk_score,
+                   array_agg(DISTINCT ra.role_name ORDER BY ra.role_name) as roles
+            FROM identities i
+            LEFT JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+            GROUP BY i.id, i.display_name, i.identity_category, i.cloud, i.risk_level, i.risk_score
+        """, [current_run])
+        current_identities = {}
+        for row in cursor.fetchall():
+            current_identities[row['display_name']] = dict(row)
+
+        cursor.execute("""
+            SELECT i.id as identity_id, i.display_name, i.identity_category,
+                   COALESCE(i.cloud, 'azure') as cloud, i.risk_level, i.risk_score,
+                   array_agg(DISTINCT ra.role_name ORDER BY ra.role_name) as roles
+            FROM identities i
+            LEFT JOIN role_assignments ra ON ra.identity_db_id = i.id
+            WHERE i.discovery_run_id = %s
+            GROUP BY i.id, i.display_name, i.identity_category, i.cloud, i.risk_level, i.risk_score
+        """, [previous_run])
+        previous_identities = {}
+        for row in cursor.fetchall():
+            previous_identities[row['display_name']] = dict(row)
+
+        # Get run timestamps
+        cursor.execute("SELECT completed_at FROM discovery_runs WHERE id = %s", [current_run])
+        current_ts = cursor.fetchone()
+        cursor.execute("SELECT completed_at FROM discovery_runs WHERE id = %s", [previous_run])
+        previous_ts = cursor.fetchone()
+        cursor.close()
+
+        timestamp = current_ts['completed_at'].isoformat() if current_ts and current_ts.get('completed_at') else None
+
+        # Compare roles
+        all_names = set(current_identities.keys()) | set(previous_identities.keys())
+        for name in all_names:
+            curr = current_identities.get(name)
+            prev = previous_identities.get(name)
+
+            if curr and prev:
+                curr_roles = set(r for r in (curr['roles'] or []) if r)
+                prev_roles = set(r for r in (prev['roles'] or []) if r)
+
+                added = curr_roles - prev_roles
+                removed = prev_roles - curr_roles
+
+                for role in added:
+                    is_priv = role in PRIVILEGED_ROLE_NAMES
+                    changes.append({
+                        'identity_id': curr['identity_id'],
+                        'identity_name': name,
+                        'identity_category': curr['identity_category'],
+                        'cloud': curr['cloud'],
+                        'change_type': 'role_added',
+                        'previous_role': None,
+                        'current_role': role,
+                        'is_privileged': is_priv,
+                        'severity': 'critical' if is_priv else 'medium',
+                        'risk_level': curr['risk_level'],
+                        'timestamp': timestamp,
+                    })
+
+                for role in removed:
+                    changes.append({
+                        'identity_id': prev['identity_id'],
+                        'identity_name': name,
+                        'identity_category': prev['identity_category'],
+                        'cloud': prev['cloud'],
+                        'change_type': 'role_removed',
+                        'previous_role': role,
+                        'current_role': None,
+                        'is_privileged': role in PRIVILEGED_ROLE_NAMES,
+                        'severity': 'low',
+                        'risk_level': prev['risk_level'],
+                        'timestamp': timestamp,
+                    })
+
+                # Risk score change
+                curr_score = curr.get('risk_score') or 0
+                prev_score = prev.get('risk_score') or 0
+                delta = curr_score - prev_score
+                if abs(delta) >= 15:
+                    changes.append({
+                        'identity_id': curr['identity_id'],
+                        'identity_name': name,
+                        'identity_category': curr['identity_category'],
+                        'cloud': curr['cloud'],
+                        'change_type': 'risk_score_change',
+                        'previous_role': f'Score: {prev_score}',
+                        'current_role': f'Score: {curr_score} ({"+" if delta > 0 else ""}{delta})',
+                        'is_privileged': False,
+                        'severity': 'high' if delta >= 30 else 'medium' if delta > 0 else 'low',
+                        'risk_level': curr['risk_level'],
+                        'timestamp': timestamp,
+                    })
+
+            elif curr and not prev:
+                # New identity
+                curr_roles = [r for r in (curr['roles'] or []) if r]
+                has_priv = any(r in PRIVILEGED_ROLE_NAMES for r in curr_roles)
+                changes.append({
+                    'identity_id': curr['identity_id'],
+                    'identity_name': name,
+                    'identity_category': curr['identity_category'],
+                    'cloud': curr['cloud'],
+                    'change_type': 'identity_added',
+                    'previous_role': None,
+                    'current_role': ', '.join(curr_roles[:3]) if curr_roles else 'No roles',
+                    'is_privileged': has_priv,
+                    'severity': 'high' if has_priv else 'low',
+                    'risk_level': curr['risk_level'],
+                    'timestamp': timestamp,
+                })
+
+            elif prev and not curr:
+                # Removed identity
+                changes.append({
+                    'identity_id': prev['identity_id'],
+                    'identity_name': name,
+                    'identity_category': prev['identity_category'],
+                    'cloud': prev['cloud'],
+                    'change_type': 'identity_removed',
+                    'previous_role': ', '.join([r for r in (prev['roles'] or []) if r][:3]) or 'No roles',
+                    'current_role': None,
+                    'is_privileged': False,
+                    'severity': 'info',
+                    'risk_level': prev['risk_level'],
+                    'timestamp': timestamp,
+                })
+
+        # Apply filter
+        if change_type_filter:
+            changes = [c for c in changes if c['change_type'] == change_type_filter]
+
+        # Sort: critical first, then by name
+        sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}
+        changes.sort(key=lambda c: (sev_order.get(c['severity'], 99), c['identity_name']))
+
+        total = len(changes)
+        paged = changes[offset:offset + limit]
+
+        stats = {
+            'role_added': sum(1 for c in changes if c['change_type'] == 'role_added'),
+            'role_removed': sum(1 for c in changes if c['change_type'] == 'role_removed'),
+            'identity_added': sum(1 for c in changes if c['change_type'] == 'identity_added'),
+            'identity_removed': sum(1 for c in changes if c['change_type'] == 'identity_removed'),
+            'risk_score_change': sum(1 for c in changes if c['change_type'] == 'risk_score_change'),
+            'privileged_changes': sum(1 for c in changes if c.get('is_privileged')),
+        }
+
+        return jsonify({
+            'changes': paged,
+            'stats': stats,
+            'total': total,
+            'current_run_id': current_run,
+            'previous_run_id': previous_run,
+        })
+    finally:
+        db.close()
+
+
+def simulate_attack_path_handler():
+    """POST /api/attack-path/simulate — simulate attack from identity with depth limit."""
+    db = _db()
+    try:
+        from app.engines.attack_simulator import AttackSimulator
+        data = request.get_json() or {}
+        identity_id = data.get('identity_id')
+        if not identity_id:
+            return jsonify({'error': 'identity_id is required'}), 400
+
+        depth_limit = min(data.get('depth_limit', 6), 10)
+        org_id = _org_id()
+
+        # Find connection
+        connection_id = data.get('connection_id')
+        if not connection_id:
+            from app.database import Database as AdminDB
+            admin_db = AdminDB()
+            connections = admin_db.get_cloud_connections(org_id)
+            admin_db.close()
+            for c in connections:
+                if c.get('status') == 'connected':
+                    connection_id = c['id']
+                    break
+            if not connection_id:
+                return jsonify({'error': 'No connected cloud connections'}), 400
+
+        simulator = AttackSimulator(db)
+        result = simulator.simulate_identity_attack(
+            connection_id, org_id, identity_id, max_depth=depth_limit
+        )
+
+        if 'error' in result:
+            return jsonify(result), 400
+
+        # Enhance response with structured output
+        blast = result.get('blast_radius', {})
+        return jsonify({
+            'simulation_id': result.get('simulation_id'),
+            'identity_id': identity_id,
+            'depth_limit': depth_limit,
+            'reachable_resources': blast.get('reachable_resources', 0),
+            'reachable_identities': blast.get('reachable_identities', 0),
+            'reachable_subscriptions': blast.get('reachable_subscriptions', 0),
+            'privilege_escalations': result.get('escalation_paths', []),
+            'risk_score': blast.get('blast_radius_score', 0),
+            'nodes': result.get('nodes', []),
+            'edges': result.get('edges', []),
+            'paths': result.get('paths', []),
+            'blast_radius': blast,
+        })
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 17: Permission Matrix
+# ──────────────────────────────────────────────────────────────────────
+
+def get_permission_matrix_handler():
+    """GET /api/auth/permissions — return the permission matrix."""
+    return jsonify({'permissions': {k: sorted(v) for k, v in PERMISSION_MATRIX.items()}})
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 17: OIDC SSO Handlers
+# ──────────────────────────────────────────────────────────────────────
+
+def oidc_login():
+    """GET /api/auth/oidc/login?org_slug=X — redirect to OIDC IdP."""
+    from app.api.oidc import get_oidc_config_for_org, build_oidc_authorization_url
+    slug = request.args.get('org_slug', '').strip()
+    if not slug:
+        return jsonify({'error': 'org_slug is required'}), 400
+    db = Database(_admin_reason='public endpoint — OIDC login')
+    try:
+        org = db.get_organization_by_slug(slug)
+        if not org or not org.get('enabled'):
+            return jsonify({'error': 'Organization not found'}), 404
+        oidc_config = get_oidc_config_for_org(db, org['id'])
+        if not oidc_config:
+            return jsonify({'error': 'OIDC not configured for this organization'}), 400
+
+        base_url = _get_base_url()
+        redirect_uri = f"{base_url}/api/auth/oidc/callback"
+
+        import secrets as _secrets
+        state = _secrets.token_urlsafe(32)
+        nonce = _secrets.token_urlsafe(32)
+
+        # Store state + nonce for validation
+        db.create_oidc_state(org['id'], state, nonce)
+
+        auth_url = build_oidc_authorization_url(oidc_config, redirect_uri, state, nonce)
+        return jsonify({'redirect_url': auth_url})
+    finally:
+        db.close()
+
+
+def oidc_callback():
+    """GET /api/auth/oidc/callback?code=&state= — handle OIDC callback from IdP."""
+    from app.api.oidc import get_oidc_config_for_org, exchange_oidc_code, extract_oidc_user_info, map_oidc_role
+
+    code = request.args.get('code', '')
+    state = request.args.get('state', '')
+    error = request.args.get('error', '')
+
+    if error:
+        error_desc = request.args.get('error_description', error)
+        return f"""<html><body><script>window.location.href='/login?error={error_desc}';</script></body></html>"""
+
+    if not code or not state:
+        return jsonify({'error': 'Missing code or state'}), 400
+
+    db = Database(_admin_reason='public endpoint — OIDC callback')
+    try:
+        # Validate state
+        state_data = db.consume_oidc_state(state)
+        if not state_data:
+            return jsonify({'error': 'Invalid or expired OIDC state'}), 400
+
+        org_id = state_data['organization_id']
+        nonce = state_data.get('nonce', '')
+
+        oidc_config = get_oidc_config_for_org(db, org_id)
+        if not oidc_config:
+            return jsonify({'error': 'OIDC configuration not found'}), 400
+
+        base_url = _get_base_url()
+        redirect_uri = f"{base_url}/api/auth/oidc/callback"
+
+        # Exchange code for tokens
+        token_data = exchange_oidc_code(oidc_config, code, redirect_uri)
+        if not token_data:
+            return jsonify({'error': 'Failed to exchange OIDC code'}), 400
+
+        # Extract user info
+        user_info = extract_oidc_user_info(token_data.get('id_token_claims', {}), token_data.get('userinfo', {}))
+        if not user_info or not user_info.get('email'):
+            return jsonify({'error': 'Could not extract user info from OIDC response'}), 400
+
+        # Map role from groups
+        role = map_oidc_role(oidc_config, user_info.get('groups', []))
+
+        # JIT provisioning — find or create user
+        username = user_info['email']
+        external_id = user_info.get('sub', username)
+        display_name = user_info.get('display_name', username.split('@')[0])
+
+        existing = db.get_user_by_username(username)
+        if existing:
+            user = existing
+            db.update_sso_user(user['id'], display_name=display_name, role=role, external_id=external_id)
+            # Update auth_provider if not already oidc
+            cursor = db.conn.cursor()
+            cursor.execute("UPDATE users SET auth_provider = 'oidc', last_login_at = NOW() WHERE id = %s", (user['id'],))
+            db._commit()
+            cursor.close()
+        else:
+            if not oidc_config.get('oidc_jit_enabled', 'true') == 'true':
+                return jsonify({'error': 'User not found and JIT provisioning is disabled'}), 403
+            user = db.create_sso_user(username, display_name, role, org_id, external_id)
+            # Update auth_provider to oidc
+            cursor = db.conn.cursor()
+            cursor.execute("UPDATE users SET auth_provider = 'oidc' WHERE id = %s", (user['id'],))
+            db._commit()
+            cursor.close()
+
+        # Create one-time SSO auth code (reuses SAML pattern)
+        sso_code = db.create_sso_auth_code(user['id'], org_id)
+
+        # Redirect to frontend SSO callback
+        return f"""<html><body><script>window.location.href='/sso-callback?code={sso_code}';</script></body></html>"""
+    finally:
+        db.close()
+
+
+def get_oidc_settings():
+    """GET /api/settings/oidc — return OIDC settings for current org."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    db = Database(organization_id=org_id)
+    try:
+        from app.api.oidc import OIDC_SETTING_KEYS, OIDC_PRESETS
+        settings = {}
+        for key in OIDC_SETTING_KEYS:
+            val = db.get_setting(key, '', organization_id=org_id)
+            # Mask client secret
+            if key == 'oidc_client_secret' and val:
+                settings[key] = '••••••••' if val else ''
+            else:
+                settings[key] = val
+        settings['presets'] = OIDC_PRESETS
+        return jsonify(settings)
+    finally:
+        db.close()
+
+
+def save_oidc_settings():
+    """POST /api/settings/oidc — save OIDC settings for current org."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    data = request.get_json(silent=True) or {}
+    db = Database(organization_id=org_id)
+    try:
+        from app.api.oidc import OIDC_SETTING_KEYS
+        for key in OIDC_SETTING_KEYS:
+            if key in data:
+                val = data[key]
+                # Don't overwrite secret with mask
+                if key == 'oidc_client_secret' and val == '••••••••':
+                    continue
+                db.save_setting(key, str(val), organization_id=org_id)
+        _log(db, 'oidc_settings_updated', 'OIDC settings updated')
+        return jsonify({'status': 'saved'})
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 17: User Invitation Handlers
+# ──────────────────────────────────────────────────────────────────────
+
+def list_invitations_handler():
+    """GET /api/invitations — list pending invitations for the org."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    db = Database(organization_id=org_id)
+    try:
+        invitations = db.list_invitations(org_id)
+        return jsonify({'invitations': invitations})
+    finally:
+        db.close()
+
+
+def create_invitation_handler():
+    """POST /api/invitations — create and send an invitation."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    role = data.get('role', 'reader').strip()
+    if not email or '@' not in email:
+        return jsonify({'error': 'Valid email is required'}), 400
+    if role not in VALID_ROLES:
+        return jsonify({'error': f'Invalid role: {role}'}), 400
+
+    db = Database(organization_id=org_id)
+    try:
+        # Check if user already exists
+        existing = db.get_user_by_username(email)
+        if existing:
+            return jsonify({'error': 'A user with this email already exists'}), 409
+
+        invitation = db.create_invitation(
+            email=email,
+            role=role,
+            organization_id=org_id,
+            invited_by=g.current_user['id'],
+        )
+
+        # Try to send email (best effort)
+        try:
+            org_name = g.current_user.get('org_name', 'AuditGraph')
+            inviter_name = g.current_user.get('display_name', g.current_user.get('username'))
+            base_url = _get_base_url()
+            accept_url = f"{base_url}/accept-invite?token={invitation['token']}"
+            from app.services.email_service import EmailService
+            svc = EmailService()
+            svc.send_invitation_email(email, org_name, inviter_name, role, accept_url)
+        except Exception as e:
+            logger.warning(f"Failed to send invitation email: {e}")
+
+        _log(db, 'invitation_created', f'Invited {email} as {role}')
+        # Don't expose the token in the list response
+        safe = {k: v for k, v in invitation.items() if k != 'token'}
+        return jsonify({'invitation': safe}), 201
+    finally:
+        db.close()
+
+
+def revoke_invitation_handler(invitation_id):
+    """DELETE /api/invitations/<id> — revoke a pending invitation."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    db = Database(organization_id=org_id)
+    try:
+        ok = db.revoke_invitation(invitation_id, org_id)
+        if not ok:
+            return jsonify({'error': 'Invitation not found or already accepted'}), 404
+        _log(db, 'invitation_revoked', f'Revoked invitation {invitation_id}')
+        return jsonify({'status': 'revoked'})
+    finally:
+        db.close()
+
+
+def validate_invitation_handler():
+    """GET /api/auth/validate-invitation?token=X — public endpoint."""
+    token = request.args.get('token', '').strip()
+    if not token:
+        return jsonify({'valid': False, 'error': 'Token is required'}), 400
+    db = Database(_admin_reason='public endpoint — validate invitation')
+    try:
+        inv = db.get_invitation_by_token(token)
+        if not inv:
+            return jsonify({'valid': False, 'error': 'Invalid or expired invitation'}), 404
+        return jsonify({
+            'valid': True,
+            'email': inv['email'],
+            'role': inv['role'],
+            'org_name': inv.get('org_name', ''),
+        })
+    finally:
+        db.close()
+
+
+def accept_invitation_handler():
+    """POST /api/auth/accept-invitation — create user from invitation."""
+    data = request.get_json(silent=True) or {}
+    token = (data.get('token') or '').strip()
+    display_name = (data.get('display_name') or '').strip()
+    password = data.get('password', '')
+
+    if not token:
+        return jsonify({'error': 'Token is required'}), 400
+    if not password or len(password) < 12:
+        return jsonify({'error': 'Password must be at least 12 characters'}), 400
+    if not display_name:
+        return jsonify({'error': 'Display name is required'}), 400
+
+    db = Database(_admin_reason='public endpoint — accept invitation')
+    try:
+        inv = db.get_invitation_by_token(token)
+        if not inv:
+            return jsonify({'error': 'Invalid or expired invitation'}), 404
+
+        # Check if user already exists
+        existing = db.get_user_by_username(inv['email'])
+        if existing:
+            return jsonify({'error': 'A user with this email already exists'}), 409
+
+        # Create user
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO users (username, password_hash, display_name, role, organization_id, enabled)
+            VALUES (%s, %s, %s, %s, %s, true)
+            RETURNING id, username, display_name, role, enabled, organization_id, is_superadmin, portal_role
+        """, (inv['email'], password_hash, display_name, inv['role'], inv['organization_id']))
+        user = dict(cursor.fetchone())
+        db._commit()
+        cursor.close()
+
+        # Mark invitation as accepted
+        db.accept_invitation(inv['id'])
+
+        # Generate tokens
+        user['org_name'] = inv.get('org_name', '')
+        access_token = generate_access_token(user)
+        db.close()  # Close before generating refresh token to avoid deadlock
+        refresh_token = generate_refresh_token(user)
+
+        return jsonify({
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'display_name': user['display_name'],
+                'role': user['role'],
+                'organization_id': user['organization_id'],
+                'org_name': user.get('org_name', ''),
+            },
+        })
+    except Exception:
+        db.close()
+        raise
+
+
+# ── Identity Graph Engine Endpoints ────────────────────────────────────
+
+def get_graph_engine_attack_paths():
+    """GET /api/graph/attack-paths?identity=<id> — attack paths for a single identity."""
+    db = _db()
+    try:
+        identity = request.args.get('identity')
+        if not identity:
+            return jsonify({'error': 'identity parameter required'}), 400
+
+        run_id = request.args.get('run_id', type=int)
+        severity = request.args.get('severity')
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Resolve run_id if not provided
+        if not run_id:
+            run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+            run_id = run_ids[0] if run_ids else None
+        if not run_id:
+            cursor.close()
+            return jsonify({'paths': [], 'summary': {'total': 0, 'by_severity': {}, 'by_type': {}}}), 200
+
+        # Look up identity display_name + risk_score
+        cursor.execute("""
+            SELECT display_name, COALESCE(risk_score, 0)
+            FROM identities
+            WHERE id = %s AND discovery_run_id = %s
+            LIMIT 1
+        """, (identity, run_id))
+        ident_row = cursor.fetchone()
+        identity_name = ident_row[0] if ident_row else ''
+        risk_score = int(ident_row[1]) if ident_row else 0
+
+        cursor.close()
+
+        # Build graph and find escalation paths
+        from app.engines.graph_attack_engine import GraphAttackEngine
+        engine = GraphAttackEngine(db)
+        engine._build_graph(org_id, run_id)
+        paths = engine.find_escalation_paths(str(identity))
+
+        # Apply severity filter
+        if severity:
+            paths = [p for p in paths if p.get('severity') == severity]
+
+        # Build summary
+        by_severity = {}
+        by_type = {}
+        for p in paths:
+            sev = p.get('severity', 'medium')
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            ft = p.get('finding_type', '')
+            by_type[ft] = by_type.get(ft, 0) + 1
+
+        # Paginate
+        total = len(paths)
+        paths = paths[offset:offset + limit]
+
+        return jsonify({
+            'paths': paths,
+            'summary': {'total': total, 'by_severity': by_severity, 'by_type': by_type},
+            'identity_name': identity_name,
+            'risk_score': risk_score,
+        })
+    finally:
+        db.close()
+
+
+def get_graph_engine_blast_radius():
+    """GET /api/graph/blast-radius?identity=<id> — blast radius for a single identity."""
+    db = _db()
+    try:
+        identity = request.args.get('identity')
+        if not identity:
+            return jsonify({'error': 'identity parameter required'}), 400
+
+        run_id = request.args.get('run_id', type=int)
+        include_graph = request.args.get('include_graph', 'false').lower() == 'true'
+
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        if not run_id:
+            run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+            run_id = run_ids[0] if run_ids else None
+        if not run_id:
+            cursor.close()
+            return jsonify({'identity_id': identity, 'blast_radius_score': 0,
+                            'reachable_resources': [], 'reachable_secrets': []}), 200
+
+        cursor.close()
+
+        from app.engines.graph_attack_engine import GraphAttackEngine
+        engine = GraphAttackEngine(db)
+        engine._build_graph(org_id, run_id)
+        result = engine.compute_blast_radius(str(identity))
+
+        if include_graph:
+            snapshot = engine.graph.to_snapshot()
+            result['graph'] = {'nodes': snapshot['nodes'], 'edges': snapshot['edges']}
+
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_graph_engine_escalation_paths():
+    """GET /api/graph/escalation-paths?identity=<id> — escalation paths with optional simulation."""
+    db = _db()
+    try:
+        identity = request.args.get('identity')
+        if not identity:
+            return jsonify({'error': 'identity parameter required'}), 400
+
+        run_id = request.args.get('run_id', type=int)
+        include_simulation = request.args.get('include_simulation', 'false').lower() == 'true'
+
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        if not run_id:
+            run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+            run_id = run_ids[0] if run_ids else None
+        if not run_id:
+            cursor.close()
+            return jsonify({'paths': [], 'escalation_count': 0, 'max_severity': 'none'}), 200
+
+        cursor.close()
+
+        from app.engines.graph_attack_engine import GraphAttackEngine
+        engine = GraphAttackEngine(db)
+        engine._build_graph(org_id, run_id)
+        paths = engine.find_escalation_paths(str(identity))
+
+        severity_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        paths.sort(key=lambda p: severity_order.get(p.get('severity', 'medium'), 99))
+        max_sev = paths[0]['severity'] if paths else 'none'
+
+        result = {
+            'paths': paths,
+            'escalation_count': len(paths),
+            'max_severity': max_sev,
+        }
+
+        if include_simulation and paths:
+            # Simulate removing each escalation edge
+            remove_edges = []
+            for p in paths:
+                for e in p.get('attack_path_edges', []):
+                    remove_edges.append({
+                        'source_id': e['source'],
+                        'target_id': e['target'],
+                        'edge_type': e['type'],
+                    })
+            sim = engine.simulate_remediation(str(identity), remove_edges)
+            result['simulation'] = sim
+
+        return jsonify(result)
+    finally:
+        db.close()
