@@ -5429,7 +5429,7 @@ class Database:
             else:
                 cursor.execute("""
                     INSERT INTO organizations (name, slug, plan, enabled)
-                    VALUES ('Platform Admin', 'default', 'enterprise', true)
+                    VALUES ('Platform Admin', 'default', 'pro', true)
                     RETURNING id
                 """)
                 default_org_id = cursor.fetchone()[0]
@@ -5735,17 +5735,22 @@ class Database:
                     u['username'], u['role'], demo_org_id,
                 )
 
-            # Auto-seed demo data if no identities exist for this org
-            # (Check identities, not just runs — a previous failed seed may have
-            # created a discovery_run but failed to insert identities)
+            # Auto-seed demo data if no identities OR no role_assignments
+            # (A previous seed may have created identities but failed on
+            # role_assignments due to missing organization_id)
             cursor.execute("""
                 SELECT COUNT(*) FROM identities i
                 JOIN discovery_runs dr ON i.discovery_run_id = dr.id
                 WHERE dr.organization_id = %s
             """, (demo_org_id,))
             identity_count = cursor.fetchone()[0]
-            if identity_count == 0:
-                logger.info("No demo identities found (count=%d) — running demo data seeder...", identity_count)
+            cursor.execute("""
+                SELECT COUNT(*) FROM role_assignments
+                WHERE organization_id = %s
+            """, (demo_org_id,))
+            ra_count = cursor.fetchone()[0]
+            if identity_count == 0 or ra_count == 0:
+                logger.info("Demo data incomplete (identities=%d, role_assignments=%d) — running demo data seeder...", identity_count, ra_count)
                 cursor.close()
                 self.close()
                 try:
@@ -9669,6 +9674,8 @@ class Database:
         cursor.execute("UPDATE organizations SET platform_fee_cents = 0 WHERE plan IN ('free', 'trial') AND platform_fee_cents != 0")
         # Backfill: pro/enterprise orgs should have $500 platform fee (was $200)
         cursor.execute("UPDATE organizations SET platform_fee_cents = 50000 WHERE plan IN ('pro', 'enterprise') AND platform_fee_cents = 20000")
+        # Migrate enterprise→pro (enterprise tier removed)
+        cursor.execute("UPDATE organizations SET plan = 'pro' WHERE plan = 'enterprise'")
         # Backfill: trial_started_at for existing trial orgs
         cursor.execute("UPDATE organizations SET trial_started_at = created_at WHERE plan = 'trial' AND trial_started_at IS NULL")
         # Phase 78: Migrate growth→pro plan + API key role renames
@@ -9690,7 +9697,7 @@ class Database:
         if org_count == 0:
             cursor.execute("""
                 INSERT INTO organizations (name, slug, plan)
-                VALUES ('Platform Admin', 'default', 'enterprise')
+                VALUES ('Platform Admin', 'default', 'pro')
                 RETURNING id
             """)
             default_org_id = cursor.fetchone()[0]
@@ -20096,8 +20103,12 @@ class Database:
                     blast_radius_critical INTEGER DEFAULT 0,
                     integrity_warning BOOLEAN DEFAULT FALSE,
                     status TEXT NOT NULL DEFAULT 'stale',
+                    risk_score INTEGER DEFAULT 0,
+                    risk_factors JSONB DEFAULT '{}',
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                ALTER TABLE tenant_health ADD COLUMN IF NOT EXISTS risk_score INTEGER DEFAULT 0;
+                ALTER TABLE tenant_health ADD COLUMN IF NOT EXISTS risk_factors JSONB DEFAULT '{}';
                 CREATE INDEX IF NOT EXISTS idx_th_status ON tenant_health(status);
                 CREATE INDEX IF NOT EXISTS idx_th_updated_at ON tenant_health(updated_at DESC);
 
@@ -20124,6 +20135,156 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_dim_org_id ON discovery_integrity_metrics(organization_id);
                 CREATE INDEX IF NOT EXISTS idx_dim_run_id ON discovery_integrity_metrics(discovery_run_id);
                 CREATE INDEX IF NOT EXISTS idx_dim_recorded_at ON discovery_integrity_metrics(recorded_at DESC);
+
+                -- Phase 7: Snapshot Runs (org-level aggregation of snapshot_jobs)
+                CREATE TABLE IF NOT EXISTS snapshot_runs (
+                    id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    scan_mode TEXT DEFAULT 'deep',
+                    started_at TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ,
+                    duration_seconds INTEGER,
+                    identities_found INTEGER DEFAULT 0,
+                    spns_found INTEGER DEFAULT 0,
+                    roles_found INTEGER DEFAULT 0,
+                    edges_created INTEGER DEFAULT 0,
+                    error_message TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    connections_total INTEGER DEFAULT 0,
+                    connections_completed INTEGER DEFAULT 0,
+                    connections_failed INTEGER DEFAULT 0,
+                    triggered_by TEXT DEFAULT 'scheduler',
+                    metadata JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_sr_org_id ON snapshot_runs(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_sr_status ON snapshot_runs(status);
+                CREATE INDEX IF NOT EXISTS idx_sr_started_at ON snapshot_runs(started_at DESC);
+
+                -- Phase 7: Snapshot Alerts (persistent failure alerts with severity)
+                CREATE TABLE IF NOT EXISTS snapshot_alerts (
+                    id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'warning',
+                    alert_type TEXT NOT NULL DEFAULT 'snapshot_failure',
+                    message TEXT NOT NULL,
+                    snapshot_run_id UUID,
+                    snapshot_job_id UUID,
+                    acknowledged BOOLEAN DEFAULT FALSE,
+                    acknowledged_by INTEGER,
+                    acknowledged_at TIMESTAMPTZ,
+                    metadata JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_sa_org_id ON snapshot_alerts(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_sa_severity ON snapshot_alerts(severity);
+                CREATE INDEX IF NOT EXISTS idx_sa_created_at ON snapshot_alerts(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_sa_acknowledged ON snapshot_alerts(acknowledged);
+
+                -- Phase 8: Identity risk scores (graph-based composite scoring)
+                CREATE TABLE IF NOT EXISTS identity_risk_scores (
+                    id SERIAL PRIMARY KEY,
+                    identity_id INTEGER NOT NULL,
+                    identity_name TEXT,
+                    identity_type TEXT,
+                    organization_id INTEGER NOT NULL,
+                    discovery_run_id INTEGER,
+                    risk_score INTEGER NOT NULL DEFAULT 0,
+                    factors JSONB DEFAULT '{}',
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_irs_identity_id ON identity_risk_scores(identity_id);
+                CREATE INDEX IF NOT EXISTS idx_irs_org_id ON identity_risk_scores(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_irs_run_id ON identity_risk_scores(discovery_run_id);
+                CREATE INDEX IF NOT EXISTS idx_irs_score ON identity_risk_scores(risk_score DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_irs_identity_run
+                    ON identity_risk_scores(identity_id, discovery_run_id);
+
+                -- Phase 8: Graph attack findings (BFS-discovered attack paths)
+                CREATE TABLE IF NOT EXISTS graph_attack_findings (
+                    id SERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    identity_id INTEGER,
+                    finding_type TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'medium',
+                    risk_score INTEGER DEFAULT 0,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    attack_path JSONB DEFAULT '{}',
+                    remediation TEXT,
+                    discovery_run_id INTEGER,
+                    fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    resolved_at TIMESTAMPTZ
+                );
+                CREATE INDEX IF NOT EXISTS idx_gaf_org_id ON graph_attack_findings(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_gaf_identity_id ON graph_attack_findings(identity_id);
+                CREATE INDEX IF NOT EXISTS idx_gaf_severity ON graph_attack_findings(severity);
+                CREATE INDEX IF NOT EXISTS idx_gaf_status ON graph_attack_findings(status);
+                CREATE INDEX IF NOT EXISTS idx_gaf_run_id ON graph_attack_findings(discovery_run_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_gaf_fingerprint_run
+                    ON graph_attack_findings(fingerprint, discovery_run_id);
+
+                -- Phase 10: Extend graph_attack_findings with workflow columns
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS assigned_to TEXT;
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS ticket_id TEXT;
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS suppressed_until TIMESTAMPTZ;
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS acknowledged_by TEXT;
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+                CREATE INDEX IF NOT EXISTS idx_gaf_assigned ON graph_attack_findings(assigned_to);
+
+                -- Phase 10: Finding comments
+                CREATE TABLE IF NOT EXISTS finding_comments (
+                    id SERIAL PRIMARY KEY,
+                    finding_id INTEGER NOT NULL REFERENCES graph_attack_findings(id) ON DELETE CASCADE,
+                    organization_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    comment TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_fc_finding_id ON finding_comments(finding_id);
+                CREATE INDEX IF NOT EXISTS idx_fc_org_id ON finding_comments(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_fc_created ON finding_comments(created_at DESC);
+
+                -- Phase 9: Tenant posture scores (composite security posture)
+                CREATE TABLE IF NOT EXISTS tenant_posture_scores (
+                    id SERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    discovery_run_id INTEGER,
+                    posture_score INTEGER NOT NULL DEFAULT 0,
+                    critical_findings INTEGER DEFAULT 0,
+                    high_findings INTEGER DEFAULT 0,
+                    attack_paths_count INTEGER DEFAULT 0,
+                    privileged_identities INTEGER DEFAULT 0,
+                    stale_credentials INTEGER DEFAULT 0,
+                    high_risk_identities INTEGER DEFAULT 0,
+                    factors JSONB DEFAULT '{}',
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_tps_org_id ON tenant_posture_scores(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_tps_computed ON tenant_posture_scores(computed_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_tps_org_run
+                    ON tenant_posture_scores(organization_id, discovery_run_id);
+
+                -- Phase 9: Security events timeline
+                CREATE TABLE IF NOT EXISTS security_events (
+                    id SERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'info',
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    identity_id INTEGER,
+                    finding_id INTEGER,
+                    metadata JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_se_org_id ON security_events(organization_id);
+                CREATE INDEX IF NOT EXISTS idx_se_type ON security_events(event_type);
+                CREATE INDEX IF NOT EXISTS idx_se_created ON security_events(created_at DESC);
             """)
             self.conn.commit()
             Database._platform_ops_ensured = True
@@ -20316,7 +20477,1327 @@ class Database:
         for k in ('last_discovery_run', 'updated_at'):
             if k in r and r[k] is not None:
                 r[k] = r[k].isoformat()
+        if 'risk_factors' in r and isinstance(r['risk_factors'], str):
+            try:
+                r['risk_factors'] = json.loads(r['risk_factors'])
+            except Exception:
+                pass
         return r
+
+    # ── snapshot_runs CRUD (Phase 7) ─────────────────────────────────
+
+    def create_snapshot_run(self, organization_id: int, scan_mode: str = 'deep',
+                            connections_total: int = 0,
+                            triggered_by: str = 'scheduler') -> str:
+        """Create an org-level snapshot run. Returns the UUID string."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO snapshot_runs
+                    (organization_id, status, scan_mode, connections_total,
+                     triggered_by, started_at)
+                VALUES (%s, 'running', %s, %s, %s, NOW())
+                RETURNING id
+            """, (organization_id, scan_mode, connections_total, triggered_by))
+            row = cursor.fetchone()
+            self.conn.commit()
+            return str(row[0])
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def complete_snapshot_run(self, run_id: str, status: str = 'completed',
+                              error_message: str = None,
+                              identities_found: int = 0, spns_found: int = 0,
+                              roles_found: int = 0, edges_created: int = 0,
+                              connections_completed: int = 0,
+                              connections_failed: int = 0) -> dict:
+        """Mark a snapshot_run as completed/failed and record metrics."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                UPDATE snapshot_runs
+                SET status = %s,
+                    completed_at = NOW(),
+                    duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::INTEGER,
+                    error_message = %s,
+                    identities_found = %s,
+                    spns_found = %s,
+                    roles_found = %s,
+                    edges_created = %s,
+                    connections_completed = %s,
+                    connections_failed = %s
+                WHERE id = %s
+                RETURNING *
+            """, (status, error_message, identities_found, spns_found,
+                  roles_found, edges_created, connections_completed,
+                  connections_failed, run_id))
+            row = cursor.fetchone()
+            self.conn.commit()
+            if not row:
+                return None
+            return self._format_snapshot_run_row(dict(row))
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_snapshot_runs(self, organization_id: int = None,
+                          status: str = None,
+                          limit: int = 50, offset: int = 0) -> list:
+        """List snapshot_runs with optional filters."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        clauses, params = [], []
+        if organization_id is not None:
+            clauses.append("sr.organization_id = %s"); params.append(organization_id)
+        if status:
+            clauses.append("sr.status = %s"); params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params += [limit, offset]
+        cursor.execute(f"""
+            SELECT sr.*, o.name AS organization_name
+            FROM snapshot_runs sr
+            LEFT JOIN organizations o ON o.id = sr.organization_id
+            {where}
+            ORDER BY sr.started_at DESC NULLS LAST
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = [self._format_snapshot_run_row(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_snapshot_run_stats(self, hours: int = 24) -> dict:
+        """Return snapshot_runs stats for the last N hours."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                    COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                    COUNT(*) FILTER (WHERE status = 'running') AS running,
+                    AVG(duration_seconds) FILTER (WHERE status = 'completed'
+                        AND duration_seconds IS NOT NULL) AS avg_duration_seconds,
+                    SUM(identities_found) FILTER (WHERE status = 'completed') AS total_identities,
+                    SUM(spns_found) FILTER (WHERE status = 'completed') AS total_spns
+                FROM snapshot_runs
+                WHERE created_at >= NOW() - INTERVAL '%s hours'
+            """, (hours,))
+            row = dict(cursor.fetchone())
+            total = row['total'] or 0
+            row['avg_duration_seconds'] = round(row['avg_duration_seconds'] or 0)
+            row['total_identities'] = row['total_identities'] or 0
+            row['total_spns'] = row['total_spns'] or 0
+            row['success_rate'] = round((row['completed'] / total) * 100, 1) if total > 0 else 100.0
+            return row
+        finally:
+            cursor.close()
+
+    def _format_snapshot_run_row(self, r: dict) -> dict:
+        """Normalize a snapshot_runs row."""
+        if 'id' in r and r['id'] is not None:
+            r['id'] = str(r['id'])
+        for k in ('started_at', 'completed_at', 'created_at'):
+            if k in r and r[k] is not None:
+                r[k] = r[k].isoformat()
+        if 'metadata' in r and isinstance(r['metadata'], str):
+            try:
+                r['metadata'] = json.loads(r['metadata'])
+            except Exception:
+                pass
+        return r
+
+    # ── snapshot_alerts CRUD (Phase 7) ────────────────────────────────
+
+    def create_snapshot_alert(self, organization_id: int, severity: str,
+                              message: str, alert_type: str = 'snapshot_failure',
+                              snapshot_run_id: str = None,
+                              snapshot_job_id: str = None,
+                              metadata: dict = None) -> str:
+        """Create a snapshot alert. Returns the UUID string."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO snapshot_alerts
+                    (organization_id, severity, alert_type, message,
+                     snapshot_run_id, snapshot_job_id, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (organization_id, severity, alert_type, message,
+                  snapshot_run_id, snapshot_job_id,
+                  json.dumps(metadata or {})))
+            row = cursor.fetchone()
+            self.conn.commit()
+            return str(row[0])
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_snapshot_alerts(self, organization_id: int = None,
+                            severity: str = None,
+                            acknowledged: bool = None,
+                            limit: int = 50) -> list:
+        """Return snapshot alerts with optional filters."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        clauses, params = [], []
+        if organization_id is not None:
+            clauses.append("sa.organization_id = %s"); params.append(organization_id)
+        if severity:
+            clauses.append("sa.severity = %s"); params.append(severity)
+        if acknowledged is not None:
+            clauses.append("sa.acknowledged = %s"); params.append(acknowledged)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        cursor.execute(f"""
+            SELECT sa.*, o.name AS organization_name
+            FROM snapshot_alerts sa
+            LEFT JOIN organizations o ON o.id = sa.organization_id
+            {where}
+            ORDER BY sa.created_at DESC
+            LIMIT %s
+        """, params)
+        rows = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            if d.get('id'):
+                d['id'] = str(d['id'])
+            for uid in ('snapshot_run_id', 'snapshot_job_id'):
+                if d.get(uid):
+                    d[uid] = str(d[uid])
+            for ts in ('created_at', 'acknowledged_at'):
+                if d.get(ts):
+                    d[ts] = d[ts].isoformat()
+            if isinstance(d.get('metadata'), str):
+                try:
+                    d['metadata'] = json.loads(d['metadata'])
+                except Exception:
+                    pass
+            rows.append(d)
+        cursor.close()
+        return rows
+
+    def acknowledge_snapshot_alert(self, alert_id: str, user_id: int) -> bool:
+        """Acknowledge a snapshot alert. Returns True if updated."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE snapshot_alerts
+                SET acknowledged = TRUE, acknowledged_by = %s, acknowledged_at = NOW()
+                WHERE id = %s AND acknowledged = FALSE
+            """, (user_id, alert_id))
+            updated = cursor.rowcount > 0
+            self.conn.commit()
+            return updated
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_snapshot_alert_counts(self) -> dict:
+        """Return alert counts by severity for unacknowledged alerts."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                    COUNT(*) FILTER (WHERE severity = 'warning') AS warning,
+                    COUNT(*) FILTER (WHERE severity = 'info') AS info
+                FROM snapshot_alerts
+                WHERE acknowledged = FALSE
+            """)
+            row = cursor.fetchone()
+            return {
+                'total': row[0] or 0,
+                'critical': row[1] or 0,
+                'warning': row[2] or 0,
+                'info': row[3] or 0,
+            }
+        finally:
+            cursor.close()
+
+    # ── Exponential backoff helper (Phase 7) ──────────────────────────
+
+    def get_retry_delay_seconds(self, retry_count: int) -> int:
+        """Calculate exponential backoff delay: 30s, 120s, 480s (×4 each retry)."""
+        base_delay = 30
+        return base_delay * (4 ** retry_count)
+
+    def retry_snapshot_job_with_backoff(self, job_id: str) -> dict:
+        """Reset a failed snapshot_job for retry with backoff metadata.
+        Returns {'retry_count': int, 'delay_seconds': int} or None."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            # Get current retry_count before increment
+            cursor.execute("""
+                SELECT retry_count, max_retries FROM snapshot_jobs
+                WHERE id = %s AND status = 'failed'
+                  AND retry_count < max_retries
+            """, (job_id,))
+            row = cursor.fetchone()
+            if not row:
+                cursor.close()
+                return None
+
+            current_retry = row['retry_count']
+            delay = self.get_retry_delay_seconds(current_retry)
+            next_retry_at = f"NOW() + INTERVAL '{delay} seconds'"
+
+            cursor.execute(f"""
+                UPDATE snapshot_jobs
+                SET status = 'queued',
+                    retry_count = retry_count + 1,
+                    error_message = NULL,
+                    error_type = NULL,
+                    completed_at = NULL,
+                    started_at = NULL,
+                    last_heartbeat_at = NULL,
+                    stage = NULL,
+                    progress = 0
+                WHERE id = %s
+                RETURNING retry_count
+            """, (job_id,))
+            new_row = cursor.fetchone()
+            self.conn.commit()
+            if not new_row:
+                return None
+            return {
+                'retry_count': new_row['retry_count'],
+                'delay_seconds': delay,
+            }
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    # ── Enhanced tenant health (Phase 7) ──────────────────────────────
+
+    def compute_tenant_health_status(self, org_id: int) -> dict:
+        """Compute HEALTHY/WARNING/CRITICAL health status for a tenant.
+        Rules:
+          - snapshot_age >72h OR >=3 failures in 24h → CRITICAL
+          - snapshot_age >24h OR >=1 failure in 24h → WARNING
+          - Otherwise → HEALTHY
+        """
+        cursor = self.conn.cursor()
+        try:
+            # Last completed discovery run
+            cursor.execute("""
+                SELECT MAX(completed_at) FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+            """, (org_id,))
+            row = cursor.fetchone()
+            last_run = row[0] if row else None
+
+            snapshot_age_hours = 999
+            if last_run:
+                from datetime import timezone
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=timezone.utc)
+                delta = datetime.now(timezone.utc) - last_run
+                snapshot_age_hours = int(delta.total_seconds() / 3600)
+
+            # Failed snapshot_jobs in last 24h
+            cursor.execute("""
+                SELECT COUNT(*) FROM snapshot_jobs
+                WHERE organization_id = %s AND status = 'failed'
+                  AND completed_at >= NOW() - INTERVAL '24 hours'
+            """, (org_id,))
+            failures_24h = cursor.fetchone()[0] or 0
+
+            # Failed snapshot_runs in last 24h
+            cursor.execute("""
+                SELECT COUNT(*) FROM snapshot_runs
+                WHERE organization_id = %s AND status = 'failed'
+                  AND completed_at >= NOW() - INTERVAL '24 hours'
+            """, (org_id,))
+            run_failures_24h = cursor.fetchone()[0] or 0
+
+            total_failures = failures_24h + run_failures_24h
+
+            # Determine status
+            if snapshot_age_hours > 72 or total_failures >= 3:
+                status = 'critical'
+            elif snapshot_age_hours > 24 or total_failures >= 1:
+                status = 'warning'
+            else:
+                status = 'healthy'
+
+            return {
+                'organization_id': org_id,
+                'status': status,
+                'snapshot_age_hours': snapshot_age_hours,
+                'failures_24h': total_failures,
+                'last_discovery_run': last_run.isoformat() if last_run else None,
+            }
+        finally:
+            cursor.close()
+
+    # ── Phase 8: Identity risk scores + graph attack findings CRUD ──
+
+    def upsert_identity_risk_scores(self, scores: list):
+        """Persist identity risk scores (upsert on identity_id + run_id)."""
+        if not scores:
+            return
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            for s in scores:
+                cursor.execute("""
+                    INSERT INTO identity_risk_scores
+                        (identity_id, identity_name, identity_type, organization_id,
+                         discovery_run_id, risk_score, factors, computed_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (identity_id, discovery_run_id)
+                    DO UPDATE SET risk_score = EXCLUDED.risk_score,
+                                  factors = EXCLUDED.factors,
+                                  computed_at = NOW()
+                """, (
+                    s['identity_id'], s.get('identity_name'), s.get('identity_type'),
+                    s['organization_id'], s.get('discovery_run_id'),
+                    s['risk_score'],
+                    __import__('json').dumps(s.get('factors', {})),
+                ))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_identity_risk_scores(self, organization_id: int,
+                                 run_id: int = None, min_score: int = 0,
+                                 limit: int = 100, offset: int = 0) -> list:
+        """Get identity risk scores for an org, optionally filtered by run and min score."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            clauses = ["irs.organization_id = %s", "irs.risk_score >= %s"]
+            params = [organization_id, min_score]
+            if run_id:
+                clauses.append("irs.discovery_run_id = %s")
+                params.append(run_id)
+            else:
+                # Latest run only
+                clauses.append("""irs.discovery_run_id = (
+                    SELECT MAX(irs2.discovery_run_id) FROM identity_risk_scores irs2
+                    WHERE irs2.organization_id = %s)""")
+                params.append(organization_id)
+            where = " AND ".join(clauses)
+            params.extend([limit, offset])
+            cursor.execute(f"""
+                SELECT irs.*, i.risk_level, i.identity_category, i.activity_status
+                FROM identity_risk_scores irs
+                LEFT JOIN identities i ON i.id = irs.identity_id
+                WHERE {where}
+                ORDER BY irs.risk_score DESC
+                LIMIT %s OFFSET %s
+            """, params)
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def save_graph_attack_findings(self, findings: list):
+        """Persist graph attack findings (upsert on fingerprint + run_id)."""
+        if not findings:
+            return
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            for f in findings:
+                cursor.execute("""
+                    INSERT INTO graph_attack_findings
+                        (organization_id, identity_id, finding_type, severity,
+                         risk_score, title, description, attack_path,
+                         remediation, discovery_run_id, fingerprint)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (fingerprint, discovery_run_id)
+                    DO UPDATE SET severity = EXCLUDED.severity,
+                                  risk_score = EXCLUDED.risk_score,
+                                  title = EXCLUDED.title,
+                                  description = EXCLUDED.description,
+                                  attack_path = EXCLUDED.attack_path,
+                                  remediation = EXCLUDED.remediation
+                """, (
+                    f['organization_id'], f.get('identity_id'),
+                    f['finding_type'], f['severity'], f.get('risk_score', 0),
+                    f['title'], f.get('description'),
+                    __import__('json').dumps(f.get('attack_path', {})),
+                    f.get('remediation'), f.get('discovery_run_id'),
+                    f['fingerprint'],
+                ))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_graph_attack_findings(self, organization_id: int,
+                                  run_id: int = None, severity: str = None,
+                                  finding_type: str = None, status: str = None,
+                                  identity_id: int = None,
+                                  limit: int = 100, offset: int = 0) -> list:
+        """Get graph attack findings with filters."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            clauses = ["gaf.organization_id = %s"]
+            params = [organization_id]
+            if run_id:
+                clauses.append("gaf.discovery_run_id = %s")
+                params.append(run_id)
+            else:
+                clauses.append("""gaf.discovery_run_id = (
+                    SELECT MAX(gaf2.discovery_run_id) FROM graph_attack_findings gaf2
+                    WHERE gaf2.organization_id = %s)""")
+                params.append(organization_id)
+            if severity:
+                clauses.append("gaf.severity = %s")
+                params.append(severity)
+            if finding_type:
+                clauses.append("gaf.finding_type = %s")
+                params.append(finding_type)
+            if status:
+                clauses.append("gaf.status = %s")
+                params.append(status)
+            else:
+                clauses.append("gaf.status = 'open'")
+            if identity_id:
+                clauses.append("gaf.identity_id = %s")
+                params.append(identity_id)
+            where = " AND ".join(clauses)
+            params.extend([limit, offset])
+            cursor.execute(f"""
+                SELECT gaf.*, i.display_name as identity_name,
+                       i.identity_category, i.risk_level as identity_risk_level
+                FROM graph_attack_findings gaf
+                LEFT JOIN identities i ON i.id = gaf.identity_id
+                WHERE {where}
+                ORDER BY gaf.risk_score DESC, gaf.created_at DESC
+                LIMIT %s OFFSET %s
+            """, params)
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def get_graph_attack_finding_stats(self, organization_id: int,
+                                       run_id: int = None) -> dict:
+        """Get summary stats for graph attack findings."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            run_clause = ""
+            params = [organization_id]
+            if run_id:
+                run_clause = " AND discovery_run_id = %s"
+                params.append(run_id)
+            else:
+                run_clause = """ AND discovery_run_id = (
+                    SELECT MAX(discovery_run_id) FROM graph_attack_findings
+                    WHERE organization_id = %s)"""
+                params.append(organization_id)
+            cursor.execute(f"""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE severity = 'critical') as critical,
+                    COUNT(*) FILTER (WHERE severity = 'high') as high,
+                    COUNT(*) FILTER (WHERE severity = 'medium') as medium,
+                    COUNT(*) FILTER (WHERE severity = 'low') as low,
+                    COUNT(*) FILTER (WHERE status = 'open') as open,
+                    COUNT(DISTINCT identity_id) as affected_identities,
+                    COUNT(DISTINCT finding_type) as finding_types
+                FROM graph_attack_findings
+                WHERE organization_id = %s{run_clause} AND status = 'open'
+            """, params)
+            row = cursor.fetchone()
+            return {
+                'total': row[0] or 0, 'critical': row[1] or 0,
+                'high': row[2] or 0, 'medium': row[3] or 0,
+                'low': row[4] or 0, 'open': row[5] or 0,
+                'affected_identities': row[6] or 0,
+                'finding_types': row[7] or 0,
+            }
+        finally:
+            cursor.close()
+
+    # ── Phase 9: Posture scores + security events CRUD ───────────
+
+    def compute_posture_score(self, org_id: int, run_id: int = None) -> dict:
+        """Compute a 0-100 security posture score from graph attack data.
+
+        Factors: critical findings, high findings, attack paths,
+        privileged identities, stale credentials.
+        Score starts at 100 and deducts for each risk factor.
+        """
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            # Resolve run_id if not given
+            if not run_id:
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (org_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return {'posture_score': 0, 'factors': {'no_data': True}}
+                run_id = row[0]
+
+            # 1. Critical + high findings (graph_attack_findings)
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE severity = 'critical') as critical,
+                    COUNT(*) FILTER (WHERE severity = 'high') as high
+                FROM graph_attack_findings
+                WHERE organization_id = %s AND discovery_run_id = %s AND status = 'open'
+            """, (org_id, run_id))
+            row = cursor.fetchone()
+            critical_findings = row[0] or 0
+            high_findings = row[1] or 0
+
+            # Also check security_findings table
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE severity = 'critical') as critical,
+                    COUNT(*) FILTER (WHERE severity = 'high') as high
+                FROM security_findings
+                WHERE organization_id = %s AND status = 'open'
+            """, (org_id,))
+            row = cursor.fetchone()
+            critical_findings += (row[0] or 0)
+            high_findings += (row[1] or 0)
+
+            # 2. Attack paths count
+            cursor.execute("""
+                SELECT COUNT(*) FROM graph_attack_findings
+                WHERE organization_id = %s AND discovery_run_id = %s AND status = 'open'
+            """, (org_id, run_id))
+            attack_paths_count = cursor.fetchone()[0] or 0
+
+            # 3. Privileged identities (Owner, Contributor, Global Admin roles)
+            cursor.execute("""
+                SELECT COUNT(DISTINCT ra.identity_id)
+                FROM role_assignments ra
+                WHERE ra.discovery_run_id = %s
+                  AND ra.role_name IN ('Owner', 'Contributor',
+                       'Global Administrator', 'User Access Administrator',
+                       'Privileged Role Administrator')
+            """, (run_id,))
+            privileged_identities = cursor.fetchone()[0] or 0
+
+            # 4. Stale credentials
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                WHERE i.discovery_run_id = %s
+                  AND i.activity_status IN ('stale', 'inactive')
+                  AND i.risk_level IN ('critical', 'high')
+            """, (run_id,))
+            stale_credentials = cursor.fetchone()[0] or 0
+
+            # 5. High-risk identities (risk_score >= 60)
+            cursor.execute("""
+                SELECT COUNT(*) FROM identity_risk_scores
+                WHERE organization_id = %s AND discovery_run_id = %s
+                  AND risk_score >= 60
+            """, (org_id, run_id))
+            high_risk_identities = cursor.fetchone()[0] or 0
+
+            # Compute score: start at 100, deduct for risk factors
+            score = 100
+            score -= min(30, critical_findings * 10)   # Up to -30
+            score -= min(20, high_findings * 3)          # Up to -20
+            score -= min(15, attack_paths_count * 2)     # Up to -15
+            score -= min(15, privileged_identities * 2)  # Up to -15
+            score -= min(10, stale_credentials * 3)      # Up to -10
+            score -= min(10, high_risk_identities * 2)   # Up to -10
+            score = max(0, score)
+
+            factors = {
+                'critical_findings': critical_findings,
+                'high_findings': high_findings,
+                'attack_paths_count': attack_paths_count,
+                'privileged_identities': privileged_identities,
+                'stale_credentials': stale_credentials,
+                'high_risk_identities': high_risk_identities,
+            }
+
+            # Persist
+            cursor.execute("""
+                INSERT INTO tenant_posture_scores
+                    (organization_id, discovery_run_id, posture_score,
+                     critical_findings, high_findings, attack_paths_count,
+                     privileged_identities, stale_credentials, high_risk_identities,
+                     factors, computed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (organization_id, discovery_run_id)
+                DO UPDATE SET posture_score = EXCLUDED.posture_score,
+                              critical_findings = EXCLUDED.critical_findings,
+                              high_findings = EXCLUDED.high_findings,
+                              attack_paths_count = EXCLUDED.attack_paths_count,
+                              privileged_identities = EXCLUDED.privileged_identities,
+                              stale_credentials = EXCLUDED.stale_credentials,
+                              high_risk_identities = EXCLUDED.high_risk_identities,
+                              factors = EXCLUDED.factors,
+                              computed_at = NOW()
+            """, (org_id, run_id, score,
+                  critical_findings, high_findings, attack_paths_count,
+                  privileged_identities, stale_credentials, high_risk_identities,
+                  __import__('json').dumps(factors)))
+            self.conn.commit()
+
+            return {
+                'organization_id': org_id,
+                'discovery_run_id': run_id,
+                'posture_score': score,
+                **factors,
+            }
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_posture_score(self, org_id: int) -> dict:
+        """Get latest posture score for a tenant."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT * FROM tenant_posture_scores
+                WHERE organization_id = %s
+                ORDER BY computed_at DESC LIMIT 1
+            """, (org_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            # Get previous for trend
+            cursor.execute("""
+                SELECT posture_score FROM tenant_posture_scores
+                WHERE organization_id = %s
+                ORDER BY computed_at DESC LIMIT 1 OFFSET 1
+            """, (org_id,))
+            prev = cursor.fetchone()
+            result = dict(row)
+            result['previous_score'] = prev['posture_score'] if prev else None
+            result['trend'] = (result['posture_score'] - result['previous_score']) if result['previous_score'] is not None else None
+            return result
+        finally:
+            cursor.close()
+
+    def get_risky_identities(self, org_id: int, limit: int = 20) -> list:
+        """Get top risky identities with attack path counts and privileges."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT irs.identity_id, irs.identity_name, irs.identity_type,
+                       irs.risk_score, irs.factors,
+                       i.risk_level, i.identity_category, i.activity_status,
+                       (SELECT COUNT(*) FROM graph_attack_findings gaf
+                        WHERE gaf.identity_id = irs.identity_id
+                          AND gaf.organization_id = irs.organization_id
+                          AND gaf.status = 'open') as attack_paths,
+                       (SELECT COUNT(*) FROM role_assignments ra
+                        WHERE ra.identity_id = irs.identity_id
+                          AND ra.discovery_run_id = irs.discovery_run_id
+                          AND ra.role_name IN ('Owner', 'Contributor',
+                               'Global Administrator', 'User Access Administrator'))
+                       as privileged_roles
+                FROM identity_risk_scores irs
+                LEFT JOIN identities i ON i.id = irs.identity_id
+                WHERE irs.organization_id = %s
+                  AND irs.discovery_run_id = (
+                      SELECT MAX(discovery_run_id) FROM identity_risk_scores
+                      WHERE organization_id = %s)
+                ORDER BY irs.risk_score DESC
+                LIMIT %s
+            """, (org_id, org_id, limit))
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def get_privileged_identities(self, org_id: int, limit: int = 50) -> list:
+        """Get identities with privileged roles (Owner, Contributor, Global Admin, etc.)."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT DISTINCT i.id as identity_id, i.display_name, i.identity_category,
+                       i.risk_level, i.risk_score, i.activity_status,
+                       array_agg(DISTINCT ra.role_name) as privileged_roles,
+                       COUNT(DISTINCT ra.role_name) as role_count
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_id = i.id
+                  AND ra.discovery_run_id = i.discovery_run_id
+                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                WHERE dr.organization_id = %s
+                  AND dr.id = (SELECT MAX(id) FROM discovery_runs
+                               WHERE organization_id = %s AND status = 'completed')
+                  AND ra.role_name IN ('Owner', 'Contributor',
+                       'Global Administrator', 'User Access Administrator',
+                       'Privileged Role Administrator', 'Application Administrator',
+                       'Cloud Application Administrator', 'Exchange Administrator',
+                       'Security Administrator', 'Conditional Access Administrator')
+                GROUP BY i.id, i.display_name, i.identity_category,
+                         i.risk_level, i.risk_score, i.activity_status
+                ORDER BY i.risk_score DESC NULLS LAST
+                LIMIT %s
+            """, (org_id, org_id, limit))
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            cursor.close()
+
+    def get_remediation_priority(self, org_id: int, limit: int = 10) -> list:
+        """Get top issues requiring remediation, ranked by risk."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT gaf.id, gaf.finding_type, gaf.severity, gaf.risk_score,
+                       gaf.title, gaf.description, gaf.remediation,
+                       gaf.attack_path, gaf.identity_id,
+                       i.display_name as identity_name, i.identity_category
+                FROM graph_attack_findings gaf
+                LEFT JOIN identities i ON i.id = gaf.identity_id
+                WHERE gaf.organization_id = %s AND gaf.status = 'open'
+                  AND gaf.discovery_run_id = (
+                      SELECT MAX(discovery_run_id) FROM graph_attack_findings
+                      WHERE organization_id = %s AND status = 'open')
+                ORDER BY
+                    CASE gaf.severity
+                        WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3 ELSE 4 END,
+                    gaf.risk_score DESC
+                LIMIT %s
+            """, (org_id, org_id, limit))
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def record_security_event(self, org_id: int, event_type: str, severity: str,
+                              title: str, description: str = None,
+                              identity_id: int = None, finding_id: int = None,
+                              metadata: dict = None):
+        """Record a security timeline event."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO security_events
+                    (organization_id, event_type, severity, title, description,
+                     identity_id, finding_id, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (org_id, event_type, severity, title, description,
+                  identity_id, finding_id,
+                  __import__('json').dumps(metadata or {})))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_security_events(self, org_id: int, event_type: str = None,
+                            limit: int = 50, offset: int = 0) -> list:
+        """Get security timeline events."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            clauses = ["se.organization_id = %s"]
+            params = [org_id]
+            if event_type:
+                clauses.append("se.event_type = %s")
+                params.append(event_type)
+            where = " AND ".join(clauses)
+            params.extend([limit, offset])
+            cursor.execute(f"""
+                SELECT se.*, i.display_name as identity_name
+                FROM security_events se
+                LEFT JOIN identities i ON i.id = se.identity_id
+                WHERE {where}
+                ORDER BY se.created_at DESC
+                LIMIT %s OFFSET %s
+            """, params)
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    # ── Phase 10: Remediation Workflow CRUD ─────────────────────────
+
+    VALID_FINDING_STATUSES = ('open', 'acknowledged', 'in_progress', 'resolved', 'ignored')
+    VALID_TRANSITIONS = {
+        'open': ('acknowledged', 'ignored'),
+        'acknowledged': ('in_progress',),
+        'in_progress': ('resolved',),
+        'resolved': ('open',),
+        'ignored': ('open',),
+    }
+
+    def assign_finding(self, finding_id: int, org_id: int,
+                       assigned_to: str, assigned_by: str = None) -> dict:
+        """Assign a finding to a user/team."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                UPDATE graph_attack_findings
+                SET assigned_to = %s, updated_at = NOW()
+                WHERE id = %s AND organization_id = %s
+                RETURNING *
+            """, (assigned_to, finding_id, org_id))
+            row = cursor.fetchone()
+            self.conn.commit()
+            if not row:
+                return None
+            self.record_security_event(
+                org_id, 'finding_assigned', 'info',
+                f'Finding #{finding_id} assigned to {assigned_to}',
+                f'Assigned by {assigned_by or "unknown"}',
+                finding_id=finding_id,
+                metadata={'assigned_to': assigned_to, 'assigned_by': assigned_by},
+            )
+            return dict(row)
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def update_finding_workflow_status(self, finding_id: int, org_id: int,
+                                       new_status: str, changed_by: str = None,
+                                       ticket_id: str = None,
+                                       suppressed_until: str = None) -> dict:
+        """Update finding status with transition validation."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT status FROM graph_attack_findings
+                WHERE id = %s AND organization_id = %s
+            """, (finding_id, org_id))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            current = row['status']
+
+            allowed = self.VALID_TRANSITIONS.get(current, ())
+            if new_status not in allowed:
+                return {'error': f'Cannot transition from {current} to {new_status}. '
+                                 f'Allowed: {", ".join(allowed)}'}
+
+            sets = ["status = %s", "updated_at = NOW()"]
+            params = [new_status]
+            if new_status == 'resolved':
+                sets.append("resolved_at = NOW()")
+            if new_status == 'acknowledged':
+                sets.append("acknowledged_at = NOW()")
+                sets.append("acknowledged_by = %s")
+                params.append(changed_by)
+            if ticket_id is not None:
+                sets.append("ticket_id = %s")
+                params.append(ticket_id)
+            if suppressed_until is not None and new_status == 'ignored':
+                sets.append("suppressed_until = %s")
+                params.append(suppressed_until)
+
+            params.extend([finding_id, org_id])
+            cursor.execute(f"""
+                UPDATE graph_attack_findings
+                SET {', '.join(sets)}
+                WHERE id = %s AND organization_id = %s
+                RETURNING *
+            """, params)
+            result = cursor.fetchone()
+            self.conn.commit()
+
+            self.record_security_event(
+                org_id, f'finding_{new_status}', 'info',
+                f'Finding #{finding_id} status: {current} → {new_status}',
+                f'Changed by {changed_by or "unknown"}',
+                finding_id=finding_id,
+                metadata={'old_status': current, 'new_status': new_status,
+                          'changed_by': changed_by, 'ticket_id': ticket_id},
+            )
+            return dict(result) if result else None
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def add_finding_comment(self, finding_id: int, org_id: int,
+                            username: str, comment: str) -> dict:
+        """Add a comment to a finding."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT id FROM graph_attack_findings
+                WHERE id = %s AND organization_id = %s
+            """, (finding_id, org_id))
+            if not cursor.fetchone():
+                return None
+            cursor.execute("""
+                INSERT INTO finding_comments (finding_id, organization_id, username, comment)
+                VALUES (%s, %s, %s, %s)
+                RETURNING *
+            """, (finding_id, org_id, username, comment))
+            row = cursor.fetchone()
+            self.conn.commit()
+            self.record_security_event(
+                org_id, 'finding_comment', 'info',
+                f'Comment added to finding #{finding_id} by {username}',
+                finding_id=finding_id,
+            )
+            return dict(row)
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def get_finding_comments(self, finding_id: int, org_id: int) -> list:
+        """Get comments for a finding."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT * FROM finding_comments
+                WHERE finding_id = %s AND organization_id = %s
+                ORDER BY created_at ASC
+            """, (finding_id, org_id))
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def get_remediation_metrics(self, org_id: int) -> dict:
+        """Compute remediation metrics: open, resolved, MTTR."""
+        self._ensure_platform_ops_tables()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE status = 'open') as open,
+                    COUNT(*) FILTER (WHERE status = 'acknowledged') as acknowledged,
+                    COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress,
+                    COUNT(*) FILTER (WHERE status = 'resolved') as resolved,
+                    COUNT(*) FILTER (WHERE status = 'ignored') as ignored
+                FROM graph_attack_findings
+                WHERE organization_id = %s
+            """, (org_id,))
+            row = cursor.fetchone()
+            total, open_c, ack_c, ip_c, resolved_c, ignored_c = row
+
+            cursor.execute("""
+                SELECT AVG(EXTRACT(EPOCH FROM (resolved_at - created_at)) / 3600)
+                FROM graph_attack_findings
+                WHERE organization_id = %s AND status = 'resolved'
+                  AND resolved_at IS NOT NULL
+            """, (org_id,))
+            mttr_row = cursor.fetchone()
+            mttr_hours = round(mttr_row[0], 1) if mttr_row and mttr_row[0] else None
+
+            cursor.execute("""
+                SELECT severity, COUNT(*)
+                FROM graph_attack_findings
+                WHERE organization_id = %s AND status IN ('open', 'acknowledged', 'in_progress')
+                GROUP BY severity
+            """, (org_id,))
+            by_severity = {r[0]: r[1] for r in cursor.fetchall()}
+
+            cursor.execute("""
+                SELECT finding_type, COUNT(*)
+                FROM graph_attack_findings
+                WHERE organization_id = %s AND status IN ('open', 'acknowledged', 'in_progress')
+                GROUP BY finding_type
+            """, (org_id,))
+            by_type = {r[0]: r[1] for r in cursor.fetchall()}
+
+            return {
+                'total': total or 0,
+                'open_findings': (open_c or 0) + (ack_c or 0) + (ip_c or 0),
+                'open': open_c or 0,
+                'acknowledged': ack_c or 0,
+                'in_progress': ip_c or 0,
+                'resolved_findings': resolved_c or 0,
+                'ignored': ignored_c or 0,
+                'mean_time_to_remediate_hours': mttr_hours,
+                'by_severity': by_severity,
+                'by_type': by_type,
+            }
+        finally:
+            cursor.close()
+
+    def auto_resolve_findings(self, org_id: int, current_run_id: int,
+                              current_fingerprints: set) -> int:
+        """Auto-resolve findings whose attack paths no longer exist.
+
+        Compares open findings against fingerprints from the current scan.
+        Returns count of auto-resolved findings.
+        """
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT id, fingerprint FROM graph_attack_findings
+                WHERE organization_id = %s
+                  AND status IN ('open', 'acknowledged', 'in_progress')
+                  AND discovery_run_id < %s
+            """, (org_id, current_run_id))
+            prev_findings = cursor.fetchall()
+
+            resolved_count = 0
+            for f in prev_findings:
+                if f['fingerprint'] not in current_fingerprints:
+                    cursor.execute("""
+                        UPDATE graph_attack_findings
+                        SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
+                        WHERE id = %s
+                    """, (f['id'],))
+                    resolved_count += 1
+                    self.record_security_event(
+                        org_id, 'finding_auto_resolved', 'info',
+                        f'Finding #{f["id"]} auto-resolved (attack path no longer exists)',
+                        finding_id=f['id'],
+                        metadata={'fingerprint': f['fingerprint'], 'run_id': current_run_id},
+                    )
+            self.conn.commit()
+            return resolved_count
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def compute_tenant_risk_score(self, org_id: int) -> dict:
+        """Compute a 0-100 risk score for a tenant based on discovery data.
+        Returns {'score': int, 'factors': dict}."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        factors = {}
+        score = 0
+        try:
+            # Latest completed discovery run
+            cursor.execute("""
+                SELECT id, critical_count, high_count, medium_count, total_identities
+                FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (org_id,))
+            run = cursor.fetchone()
+            if not run:
+                return {'score': 0, 'factors': {'no_data': True}}
+
+            critical = run['critical_count'] or 0
+            high = run['high_count'] or 0
+            medium = run['medium_count'] or 0
+            total = run['total_identities'] or 0
+            factors['critical_identities'] = critical
+            factors['high_identities'] = high
+            factors['medium_identities'] = medium
+            factors['total_identities'] = total
+
+            # Critical/high contribute heavily to risk
+            score += min(critical * 15, 45)  # max 45 from critical
+            score += min(high * 5, 25)       # max 25 from high
+            score += min(medium * 1, 10)     # max 10 from medium
+
+            # Stale credentials (expired secrets/certs on SPNs)
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt FROM identities
+                WHERE discovery_run_id = %s
+                  AND risk_level IN ('critical', 'high')
+                  AND identity_category = 'service_principal'
+            """, (run['id'],))
+            exposed_spns = cursor.fetchone()['cnt'] or 0
+            factors['exposed_spns'] = exposed_spns
+            score += min(exposed_spns * 3, 20)  # max 20 from exposed SPNs
+
+            score = max(0, min(100, score))
+
+            # Persist to tenant_health
+            cursor.execute("""
+                UPDATE tenant_health SET risk_score = %s, risk_factors = %s, updated_at = NOW()
+                WHERE organization_id = %s
+            """, (score, json.dumps(factors), org_id))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+        finally:
+            cursor.close()
+        return {'score': score, 'factors': factors}
+
+    def get_snapshot_stats(self, hours: int = 24) -> dict:
+        """Return snapshot job stats for the last N hours."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                    COUNT(*) FILTER (WHERE status = 'failed') AS failed
+                FROM job_runs
+                WHERE job_type = 'snapshot'
+                  AND created_at >= NOW() - INTERVAL '%s hours'
+            """, (hours,))
+            row = dict(cursor.fetchone())
+            total = row['total'] or 0
+            row['success_rate'] = round((row['completed'] / total) * 100, 1) if total > 0 else 100.0
+            return row
+        finally:
+            cursor.close()
+
+    def get_discovery_stats(self, hours: int = 24) -> dict:
+        """Return discovery run stats for the last N hours."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                    COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                    AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
+                        FILTER (WHERE status = 'completed' AND completed_at IS NOT NULL AND started_at IS NOT NULL)
+                        AS avg_duration_ms
+                FROM discovery_runs
+                WHERE created_at >= NOW() - INTERVAL '%s hours'
+            """, (hours,))
+            row = dict(cursor.fetchone())
+            total = row['total'] or 0
+            row['avg_duration_ms'] = round(row['avg_duration_ms'] or 0)
+            row['success_rate'] = round((row['completed'] / total) * 100, 1) if total > 0 else 100.0
+            return row
+        except Exception:
+            return {'total': 0, 'completed': 0, 'failed': 0, 'avg_duration_ms': 0, 'success_rate': 100.0}
+        finally:
+            cursor.close()
+
+    def get_recent_failures(self, limit: int = 50) -> list:
+        """Return recent failed jobs and discovery runs."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        failures = []
+        try:
+            # Failed job_runs
+            cursor.execute("""
+                SELECT jr.job_id, jr.job_type, jr.organization_id, jr.error_message,
+                       jr.created_at, o.name AS org_name
+                FROM job_runs jr
+                LEFT JOIN organizations o ON o.id = jr.organization_id
+                WHERE jr.status = 'failed'
+                ORDER BY jr.created_at DESC LIMIT %s
+            """, (limit,))
+            for r in cursor.fetchall():
+                row = dict(r)
+                row['type'] = 'job'
+                row['error'] = row.pop('error_message', None)
+                if row.get('created_at'):
+                    row['created_at'] = row['created_at'].isoformat()
+                failures.append(row)
+
+            # Failed discovery_runs
+            cursor.execute("""
+                SELECT dr.id, dr.organization_id, dr.error_message,
+                       dr.created_at, o.name AS org_name
+                FROM discovery_runs dr
+                LEFT JOIN organizations o ON o.id = dr.organization_id
+                WHERE dr.status = 'failed'
+                ORDER BY dr.created_at DESC LIMIT %s
+            """, (limit,))
+            for r in cursor.fetchall():
+                row = dict(r)
+                row['type'] = 'discovery'
+                row['error'] = row.pop('error_message', None)
+                if row.get('created_at'):
+                    row['created_at'] = row['created_at'].isoformat()
+                failures.append(row)
+        except Exception:
+            pass
+        finally:
+            cursor.close()
+        # Sort by created_at desc and limit
+        failures.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return failures[:limit]
+
+    def clear_tenant_discovery_data(self, org_id: int) -> dict:
+        """Delete all discovery data for a tenant. Returns counts of deleted rows."""
+        cursor = self.conn.cursor()
+        counts = {}
+        try:
+            # Delete in dependency order
+            for table in ['risk_scores', 'anomalies', 'drift_reports',
+                          'identity_subscription_access', 'pim_eligible_assignments',
+                          'pim_activations', 'role_assignments', 'entra_role_assignments',
+                          'app_registrations', 'azure_storage_accounts', 'azure_key_vaults']:
+                try:
+                    cursor.execute(f"""
+                        DELETE FROM {table}
+                        WHERE discovery_run_id IN (
+                            SELECT id FROM discovery_runs WHERE organization_id = %s
+                        )
+                    """, (org_id,))
+                    counts[table] = cursor.rowcount
+                except Exception:
+                    self.conn.rollback()
+                    continue
+
+            # Delete discovery_runs (CASCADE deletes identities + children)
+            cursor.execute("DELETE FROM discovery_runs WHERE organization_id = %s", (org_id,))
+            counts['discovery_runs'] = cursor.rowcount
+
+            # Clear tenant_health
+            cursor.execute("DELETE FROM tenant_health WHERE organization_id = %s", (org_id,))
+
+            # Clear job_runs
+            cursor.execute("DELETE FROM job_runs WHERE organization_id = %s", (org_id,))
+            counts['job_runs'] = cursor.rowcount
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cursor.close()
+        return counts
 
     # ── system_health_metrics CRUD ───────────────────────────────────
 

@@ -463,7 +463,7 @@ def seed_credentials(db, identity_map, run_id):
     logger.info("Seeded %d credentials.", count)
 
 
-def seed_role_assignments(db, identity_map, run_id):
+def seed_role_assignments(db, identity_map, run_id, org_id=None):
     """Seed RBAC + Entra role assignments (Part 6)."""
     cursor = db.conn.cursor()
     rbac_count = 0
@@ -508,11 +508,11 @@ def seed_role_assignments(db, identity_map, run_id):
         cursor.execute("""
             INSERT INTO role_assignments
                 (identity_db_id, role_name, scope, scope_type, principal_id,
-                 assignment_id, created_on, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                 assignment_id, created_on, created_at, organization_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
         """, (
             db_id, role, scope, scope_type, _uuid(), _uuid(),
-            _past(30, 365),
+            _past(30, 365), org_id,
         ))
         rbac_count += 1
 
@@ -535,9 +535,9 @@ def seed_role_assignments(db, identity_map, run_id):
         cursor.execute("""
             INSERT INTO role_assignments
                 (identity_db_id, role_name, scope, scope_type, principal_id,
-                 assignment_id, created_on, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-        """, (db_id, role, scope, scope_type, _uuid(), _uuid(), _past(30, 365)))
+                 assignment_id, created_on, created_at, organization_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+        """, (db_id, role, scope, scope_type, _uuid(), _uuid(), _past(30, 365), org_id))
         rbac_count += 1
 
     # Entra directory roles
@@ -560,9 +560,10 @@ def seed_role_assignments(db, identity_map, run_id):
         if db_id:
             cursor.execute("""
                 INSERT INTO entra_role_assignments
-                    (identity_db_id, role_name, role_definition_id, directory_scope)
-                VALUES (%s, %s, %s, %s)
-            """, (db_id, "Global Administrator", _uuid(), "/"))
+                    (identity_db_id, role_name, role_definition_id, directory_scope,
+                     organization_id)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (db_id, "Global Administrator", _uuid(), "/", org_id))
             entra_count += 1
 
     # Random Entra roles for some identities
@@ -570,9 +571,10 @@ def seed_role_assignments(db, identity_map, run_id):
         role_name, scope = random.choice(ENTRA_ROLES[1:])  # Not GA
         cursor.execute("""
             INSERT INTO entra_role_assignments
-                (identity_db_id, role_name, role_definition_id, directory_scope)
-            VALUES (%s, %s, %s, %s)
-        """, (db_id, role_name, _uuid(), scope))
+                (identity_db_id, role_name, role_definition_id, directory_scope,
+                 organization_id)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (db_id, role_name, _uuid(), scope, org_id))
         entra_count += 1
 
     db.conn.commit()
@@ -1339,7 +1341,7 @@ def main():
         run_id = seed_discovery_run(db, org_id, cc_id)
         identity_map = seed_identities(db, org_id, run_id)
         seed_credentials(db, identity_map, run_id)
-        seed_role_assignments(db, identity_map, run_id)
+        seed_role_assignments(db, identity_map, run_id, org_id)
         seed_storage_accounts(db, org_id, run_id)
         seed_key_vaults(db, org_id, run_id)
         seed_security_findings(db, org_id, run_id, identity_map)
