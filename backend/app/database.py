@@ -5763,8 +5763,14 @@ class Database:
                         )
                         if result.returncode == 0:
                             logger.info("Demo data seeder completed successfully")
+                            if result.stdout:
+                                logger.info("Demo seeder stdout: %s", result.stdout[-1000:])
                         else:
-                            logger.error("Demo data seeder failed: %s", result.stderr[-500:] if result.stderr else 'unknown')
+                            logger.error("Demo data seeder failed (rc=%d)", result.returncode)
+                            if result.stderr:
+                                logger.error("Demo seeder stderr: %s", result.stderr[-1000:])
+                            if result.stdout:
+                                logger.error("Demo seeder stdout: %s", result.stdout[-1000:])
                     else:
                         logger.warning("Demo seeder script not found at %s", script)
                 except Exception as seed_err:
@@ -20236,6 +20242,10 @@ class Database:
                 ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
                 CREATE INDEX IF NOT EXISTS idx_gaf_assigned ON graph_attack_findings(assigned_to);
 
+                -- Phase 11: SLA monitoring columns
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS sla_deadline TIMESTAMPTZ;
+                ALTER TABLE graph_attack_findings ADD COLUMN IF NOT EXISTS sla_breached BOOLEAN DEFAULT FALSE;
+
                 -- Phase 10: Finding comments
                 CREATE TABLE IF NOT EXISTS finding_comments (
                     id SERIAL PRIMARY KEY,
@@ -21602,6 +21612,399 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            cursor.close()
+
+    # ── Phase 11: SLA Monitoring + Webhook Dispatch + Reports ──────
+
+    SLA_HOURS = {'critical': 24, 'high': 72, 'medium': 168}  # 24h, 72h, 7d
+
+    def set_finding_sla(self, finding_id: int, severity: str):
+        """Set SLA deadline on a finding based on severity."""
+        hours = self.SLA_HOURS.get(severity, 168)
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE graph_attack_findings
+                SET sla_deadline = created_at + INTERVAL '%s hours'
+                WHERE id = %s AND sla_deadline IS NULL
+            """ % (hours, '%s'), (finding_id,))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+        finally:
+            cursor.close()
+
+    def check_sla_breaches(self, org_id: int) -> list:
+        """Find open findings that have breached their SLA deadline."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                UPDATE graph_attack_findings
+                SET sla_breached = TRUE, updated_at = NOW()
+                WHERE organization_id = %s
+                  AND status IN ('open', 'acknowledged', 'in_progress')
+                  AND sla_deadline IS NOT NULL
+                  AND sla_deadline < NOW()
+                  AND sla_breached = FALSE
+                RETURNING id, severity, title, sla_deadline, identity_id
+            """, (org_id,))
+            breached = [dict(r) for r in cursor.fetchall()]
+            self.conn.commit()
+            return breached
+        except Exception:
+            self.conn.rollback()
+            return []
+        finally:
+            cursor.close()
+
+    def backfill_finding_slas(self, org_id: int) -> int:
+        """Set SLA deadlines on findings that don't have one yet."""
+        cursor = self.conn.cursor()
+        try:
+            count = 0
+            for severity, hours in self.SLA_HOURS.items():
+                cursor.execute("""
+                    UPDATE graph_attack_findings
+                    SET sla_deadline = created_at + INTERVAL '%s hours'
+                    WHERE organization_id = %%s AND severity = %%s
+                      AND sla_deadline IS NULL
+                      AND status IN ('open', 'acknowledged', 'in_progress')
+                """ % hours, (org_id, severity))
+                count += cursor.rowcount
+            self.conn.commit()
+            return count
+        except Exception:
+            self.conn.rollback()
+            return 0
+        finally:
+            cursor.close()
+
+    def get_findings_export(self, org_id: int, fmt: str = 'json') -> list:
+        """Get all findings for export (JSON or CSV-ready dicts)."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT gaf.id, gaf.finding_type, gaf.severity, gaf.risk_score,
+                       gaf.title, gaf.description, gaf.remediation,
+                       gaf.status, gaf.assigned_to, gaf.ticket_id,
+                       gaf.sla_deadline, gaf.sla_breached,
+                       gaf.created_at, gaf.resolved_at,
+                       i.display_name as identity_name, i.identity_category
+                FROM graph_attack_findings gaf
+                LEFT JOIN identities i ON i.id = gaf.identity_id
+                WHERE gaf.organization_id = %s
+                ORDER BY gaf.risk_score DESC, gaf.created_at DESC
+            """, (org_id,))
+            rows = [dict(r) for r in cursor.fetchall()]
+            # Serialize datetimes for JSON/CSV
+            for r in rows:
+                for k in ('sla_deadline', 'created_at', 'resolved_at'):
+                    if r.get(k):
+                        r[k] = r[k].isoformat() if hasattr(r[k], 'isoformat') else str(r[k])
+            return rows
+        finally:
+            cursor.close()
+
+    def get_posture_export(self, org_id: int) -> list:
+        """Get posture score history for export."""
+        self._ensure_platform_ops_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT * FROM tenant_posture_scores
+                WHERE organization_id = %s
+                ORDER BY computed_at DESC
+                LIMIT 100
+            """, (org_id,))
+            rows = [dict(r) for r in cursor.fetchall()]
+            for r in rows:
+                if r.get('computed_at'):
+                    r['computed_at'] = r['computed_at'].isoformat() if hasattr(r['computed_at'], 'isoformat') else str(r['computed_at'])
+            return rows
+        finally:
+            cursor.close()
+
+    def get_remediation_export(self, org_id: int) -> dict:
+        """Get remediation metrics + timeline for export."""
+        metrics = self.get_remediation_metrics(org_id)
+        findings = self.get_findings_export(org_id)
+        resolved = [f for f in findings if f['status'] == 'resolved']
+        open_findings = [f for f in findings if f['status'] in ('open', 'acknowledged', 'in_progress')]
+        return {
+            'metrics': metrics,
+            'open_findings': open_findings,
+            'resolved_findings': resolved,
+        }
+
+    def dispatch_security_webhooks(self, org_id: int, event_type: str,
+                                    payload: dict):
+        """Dispatch webhooks for a security event. Uses existing webhooks table."""
+        self._ensure_webhook_tables()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT id, url, secret, headers FROM webhooks
+                WHERE organization_id = %s AND enabled = TRUE
+                  AND %s = ANY(event_types)
+            """, (org_id, event_type))
+            hooks = cursor.fetchall()
+            cursor.close()
+
+            import hashlib, hmac, json, urllib.request
+            for hook in hooks:
+                body = json.dumps({
+                    'event': event_type,
+                    'organization_id': org_id,
+                    'payload': payload,
+                }).encode()
+                headers = {'Content-Type': 'application/json'}
+                if hook.get('secret'):
+                    sig = hmac.new(hook['secret'].encode(), body, hashlib.sha256).hexdigest()
+                    headers['X-Webhook-Signature'] = sig
+                if hook.get('headers'):
+                    headers.update(hook['headers'])
+
+                # Record delivery attempt
+                dcursor = self.conn.cursor()
+                try:
+                    req = urllib.request.Request(hook['url'], data=body, headers=headers, method='POST')
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    dcursor.execute("""
+                        INSERT INTO webhook_deliveries
+                            (webhook_id, event_type, payload, status, http_status,
+                             organization_id, delivered_at, attempts)
+                        VALUES (%s, %s, %s, 'delivered', %s, %s, NOW(), 1)
+                    """, (hook['id'], event_type, json.dumps(payload),
+                          resp.status, org_id))
+                except Exception as e:
+                    dcursor.execute("""
+                        INSERT INTO webhook_deliveries
+                            (webhook_id, event_type, payload, status,
+                             response_body, organization_id, attempts)
+                        VALUES (%s, %s, %s, 'failed', %s, %s, 1)
+                    """, (hook['id'], event_type, json.dumps(payload),
+                          str(e)[:500], org_id))
+                finally:
+                    self.conn.commit()
+                    dcursor.close()
+        except Exception:
+            pass  # Non-blocking
+
+    def save_jira_integration(self, org_id: int, project_key: str,
+                              api_url: str, api_email: str, api_token: str):
+        """Save Jira integration config."""
+        config = {
+            'project_key': project_key,
+            'api_url': api_url,
+            'api_email': api_email,
+            'api_token': api_token,
+        }
+        self.upsert_integration_config(org_id, 'jira', True, config)
+
+    def save_slack_integration(self, org_id: int, webhook_url: str,
+                               channel: str = None):
+        """Save Slack integration config."""
+        config = {'webhook_url': webhook_url}
+        if channel:
+            config['channel'] = channel
+        self.upsert_integration_config(org_id, 'slack', True, config)
+
+    def create_jira_ticket(self, org_id: int, finding: dict) -> dict:
+        """Create a Jira ticket for a finding. Returns ticket key or error."""
+        configs = self.get_integration_configs(org_id)
+        jira = next((c for c in configs if c['integration_type'] == 'jira' and c['enabled']), None)
+        if not jira:
+            return {'error': 'Jira integration not configured'}
+
+        import json, urllib.request
+        cfg = jira['config'] if isinstance(jira['config'], dict) else json.loads(jira['config'])
+        payload = json.dumps({
+            'fields': {
+                'project': {'key': cfg['project_key']},
+                'issuetype': {'name': 'Bug'},
+                'summary': finding.get('title', 'Security Finding'),
+                'description': (
+                    f"Severity: {finding.get('severity', 'unknown')}\n"
+                    f"Risk Score: {finding.get('risk_score', 0)}\n"
+                    f"Type: {finding.get('finding_type', '')}\n\n"
+                    f"{finding.get('description', '')}\n\n"
+                    f"Remediation: {finding.get('remediation', '')}"
+                ),
+                'priority': {'name': 'High' if finding.get('severity') in ('critical', 'high') else 'Medium'},
+            }
+        }).encode()
+
+        import base64
+        auth = base64.b64encode(f"{cfg['api_email']}:{cfg['api_token']}".encode()).decode()
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Basic {auth}',
+        }
+        try:
+            req = urllib.request.Request(
+                f"{cfg['api_url']}/rest/api/2/issue",
+                data=payload, headers=headers, method='POST',
+            )
+            resp = urllib.request.urlopen(req, timeout=15)
+            result = json.loads(resp.read().decode())
+            ticket_key = result.get('key', '')
+            # Update finding with ticket_id
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE graph_attack_findings SET ticket_id = %s, updated_at = NOW()
+                WHERE id = %s AND organization_id = %s
+            """, (ticket_key, finding.get('id'), org_id))
+            self.conn.commit()
+            cursor.close()
+            return {'ticket_key': ticket_key, 'url': f"{cfg['api_url']}/browse/{ticket_key}"}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def send_slack_notification(self, org_id: int, text: str,
+                                blocks: list = None) -> bool:
+        """Send a Slack notification via webhook. Returns success."""
+        configs = self.get_integration_configs(org_id)
+        slack = next((c for c in configs if c['integration_type'] == 'slack' and c['enabled']), None)
+        if not slack:
+            return False
+
+        import json, urllib.request
+        cfg = slack['config'] if isinstance(slack['config'], dict) else json.loads(slack['config'])
+        webhook_url = cfg.get('webhook_url')
+        if not webhook_url:
+            return False
+
+        payload = json.dumps({'text': text, 'blocks': blocks} if blocks else {'text': text}).encode()
+        try:
+            req = urllib.request.Request(webhook_url, data=payload,
+                                         headers={'Content-Type': 'application/json'}, method='POST')
+            urllib.request.urlopen(req, timeout=10)
+            return True
+        except Exception:
+            return False
+
+    # ── Phase 12: Copilot context helpers ──────────────────────────
+
+    def get_finding_context(self, finding_id: int) -> dict:
+        """Load a finding with its identity data for copilot context."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT f.*, i.display_name AS identity_name,
+                       i.identity_category, i.risk_level AS identity_risk_level,
+                       i.risk_score AS identity_risk_score,
+                       i.credential_status, i.activity_status
+                FROM graph_attack_findings f
+                LEFT JOIN identities i ON f.identity_id = i.id
+                WHERE f.id = %s
+            """, (finding_id,))
+            row = cursor.fetchone()
+            if not row:
+                return {}
+            result = dict(row)
+            if result.get('attack_path') and isinstance(result['attack_path'], str):
+                import json
+                result['attack_path'] = json.loads(result['attack_path'])
+            return result
+        finally:
+            cursor.close()
+
+    def get_security_summary_context(self, org_id: int) -> dict:
+        """Gather aggregate security data for AI summary generation."""
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        ctx = {}
+        try:
+            # Posture score
+            cursor.execute("""
+                SELECT score FROM tenant_posture_scores
+                WHERE org_id = %s ORDER BY computed_at DESC LIMIT 1
+            """, (org_id,))
+            row = cursor.fetchone()
+            ctx['posture_score'] = row['score'] if row else None
+
+            # Latest run stats
+            cursor.execute("""
+                SELECT total_identities, critical_count, high_count, medium_count,
+                       completed_at
+                FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (org_id,))
+            run = cursor.fetchone()
+            if run:
+                ctx['total_identities'] = run['total_identities'] or 0
+                ctx['critical_count'] = run['critical_count'] or 0
+                ctx['high_count'] = run['high_count'] or 0
+                ctx['last_scan'] = str(run['completed_at']) if run['completed_at'] else 'Never'
+                run_id_for_creds = None
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (org_id,))
+                rid = cursor.fetchone()
+                if rid:
+                    run_id_for_creds = rid['id']
+
+                # Expired credentials
+                if run_id_for_creds:
+                    cursor.execute("""
+                        SELECT COUNT(*) AS cnt FROM identities
+                        WHERE discovery_run_id = %s AND credential_status = 'expired'
+                    """, (run_id_for_creds,))
+                    ctx['expired_credentials'] = cursor.fetchone()['cnt']
+
+                    # Privileged identities
+                    cursor.execute("""
+                        SELECT COUNT(*) AS cnt FROM identities
+                        WHERE discovery_run_id = %s AND is_privileged = true
+                    """, (run_id_for_creds,))
+                    ctx['privileged_count'] = cursor.fetchone()['cnt']
+            else:
+                ctx['total_identities'] = 0
+                ctx['critical_count'] = 0
+                ctx['high_count'] = 0
+                ctx['last_scan'] = 'Never'
+                ctx['expired_credentials'] = 0
+                ctx['privileged_count'] = 0
+
+            # Open findings
+            cursor.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE severity = 'critical') AS critical_findings,
+                       COUNT(*) FILTER (WHERE sla_breached = true) AS sla_breaches
+                FROM graph_attack_findings
+                WHERE organization_id = %s AND status = 'open'
+            """, (org_id,))
+            findings = cursor.fetchone()
+            ctx['open_findings'] = findings['total']
+            ctx['critical_findings'] = findings['critical_findings']
+            ctx['sla_breaches'] = findings['sla_breaches'] or 0
+
+            # Attack paths
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt FROM graph_attack_findings
+                WHERE organization_id = %s AND status IN ('open', 'acknowledged', 'in_progress')
+            """, (org_id,))
+            ctx['attack_paths'] = cursor.fetchone()['cnt']
+
+            # Recent anomalies
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt FROM anomalies
+                WHERE resolved = false
+            """)
+            ctx['recent_anomalies'] = cursor.fetchone()['cnt']
+
+            return ctx
         finally:
             cursor.close()
 

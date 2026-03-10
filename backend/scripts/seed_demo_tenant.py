@@ -468,6 +468,8 @@ def seed_role_assignments(db, identity_map, run_id, org_id=None):
     cursor = db.conn.cursor()
     rbac_count = 0
     entra_count = 0
+    logger.info("seed_role_assignments: org_id=%s, identity_map size=%d, run_id=%s",
+                org_id, len(identity_map), run_id)
 
     SUBS = [
         ("/subscriptions/sub-prod-001", "NGH-Production"),
@@ -496,6 +498,7 @@ def seed_role_assignments(db, identity_map, run_id, org_id=None):
     for identity_id, role, sub_idx, scope_type in risky_rbac:
         db_id = identity_map.get(identity_id)
         if not db_id:
+            logger.warning("  Risky RBAC: identity_id=%s NOT FOUND in identity_map", identity_id)
             continue
         sub_scope, sub_name = SUBS[sub_idx % len(SUBS)]
         if scope_type == "subscription":
@@ -505,16 +508,21 @@ def seed_role_assignments(db, identity_map, run_id, org_id=None):
         else:
             scope = f"{sub_scope}/resourceGroups/{random.choice(RGS)}/providers/Microsoft.Storage/storageAccounts/prodcoredata"
 
-        cursor.execute("""
-            INSERT INTO role_assignments
-                (identity_db_id, role_name, scope, scope_type, principal_id,
-                 assignment_id, created_on, created_at, organization_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
-        """, (
-            db_id, role, scope, scope_type, _uuid(), _uuid(),
-            _past(30, 365), org_id,
-        ))
-        rbac_count += 1
+        try:
+            cursor.execute("""
+                INSERT INTO role_assignments
+                    (identity_db_id, role_name, scope, scope_type, principal_id,
+                     assignment_id, created_on, created_at, organization_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+            """, (
+                db_id, role, scope, scope_type, _uuid(), _uuid(),
+                _past(30, 365), org_id,
+            ))
+            rbac_count += 1
+        except Exception as e:
+            logger.error("  RBAC INSERT FAILED for %s/%s: %s", identity_id, role, e)
+            db.conn.rollback()
+            raise
 
     # Normal RBAC for remaining identities
     for identity_id, db_id in identity_map.items():
