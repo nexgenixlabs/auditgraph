@@ -1324,6 +1324,51 @@ def seed_tenant_health(db, org_id, run_id):
     logger.info("Seeded tenant_health for demo org.")
 
 
+def _ensure_id_sequences(db):
+    """Ensure all tables used by the seeder have auto-increment on their id column.
+
+    Some deployments create tables with 'id bigint NOT NULL' but no sequence.
+    This adds a default nextval() sequence where missing.
+    """
+    tables = [
+        'credentials', 'role_assignments', 'entra_role_assignments',
+        'security_findings', 'attack_paths', 'blast_radius_results',
+        'fix_recommendations', 'azure_storage_accounts', 'azure_key_vaults',
+    ]
+    cursor = db.conn.cursor()
+    fixed = 0
+    for tbl in tables:
+        try:
+            cursor.execute(f"SAVEPOINT seq_{tbl}")
+            # Check if column has a default
+            cursor.execute("""
+                SELECT pg_get_expr(ad.adbin, ad.adrelid)
+                FROM pg_attrdef ad
+                JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+                WHERE a.attrelid = %s::regclass AND a.attname = 'id'
+            """, (tbl,))
+            row = cursor.fetchone()
+            if row is None:
+                # No default — create a sequence
+                seq_name = f"{tbl}_id_seq"
+                cursor.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq_name}")
+                cursor.execute(f"ALTER TABLE {tbl} ALTER COLUMN id SET DEFAULT nextval('{seq_name}')")
+                cursor.execute(f"SELECT setval('{seq_name}', COALESCE((SELECT MAX(id) FROM {tbl}), 0) + 1)")
+                fixed += 1
+                logger.info("  Created sequence %s for %s.id", seq_name, tbl)
+            cursor.execute(f"RELEASE SAVEPOINT seq_{tbl}")
+        except Exception as e:
+            logger.warning("  Could not fix sequence for %s: %s", tbl, e)
+            try:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT seq_{tbl}")
+            except Exception:
+                pass
+    db.conn.commit()
+    cursor.close()
+    if fixed:
+        logger.info("Fixed %d missing id sequences", fixed)
+
+
 # ─── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -1341,6 +1386,10 @@ def main():
         cursor.execute("SELECT set_config('app.current_organization_id', %s, false)", (str(org_id),))
         cursor.close()
         db.conn.commit()
+
+        # Ensure all tables with bigint/int id columns have auto-increment sequences
+        # (some deployments lack them when tables were created without SERIAL)
+        _ensure_id_sequences(db)
 
         clean_demo_data(db, org_id)
 
