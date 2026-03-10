@@ -22743,6 +22743,54 @@ def get_graph_debug_handler():
             cursor.execute("SELECT COUNT(*) as cnt FROM identity_graph_edges WHERE connection_id = %s", (cid,))
             diag['connection_graph_edges'] = cursor.fetchone()['cnt']
 
+        # 9. Test INSERT into role_assignments (then rollback)
+        try:
+            cursor.execute("SAVEPOINT test_ra")
+            cursor.execute("SELECT id, identity_id FROM identities LIMIT 1")
+            sample_ident = cursor.fetchone()
+            if sample_ident:
+                org_id = g.current_user.get('org_id') or g.current_user.get('tenant_id')
+                cursor.execute("""
+                    INSERT INTO role_assignments
+                        (identity_db_id, role_name, scope, scope_type, principal_id,
+                         assignment_id, created_on, created_at, organization_id)
+                    VALUES (%s, 'TestRole', '/test/scope', 'test', 'test-principal',
+                            'test-assignment', NOW(), NOW(), %s)
+                """, (sample_ident['id'], org_id))
+                diag['test_insert'] = 'SUCCESS'
+            else:
+                diag['test_insert'] = 'NO_IDENTITIES'
+            cursor.execute("ROLLBACK TO SAVEPOINT test_ra")
+        except Exception as insert_err:
+            diag['test_insert'] = f'FAILED: {str(insert_err)}'
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT test_ra")
+            except Exception:
+                pass
+
+        # 10. Check if role_assignments has RLS enabled
+        try:
+            cursor.execute("""
+                SELECT relrowsecurity, relforcerowsecurity
+                FROM pg_class WHERE relname = 'role_assignments'
+            """)
+            rls_row = cursor.fetchone()
+            diag['role_assignments_rls'] = dict(rls_row) if rls_row else 'NOT_FOUND'
+        except Exception as rls_err:
+            diag['role_assignments_rls'] = f'ERROR: {str(rls_err)}'
+
+        # 11. Check organization_id column nullable status
+        try:
+            cursor.execute("""
+                SELECT is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_name = 'role_assignments' AND column_name = 'organization_id'
+            """)
+            col_info = cursor.fetchone()
+            diag['role_assignments_org_id_info'] = dict(col_info) if col_info else 'NOT_FOUND'
+        except Exception:
+            pass
+
         cursor.close()
         return jsonify(diag)
     except Exception as e:
@@ -25151,3 +25199,413 @@ def get_system_metrics_handler():
         return jsonify({'metrics': metrics, 'count': len(metrics)})
     finally:
         db.close()
+
+
+# ================================================================
+# Phase 8: Graph Attack Findings & Identity Risk Scores
+# ================================================================
+
+def get_graph_attack_findings_handler():
+    """GET /api/graph-findings — BFS-discovered attack path findings."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        severity = request.args.get('severity')
+        finding_type = request.args.get('type')
+        status = request.args.get('status')
+        identity_id = request.args.get('identity_id', type=int)
+        run_id = request.args.get('run_id', type=int)
+
+        findings = db.get_graph_attack_findings(
+            organization_id=_tenant_id(),
+            run_id=run_id, severity=severity,
+            finding_type=finding_type, status=status,
+            identity_id=identity_id,
+            limit=limit, offset=offset,
+        )
+        stats = db.get_graph_attack_finding_stats(
+            organization_id=_tenant_id(), run_id=run_id,
+        )
+        return jsonify({'findings': findings, 'stats': stats, 'count': len(findings)})
+    finally:
+        db.close()
+
+
+def get_graph_attack_finding_detail_handler(finding_id):
+    """GET /api/graph-findings/<id> — single graph attack finding."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT gaf.*, i.display_name as identity_name,
+                   i.identity_category, i.risk_level as identity_risk_level
+            FROM graph_attack_findings gaf
+            LEFT JOIN identities i ON i.id = gaf.identity_id
+            WHERE gaf.id = %s AND gaf.organization_id = %s
+        """, (finding_id, _tenant_id()))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'Finding not found'}), 404
+        return jsonify(dict(row))
+    finally:
+        db.close()
+
+
+def get_identity_risk_scores_handler():
+    """GET /api/identity-risk-scores — graph-based per-identity risk scores."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        min_score = int(request.args.get('min_score', 0))
+        run_id = request.args.get('run_id', type=int)
+
+        scores = db.get_identity_risk_scores(
+            organization_id=_tenant_id(),
+            run_id=run_id, min_score=min_score,
+            limit=limit, offset=offset,
+        )
+        return jsonify({'scores': scores, 'count': len(scores)})
+    finally:
+        db.close()
+
+
+def run_graph_attack_analysis_handler():
+    """POST /api/graph-attack/analyze — trigger graph attack analysis for latest run."""
+    from app.engines.graph_attack_engine import GraphAttackEngine
+
+    db = _db()
+    try:
+        org_id = _tenant_id()
+        # Get latest completed discovery run
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'No completed discovery run found'}), 404
+
+        run_id = row[0]
+        engine = GraphAttackEngine(db)
+        result = engine.analyze(org_id, run_id)
+
+        # Persist results
+        db.upsert_identity_risk_scores(result['risk_scores'])
+        db.save_graph_attack_findings(result['findings'])
+
+        _log(db, 'graph_attack_analysis',
+             f'Graph attack analysis completed: {result["stats"]["paths_discovered"]} paths, '
+             f'{result["stats"]["findings_generated"]} findings',
+             {'stats': result['stats'], 'run_id': run_id})
+
+        return jsonify({
+            'stats': result['stats'],
+            'findings_count': len(result['findings']),
+            'risk_scores_count': len(result['risk_scores']),
+            'run_id': run_id,
+        })
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 9: Security Posture Command Center
+# ================================================================
+
+def get_posture_score_handler():
+    """GET /api/posture-score — tenant security posture score."""
+    db = _db()
+    try:
+        score = db.get_posture_score(_tenant_id())
+        if not score:
+            # Compute on-demand if not yet computed
+            score = db.compute_posture_score(_tenant_id())
+        return jsonify(score)
+    finally:
+        db.close()
+
+
+def get_risky_identities_handler():
+    """GET /api/risky-identities — top identities sorted by risk score."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 20)), 100)
+        identities = db.get_risky_identities(_tenant_id(), limit=limit)
+        return jsonify({'identities': identities, 'count': len(identities)})
+    finally:
+        db.close()
+
+
+def get_remediation_priority_handler():
+    """GET /api/remediation-priority — top issues requiring remediation."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 10)), 50)
+        items = db.get_remediation_priority(_tenant_id(), limit=limit)
+        return jsonify({'items': items, 'count': len(items)})
+    finally:
+        db.close()
+
+
+def get_privileged_identities_handler():
+    """GET /api/privileged-identities — identities with privileged roles."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        identities = db.get_privileged_identities(_tenant_id(), limit=limit)
+        return jsonify({'identities': identities, 'count': len(identities)})
+    finally:
+        db.close()
+
+
+def get_security_events_handler():
+    """GET /api/security-events — security timeline events."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        event_type = request.args.get('type')
+        events = db.get_security_events(
+            _tenant_id(), event_type=event_type,
+            limit=limit, offset=offset,
+        )
+        return jsonify({'events': events, 'count': len(events)})
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 10: Remediation Workflow
+# ================================================================
+
+def assign_finding_handler(finding_id):
+    """POST /api/findings/<id>/assign — assign finding to user/team."""
+    user = getattr(g, 'current_user', None)
+    data = request.get_json(silent=True) or {}
+    assigned_to = data.get('assigned_to')
+    if not assigned_to:
+        return jsonify({'error': 'assigned_to is required'}), 400
+
+    db = _db()
+    try:
+        result = db.assign_finding(
+            int(finding_id), _tenant_id(), assigned_to,
+            assigned_by=user['username'] if user else None,
+        )
+        if not result:
+            return jsonify({'error': 'Finding not found'}), 404
+        _log(db, 'finding_assigned',
+             f'Finding #{finding_id} assigned to {assigned_to}',
+             {'finding_id': finding_id, 'assigned_to': assigned_to})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def update_finding_status_workflow_handler(finding_id):
+    """POST /api/findings/<id>/status — update finding status."""
+    user = getattr(g, 'current_user', None)
+    data = request.get_json(silent=True) or {}
+    new_status = data.get('status')
+    if not new_status:
+        return jsonify({'error': 'status is required'}), 400
+    if new_status not in ('open', 'acknowledged', 'in_progress', 'resolved', 'ignored'):
+        return jsonify({'error': f'Invalid status: {new_status}'}), 400
+
+    db = _db()
+    try:
+        result = db.update_finding_workflow_status(
+            int(finding_id), _tenant_id(), new_status,
+            changed_by=user['username'] if user else None,
+            ticket_id=data.get('ticket_id'),
+            suppressed_until=data.get('suppressed_until'),
+        )
+        if not result:
+            return jsonify({'error': 'Finding not found'}), 404
+        if 'error' in result:
+            return jsonify(result), 400
+        _log(db, 'finding_status_change',
+             f'Finding #{finding_id} → {new_status}',
+             {'finding_id': finding_id, 'new_status': new_status})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def add_finding_comment_handler(finding_id):
+    """POST /api/findings/<id>/comments — add comment to finding."""
+    user = getattr(g, 'current_user', None)
+    data = request.get_json(silent=True) or {}
+    comment = data.get('comment', '').strip()
+    if not comment:
+        return jsonify({'error': 'comment is required'}), 400
+
+    db = _db()
+    try:
+        username = user['username'] if user else data.get('username', 'unknown')
+        result = db.add_finding_comment(int(finding_id), _tenant_id(), username, comment)
+        if not result:
+            return jsonify({'error': 'Finding not found'}), 404
+        return jsonify(result), 201
+    finally:
+        db.close()
+
+
+def get_finding_comments_handler(finding_id):
+    """GET /api/findings/<id>/comments — list comments for a finding."""
+    db = _db()
+    try:
+        comments = db.get_finding_comments(int(finding_id), _tenant_id())
+        return jsonify({'comments': comments, 'count': len(comments)})
+    finally:
+        db.close()
+
+
+def get_remediation_metrics_handler():
+    """GET /api/remediation-metrics — remediation workflow metrics."""
+    db = _db()
+    try:
+        metrics = db.get_remediation_metrics(_tenant_id())
+        return jsonify(metrics)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Phase 11: Security Automation & Integrations
+# ================================================================
+
+def save_slack_integration_handler():
+    """POST /api/integrations/slack — configure Slack webhook."""
+    data = request.get_json(silent=True) or {}
+    webhook_url = data.get('webhook_url')
+    if not webhook_url:
+        return jsonify({'error': 'webhook_url is required'}), 400
+
+    db = _db()
+    try:
+        db.save_slack_integration(
+            _tenant_id(), webhook_url, channel=data.get('channel'),
+        )
+        _log(db, 'integration_configured',
+             'Slack integration configured',
+             {'integration': 'slack'})
+        return jsonify({'status': 'ok', 'integration': 'slack'})
+    finally:
+        db.close()
+
+
+def save_jira_integration_handler():
+    """POST /api/integrations/jira — configure Jira integration."""
+    data = request.get_json(silent=True) or {}
+    required = ('jira_project_key', 'jira_api_url', 'jira_api_email', 'jira_api_token')
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({'error': f'Missing fields: {", ".join(missing)}'}), 400
+
+    db = _db()
+    try:
+        db.save_jira_integration(
+            _tenant_id(),
+            project_key=data['jira_project_key'],
+            api_url=data['jira_api_url'],
+            api_email=data['jira_api_email'],
+            api_token=data['jira_api_token'],
+        )
+        _log(db, 'integration_configured',
+             'Jira integration configured',
+             {'integration': 'jira', 'project_key': data['jira_project_key']})
+        return jsonify({'status': 'ok', 'integration': 'jira'})
+    finally:
+        db.close()
+
+
+def create_jira_ticket_handler(finding_id):
+    """POST /api/findings/<id>/jira — create Jira ticket for finding."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM graph_attack_findings
+            WHERE id = %s AND organization_id = %s
+        """, (int(finding_id), _tenant_id()))
+        finding = cursor.fetchone()
+        cursor.close()
+        if not finding:
+            return jsonify({'error': 'Finding not found'}), 404
+
+        result = db.create_jira_ticket(_tenant_id(), dict(finding))
+        if 'error' in result:
+            return jsonify(result), 400
+
+        _log(db, 'jira_ticket_created',
+             f'Jira ticket {result.get("ticket_key")} created for finding #{finding_id}',
+             {'finding_id': finding_id, 'ticket_key': result.get('ticket_key')})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_report_posture_handler():
+    """GET /api/reports/posture — export posture score history."""
+    db = _db()
+    try:
+        fmt = request.args.get('format', 'json')
+        data = db.get_posture_export(_tenant_id())
+        if fmt == 'csv':
+            return _to_csv(data, 'posture_report')
+        return jsonify({'posture_history': data, 'count': len(data)})
+    finally:
+        db.close()
+
+
+def get_report_findings_handler():
+    """GET /api/reports/findings — export all findings."""
+    db = _db()
+    try:
+        fmt = request.args.get('format', 'json')
+        data = db.get_findings_export(_tenant_id())
+        if fmt == 'csv':
+            return _to_csv(data, 'findings_report')
+        return jsonify({'findings': data, 'count': len(data)})
+    finally:
+        db.close()
+
+
+def get_report_remediation_handler():
+    """GET /api/reports/remediation — export remediation metrics + findings."""
+    db = _db()
+    try:
+        fmt = request.args.get('format', 'json')
+        data = db.get_remediation_export(_tenant_id())
+        if fmt == 'csv':
+            return _to_csv(data.get('open_findings', []), 'remediation_report')
+        return jsonify(data)
+    finally:
+        db.close()
+
+
+def _to_csv(rows: list, filename: str):
+    """Convert list of dicts to CSV response."""
+    import csv, io
+    if not rows:
+        return ('', 200, {'Content-Type': 'text/csv',
+                          'Content-Disposition': f'attachment; filename={filename}.csv'})
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: str(v) if v is not None else '' for k, v in row.items()})
+    resp = output.getvalue()
+    return (resp, 200, {
+        'Content-Type': 'text/csv',
+        'Content-Disposition': f'attachment; filename={filename}.csv',
+    })
