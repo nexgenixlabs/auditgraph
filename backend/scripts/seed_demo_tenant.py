@@ -450,7 +450,6 @@ def seed_credentials(db, identity_map, run_id):
                     (identity_db_id, credential_type, key_id, display_name,
                      start_datetime, end_datetime, discovered_at)
                 VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (identity_db_id, key_id) DO NOTHING
             """, (
                 db_id, cred_type, _uuid(),
                 f"{sp_name} {cred_type.title()} #{j+1}",
@@ -621,7 +620,7 @@ def seed_storage_accounts(db, org_id, run_id):
                     'Standard_LRS','StorageV2','Hot',
                     %s,true,'TLS1_2',%s,'Allow',
                     %s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (discovery_run_id, resource_id) DO NOTHING
+            -- data is cleaned before seeding, no conflict expected
         """, (
             run_id, resource_id, name, location,
             "sub-prod-001",
@@ -703,7 +702,7 @@ def seed_key_vaults(db, org_id, run_id):
                     %s,90,%s,%s,'Enabled',
                     %s,%s,%s,%s,%s,%s,%s,%s,%s,
                     %s,%s,%s,%s,%s,%s)
-            ON CONFLICT (discovery_run_id, resource_id) DO NOTHING
+            -- data is cleaned before seeding, no conflict expected
         """, (
             run_id, resource_id, name, loc,
             "sub-prod-001",
@@ -806,7 +805,7 @@ def seed_security_findings(db, org_id, run_id, identity_map):
                  status, first_detected_at, last_detected_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                     'open', NOW(), NOW())
-            ON CONFLICT (discovery_run_id, entity_id, finding_type) DO NOTHING
+            -- data is cleaned before seeding, no conflict expected
         """, f)
 
     db.conn.commit()
@@ -960,7 +959,7 @@ def seed_attack_paths(db, org_id, run_id, identity_map):
                  path_fingerprint, affected_resource_count,
                  first_detected_at, last_detected_at, last_seen_run_id)
             VALUES (%s,%s,%s,%s,'identity',%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW(),%s)
-            ON CONFLICT (discovery_run_id, source_entity_id, path_type, description) DO NOTHING
+            -- data is cleaned before seeding, no conflict expected
         """, (
             org_id, run_id, p["source"],
             p["nodes"][0]["label"] if p["nodes"] else p["source"],
@@ -1015,7 +1014,7 @@ def seed_blast_radius(db, org_id, run_id, identity_map):
                  risk_domain, identity_exposure_level,
                  risk_score)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'identity',%s,%s)
-            ON CONFLICT (discovery_run_id, identity_id) DO NOTHING
+            -- data is cleaned before seeding, no conflict expected
         """, (
             org_id, db_id, iname, itype, run_id,
             reach, subs, rgs, sens,
@@ -1167,7 +1166,7 @@ def seed_fix_recommendations(db, org_id, run_id, identity_map):
                  compliance_refs, status, recommendation_fingerprint,
                  first_detected_at, last_detected_at)
             VALUES (%s,%s,%s,'identity',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',%s,NOW(),NOW())
-            ON CONFLICT (discovery_run_id, entity_id, fix_type) DO NOTHING
+            -- data is cleaned before seeding, no conflict expected
         """, (
             org_id, run_id, r["entity"], r["entity"],
             r["type"], r["title"], r["desc"], r["category"],
