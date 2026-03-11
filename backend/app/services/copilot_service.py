@@ -383,6 +383,348 @@ Use markdown formatting. Be specific to the actual path, not generic."""
         )
         return response.content[0].text
 
+    def explain_identity_risk(self, data: dict) -> dict:
+        """Generate a structured AI explanation of identity risk.
+
+        Input data keys: identity_name, risk_score, risk_level, risk_drivers[],
+                         blast_radius, attack_path_count, last_activity.
+
+        Returns: { summary, drivers[], implications, recommended_action }
+        """
+        client = self._get_client()
+
+        drivers_text = '\n'.join(f'- {d}' for d in (data.get('risk_drivers') or ['No specific drivers']))
+
+        prompt = f"""Analyze this identity's risk profile and return a JSON object.
+
+**Identity:** {data.get('identity_name', 'Unknown')}
+**Risk Score:** {data.get('risk_score', 0)}/100
+**Risk Level:** {data.get('risk_level', 'unknown')}
+**Risk Drivers:**
+{drivers_text}
+**Blast Radius Score:** {data.get('blast_radius', 0)}/100
+**Attack Path Count:** {data.get('attack_path_count', 0)}
+**Last Activity:** {data.get('last_activity', 'Unknown')}
+
+RULES:
+1. Only reference the data provided above. Do NOT invent additional facts.
+2. Be specific to this identity — not generic security advice.
+3. Keep each field concise (2-3 sentences max).
+
+Return ONLY valid JSON with exactly these fields:
+{{
+  "summary": "A 1-2 sentence risk overview of this specific identity",
+  "drivers": ["driver 1 explanation", "driver 2 explanation", ...],
+  "implications": "What could happen if this identity is compromised (2-3 sentences)",
+  "recommended_action": "The single most impactful remediation action for this identity"
+}}"""
+
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=800,
+                system="You are a cloud identity security analyst. Return ONLY valid JSON. Do not wrap in markdown code blocks. Do not add commentary outside the JSON.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            # Strip markdown code fences if present
+            if text.startswith('```'):
+                text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+            if text.endswith('```'):
+                text = text[:-3].rstrip()
+            result = json.loads(text)
+            # Validate required keys
+            for key in ('summary', 'drivers', 'implications', 'recommended_action'):
+                if key not in result:
+                    result[key] = ''
+            if not isinstance(result['drivers'], list):
+                result['drivers'] = [str(result['drivers'])]
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("AI risk explanation parse failed: %s", e)
+            # Fallback to raw text if JSON parse fails
+            return {
+                'summary': f"The identity {data.get('identity_name', 'Unknown')} has a risk score of {data.get('risk_score', 0)}/100 ({data.get('risk_level', 'unknown')}).",
+                'drivers': data.get('risk_drivers', []),
+                'implications': 'Unable to generate AI analysis. Review the risk drivers manually.',
+                'recommended_action': 'Review the identity risk drivers and take appropriate action.',
+            }
+
+    def explain_attack_path_chain(self, data: dict) -> dict:
+        """Generate a structured AI explanation of a privilege escalation chain.
+
+        Input data keys:
+            identity: str — the identity name
+            attack_path: list — ordered steps in the escalation chain,
+                each with node_type, node_id, node_label, description
+            risk_level: str — critical/high/medium/low
+
+        Returns: { explanation, security_impact, recommended_fix }
+        """
+        client = self._get_client()
+
+        identity = data.get('identity', 'Unknown')
+        risk_level = data.get('risk_level', 'unknown')
+        path_steps = data.get('attack_path', [])
+
+        # Build step-by-step description from path data
+        steps_text = []
+        for i, step in enumerate(path_steps, 1):
+            if isinstance(step, dict):
+                label = step.get('node_label') or step.get('name') or step.get('node_id', '?')
+                ntype = step.get('node_type') or step.get('type', '?')
+                desc = step.get('description', '')
+                line = f"Step {i}: [{ntype}] {label}"
+                if desc:
+                    line += f" — {desc}"
+                steps_text.append(line)
+            elif isinstance(step, str):
+                steps_text.append(f"Step {i}: {step}")
+
+        chain_desc = '\n'.join(steps_text) if steps_text else 'No path steps provided'
+
+        # Build the arrow chain for quick visual
+        arrow_chain = ' -> '.join(
+            (s.get('node_label') or s.get('name') or '?') if isinstance(s, dict) else str(s)
+            for s in path_steps
+        ) if path_steps else 'N/A'
+
+        prompt = f"""Analyze this privilege escalation chain and return a JSON object.
+
+**Identity:** {identity}
+**Risk Level:** {risk_level}
+**Escalation Chain:** {arrow_chain}
+
+**Detailed Steps:**
+{chain_desc}
+
+RULES:
+1. ONLY reference the data provided above. Do NOT invent additional facts or assume permissions not listed.
+2. Explain each step in the chain and how it enables the next step.
+3. Describe the concrete security impact if this path is exploited.
+4. Suggest specific remediation to break this chain.
+5. Keep each field concise and actionable (3-5 sentences max).
+
+Return ONLY valid JSON with exactly these fields:
+{{
+  "explanation": "Step-by-step explanation of how the escalation chain works, describing each step and the transition between steps",
+  "security_impact": "What an attacker could achieve by exploiting this path — be specific about the blast radius and data at risk",
+  "recommended_fix": "The most effective remediation action to break this escalation chain"
+}}"""
+
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=1000,
+                system="You are a cloud identity security analyst specializing in privilege escalation detection. Return ONLY valid JSON. Do not wrap in markdown code blocks.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            # Strip markdown code fences if present
+            if text.startswith('```'):
+                text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+            if text.endswith('```'):
+                text = text[:-3].rstrip()
+            result = json.loads(text)
+            # Validate required keys
+            for key in ('explanation', 'security_impact', 'recommended_fix'):
+                if key not in result:
+                    result[key] = ''
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("AI attack path explanation parse failed: %s", e)
+            return self._fallback_attack_path_explanation(data)
+
+    @staticmethod
+    def _fallback_attack_path_explanation(data: dict) -> dict:
+        """Deterministic attack path explanation when AI is unavailable."""
+        identity = data.get('identity', 'Unknown')
+        risk_level = data.get('risk_level', 'unknown')
+        path_steps = data.get('attack_path', [])
+
+        # Build explanation from steps
+        step_descs = []
+        for i, step in enumerate(path_steps, 1):
+            if isinstance(step, dict):
+                label = step.get('node_label') or step.get('name') or step.get('node_id', '?')
+                ntype = step.get('node_type') or step.get('type', '?')
+                desc = step.get('description', '')
+                step_descs.append(f"Step {i}: The {ntype} '{label}' {desc}." if desc
+                                  else f"Step {i}: Involves {ntype} '{label}'.")
+            elif isinstance(step, str):
+                step_descs.append(f"Step {i}: {step}.")
+
+        explanation = (
+            f"The identity '{identity}' participates in a {risk_level} severity "
+            f"privilege escalation chain with {len(path_steps)} step(s). "
+            + ' '.join(step_descs)
+        )
+
+        # Impact based on risk level
+        impact_map = {
+            'critical': f"If exploited, an attacker starting from '{identity}' could escalate to full administrative control, potentially compromising all tenant resources and data.",
+            'high': f"Exploitation could allow an attacker to gain elevated privileges from '{identity}', accessing sensitive resources beyond the identity's intended scope.",
+            'medium': f"This path allows privilege elevation from '{identity}', though the target privilege has a limited blast radius.",
+        }
+        security_impact = impact_map.get(risk_level,
+            f"This escalation chain from '{identity}' represents a {risk_level} level security concern.")
+
+        # Fix based on chain length
+        if len(path_steps) <= 2:
+            fix = "Remove the direct role assignment that enables this single-hop escalation. Consider replacing standing access with PIM just-in-time activation."
+        else:
+            fix = "Break the escalation chain by removing the intermediate role assignment at the weakest link. Apply least-privilege scoping and enable PIM for privileged roles."
+
+        return {
+            'explanation': explanation,
+            'security_impact': security_impact,
+            'recommended_fix': fix,
+        }
+
+    def generate_executive_narrative(self, data: dict) -> dict:
+        """Generate an AI executive security narrative for CISO consumption.
+
+        Input data keys:
+            agirs_score: int — AuditGraph Identity Risk Score (0-100)
+            risk_level: str — overall risk level
+            top_risk_drivers: list — key risk driver descriptions
+            top_risk_identities: list — names/IDs of highest-risk identities
+            recommended_actions: list — prioritized remediation actions
+            projected_score: int — projected score after remediation
+
+        Returns: { executive_summary, top_risks[], recommended_actions[], expected_improvement }
+        """
+        client = self._get_client()
+
+        agirs = data.get('agirs_score', 0)
+        risk_level = data.get('risk_level', 'unknown')
+        drivers = data.get('top_risk_drivers', [])
+        identities = data.get('top_risk_identities', [])
+        actions = data.get('recommended_actions', [])
+        projected = data.get('projected_score', 0)
+
+        drivers_text = '\n'.join(f'- {d}' for d in drivers) if drivers else '- No specific drivers'
+        identities_text = '\n'.join(f'- {i}' for i in identities) if identities else '- None identified'
+        actions_text = '\n'.join(f'- {a}' for a in actions) if actions else '- No actions specified'
+
+        prompt = f"""Generate an executive security narrative for a CISO audience and return a JSON object.
+
+**AGIRS Score:** {agirs}/100
+**Risk Level:** {risk_level}
+**Projected Score After Remediation:** {projected}/100
+
+**Top Risk Drivers:**
+{drivers_text}
+
+**Top Risk Identities:**
+{identities_text}
+
+**Recommended Actions:**
+{actions_text}
+
+RULES:
+1. ONLY reference the data provided above. Do NOT invent metrics, counts, or facts not listed.
+2. Write for a CISO audience — strategic, concise, no technical jargon.
+3. The executive_summary MUST be under 150 words.
+4. top_risks should have 2-4 items, each a concise risk statement.
+5. recommended_actions should have 2-4 items, each an actionable step.
+6. expected_improvement should quantify the score improvement ({agirs} → {projected}).
+
+Return ONLY valid JSON with exactly these fields:
+{{
+  "executive_summary": "A strategic overview of the organization's identity security posture (under 150 words)",
+  "top_risks": ["risk 1", "risk 2", ...],
+  "recommended_actions": ["action 1", "action 2", ...],
+  "expected_improvement": "Projected impact statement referencing the score improvement"
+}}"""
+
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=800,
+                system="You are a CISO advisor generating executive security narratives. Return ONLY valid JSON. Do not wrap in markdown code blocks. Be concise, strategic, and data-driven. Limit executive_summary to 150 words.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            if text.startswith('```'):
+                text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+            if text.endswith('```'):
+                text = text[:-3].rstrip()
+            result = json.loads(text)
+            for key in ('executive_summary', 'top_risks', 'recommended_actions', 'expected_improvement'):
+                if key not in result:
+                    result[key] = '' if key in ('executive_summary', 'expected_improvement') else []
+            if not isinstance(result['top_risks'], list):
+                result['top_risks'] = [str(result['top_risks'])]
+            if not isinstance(result['recommended_actions'], list):
+                result['recommended_actions'] = [str(result['recommended_actions'])]
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("AI executive narrative parse failed: %s", e)
+            return self._fallback_executive_narrative(data)
+
+    @staticmethod
+    def _fallback_executive_narrative(data: dict) -> dict:
+        """Deterministic executive narrative when AI is unavailable."""
+        agirs = data.get('agirs_score', 0)
+        risk_level = data.get('risk_level', 'unknown')
+        drivers = data.get('top_risk_drivers', [])
+        identities = data.get('top_risk_identities', [])
+        actions = data.get('recommended_actions', [])
+        projected = data.get('projected_score', 0)
+
+        # Build executive summary
+        if agirs < 40:
+            posture = "critically exposed"
+            urgency = "Immediate executive attention is required."
+        elif agirs < 60:
+            posture = "elevated risk"
+            urgency = "Targeted remediation is recommended within the current quarter."
+        elif agirs < 80:
+            posture = "moderate risk with improvement opportunities"
+            urgency = "Continued monitoring and incremental hardening are advised."
+        else:
+            posture = "well-managed"
+            urgency = "Maintain current controls and review periodically."
+
+        identity_count = len(identities)
+        driver_count = len(drivers)
+        summary_parts = [
+            f"The organization's identity security posture is {posture}, with an AGIRS score of {agirs}/100 ({risk_level}).",
+        ]
+        if driver_count:
+            summary_parts.append(f"Analysis identified {driver_count} key risk driver(s) contributing to the current exposure.")
+        if identity_count:
+            summary_parts.append(f"{identity_count} high-risk identit{'y requires' if identity_count == 1 else 'ies require'} priority attention.")
+        summary_parts.append(urgency)
+        if projected > agirs:
+            summary_parts.append(f"Implementing recommended actions is projected to improve the score to {projected}/100.")
+
+        # Top risks from drivers
+        top_risks = drivers[:4] if drivers else [
+            f"Overall posture rated {risk_level} with an AGIRS score of {agirs}/100."
+        ]
+
+        # Recommended actions
+        rec_actions = actions[:4] if actions else [
+            "Review and remediate high-risk identity configurations.",
+            "Enforce least-privilege access across privileged roles.",
+        ]
+
+        # Expected improvement
+        delta = projected - agirs
+        if delta > 0:
+            improvement = f"Implementing the recommended actions is projected to improve the AGIRS score from {agirs} to {projected} (+{delta} points), moving the posture from {risk_level} toward a stronger security baseline."
+        else:
+            improvement = f"Current AGIRS score is {agirs}/100. Continue monitoring and enforcing existing controls to maintain posture."
+
+        return {
+            'executive_summary': ' '.join(summary_parts),
+            'top_risks': top_risks,
+            'recommended_actions': rec_actions,
+            'expected_improvement': improvement,
+        }
+
     def get_remediation_advice(self, finding: dict) -> str:
         """Generate remediation advice for a specific finding."""
         client = self._get_client()
@@ -667,6 +1009,752 @@ Use markdown. Be specific and data-driven."""
                 "Show risk trends over time",
             ],
         }
+
+    # ── Investigation Assistant (Phase 91) ──────────────────────────────
+
+    INVESTIGATION_SYSTEM_PROMPT = (
+        "You are AuditGraph Investigation Assistant, a security analyst AI with access to "
+        "live identity graph data via tools. You answer security investigation questions by "
+        "calling the provided tools to retrieve real data, then synthesize a grounded response.\n\n"
+        "RULES:\n"
+        "1. You MUST call at least one tool before answering. Never guess or fabricate data.\n"
+        "2. Your answer MUST reference ONLY data returned by tools. Cite exact numbers, names, and scores.\n"
+        "3. If a tool returns an error (e.g. identity not found), report that clearly — do not improvise.\n"
+        "4. When referencing identities, use their display_name and identity_id.\n"
+        "5. Format your answer in clear markdown with sections if appropriate.\n"
+        "6. At the end, suggest 1-3 follow-up investigation questions the user might ask.\n"
+        "7. Keep answers concise — under 500 words.\n"
+    )
+
+    def investigate_with_tools(self, question, tools, executor):
+        """Multi-turn tool_use investigation loop.
+
+        Args:
+            question: User's investigation question
+            tools: INVESTIGATION_TOOLS schema list
+            executor: InvestigationToolExecutor instance
+
+        Returns:
+            dict with answer, evidence[], tools_used[], suggestions[]
+        """
+        client = self._get_client()
+        messages = [{"role": "user", "content": question}]
+        evidence = []
+        tools_used = []
+
+        max_rounds = 3
+        for _round in range(max_rounds):
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                system=self.INVESTIGATION_SYSTEM_PROMPT,
+                tools=tools,
+                messages=messages,
+            )
+
+            # Check if Claude wants to use tools
+            tool_use_blocks = [b for b in response.content if b.type == 'tool_use']
+            text_blocks = [b for b in response.content if b.type == 'text']
+
+            if not tool_use_blocks:
+                # No tool calls — Claude is done, extract final answer
+                answer = '\n'.join(b.text for b in text_blocks).strip()
+                break
+
+            # Process tool calls
+            # Add the assistant's full response (with tool_use blocks) to messages
+            messages.append({"role": "assistant", "content": response.content})
+
+            tool_results = []
+            for block in tool_use_blocks:
+                tool_name = block.name
+                tool_input = block.input
+                tools_used.append(tool_name)
+
+                logger.info("Investigation tool call: %s(%s)", tool_name, json.dumps(tool_input)[:200])
+                result = executor.execute(tool_name, tool_input)
+
+                # Serialize result for evidence tracking
+                result_json = json.dumps(result, default=str)
+                # Truncate large results for the evidence log
+                result_summary = result_json[:2000] if len(result_json) > 2000 else result_json
+
+                evidence.append({
+                    'tool': tool_name,
+                    'input': tool_input,
+                    'result_summary': result_summary,
+                })
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_json,
+                })
+
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            # Exhausted max rounds — use whatever text we have
+            answer = '\n'.join(b.text for b in text_blocks).strip() if text_blocks else \
+                'Investigation completed but no summary was generated. See evidence for raw data.'
+
+        # Extract suggestions from the answer (lines starting with - or * after "follow-up" keyword)
+        suggestions = self._extract_suggestions(answer)
+
+        return {
+            'answer': answer,
+            'evidence': evidence,
+            'tools_used': list(set(tools_used)),
+            'suggestions': suggestions,
+        }
+
+    def generate_remediation_plan(self, data: dict) -> dict:
+        """Generate an AI-driven remediation plan that maps risk factors to
+        platform-supported remediation actions to reduce the AGIRS score.
+
+        Input data keys:
+            agirs_score: int — current AuditGraph Identity Risk Score (0-100)
+            top_risk_identities: list of dicts — {name, risk_score, risk_level, risk_drivers[], identity_category, activity_status}
+            attack_paths: list of dicts — {identity, risk_level, steps_count, description}
+            risk_drivers: list of str — aggregated risk driver strings from the tenant
+
+        Returns:
+            {
+              "plan_summary": str,
+              "projected_score": int,
+              "remediation_actions": [
+                {
+                  "priority": int (1=highest),
+                  "action_type": str (one of the 5 platform action types),
+                  "title": str,
+                  "description": str,
+                  "target_identities": [str],
+                  "agirs_impact": str (e.g. "HIRI +5", "NHIRI +3"),
+                  "effort": "low"|"medium"|"high",
+                  "risk": "low"|"medium"|"high",
+                  "playbook_category": str
+                }, ...
+              ]
+            }
+        """
+        client = self._get_client()
+
+        agirs = data.get('agirs_score', 0)
+        identities = data.get('top_risk_identities', [])
+        attack_paths = data.get('attack_paths', [])
+        drivers = data.get('risk_drivers', [])
+
+        # Build identity summary
+        id_lines = []
+        for ident in identities[:15]:
+            name = ident.get('name') or ident.get('identity_name', 'Unknown')
+            cat = ident.get('identity_category', '')
+            rs = ident.get('risk_score', 0)
+            rl = ident.get('risk_level', 'unknown')
+            act = ident.get('activity_status', '')
+            rd = ', '.join((ident.get('risk_drivers') or [])[:5])
+            id_lines.append(f"- {name} ({cat}): score={rs}, level={rl}, status={act}, drivers=[{rd}]")
+        identities_text = '\n'.join(id_lines) if id_lines else '- None provided'
+
+        # Build attack path summary
+        ap_lines = []
+        for ap in attack_paths[:10]:
+            ap_lines.append(
+                f"- {ap.get('identity', '?')} [{ap.get('risk_level', '?')}]: "
+                f"{ap.get('steps_count', '?')} steps — {ap.get('description', 'N/A')}"
+            )
+        paths_text = '\n'.join(ap_lines) if ap_lines else '- No attack paths'
+
+        # Build risk driver summary
+        drivers_text = '\n'.join(f'- {d}' for d in drivers[:20]) if drivers else '- No specific drivers'
+
+        prompt = f"""You are a remediation planner for AuditGraph, an identity security platform.
+Given the current AGIRS score and risk data, propose the top remediation actions that would
+most effectively reduce risk and improve the AGIRS score.
+
+**Current AGIRS Score:** {agirs}/100 (100 = perfect, lower = more risk)
+
+**AGIRS Score Model:**
+- HIRI (Human Identity Risk Index, 40%): penalizes ghost humans (H1), dormant privileged (H2), over-privileged (H3), external guests with privileges (H4)
+- NHIRI (Non-Human Identity Risk Index, 40%): penalizes orphaned NHIs (N1), dormant NHIs (N2), zombie NHIs (N3), expired credentials (N4), ownerless high-risk apps (N5)
+- GEI (Governance Effectiveness Index, 20%): rewards ownership coverage, PIM adoption, access review completion, monitoring coverage
+
+**Top Risk Identities:**
+{identities_text}
+
+**Attack Paths:**
+{paths_text}
+
+**Aggregated Risk Drivers:**
+{drivers_text}
+
+**PLATFORM-SUPPORTED REMEDIATION ACTION TYPES (you MUST only use these):**
+1. flag_for_review — Add internal review flag for manual follow-up (low risk, any category)
+2. create_ticket — Create tracking ticket in ticketing system (low risk)
+3. disable_identity — Disable the identity in Entra ID (high risk, for dormant/never_used/stale)
+4. remove_role — Remove Azure RBAC or Entra directory role assignment (high risk, for over-privileged)
+5. rotate_credential — Initiate credential rotation (medium risk, for expired/expiring/stale credentials)
+
+**PLATFORM REMEDIATION CATEGORIES:**
+- access_control: over-privileged roles, excessive permissions, missing CA/MFA
+- credential_hygiene: expired creds, expiring creds, stale credentials
+- governance: dormant identities, never-used, no owner, multiple high privileges
+
+RULES:
+1. ONLY reference the data provided above. Do NOT invent identities, scores, or facts.
+2. Each action MUST use one of the 5 platform-supported action_type values exactly.
+3. Each action MUST map to a playbook_category (access_control, credential_hygiene, or governance).
+4. Propose 3-7 actions, ordered by priority (highest impact first).
+5. For target_identities, use actual identity names from the data above.
+6. agirs_impact should reference which AGIRS sub-score improves (HIRI, NHIRI, or GEI) and estimated points.
+7. projected_score should be a realistic estimate of the AGIRS score after all actions are executed.
+8. plan_summary should be 2-3 sentences for a security administrator audience.
+9. Be specific and actionable — not generic security advice.
+
+Return ONLY valid JSON with exactly these fields:
+{{
+  "plan_summary": "2-3 sentence overview of the remediation plan",
+  "projected_score": <integer 0-100>,
+  "remediation_actions": [
+    {{
+      "priority": 1,
+      "action_type": "<one of: flag_for_review, create_ticket, disable_identity, remove_role, rotate_credential>",
+      "title": "Short action title",
+      "description": "What to do and why it matters (1-2 sentences)",
+      "target_identities": ["identity1", "identity2"],
+      "agirs_impact": "HIRI +N / NHIRI +N / GEI +N",
+      "effort": "low|medium|high",
+      "risk": "low|medium|high",
+      "playbook_category": "access_control|credential_hygiene|governance"
+    }}
+  ]
+}}"""
+
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=1500,
+                system=(
+                    "You are an identity security remediation planner. "
+                    "Return ONLY valid JSON. Do not wrap in markdown code blocks. "
+                    "Be precise, actionable, and data-driven. "
+                    "Every action must use one of the 5 platform-supported action types."
+                ),
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            if text.startswith('```'):
+                text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+            if text.endswith('```'):
+                text = text[:-3].rstrip()
+            result = json.loads(text)
+            # Validate required keys
+            for key in ('plan_summary', 'projected_score', 'remediation_actions'):
+                if key not in result:
+                    if key == 'remediation_actions':
+                        result[key] = []
+                    elif key == 'projected_score':
+                        result[key] = agirs
+                    else:
+                        result[key] = ''
+            if not isinstance(result['remediation_actions'], list):
+                result['remediation_actions'] = []
+            # Validate action types
+            valid_types = {'flag_for_review', 'create_ticket', 'disable_identity', 'remove_role', 'rotate_credential'}
+            for action in result['remediation_actions']:
+                if action.get('action_type') not in valid_types:
+                    action['action_type'] = 'flag_for_review'
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("AI remediation plan parse failed: %s", e)
+            return self._fallback_remediation_plan(data)
+
+    @staticmethod
+    def _fallback_remediation_plan(data: dict) -> dict:
+        """Deterministic remediation plan when AI is unavailable."""
+        agirs = data.get('agirs_score', 0)
+        identities = data.get('top_risk_identities', [])
+        attack_paths = data.get('attack_paths', [])
+        drivers = data.get('risk_drivers', [])
+
+        actions = []
+        priority = 1
+        targeted = set()
+
+        # Derive drivers set for matching
+        all_drivers = set()
+        for d in drivers:
+            all_drivers.add(d.lower())
+        for ident in identities:
+            for d in (ident.get('risk_drivers') or []):
+                all_drivers.add(d.lower())
+
+        # 1. Over-privileged / Global Admin — remove_role
+        priv_identities = [
+            i.get('name') or i.get('identity_name', 'Unknown')
+            for i in identities
+            if any(kw in d.lower() for d in (i.get('risk_drivers') or [])
+                   for kw in ('global administrator', 'owner', 'privileged role', 'full tenant'))
+        ]
+        if priv_identities:
+            actions.append({
+                'priority': priority,
+                'action_type': 'remove_role',
+                'title': 'Remove excessive privileged role assignments',
+                'description': 'Remove or scope Global Administrator, Owner, and Privileged Role Administrator assignments to reduce blast radius.',
+                'target_identities': priv_identities[:5],
+                'agirs_impact': f'HIRI +{min(len(priv_identities) * 3, 15)}',
+                'effort': 'medium',
+                'risk': 'high',
+                'playbook_category': 'access_control',
+            })
+            targeted.update(priv_identities[:5])
+            priority += 1
+
+        # 2. Dormant / never-used identities — disable_identity
+        dormant_identities = [
+            i.get('name') or i.get('identity_name', 'Unknown')
+            for i in identities
+            if i.get('activity_status') in ('stale', 'never_used', 'dormant', 'inactive')
+        ]
+        if dormant_identities:
+            is_nhi = any(
+                i.get('identity_category', '') in ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                for i in identities if (i.get('name') or i.get('identity_name')) in dormant_identities
+            )
+            actions.append({
+                'priority': priority,
+                'action_type': 'disable_identity',
+                'title': 'Disable dormant and never-used identities',
+                'description': 'Disable identities with no recent activity to eliminate standing risk from unused accounts.',
+                'target_identities': dormant_identities[:5],
+                'agirs_impact': f'{"NHIRI" if is_nhi else "HIRI"} +{min(len(dormant_identities) * 2, 10)}',
+                'effort': 'low',
+                'risk': 'high',
+                'playbook_category': 'governance',
+            })
+            targeted.update(dormant_identities[:5])
+            priority += 1
+
+        # 3. Expired / expiring credentials — rotate_credential
+        cred_identities = [
+            i.get('name') or i.get('identity_name', 'Unknown')
+            for i in identities
+            if any(kw in d.lower() for d in (i.get('risk_drivers') or [])
+                   for kw in ('expired', 'expiring', 'stale_credential', 'credential'))
+        ]
+        if cred_identities:
+            actions.append({
+                'priority': priority,
+                'action_type': 'rotate_credential',
+                'title': 'Rotate expired and expiring credentials',
+                'description': 'Rotate credentials on identities with expired or soon-to-expire secrets to prevent authentication failures and reduce attack surface.',
+                'target_identities': cred_identities[:5],
+                'agirs_impact': f'NHIRI +{min(len(cred_identities) * 2, 8)}',
+                'effort': 'low',
+                'risk': 'medium',
+                'playbook_category': 'credential_hygiene',
+            })
+            priority += 1
+
+        # 4. Attack paths — flag_for_review
+        if attack_paths:
+            ap_identities = list(set(
+                ap.get('identity', 'Unknown') for ap in attack_paths
+                if ap.get('risk_level') in ('critical', 'high')
+            ))[:5]
+            if ap_identities:
+                actions.append({
+                    'priority': priority,
+                    'action_type': 'flag_for_review',
+                    'title': 'Review identities with active attack paths',
+                    'description': f'Flag {len(ap_identities)} identit{"y" if len(ap_identities) == 1 else "ies"} participating in critical/high attack paths for manual security review.',
+                    'target_identities': ap_identities,
+                    'agirs_impact': 'HIRI +3 / NHIRI +3',
+                    'effort': 'low',
+                    'risk': 'low',
+                    'playbook_category': 'access_control',
+                })
+                priority += 1
+
+        # 5. Remaining high-risk — create_ticket
+        remaining = [
+            i.get('name') or i.get('identity_name', 'Unknown')
+            for i in identities
+            if i.get('risk_level') in ('critical', 'high')
+            and (i.get('name') or i.get('identity_name', 'Unknown')) not in targeted
+        ]
+        if remaining:
+            actions.append({
+                'priority': priority,
+                'action_type': 'create_ticket',
+                'title': 'Create tracking tickets for remaining high-risk identities',
+                'description': 'Create remediation tickets to track and resolve remaining high-risk identities not covered by automated actions.',
+                'target_identities': remaining[:5],
+                'agirs_impact': 'GEI +2',
+                'effort': 'low',
+                'risk': 'low',
+                'playbook_category': 'governance',
+            })
+
+        # If no actions were generated, add a generic review
+        if not actions:
+            actions.append({
+                'priority': 1,
+                'action_type': 'flag_for_review',
+                'title': 'Review current identity security posture',
+                'description': 'No specific high-priority remediations identified from the provided data. Conduct a manual review of the identity landscape.',
+                'target_identities': [],
+                'agirs_impact': 'GEI +1',
+                'effort': 'low',
+                'risk': 'low',
+                'playbook_category': 'governance',
+            })
+
+        # Estimate projected score
+        total_improvement = 0
+        for a in actions:
+            impact_str = a.get('agirs_impact', '')
+            import re
+            nums = re.findall(r'\+(\d+)', impact_str)
+            total_improvement += sum(int(n) for n in nums)
+        projected = min(agirs + total_improvement, 100)
+
+        # Plan summary
+        if agirs < 40:
+            severity = 'critical'
+        elif agirs < 60:
+            severity = 'elevated'
+        elif agirs < 75:
+            severity = 'moderate'
+        else:
+            severity = 'low'
+
+        plan_summary = (
+            f"The organization's AGIRS score of {agirs}/100 indicates {severity} identity risk. "
+            f"This plan proposes {len(actions)} remediation action(s) targeting the highest-impact risk factors. "
+            f"Full execution is projected to improve the score to approximately {projected}/100."
+        )
+
+        return {
+            'plan_summary': plan_summary,
+            'projected_score': projected,
+            'remediation_actions': actions,
+        }
+
+    # ── Least Privilege Role Generator ────────────────────────────────────
+
+    # Map of built-in Azure roles → their full ARM action sets.
+    # Used to compute privilege_reduction_percent by comparing the original
+    # role's action count against the generated custom role's action count.
+    BUILTIN_ROLE_ACTION_COUNTS = {
+        'Owner': 120, 'Contributor': 95, 'Reader': 25,
+        'User Access Administrator': 18,
+        'Storage Blob Data Contributor': 12, 'Storage Blob Data Reader': 6,
+        'Storage Blob Data Owner': 15,
+        'Key Vault Administrator': 22, 'Key Vault Secrets Officer': 10,
+        'Key Vault Secrets User': 4, 'Key Vault Certificates Officer': 10,
+        'Key Vault Crypto User': 5,
+        'Virtual Machine Contributor': 30, 'Network Contributor': 35,
+        'SQL DB Contributor': 20,
+        'Monitoring Reader': 10, 'Monitoring Contributor': 15,
+        'Log Analytics Reader': 8,
+        'Security Reader': 12, 'Security Admin': 20,
+        'Managed Identity Operator': 6, 'Managed Identity Contributor': 8,
+    }
+
+    # Map resource_type keywords → ARM resource provider namespace
+    RESOURCE_TYPE_NAMESPACES = {
+        'storage': 'Microsoft.Storage',
+        'blob': 'Microsoft.Storage',
+        'keyvault': 'Microsoft.KeyVault',
+        'key vault': 'Microsoft.KeyVault',
+        'vm': 'Microsoft.Compute',
+        'virtual machine': 'Microsoft.Compute',
+        'compute': 'Microsoft.Compute',
+        'network': 'Microsoft.Network',
+        'sql': 'Microsoft.Sql',
+        'database': 'Microsoft.Sql',
+        'web': 'Microsoft.Web',
+        'app service': 'Microsoft.Web',
+        'function': 'Microsoft.Web',
+        'container': 'Microsoft.ContainerRegistry',
+        'kubernetes': 'Microsoft.ContainerService',
+        'aks': 'Microsoft.ContainerService',
+        'monitor': 'Microsoft.Insights',
+        'log analytics': 'Microsoft.OperationalInsights',
+        'cosmos': 'Microsoft.DocumentDB',
+        'redis': 'Microsoft.Cache',
+        'event hub': 'Microsoft.EventHub',
+        'service bus': 'Microsoft.ServiceBus',
+    }
+
+    def generate_least_privilege_role(self, data: dict) -> dict:
+        """Generate a custom Azure RBAC role JSON scoped to observed actions only.
+
+        Input data keys:
+            identity_id: str — Azure object ID
+            current_role: str — current built-in role name (e.g., "Contributor")
+            observed_actions: list of str — ARM actions actually used (e.g., ["Microsoft.Storage/storageAccounts/read"])
+            resource_types: list of str — resource types accessed (e.g., ["storage", "keyvault"])
+            resource_scope: str — ARM scope (e.g., "/subscriptions/xxx/resourceGroups/yyy")
+            resource_criticality: str — low/medium/high/critical
+
+        Returns:
+            {
+              "role_definition": { name, description, actions, notActions, assignableScopes },
+              "risk_reduction_score": float,
+              "privilege_reduction_percent": float,
+              "analysis": str
+            }
+        """
+        client = self._get_client()
+
+        identity_id = data.get('identity_id', 'unknown')
+        current_role = data.get('current_role', 'Contributor')
+        observed = data.get('observed_actions', [])
+        resource_types = data.get('resource_types', [])
+        scope = data.get('resource_scope', '/')
+        criticality = data.get('resource_criticality', 'medium')
+
+        actions_text = '\n'.join(f'- {a}' for a in observed[:60]) if observed else '- No observed actions'
+        rtypes_text = ', '.join(resource_types) if resource_types else 'general'
+
+        prompt = f"""Generate a least-privilege custom Azure RBAC role definition for an identity.
+
+**Identity ID:** {identity_id}
+**Current Role:** {current_role}
+**Resource Types Accessed:** {rtypes_text}
+**Resource Scope:** {scope}
+**Resource Criticality:** {criticality}
+
+**Observed ARM Actions (from usage logs — the ONLY actions this identity actually needs):**
+{actions_text}
+
+RULES:
+1. The custom role MUST include ONLY the observed actions listed above. Do NOT add extra actions.
+2. NEVER include wildcard actions (e.g., "*/read" or "Microsoft.Storage/*"). Every action must be fully qualified.
+3. Scope the role to the narrowest possible level based on the resource_scope provided.
+4. The role name must follow the pattern "AuditGraph-Custom-<descriptive>" (e.g., "AuditGraph-Custom-StorageReader").
+5. The description must explain what this role replaces and why it's more restrictive.
+6. notActions should list dangerous operations explicitly excluded (e.g., "*/delete", "*/write" for read-only roles).
+7. assignableScopes must be an array containing ONLY the provided resource_scope.
+8. If observed_actions is empty, generate a minimal read-only role for the resource types.
+
+Return ONLY valid JSON with exactly these fields:
+{{
+  "role_definition": {{
+    "name": "AuditGraph-Custom-<descriptive name>",
+    "description": "Custom least-privilege role replacing <current_role>. <explanation of scope reduction>.",
+    "actions": ["Microsoft.X/y/action1", "Microsoft.X/y/action2"],
+    "notActions": ["Microsoft.X/y/delete"],
+    "assignableScopes": ["{scope}"]
+  }},
+  "analysis": "2-3 sentence explanation of why this custom role is safer than the current role and what privileges were removed"
+}}"""
+
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=1200,
+                system=(
+                    "You are an Azure RBAC expert generating least-privilege custom role definitions. "
+                    "Return ONLY valid JSON. Do not wrap in markdown code blocks. "
+                    "Never include wildcard actions. Every action must be a fully qualified ARM action string."
+                ),
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            if text.startswith('```'):
+                text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+            if text.endswith('```'):
+                text = text[:-3].rstrip()
+            result = json.loads(text)
+
+            # Validate structure
+            rd = result.get('role_definition', {})
+            for key in ('name', 'description', 'actions', 'notActions', 'assignableScopes'):
+                if key not in rd:
+                    rd[key] = [] if key in ('actions', 'notActions', 'assignableScopes') else ''
+            if not isinstance(rd['actions'], list):
+                rd['actions'] = [str(rd['actions'])]
+            if not isinstance(rd['notActions'], list):
+                rd['notActions'] = []
+            if not isinstance(rd['assignableScopes'], list):
+                rd['assignableScopes'] = [scope]
+
+            # Strip any wildcard actions the AI might have sneaked in
+            rd['actions'] = [a for a in rd['actions'] if '*' not in a]
+            if not rd['actions'] and observed:
+                rd['actions'] = list(observed)
+
+            result['role_definition'] = rd
+
+            # Compute metrics
+            orig_count = self.BUILTIN_ROLE_ACTION_COUNTS.get(current_role, 50)
+            new_count = len(rd['actions'])
+            result['privilege_reduction_percent'] = round(
+                max((orig_count - new_count) / orig_count * 100, 0), 1
+            ) if orig_count > 0 else 0.0
+            result['risk_reduction_score'] = self._compute_risk_reduction(
+                current_role, rd['actions'], criticality
+            )
+
+            if 'analysis' not in result:
+                result['analysis'] = ''
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("AI least-privilege role generation failed: %s", e)
+            return self._fallback_least_privilege_role(data)
+
+    @staticmethod
+    def _compute_risk_reduction(current_role, new_actions, criticality):
+        """Compute a 0-100 risk reduction score based on privilege delta."""
+        # Higher current role danger = more room for improvement
+        role_danger = {
+            'Owner': 100, 'Contributor': 80, 'User Access Administrator': 90,
+            'Security Admin': 60, 'Key Vault Administrator': 70,
+            'Storage Blob Data Owner': 65, 'Virtual Machine Contributor': 55,
+            'Network Contributor': 55, 'SQL DB Contributor': 50,
+        }
+        base_danger = role_danger.get(current_role, 40)
+
+        # Criticality multiplier
+        crit_mult = {'critical': 1.3, 'high': 1.1, 'medium': 1.0, 'low': 0.8}
+        mult = crit_mult.get(criticality, 1.0)
+
+        # Fewer new actions relative to original = higher reduction
+        orig_count = CopilotService.BUILTIN_ROLE_ACTION_COUNTS.get(current_role, 50)
+        new_count = len(new_actions)
+        if orig_count <= 0:
+            ratio = 0
+        else:
+            ratio = max(orig_count - new_count, 0) / orig_count
+
+        # Score = danger * reduction_ratio * criticality_mult, capped at 100
+        score = min(base_danger * ratio * mult, 100)
+        return round(score, 1)
+
+    @staticmethod
+    def _fallback_least_privilege_role(data: dict) -> dict:
+        """Deterministic custom role generation when AI is unavailable."""
+        identity_id = data.get('identity_id', 'unknown')
+        current_role = data.get('current_role', 'Contributor')
+        observed = data.get('observed_actions', [])
+        resource_types = data.get('resource_types', [])
+        scope = data.get('resource_scope', '/')
+        criticality = data.get('resource_criticality', 'medium')
+
+        # Build descriptive name from resource types
+        if resource_types:
+            primary = resource_types[0].replace(' ', '').title()
+        elif observed:
+            # Extract resource provider from first observed action
+            parts = observed[0].split('/')
+            primary = parts[1] if len(parts) >= 2 else 'General'
+        else:
+            primary = 'General'
+
+        # Determine if read-only or read-write from observed actions
+        has_write = any(
+            '/write' in a.lower() or '/delete' in a.lower() or '/action' in a.lower()
+            for a in observed
+        )
+        access_label = 'ReadWrite' if has_write else 'Reader'
+        role_name = f'AuditGraph-Custom-{primary}{access_label}'
+
+        # Use observed actions directly, or generate minimal read actions
+        if observed:
+            actions = [a for a in observed if '*' not in a]
+        else:
+            # Generate read-only actions from resource types
+            actions = []
+            ns_map = CopilotService.RESOURCE_TYPE_NAMESPACES
+            for rt in resource_types:
+                ns = ns_map.get(rt.lower())
+                if ns:
+                    actions.append(f'{ns}/*/read')
+            if not actions:
+                actions = ['Microsoft.Resources/subscriptions/resourceGroups/read']
+            # Remove wildcards — expand to specific read actions
+            expanded = []
+            for a in actions:
+                if '*' in a:
+                    ns = a.split('/')[0] + '/' + a.split('/')[1] if '/' in a else a
+                    # Don't include wildcards — the rule says never
+                    pass
+                else:
+                    expanded.append(a)
+            actions = expanded if expanded else [
+                'Microsoft.Resources/subscriptions/resourceGroups/read'
+            ]
+
+        # Build notActions: exclude dangerous ops not in observed set
+        not_actions = []
+        if not has_write:
+            not_actions = [
+                'Microsoft.Authorization/roleAssignments/write',
+                'Microsoft.Authorization/roleAssignments/delete',
+            ]
+
+        description = (
+            f'Custom least-privilege role replacing {current_role} for identity {identity_id[:12]}. '
+            f'Scoped to {len(actions)} observed action(s) on {", ".join(resource_types) if resource_types else "general resources"}, '
+            f'eliminating all unused privileges from the original role.'
+        )
+
+        role_def = {
+            'name': role_name,
+            'description': description,
+            'actions': actions,
+            'notActions': not_actions,
+            'assignableScopes': [scope],
+        }
+
+        # Compute metrics
+        orig_count = CopilotService.BUILTIN_ROLE_ACTION_COUNTS.get(current_role, 50)
+        new_count = len(actions)
+        priv_reduction = round(
+            max((orig_count - new_count) / orig_count * 100, 0), 1
+        ) if orig_count > 0 else 0.0
+
+        risk_reduction = CopilotService._compute_risk_reduction(
+            current_role, actions, criticality
+        )
+
+        analysis = (
+            f"The current '{current_role}' role grants approximately {orig_count} actions. "
+            f"This custom role restricts access to only {new_count} observed action(s), "
+            f"a {priv_reduction}% privilege reduction. "
+            f"{'High-criticality resources benefit most from this scoping.' if criticality in ('critical', 'high') else 'This scoping follows the principle of least privilege.'}"
+        )
+
+        return {
+            'role_definition': role_def,
+            'risk_reduction_score': risk_reduction,
+            'privilege_reduction_percent': priv_reduction,
+            'analysis': analysis,
+        }
+
+    @staticmethod
+    def _extract_suggestions(answer):
+        """Extract follow-up question suggestions from the answer text."""
+        suggestions = []
+        lines = answer.split('\n')
+        in_suggestions = False
+        for line in lines:
+            stripped = line.strip()
+            lower = stripped.lower()
+            if 'follow-up' in lower or 'follow up' in lower or 'next' in lower and 'question' in lower:
+                in_suggestions = True
+                continue
+            if in_suggestions and stripped.startswith(('- ', '* ', '1.', '2.', '3.')):
+                text = stripped.lstrip('-*0123456789. ').strip()
+                # Remove surrounding quotes if present
+                if text.startswith('"') and text.endswith('"'):
+                    text = text[1:-1]
+                if text:
+                    suggestions.append(text)
+        return suggestions[:3]
 
     @staticmethod
     def _extract_findings(report: str) -> list:

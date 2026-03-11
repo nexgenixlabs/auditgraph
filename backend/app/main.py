@@ -381,6 +381,20 @@ from app.api.handlers import (
     get_graph_engine_attack_paths,
     get_graph_engine_blast_radius,
     get_graph_engine_escalation_paths,
+    # Identity Risk Summary & AI Explanation
+    get_identity_risk_summary_detail,
+    get_identity_ai_risk_explanation,
+    post_ai_attack_path_explanation,
+    post_ai_executive_narrative,
+    # Phase 91: AI Investigation Assistant
+    ai_investigate_assistant_handler,
+    # AI Audit Log
+    get_ai_audit_log_handler,
+    # AI Remediation Planner
+    post_ai_remediation_plan,
+    # Least Privilege Role Generator
+    post_ai_least_privilege_role,
+    get_graph_diff_handler,
     get_attack_paths_list,
     get_attack_path_detail,
     get_identity_persisted_attack_paths,
@@ -836,6 +850,7 @@ def create_app():
             ('organizations', lambda: _db_init._ensure_organizations_table()),
             ('users', lambda: _db_init._ensure_users_table()),
             ('copilot', lambda: _db_init._ensure_copilot_tables()),
+            ('ai_audit_log', lambda: _db_init._ensure_ai_audit_log_table()),
             ('sa_attestations', lambda: _db_init._ensure_sa_attestations_table()),
             ('billing_events', lambda: _db_init._ensure_billing_events_table()),
             ('azure_storage_accounts', lambda: _db_init._ensure_azure_storage_accounts_table()),
@@ -3291,6 +3306,52 @@ def create_app():
     @app.get("/api/graph/escalation-paths")
     def graph_engine_escalation_paths():
         return get_graph_engine_escalation_paths()
+
+    # -----------------------
+    # Identity Risk Summary & AI Explanation
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/risk-summary")
+    def identity_risk_summary_detail(identity_id):
+        return get_identity_risk_summary_detail(identity_id)
+
+    @app.get("/api/identities/<identity_id>/ai-risk-explanation")
+    def identity_ai_risk_explanation(identity_id):
+        return get_identity_ai_risk_explanation(identity_id)
+
+    @app.post("/api/ai/explain-attack-path")
+    def ai_explain_attack_path():
+        return post_ai_attack_path_explanation()
+
+    @app.post("/api/ai/executive-narrative")
+    def ai_executive_narrative():
+        return post_ai_executive_narrative()
+
+    # -----------------------
+    # Phase 91: AI Investigation Assistant
+    # -----------------------
+    @app.post("/api/ai/investigate-assistant")
+    @require_feature('ai_copilot')
+    def ai_investigate_assistant():
+        return ai_investigate_assistant_handler()
+
+    @app.get("/api/ai/audit-log")
+    @require_role('admin')
+    def ai_audit_log():
+        return get_ai_audit_log_handler()
+
+    @app.post("/api/ai/remediation-plan")
+    @require_feature('ai_copilot')
+    def ai_remediation_plan():
+        return post_ai_remediation_plan()
+
+    @app.post("/api/ai/least-privilege-role")
+    @require_feature('ai_copilot')
+    def ai_least_privilege_role():
+        return post_ai_least_privilege_role()
+
+    @app.get("/api/graph/diff")
+    def graph_diff():
+        return get_graph_diff_handler()
 
     # -----------------------
     # Phase 16: Continuous Identity Risk Monitoring

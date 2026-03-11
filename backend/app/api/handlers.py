@@ -212,6 +212,62 @@ def _log(db, action_type, description, metadata=None):
     db.log_activity(action_type, description, metadata, user_id=uid, organization_id=tid)
 
 
+def _log_ai_audit(db, query_type, input_payload, output_payload,
+                  identity_id=None, duration_ms=0):
+    """Log an AI audit entry with auto-injected org/user/model context."""
+    try:
+        user = getattr(g, 'current_user', None)
+        uid = user.get('id') if user else None
+        org_id = user.get('organization_id') if user else None
+        # Model version from copilot_service
+        import os
+        model_version = os.getenv('LLM_MODEL', 'claude-sonnet-4-5-20250514')
+        # Confidence heuristic
+        if output_payload is None:
+            confidence = None
+        elif isinstance(output_payload, dict):
+            confidence = 1.0
+        elif isinstance(output_payload, str) and output_payload:
+            confidence = 0.9
+            # Truncate large string outputs
+            if len(output_payload) > 50000:
+                output_payload = output_payload[:50000] + '...[truncated]'
+            output_payload = {'response': output_payload}
+        else:
+            confidence = None
+        db.log_ai_audit(
+            organization_id=org_id,
+            user_id=uid,
+            identity_id=identity_id,
+            query_type=query_type,
+            model_version=model_version,
+            input_payload=input_payload,
+            output_payload=output_payload,
+            confidence_score=confidence,
+            duration_ms=duration_ms,
+        )
+    except Exception as e:
+        logger.warning(f"AI audit log failed: {e}")
+
+
+def get_ai_audit_log_handler():
+    """GET /api/ai/audit-log — admin-only AI audit log retrieval."""
+    db = _db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+        query_type = request.args.get('query_type')
+        identity_id = request.args.get('identity_id')
+        user_id = request.args.get('user_id')
+        entries = db.get_ai_audit_log(
+            limit=limit, offset=offset, query_type=query_type,
+            identity_id=identity_id, user_id=user_id,
+        )
+        return jsonify({'entries': entries, 'limit': limit, 'offset': offset})
+    finally:
+        db.close()
+
+
 def _get_org_plan(db, org_id):
     """Fetch the billing plan tier for an organization. Returns 'free' as default."""
     if not org_id or org_id == -1:
@@ -17393,6 +17449,9 @@ def copilot_chat():
 
         suggestions = service.get_suggestions(db)
         gateway.log_usage(db, org_id, user_id, 'chat')
+        _log_ai_audit(db, 'chat',
+                      {'message': message},
+                      response_text)
 
         return jsonify({
             'response': response_text,
@@ -25903,15 +25962,19 @@ def copilot_query_handler():
 
         elif context_type == 'translate':
             result = service.translate_security_query(question)
+            tr_dur = int((time.time() - start) * 1000)
             gateway.log_usage(db, org_id, user_id, 'translate')
             _log(db, 'copilot_query',
                  f'Security query translation: {question[:100]}',
                  {'context_type': 'translate', 'matched': result.get('matched')})
+            _log_ai_audit(db, 'query_translate',
+                          {'question': question, 'context_type': 'translate'},
+                          result, duration_ms=tr_dur)
             return jsonify({
                 'answer': f"**API Suggestion:** `{result['api']}`\n\n{result['description']}" if result['matched']
                           else result['description'],
                 'translation': result,
-                'duration_ms': int((time.time() - start) * 1000),
+                'duration_ms': tr_dur,
             })
 
         else:
@@ -25923,6 +25986,11 @@ def copilot_query_handler():
         _log(db, 'copilot_query',
              f'Copilot query ({context_type or "general"}): {question[:100]}',
              {'context_type': context_type, 'context_id': context_id, 'duration_ms': duration_ms})
+        _log_ai_audit(db, f'query_{context_type or "general"}',
+                      {'question': question, 'context_type': context_type, 'context_id': context_id},
+                      answer,
+                      identity_id=context_id if context_type == 'identity' else None,
+                      duration_ms=duration_ms)
 
         return jsonify({
             'answer': answer,
@@ -25967,6 +26035,9 @@ def copilot_security_summary_handler():
 
         gateway.log_usage(db, org_id, user_id, 'security_summary', latency_ms=duration_ms)
         _log(db, 'copilot_summary', 'Generated AI security summary', {'duration_ms': duration_ms})
+        _log_ai_audit(db, 'security_summary',
+                      {'context_keys': list(context_data.keys()) if isinstance(context_data, dict) else {}},
+                      summary, duration_ms=duration_ms)
 
         return jsonify({
             'summary': summary,
@@ -26041,6 +26112,11 @@ def copilot_investigate_handler():
         _log(db, 'copilot_investigation',
              f'Copilot investigation ({inv_type}): {target_id or "tenant-wide"}',
              {'type': inv_type, 'target_id': target_id, 'duration_ms': duration_ms})
+        _log_ai_audit(db, f'investigate_{inv_type}',
+                      {'type': inv_type, 'target_id': target_id, 'question': question},
+                      result,
+                      identity_id=str(target_id) if inv_type == 'identity' and target_id else None,
+                      duration_ms=duration_ms)
 
         return jsonify(result)
 
@@ -26116,6 +26192,9 @@ def copilot_graph_query_handler():
              f'Graph query: {query[:100]}',
              {'query_type': query_type, 'matched': translation.get('matched', False),
               'duration_ms': duration_ms})
+        _log_ai_audit(db, 'graph_query',
+                      {'query': query, 'query_type': query_type},
+                      answer, duration_ms=duration_ms)
 
         return jsonify({
             'answer': answer,
@@ -27147,5 +27226,765 @@ def get_graph_engine_escalation_paths():
             result['simulation'] = sim
 
         return jsonify(result)
+    finally:
+        db.close()
+
+
+# ── Identity Risk Summary ──────────────────────────────────────────────
+
+def get_identity_risk_summary_detail(identity_id):
+    """GET /api/identities/<id>/risk-summary — structured risk summary for one identity."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs found'}), 404
+
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   i.risk_level, COALESCE(i.risk_score, 0), i.risk_reasons,
+                   i.activity_status, i.credential_risk, COALESCE(i.owner_count, 0),
+                   i.last_sign_in, i.last_seen_auth, i.credential_count,
+                   COALESCE(i.cloud, 'azure'), i.risk_factors
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = row[0]
+        display_name = row[2] or ''
+        category = _normalize_category_key(row[3] or '')
+        risk_level = row[4] or 'info'
+        risk_score = int(row[5])
+        risk_reasons = _parse_risk_reasons(row[6])
+        activity_status = row[7] or 'unknown'
+        cred_risk = row[8] or 'unknown'
+        owner_count = int(row[9])
+        last_sign_in = row[10]
+        last_seen_auth = row[11]
+        cred_count = row[12] or 0
+        cloud = row[13]
+        risk_factors_raw = row[14]
+
+        # Parse risk_factors JSONB
+        risk_factors = []
+        if risk_factors_raw:
+            if isinstance(risk_factors_raw, list):
+                risk_factors = risk_factors_raw
+            elif isinstance(risk_factors_raw, str):
+                try:
+                    risk_factors = json.loads(risk_factors_raw)
+                except Exception:
+                    pass
+
+        # Roles
+        roles = db.get_identity_roles_enriched(db_id)
+        entra_roles = []
+        rbac_roles = []
+        for r in roles:
+            if r.get('is_entra') or r.get('assignment_type') == 'entra':
+                entra_roles.append(r)
+            else:
+                rbac_roles.append(r)
+
+        # Privilege tier
+        TIER0_ROLES = {'global administrator', 'privileged role administrator', 'owner', 'user access administrator'}
+        TIER1_ROLES = {'contributor', 'application administrator', 'cloud application administrator',
+                       'exchange administrator', 'security administrator', 'key vault administrator'}
+        all_role_names = {(r.get('role_name') or '').lower() for r in roles}
+        if all_role_names & TIER0_ROLES:
+            privilege_tier = 0
+        elif all_role_names & TIER1_ROLES:
+            privilege_tier = 1
+        else:
+            privilege_tier = 2 if roles else 3
+
+        # Blast radius
+        blast_radius = {}
+        try:
+            blast_radius = db.get_blast_radius_for_identity(db_id) or {}
+        except Exception:
+            pass
+        blast_radius_score = blast_radius.get('blast_radius_score', 0)
+
+        # Attack paths
+        attack_path_count = 0
+        try:
+            paths = db.get_attack_paths(source_entity_id=db_id, limit=100)
+            attack_path_count = len(paths) if paths else 0
+        except Exception:
+            pass
+
+        # Escalation paths via graph engine
+        escalation_paths = []
+        try:
+            from app.engines.graph_attack_engine import GraphAttackEngine
+            engine = GraphAttackEngine(db)
+            engine._build_graph(_org_id(), run_ids[0])
+            escalation_paths = engine.find_escalation_paths(str(db_id))
+        except Exception:
+            pass
+
+        # Key Vault access
+        kv_access = False
+        kv_roles = {'key vault administrator', 'key vault secrets officer', 'key vault secrets user',
+                     'key vault reader', 'key vault contributor'}
+        if all_role_names & kv_roles:
+            kv_access = True
+
+        # PIM data
+        pim_eligible = []
+        try:
+            pim_data = db.get_pim_data(db_id)
+            pim_eligible = pim_data.get('eligible_assignments', []) if pim_data else []
+        except Exception:
+            pass
+
+        # Dormancy
+        last_activity = last_seen_auth or last_sign_in
+        days_inactive = None
+        if last_activity:
+            try:
+                from datetime import datetime, timezone
+                if isinstance(last_activity, str):
+                    last_activity_dt = datetime.fromisoformat(last_activity.replace('Z', '+00:00'))
+                else:
+                    last_activity_dt = last_activity
+                if last_activity_dt.tzinfo is None:
+                    last_activity_dt = last_activity_dt.replace(tzinfo=timezone.utc)
+                days_inactive = (datetime.now(timezone.utc) - last_activity_dt).days
+            except Exception:
+                pass
+
+        # ── Build risk drivers ──
+        risk_drivers = []
+
+        if privilege_tier == 0:
+            risk_drivers.append({
+                'driver': 'Tier-0 privileged account',
+                'severity': 'critical',
+                'detail': f'Holds {", ".join(sorted(all_role_names & TIER0_ROLES))}',
+            })
+        elif privilege_tier == 1:
+            risk_drivers.append({
+                'driver': 'Tier-1 privileged account',
+                'severity': 'high',
+                'detail': f'Holds {", ".join(sorted(all_role_names & TIER1_ROLES))}',
+            })
+
+        if days_inactive is not None and days_inactive > 30:
+            sev = 'critical' if days_inactive > 90 else 'high' if days_inactive > 60 else 'medium'
+            risk_drivers.append({
+                'driver': f'Dormant for {days_inactive} days',
+                'severity': sev,
+                'detail': f'Last activity: {last_activity}',
+            })
+        elif activity_status in ('stale', 'never_used', 'inactive'):
+            risk_drivers.append({
+                'driver': f'Activity status: {activity_status}',
+                'severity': 'high',
+                'detail': 'No recent authentication or sign-in detected',
+            })
+
+        if kv_access:
+            risk_drivers.append({
+                'driver': 'Has access to Key Vault secrets',
+                'severity': 'high',
+                'detail': 'Can read or manage secrets, keys, and certificates',
+            })
+
+        if attack_path_count > 0 or len(escalation_paths) > 0:
+            total_paths = attack_path_count + len(escalation_paths)
+            risk_drivers.append({
+                'driver': f'Participates in {total_paths} escalation path(s)',
+                'severity': 'critical' if any(p.get('severity') == 'critical' for p in escalation_paths) else 'high',
+                'detail': 'Identity is a source or link in privilege escalation chains',
+            })
+
+        if cred_risk == 'expired':
+            risk_drivers.append({
+                'driver': 'Has expired credentials',
+                'severity': 'critical',
+                'detail': f'{cred_count} credential(s) — expired status indicates abandoned or misconfigured identity',
+            })
+        elif cred_risk == 'expiring_soon':
+            risk_drivers.append({
+                'driver': 'Credentials expiring soon',
+                'severity': 'high',
+                'detail': 'Credentials will expire within 30 days',
+            })
+
+        if owner_count == 0 and category in ('service_principal', 'managed_identity_system', 'managed_identity_user'):
+            risk_drivers.append({
+                'driver': 'No registered owner',
+                'severity': 'medium',
+                'detail': 'Accountability gap — no human owner assigned',
+            })
+
+        if blast_radius_score > 60:
+            risk_drivers.append({
+                'driver': f'High blast radius ({blast_radius_score}/100)',
+                'severity': 'high',
+                'detail': f'{blast_radius.get("subscription_count", 0)} subs, {blast_radius.get("resource_count", 0)} resources reachable',
+            })
+
+        # ── Build recommended actions ──
+        recommended_actions = []
+
+        if privilege_tier <= 1 and len(pim_eligible) == 0:
+            recommended_actions.append({
+                'priority': 'critical',
+                'action': 'Enable PIM for privileged roles',
+                'reason': 'Standing privileged access should be replaced with just-in-time PIM activation',
+            })
+        if privilege_tier == 0:
+            recommended_actions.append({
+                'priority': 'critical',
+                'action': 'Remove Owner role or scope to resource group',
+                'reason': 'Subscription-level Owner grants unrestricted control',
+            })
+        if days_inactive is not None and days_inactive > 90:
+            recommended_actions.append({
+                'priority': 'high',
+                'action': 'Disable or remove this identity',
+                'reason': f'Dormant for {days_inactive} days — unused accounts increase attack surface',
+            })
+        if cred_risk in ('expired', 'expiring_soon'):
+            recommended_actions.append({
+                'priority': 'high' if cred_risk == 'expiring_soon' else 'critical',
+                'action': 'Rotate or remove credentials',
+                'reason': 'Expired or expiring credentials indicate credential hygiene gap',
+            })
+        if kv_access and privilege_tier <= 1:
+            recommended_actions.append({
+                'priority': 'high',
+                'action': 'Review Key Vault access scope',
+                'reason': 'Privileged identity with Key Vault access can exfiltrate secrets',
+            })
+        if attack_path_count > 0 or len(escalation_paths) > 0:
+            recommended_actions.append({
+                'priority': 'high',
+                'action': 'Break escalation paths by removing intermediate role assignments',
+                'reason': 'Identity participates in privilege escalation chains',
+            })
+        if owner_count == 0 and category in ('service_principal', 'managed_identity_system', 'managed_identity_user'):
+            recommended_actions.append({
+                'priority': 'medium',
+                'action': 'Assign a human owner',
+                'reason': 'Every non-human identity should have an accountable human owner',
+            })
+
+        # Sort by severity
+        sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        risk_drivers.sort(key=lambda d: sev_order.get(d['severity'], 99))
+        recommended_actions.sort(key=lambda a: sev_order.get(a['priority'], 99))
+
+        cursor.close()
+        return jsonify({
+            'identity_id': identity_id,
+            'identity_name': display_name,
+            'identity_category': category,
+            'risk_level': risk_level,
+            'risk_score': risk_score,
+            'privilege_tier': privilege_tier,
+            'activity_status': activity_status,
+            'days_inactive': days_inactive,
+            'blast_radius_score': blast_radius_score,
+            'attack_path_count': attack_path_count + len(escalation_paths),
+            'escalation_path_count': len(escalation_paths),
+            'credential_risk': cred_risk,
+            'owner_count': owner_count,
+            'kv_access': kv_access,
+            'pim_enabled': len(pim_eligible) > 0,
+            'risk_drivers': risk_drivers,
+            'recommended_actions': recommended_actions,
+            'last_activity': str(last_activity) if last_activity else None,
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
+# ── AI Risk Explanation ────────────────────────────────────────────────
+
+def get_identity_ai_risk_explanation(identity_id):
+    """GET /api/identities/<id>/ai-risk-explanation — AI-generated risk narrative."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs found'}), 404
+
+        # Fetch core identity data
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.risk_level, COALESCE(i.risk_score, 0),
+                   i.risk_reasons, i.activity_status, i.credential_risk,
+                   i.last_seen_auth, i.last_sign_in, COALESCE(i.owner_count, 0),
+                   i.identity_category
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = row[0]
+        identity_name = row[1] or identity_id
+        risk_level = row[2] or 'info'
+        risk_score = int(row[3])
+        risk_reasons = _parse_risk_reasons(row[4])
+        activity_status = row[5] or 'unknown'
+        last_activity = row[7] or row[8]
+
+        # Blast radius
+        blast_radius = 0
+        try:
+            br = db.get_blast_radius_for_identity(db_id) or {}
+            blast_radius = br.get('blast_radius_score', 0)
+        except Exception:
+            pass
+
+        # Attack path count
+        attack_path_count = 0
+        try:
+            paths = db.get_attack_paths(source_entity_id=db_id, limit=100)
+            attack_path_count = len(paths) if paths else 0
+        except Exception:
+            pass
+
+        cursor.close()
+
+        # Build structured input for the AI
+        ai_input = {
+            'identity_name': identity_name,
+            'risk_score': risk_score,
+            'risk_level': risk_level,
+            'risk_drivers': risk_reasons,
+            'blast_radius': blast_radius,
+            'attack_path_count': attack_path_count,
+            'last_activity': str(last_activity) if last_activity else 'No activity recorded',
+        }
+
+        # Call AI service
+        from app.services.copilot_service import get_platform_copilot_service
+        service, err = get_platform_copilot_service()
+        if not service:
+            # Fallback: generate deterministic explanation without AI
+            fallback = _generate_fallback_explanation(ai_input)
+            _log_ai_audit(db, 'risk_explanation', ai_input, fallback,
+                          identity_id=identity_id)
+            return jsonify(fallback)
+
+        start_ai = time.time()
+        explanation = service.explain_identity_risk(ai_input)
+        ai_dur = int((time.time() - start_ai) * 1000)
+        _log_ai_audit(db, 'risk_explanation', ai_input, explanation,
+                      identity_id=identity_id, duration_ms=ai_dur)
+        return jsonify(explanation)
+    finally:
+        db.close()
+
+
+def _generate_fallback_explanation(data):
+    """Deterministic risk explanation when AI service is unavailable."""
+    name = data['identity_name']
+    score = data['risk_score']
+    level = data['risk_level']
+    drivers = data['risk_drivers']
+    blast = data['blast_radius']
+    paths = data['attack_path_count']
+    last_act = data['last_activity']
+
+    summary = f"The identity {name} is classified as {level.upper()} risk with a score of {score}/100."
+    if blast > 0:
+        summary += f" It has a blast radius score of {blast}, meaning it can reach a significant number of cloud resources."
+    if paths > 0:
+        summary += f" It participates in {paths} escalation path(s), creating potential privilege escalation vectors."
+
+    driver_list = []
+    for d in drivers:
+        if isinstance(d, str):
+            driver_list.append(d)
+        elif isinstance(d, dict):
+            driver_list.append(d.get('factor', d.get('driver', str(d))))
+
+    if not driver_list:
+        driver_list = [f'{level.capitalize()} risk classification based on composite scoring']
+
+    implications = f"This identity represents a {level} security concern."
+    if paths > 0:
+        implications += " Its participation in escalation paths means a compromise could lead to privilege escalation."
+    if blast > 60:
+        implications += " The high blast radius indicates that compromise would expose a large number of resources."
+    if 'No activity' in last_act or last_act == 'None':
+        implications += " The lack of recent activity suggests this may be an abandoned account that still retains access."
+
+    actions = []
+    if level in ('critical', 'high'):
+        actions.append('Review and reduce role assignments to enforce least privilege')
+    if paths > 0:
+        actions.append('Break escalation paths by removing intermediate role assignments or enabling PIM')
+    if blast > 60:
+        actions.append('Scope access to specific resource groups instead of subscription-level')
+    if 'No activity' in last_act or last_act == 'None':
+        actions.append('Disable or remove this identity if no longer needed')
+    if not actions:
+        actions.append('Continue monitoring — no immediate action required')
+
+    return {
+        'summary': summary,
+        'drivers': driver_list,
+        'implications': implications,
+        'recommended_action': '; '.join(actions),
+    }
+
+
+# ── AI Attack Path Explanation ─────────────────────────────────────────
+
+def post_ai_attack_path_explanation():
+    """POST /api/ai/explain-attack-path — AI-generated attack path explanation.
+
+    Request body:
+        { "identity": str, "attack_path": [...steps], "risk_level": str }
+
+    Returns:
+        { "explanation": str, "security_impact": str, "recommended_fix": str }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    identity = data.get('identity', '')
+    attack_path = data.get('attack_path', [])
+    risk_level = data.get('risk_level', 'unknown')
+
+    if not identity:
+        return jsonify({'error': 'identity field is required'}), 400
+    if not attack_path or not isinstance(attack_path, list):
+        return jsonify({'error': 'attack_path must be a non-empty array'}), 400
+
+    ai_input = {
+        'identity': identity,
+        'attack_path': attack_path,
+        'risk_level': risk_level,
+    }
+
+    from app.services.copilot_service import get_platform_copilot_service, CopilotService
+    service, err = get_platform_copilot_service()
+    db = _db()
+    try:
+        if not service:
+            fallback = CopilotService._fallback_attack_path_explanation(ai_input)
+            _log_ai_audit(db, 'attack_path_explanation', ai_input, fallback)
+            return jsonify(fallback)
+
+        start_ai = time.time()
+        result = service.explain_attack_path_chain(ai_input)
+        ai_dur = int((time.time() - start_ai) * 1000)
+        _log_ai_audit(db, 'attack_path_explanation', ai_input, result,
+                      duration_ms=ai_dur)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def post_ai_executive_narrative():
+    """POST /api/ai/executive-narrative — AI-generated executive security narrative.
+
+    Request body:
+        { "agirs_score": int, "risk_level": str, "top_risk_drivers": [],
+          "top_risk_identities": [], "recommended_actions": [], "projected_score": int }
+
+    Returns:
+        { "executive_summary": str, "top_risks": [], "recommended_actions": [], "expected_improvement": str }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    agirs_score = data.get('agirs_score')
+    if agirs_score is None:
+        return jsonify({'error': 'agirs_score field is required'}), 400
+
+    ai_input = {
+        'agirs_score': agirs_score,
+        'risk_level': data.get('risk_level', 'unknown'),
+        'top_risk_drivers': data.get('top_risk_drivers', []),
+        'top_risk_identities': data.get('top_risk_identities', []),
+        'recommended_actions': data.get('recommended_actions', []),
+        'projected_score': data.get('projected_score', 0),
+    }
+
+    from app.services.copilot_service import get_platform_copilot_service, CopilotService
+    service, err = get_platform_copilot_service()
+    db = _db()
+    try:
+        if not service:
+            fallback = CopilotService._fallback_executive_narrative(ai_input)
+            _log_ai_audit(db, 'executive_narrative', ai_input, fallback)
+            return jsonify(fallback)
+
+        start_ai = time.time()
+        result = service.generate_executive_narrative(ai_input)
+        ai_dur = int((time.time() - start_ai) * 1000)
+        _log_ai_audit(db, 'executive_narrative', ai_input, result,
+                      duration_ms=ai_dur)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ── AI Remediation Planner ─────────────────────────────────────────────
+
+def post_ai_remediation_plan():
+    """POST /api/ai/remediation-plan — AI-generated remediation plan.
+
+    Request body:
+        { "agirs_score": int, "top_risk_identities": [], "attack_paths": [], "risk_drivers": [] }
+
+    Returns:
+        { "plan_summary": str, "projected_score": int, "remediation_actions": [...] }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    agirs_score = data.get('agirs_score')
+    if agirs_score is None:
+        return jsonify({'error': 'agirs_score field is required'}), 400
+
+    ai_input = {
+        'agirs_score': agirs_score,
+        'top_risk_identities': data.get('top_risk_identities', []),
+        'attack_paths': data.get('attack_paths', []),
+        'risk_drivers': data.get('risk_drivers', []),
+    }
+
+    from app.services.copilot_service import get_platform_copilot_service, CopilotService
+    service, err = get_platform_copilot_service()
+    db = _db()
+    try:
+        if not service:
+            fallback = CopilotService._fallback_remediation_plan(ai_input)
+            _log_ai_audit(db, 'remediation_plan', ai_input, fallback)
+            return jsonify(fallback)
+
+        start_ai = time.time()
+        result = service.generate_remediation_plan(ai_input)
+        ai_dur = int((time.time() - start_ai) * 1000)
+        _log_ai_audit(db, 'remediation_plan', ai_input, result,
+                      duration_ms=ai_dur)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ── Least Privilege Role Generator ─────────────────────────────────────
+
+def post_ai_least_privilege_role():
+    """POST /api/ai/least-privilege-role — generate a custom least-privilege Azure RBAC role.
+
+    Request body:
+        { "identity_id": str, "current_role": str, "observed_actions": [],
+          "resource_types": [], "resource_scope": str, "resource_criticality": str }
+
+    Returns:
+        { "role_definition": { name, description, actions, notActions, assignableScopes },
+          "risk_reduction_score": float, "privilege_reduction_percent": float, "analysis": str }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    identity_id = data.get('identity_id')
+    current_role = data.get('current_role')
+    if not identity_id:
+        return jsonify({'error': 'identity_id field is required'}), 400
+    if not current_role:
+        return jsonify({'error': 'current_role field is required'}), 400
+
+    observed = data.get('observed_actions', [])
+    if not isinstance(observed, list):
+        return jsonify({'error': 'observed_actions must be an array'}), 400
+
+    # Reject wildcard actions at input validation
+    wildcards = [a for a in observed if '*' in a]
+    if wildcards:
+        return jsonify({'error': f'Wildcard actions are not allowed: {wildcards[:3]}'}), 400
+
+    ai_input = {
+        'identity_id': identity_id,
+        'current_role': current_role,
+        'observed_actions': observed,
+        'resource_types': data.get('resource_types', []),
+        'resource_scope': data.get('resource_scope', '/'),
+        'resource_criticality': data.get('resource_criticality', 'medium'),
+    }
+
+    from app.services.copilot_service import get_platform_copilot_service, CopilotService
+    service, err = get_platform_copilot_service()
+    db = _db()
+    try:
+        if not service:
+            fallback = CopilotService._fallback_least_privilege_role(ai_input)
+            _log_ai_audit(db, 'least_privilege_role', ai_input, fallback,
+                          identity_id=identity_id)
+            return jsonify(fallback)
+
+        start_ai = time.time()
+        result = service.generate_least_privilege_role(ai_input)
+        ai_dur = int((time.time() - start_ai) * 1000)
+        _log_ai_audit(db, 'least_privilege_role', ai_input, result,
+                      identity_id=identity_id, duration_ms=ai_dur)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+# ── Phase 91: AI Investigation Assistant ──────────────────────────────────
+
+def ai_investigate_assistant_handler():
+    """POST /api/ai/investigate-assistant — tool_use powered investigation.
+
+    Request body: { "question": "What attack paths exist for john.admin?" }
+    Returns: { answer, evidence[], tools_used[], suggestions[] }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    question = (data.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': 'question field is required'}), 400
+    if len(question) > 2000:
+        return jsonify({'error': 'question must be under 2000 characters'}), 400
+
+    from app.ai.copilot_gateway import get_gateway
+    gateway = get_gateway()
+
+    service, svc_err = gateway.check_available()
+    if not service:
+        # Fallback mode — no AI key
+        return jsonify(_investigate_assistant_fallback(question))
+
+    org_id = _org_id()
+    user_id = _current_user_id()
+    db = _db()
+    try:
+        # Rate limit
+        plan = _get_org_plan(db, org_id)
+        allowed, rate_err = gateway.check_rate_limit(db, org_id, plan)
+        if not allowed:
+            return jsonify({'error': rate_err}), 429
+
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        cursor.close()
+
+        if not run_ids:
+            return jsonify({
+                'error': 'No completed discovery runs found. Run a scan first.',
+            }), 404
+
+        from app.ai.investigation_tools import INVESTIGATION_TOOLS, InvestigationToolExecutor
+        executor = InvestigationToolExecutor(db, org_id, run_ids)
+
+        question = gateway.truncate_prompt(question)
+        start = time.time()
+        result = service.investigate_with_tools(question, INVESTIGATION_TOOLS, executor)
+        duration_ms = int((time.time() - start) * 1000)
+
+        result['duration_ms'] = duration_ms
+        gateway.log_usage(db, org_id, user_id, 'investigate_assistant', latency_ms=duration_ms)
+        _log(db, 'ai_investigate', f'Investigation: {question[:100]}',
+             {'tools_used': result.get('tools_used', []), 'duration_ms': duration_ms})
+        _log_ai_audit(db, 'investigate_assistant',
+                      {'question': question},
+                      result, duration_ms=duration_ms)
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error("AI investigation error: %s", e, exc_info=True)
+        try:
+            db._rollback()
+        except Exception:
+            pass
+        return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
+    finally:
+        db.close()
+
+
+def _investigate_assistant_fallback(question):
+    """Keyword-based tool selection when no AI key is available."""
+    q_lower = question.lower()
+    tools_to_run = []
+
+    if 'attack path' in q_lower or 'escalat' in q_lower:
+        tools_to_run.append('attack_paths')
+    if 'blast radius' in q_lower or 'blast' in q_lower:
+        tools_to_run.append('blast_radius')
+    if 'timeline' in q_lower or 'happened' in q_lower or 'history' in q_lower:
+        tools_to_run.append('timeline')
+    if 'compare' in q_lower or 'diff' in q_lower or 'change' in q_lower:
+        tools_to_run.append('graph_diff')
+
+    if not tools_to_run:
+        tools_to_run = ['attack_paths']
+
+    return {
+        'answer': None,
+        'tools_used': tools_to_run,
+        'evidence': [],
+        'suggestions': [],
+        'fallback': True,
+        'message': 'AI service is not configured. Configure ANTHROPIC_API_KEY for AI-powered investigation. '
+                   f'Detected relevant tools: {", ".join(tools_to_run)}.',
+    }
+
+
+def get_graph_diff_handler():
+    """GET /api/graph/diff — compare two graph snapshots."""
+    org_id = _org_id()
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        run_id_a = request.args.get('run_id_a', type=int)
+        run_id_b = request.args.get('run_id_b', type=int)
+
+        # Default to latest and previous runs
+        if not run_id_b:
+            run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+            run_id_b = run_ids[0] if run_ids else None
+
+        if not run_id_a and run_id_b:
+            prev_ids = _previous_run_ids(cursor, org_id, _connection_id())
+            run_id_a = prev_ids[0] if prev_ids else None
+
+        cursor.close()
+
+        if not run_id_a or not run_id_b:
+            return jsonify({
+                'error': 'Need at least two completed discovery runs to compare',
+                'run_id_a': run_id_a,
+                'run_id_b': run_id_b,
+            }), 404
+
+        diff = db.get_graph_diff(org_id, run_id_a, run_id_b)
+        diff['run_id_a'] = run_id_a
+        diff['run_id_b'] = run_id_b
+        diff['summary'] = {
+            'added_nodes': len(diff.get('added_nodes', [])),
+            'removed_nodes': len(diff.get('removed_nodes', [])),
+            'changed_nodes': len(diff.get('changed_nodes', [])),
+            'added_edges': len(diff.get('added_edges', [])),
+            'removed_edges': len(diff.get('removed_edges', [])),
+        }
+        return jsonify(diff)
     finally:
         db.close()

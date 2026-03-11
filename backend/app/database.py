@@ -16720,6 +16720,7 @@ class Database:
     # ──────────────────────────────────────────────────────────
 
     _copilot_ensured = False
+    _ai_audit_log_ensured = False
 
     def _ensure_copilot_tables(self):
         if Database._copilot_ensured:
@@ -23253,6 +23254,158 @@ class Database:
         if not row or not row[1]:
             return 0.0
         return row[0] / row[1]
+
+    # ──────────────────────────────────────────────────────────
+    # AI Audit Log
+    # ──────────────────────────────────────────────────────────
+
+    def _ensure_ai_audit_log_table(self):
+        if Database._ai_audit_log_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_audit_log (
+                id SERIAL PRIMARY KEY,
+                organization_id INT NOT NULL,
+                user_id INT,
+                identity_id TEXT,
+                query_type VARCHAR(50) NOT NULL,
+                model_version TEXT NOT NULL,
+                input_payload JSONB NOT NULL,
+                output_payload JSONB,
+                confidence_score FLOAT,
+                duration_ms INT DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        # Indexes (savepoint-wrapped for idempotency)
+        for idx_stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_ai_audit_org_created ON ai_audit_log (organization_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_audit_user_created ON ai_audit_log (user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_audit_query_type ON ai_audit_log (query_type)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_audit_identity ON ai_audit_log (identity_id) WHERE identity_id IS NOT NULL",
+        ]:
+            cursor.execute("SAVEPOINT idx_create")
+            try:
+                cursor.execute(idx_stmt)
+                cursor.execute("RELEASE SAVEPOINT idx_create")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT idx_create")
+        # RLS: append-only (SELECT + INSERT only)
+        cursor.execute("ALTER TABLE ai_audit_log ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE ai_audit_log FORCE ROW LEVEL SECURITY")
+        for policy_stmt in [
+            "CREATE POLICY ai_audit_sel ON ai_audit_log FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY ai_audit_ins ON ai_audit_log FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+        ]:
+            cursor.execute("SAVEPOINT rls_policy")
+            try:
+                cursor.execute(policy_stmt)
+                cursor.execute("RELEASE SAVEPOINT rls_policy")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
+        # Immutable trigger — prevent UPDATE and DELETE
+        cursor.execute("""
+            CREATE OR REPLACE FUNCTION fn_ai_audit_log_immutable()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'AUDIT_INTEGRITY: DELETE on ai_audit_log is prohibited';
+                END IF;
+                IF TG_OP = 'UPDATE' THEN
+                    RAISE EXCEPTION 'AUDIT_INTEGRITY: UPDATE on ai_audit_log is prohibited';
+                END IF;
+                RETURN NULL;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        cursor.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = 'trg_ai_audit_log_immutable'
+                    AND tgrelid = 'ai_audit_log'::regclass
+                ) THEN
+                    CREATE TRIGGER trg_ai_audit_log_immutable
+                    BEFORE DELETE OR UPDATE ON ai_audit_log
+                    FOR EACH ROW
+                    EXECUTE FUNCTION fn_ai_audit_log_immutable();
+                END IF;
+            END $$
+        """)
+        self._commit()
+        cursor.close()
+        Database._ai_audit_log_ensured = True
+
+    def log_ai_audit(self, organization_id, user_id, identity_id, query_type,
+                     model_version, input_payload, output_payload,
+                     confidence_score=None, duration_ms=0):
+        """Append an AI audit entry. Never raises — errors are swallowed."""
+        try:
+            self._ensure_ai_audit_log_table()
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO ai_audit_log
+                    (organization_id, user_id, identity_id, query_type,
+                     model_version, input_payload, output_payload,
+                     confidence_score, duration_ms, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """, (
+                organization_id, user_id, identity_id, query_type,
+                model_version,
+                json.dumps(input_payload) if input_payload else '{}',
+                json.dumps(output_payload) if output_payload else None,
+                confidence_score, duration_ms,
+            ))
+            self._commit()
+            cursor.close()
+        except Exception as e:
+            print(f"Warning: Failed to log AI audit: {e}")
+            try:
+                self._rollback()
+            except Exception:
+                pass
+
+    def get_ai_audit_log(self, limit=50, offset=0, query_type=None,
+                         identity_id=None, user_id=None):
+        """Retrieve AI audit log entries with optional filters. RLS scopes to current org."""
+        self._ensure_ai_audit_log_table()
+        cursor = self.conn.cursor()
+        conditions = []
+        params = []
+        if query_type:
+            conditions.append("a.query_type = %s")
+            params.append(query_type)
+        if identity_id:
+            conditions.append("a.identity_id = %s")
+            params.append(identity_id)
+        if user_id:
+            conditions.append("a.user_id = %s")
+            params.append(int(user_id))
+        where = (" AND " + " AND ".join(conditions)) if conditions else ""
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT a.id, a.organization_id, a.user_id, a.identity_id,
+                   a.query_type, a.model_version, a.input_payload,
+                   a.output_payload, a.confidence_score, a.duration_ms,
+                   a.created_at,
+                   u.username AS user_username,
+                   u.display_name AS user_display_name
+            FROM ai_audit_log a
+            LEFT JOIN users u ON u.id = a.user_id
+            WHERE 1=1 {where}
+            ORDER BY a.created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        cols = [d[0] for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        # Serialize timestamps
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = str(r['created_at'])
+        return rows
 
 
 # ─── Access Review V2 Helper Functions ────────────────────────────────
