@@ -53,3 +53,11 @@ pnpm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# =====================
+# Temp / Artifacts
+# =====================
+asdasd
+folderstructure.txt
+diagnostics.sh
+backend/=*
