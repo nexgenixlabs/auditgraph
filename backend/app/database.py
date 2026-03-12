@@ -3360,11 +3360,15 @@ class Database:
         """Persist a drift comparison result. Returns drift_report ID."""
         cursor = self.conn.cursor()
 
-        # Ensure events JSONB column exists
+        # Ensure events JSONB column + intelligence columns exist
         if not Database._drift_events_col_ensured:
             try:
                 cursor.execute("SAVEPOINT drift_events_ddl")
                 cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS events JSONB DEFAULT '[]'::jsonb")
+                cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS max_severity TEXT")
+                cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS privilege_escalation_count INTEGER DEFAULT 0")
+                cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS attack_path_created_count INTEGER DEFAULT 0")
+                cursor.execute("ALTER TABLE drift_reports ADD COLUMN IF NOT EXISTS identity_resurrection_count INTEGER DEFAULT 0")
                 cursor.execute("RELEASE SAVEPOINT drift_events_ddl")
                 self._commit()
             except Exception:
@@ -3413,6 +3417,31 @@ class Database:
         cursor.close()
         return report_id
 
+    def update_drift_report_intelligence(self, report_id: int, enriched_events: list,
+                                          max_severity: str, privilege_escalation_count: int,
+                                          attack_path_created_count: int,
+                                          identity_resurrection_count: int) -> None:
+        """Update a drift report with intelligence enrichment data."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE drift_reports
+            SET events = %s,
+                max_severity = %s,
+                privilege_escalation_count = %s,
+                attack_path_created_count = %s,
+                identity_resurrection_count = %s
+            WHERE id = %s
+        """, (
+            json.dumps(enriched_events, default=str),
+            max_severity,
+            privilege_escalation_count,
+            attack_path_created_count,
+            identity_resurrection_count,
+            report_id,
+        ))
+        self._commit()
+        cursor.close()
+
     def get_drift_report(self, run_id: int) -> Optional[Dict]:
         """Get the drift report where current_run_id = run_id. Returns None if not found."""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -3421,7 +3450,9 @@ class Database:
                    new_identities_count, removed_identities_count,
                    permission_changes_count, risk_changes_count,
                    credential_changes_count, total_changes,
-                   changes, created_at
+                   changes, events, max_severity,
+                   privilege_escalation_count, attack_path_created_count,
+                   identity_resurrection_count, created_at
             FROM drift_reports
             WHERE current_run_id = %s
         """, (run_id,))
@@ -3430,37 +3461,75 @@ class Database:
         return dict(row) if row else None
 
     def get_latest_drift_report(self) -> Optional[Dict]:
-        """Get the most recent drift report summary (no full changes JSONB)."""
+        """Get the most recent drift report summary (no full changes JSONB).
+        Scoped to current organization_id.
+        """
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT id, current_run_id, previous_run_id,
-                   new_identities_count, removed_identities_count,
-                   permission_changes_count, risk_changes_count,
-                   credential_changes_count, total_changes,
-                   created_at
-            FROM drift_reports
-            ORDER BY created_at DESC
-            LIMIT 1
-        """)
+        org_id = self._organization_id
+        if org_id is not None:
+            cursor.execute("""
+                SELECT id, current_run_id, previous_run_id,
+                       new_identities_count, removed_identities_count,
+                       permission_changes_count, risk_changes_count,
+                       credential_changes_count, total_changes,
+                       max_severity, created_at
+                FROM drift_reports
+                WHERE organization_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (org_id,))
+        else:
+            cursor.execute("""
+                SELECT id, current_run_id, previous_run_id,
+                       new_identities_count, removed_identities_count,
+                       permission_changes_count, risk_changes_count,
+                       credential_changes_count, total_changes,
+                       max_severity, created_at
+                FROM drift_reports
+                ORDER BY created_at DESC
+                LIMIT 1
+            """)
         row = cursor.fetchone()
         cursor.close()
         return dict(row) if row else None
 
     def get_drift_history(self, limit: int = 20) -> List[Dict]:
-        """Get drift report summaries ordered by most recent."""
+        """Get drift report summaries ordered by most recent.
+        Scoped to current organization_id.
+        """
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT dr.id, dr.current_run_id, dr.previous_run_id,
-                   dr.new_identities_count, dr.removed_identities_count,
-                   dr.permission_changes_count, dr.risk_changes_count,
-                   dr.credential_changes_count, dr.total_changes,
-                   dr.created_at,
-                   r.completed_at as run_completed_at
-            FROM drift_reports dr
-            JOIN discovery_runs r ON r.id = dr.current_run_id
-            ORDER BY dr.created_at DESC
-            LIMIT %s
-        """, (limit,))
+        org_id = self._organization_id
+        if org_id is not None:
+            cursor.execute("""
+                SELECT dr.id, dr.current_run_id, dr.previous_run_id,
+                       dr.new_identities_count, dr.removed_identities_count,
+                       dr.permission_changes_count, dr.risk_changes_count,
+                       dr.credential_changes_count, dr.total_changes,
+                       dr.max_severity, dr.privilege_escalation_count,
+                       dr.attack_path_created_count, dr.identity_resurrection_count,
+                       dr.created_at,
+                       r.completed_at as run_completed_at
+                FROM drift_reports dr
+                JOIN discovery_runs r ON r.id = dr.current_run_id
+                WHERE dr.organization_id = %s
+                ORDER BY dr.created_at DESC
+                LIMIT %s
+            """, (org_id, limit))
+        else:
+            cursor.execute("""
+                SELECT dr.id, dr.current_run_id, dr.previous_run_id,
+                       dr.new_identities_count, dr.removed_identities_count,
+                       dr.permission_changes_count, dr.risk_changes_count,
+                       dr.credential_changes_count, dr.total_changes,
+                       dr.max_severity, dr.privilege_escalation_count,
+                       dr.attack_path_created_count, dr.identity_resurrection_count,
+                       dr.created_at,
+                       r.completed_at as run_completed_at
+                FROM drift_reports dr
+                JOIN discovery_runs r ON r.id = dr.current_run_id
+                ORDER BY dr.created_at DESC
+                LIMIT %s
+            """, (limit,))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         return rows
@@ -8757,16 +8826,26 @@ class Database:
         return result
 
     def get_anomaly_stats(self) -> dict:
-        """Get anomaly summary: total, unresolved, by_type, by_severity."""
+        """Get anomaly summary: total, unresolved, by_type, by_severity.
+        Scoped to current organization_id.
+        """
         self._ensure_anomalies_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT COUNT(*) as total FROM anomalies")
+        org_id = self._organization_id
+        org_filter = ""
+        org_unresolved = "WHERE resolved = false"
+        org_params: tuple = ()
+        if org_id is not None:
+            org_filter = "WHERE organization_id = %s"
+            org_unresolved = "WHERE resolved = false AND organization_id = %s"
+            org_params = (org_id,)
+        cursor.execute(f"SELECT COUNT(*) as total FROM anomalies {org_filter}", org_params)
         total = cursor.fetchone()['total']
-        cursor.execute("SELECT COUNT(*) as unresolved FROM anomalies WHERE resolved = false")
+        cursor.execute(f"SELECT COUNT(*) as unresolved FROM anomalies {org_unresolved}", org_params)
         unresolved = cursor.fetchone()['unresolved']
-        cursor.execute("SELECT anomaly_type, COUNT(*) as count FROM anomalies WHERE resolved = false GROUP BY anomaly_type ORDER BY count DESC")
+        cursor.execute(f"SELECT anomaly_type, COUNT(*) as count FROM anomalies {org_unresolved} GROUP BY anomaly_type ORDER BY count DESC", org_params)
         by_type = {r['anomaly_type']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("SELECT severity, COUNT(*) as count FROM anomalies WHERE resolved = false GROUP BY severity ORDER BY count DESC")
+        cursor.execute(f"SELECT severity, COUNT(*) as count FROM anomalies {org_unresolved} GROUP BY severity ORDER BY count DESC", org_params)
         by_severity = {r['severity']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return {
@@ -13667,105 +13746,215 @@ class Database:
     # ── Dashboard Summary & Credential Inventory ─────────────────────────────
 
     def get_dashboard_summary(self):
-        """Compute executive dashboard metrics."""
+        """Compute executive dashboard metrics.
+
+        Resolves the latest completed discovery run IDs (scoped to this
+        connection's organization_id) once, then uses them consistently
+        across all queries (security_findings, credentials, identities,
+        attack_paths). Each query is wrapped in try/except so that
+        missing tables return safe defaults.
+        """
         from psycopg2.extras import RealDictCursor
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = self._organization_id
 
-        # Identity counts by category (latest run per connection)
-        cursor.execute("""
-            SELECT
-                COUNT(*) AS total_identities,
-                COUNT(*) FILTER (WHERE identity_category = 'human_user') AS users,
-                COUNT(*) FILTER (WHERE identity_category = 'service_principal') AS service_principals,
-                COUNT(*) FILTER (WHERE identity_category IN ('managed_identity_system', 'managed_identity_user')) AS managed_identities,
-                COUNT(*) FILTER (WHERE identity_category = 'guest') AS guests
-            FROM identities i
-            WHERE i.discovery_run_id IN (
-                SELECT DISTINCT ON (cloud_connection_id) id
-                FROM discovery_runs
-                WHERE status = 'completed'
-                ORDER BY cloud_connection_id, id DESC
-            )
-        """)
-        identity_row = cursor.fetchone()
+        # ── Step 1: Resolve latest completed run per connection for this org ─
+        run_ids = []
+        data_as_of = None
+        try:
+            if org_id is not None:
+                cursor.execute("""
+                    SELECT DISTINCT ON (cloud_connection_id)
+                        id, completed_at
+                    FROM discovery_runs
+                    WHERE status = 'completed'
+                      AND organization_id = %s
+                    ORDER BY cloud_connection_id, completed_at DESC
+                """, (org_id,))
+            else:
+                # Superadmin / no org context — fall back to unscoped
+                cursor.execute("""
+                    SELECT DISTINCT ON (cloud_connection_id)
+                        id, completed_at
+                    FROM discovery_runs
+                    WHERE status = 'completed'
+                    ORDER BY cloud_connection_id, completed_at DESC
+                """)
+            rows = cursor.fetchall()
+            run_ids = [r['id'] for r in rows]
+            if rows:
+                timestamps = [r['completed_at'] for r in rows if r.get('completed_at')]
+                data_as_of = max(timestamps).isoformat() if timestamps else None
+        except Exception as e:
+            _db_logger.warning("Dashboard summary: run_ids query failed: %s", e)
+            self._rollback()
 
-        # Risk findings by severity (open only)
-        cursor.execute("""
-            SELECT
-                COUNT(*) FILTER (WHERE severity = 'critical') AS critical_findings,
-                COUNT(*) FILTER (WHERE severity = 'high') AS high_findings,
-                COUNT(*) FILTER (WHERE severity = 'medium') AS medium_findings,
-                COUNT(*) FILTER (WHERE severity = 'low') AS low_findings
-            FROM risk_findings
-            WHERE status = 'open'
-        """)
-        findings_row = cursor.fetchone()
+        _db_logger.info("DASHBOARD_SUMMARY org_id=%s run_ids=%s", org_id, run_ids)
 
-        # NHI-specific metrics
-        cursor.execute("""
-            SELECT COUNT(*) AS cnt FROM risk_findings
-            WHERE status = 'open' AND metadata->>'finding_category' = 'nhi_security'
-              AND metadata->>'reason' LIKE '%%no expiration%%'
-        """)
-        secrets_no_expiry = cursor.fetchone()['cnt']
+        # ── Step 2: Identity counts by category ──────────────────────────
+        identity_row = {'total_identities': 0, 'users': 0, 'service_principals': 0,
+                        'managed_identities': 0, 'guests': 0}
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) AS total_identities,
+                        COUNT(*) FILTER (WHERE identity_category = 'human_user') AS users,
+                        COUNT(*) FILTER (WHERE identity_category = 'service_principal') AS service_principals,
+                        COUNT(*) FILTER (WHERE identity_category IN ('managed_identity_system', 'managed_identity_user')) AS managed_identities,
+                        COUNT(*) FILTER (WHERE identity_category = 'guest') AS guests
+                    FROM identities
+                    WHERE discovery_run_id = ANY(%s)
+                      AND NOT COALESCE(is_microsoft_system, false)
+                """, (run_ids,))
+                identity_row = cursor.fetchone() or identity_row
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: identity query failed: %s", e)
+                self._rollback()
 
-        cursor.execute("""
-            SELECT COUNT(*) AS cnt FROM risk_findings
-            WHERE status = 'open' AND metadata->>'finding_category' = 'nhi_security'
-              AND metadata->>'reason' LIKE '%%older than 180%%'
-        """)
-        secrets_old = cursor.fetchone()['cnt']
+        # ── Step 3: Risk findings by severity (open only) ────────────────
+        findings_row = {'critical_findings': 0, 'high_findings': 0,
+                        'medium_findings': 0, 'low_findings': 0}
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE severity = 'critical' AND status = 'open') AS critical_findings,
+                        COUNT(*) FILTER (WHERE severity = 'high' AND status = 'open') AS high_findings,
+                        COUNT(*) FILTER (WHERE severity = 'medium' AND status = 'open') AS medium_findings,
+                        COUNT(*) FILTER (WHERE severity = 'low' AND status = 'open') AS low_findings
+                    FROM security_findings
+                    WHERE discovery_run_id = ANY(%s)
+                """, (run_ids,))
+                findings_row = cursor.fetchone() or findings_row
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: security_findings query failed: %s", e)
+                self._rollback()
 
-        cursor.execute("""
-            SELECT COUNT(*) AS cnt FROM risk_findings
-            WHERE status = 'open' AND metadata->>'finding_category' = 'nhi_security'
-              AND metadata->>'reason' LIKE '%%no sign-in%%'
-        """)
-        unused_spns = cursor.fetchone()['cnt']
+        # ── Step 4: NHI-specific metrics ─────────────────────────────────
+        secrets_no_expiry = 0
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) AS cnt
+                    FROM credentials c
+                    JOIN identities i ON i.id = c.identity_db_id
+                    WHERE i.discovery_run_id = ANY(%s)
+                      AND c.end_datetime IS NULL
+                      AND NOT COALESCE(i.is_microsoft_system, false)
+                """, (run_ids,))
+                secrets_no_expiry = (cursor.fetchone() or {}).get('cnt', 0)
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: secrets_no_expiry query failed: %s", e)
+                self._rollback()
 
-        # Escalation metrics
-        cursor.execute("""
-            SELECT COUNT(DISTINCT identity_id) AS cnt FROM risk_findings
-            WHERE status = 'open' AND metadata->>'finding_category' = 'privilege_escalation'
-        """)
-        attack_path_identities = cursor.fetchone()['cnt']
+        secrets_old = 0
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) AS cnt
+                    FROM credentials c
+                    JOIN identities i ON i.id = c.identity_db_id
+                    WHERE i.discovery_run_id = ANY(%s)
+                      AND c.start_datetime < NOW() - INTERVAL '180 days'
+                      AND NOT COALESCE(i.is_microsoft_system, false)
+                """, (run_ids,))
+                secrets_old = (cursor.fetchone() or {}).get('cnt', 0)
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: secrets_old query failed: %s", e)
+                self._rollback()
 
-        # Credential inventory stats
-        cursor.execute("""
-            SELECT
-                COUNT(*) AS total_credentials,
-                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at < NOW()) AS expired_credentials,
-                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at >= NOW() AND expires_at < NOW() + INTERVAL '30 days') AS expiring_soon_credentials
-            FROM identity_credentials
-        """)
-        cred_row = cursor.fetchone()
+        unused_spns = 0
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) AS cnt
+                    FROM identities
+                    WHERE identity_category = 'service_principal'
+                      AND activity_status IN ('stale', 'inactive', 'never_used')
+                      AND discovery_run_id = ANY(%s)
+                      AND NOT COALESCE(is_microsoft_system, false)
+                """, (run_ids,))
+                unused_spns = (cursor.fetchone() or {}).get('cnt', 0)
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: unused_spns query failed: %s", e)
+                self._rollback()
+
+        # ── Step 5: Escalation metrics — attack_paths ────────────────────
+        attack_path_identities = 0
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT source_entity_id) AS cnt
+                    FROM attack_paths
+                    WHERE discovery_run_id = ANY(%s)
+                """, (run_ids,))
+                attack_path_identities = (cursor.fetchone() or {}).get('cnt', 0)
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: attack_path_identities query failed: %s", e)
+                self._rollback()
+
+        # ── Step 6: Credential inventory stats ───────────────────────────
+        cred_row = {'total_credentials': 0, 'expired_credentials': 0,
+                    'expiring_soon_credentials': 0}
+        if run_ids:
+            try:
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) AS total_credentials,
+                        COUNT(*) FILTER (WHERE c.end_datetime IS NOT NULL AND c.end_datetime < NOW()) AS expired_credentials,
+                        COUNT(*) FILTER (WHERE c.end_datetime IS NOT NULL AND c.end_datetime >= NOW()
+                                          AND c.end_datetime < NOW() + INTERVAL '30 days') AS expiring_soon_credentials
+                    FROM credentials c
+                    JOIN identities i ON i.id = c.identity_db_id
+                    WHERE i.discovery_run_id = ANY(%s)
+                      AND NOT COALESCE(i.is_microsoft_system, false)
+                """, (run_ids,))
+                cred_row = cursor.fetchone() or cred_row
+            except Exception as e:
+                _db_logger.warning("Dashboard summary: credential query failed: %s", e)
+                self._rollback()
 
         cursor.close()
 
         # Risk score: critical*10 + high*5 + medium*2
-        critical = findings_row['critical_findings'] or 0
-        high = findings_row['high_findings'] or 0
-        medium = findings_row['medium_findings'] or 0
+        critical = findings_row.get('critical_findings') or 0
+        high = findings_row.get('high_findings') or 0
+        medium = findings_row.get('medium_findings') or 0
+        low = findings_row.get('low_findings') or 0
         risk_score = (critical * 10) + (high * 5) + (medium * 2)
 
+        _db_logger.info("DASHBOARD_SUMMARY source=security_findings critical=%d high=%d medium=%d low=%d",
+                        critical, high, medium, low)
+        _db_logger.info("DASHBOARD_SUMMARY source=identities total=%d users=%d spns=%d mi=%d guests=%d",
+                        identity_row.get('total_identities') or 0, identity_row.get('users') or 0,
+                        identity_row.get('service_principals') or 0, identity_row.get('managed_identities') or 0,
+                        identity_row.get('guests') or 0)
+        _db_logger.info("DASHBOARD_SUMMARY source=credentials total=%d expired=%d expiring=%d",
+                        cred_row.get('total_credentials') or 0, cred_row.get('expired_credentials') or 0,
+                        cred_row.get('expiring_soon_credentials') or 0)
+        _db_logger.info("DASHBOARD_SUMMARY source=attack_paths distinct_identities=%d", attack_path_identities)
+
         return {
-            'total_identities': identity_row['total_identities'] or 0,
-            'users': identity_row['users'] or 0,
-            'service_principals': identity_row['service_principals'] or 0,
-            'managed_identities': identity_row['managed_identities'] or 0,
-            'guests': identity_row['guests'] or 0,
+            'discovery_run_ids': run_ids,
+            'data_as_of': data_as_of,
+            'total_identities': identity_row.get('total_identities') or 0,
+            'users': identity_row.get('users') or 0,
+            'service_principals': identity_row.get('service_principals') or 0,
+            'managed_identities': identity_row.get('managed_identities') or 0,
+            'guests': identity_row.get('guests') or 0,
             'critical_findings': critical,
             'high_findings': high,
             'medium_findings': medium,
-            'low_findings': findings_row['low_findings'] or 0,
+            'low_findings': low,
             'risk_score': risk_score,
             'secrets_without_expiry': secrets_no_expiry,
             'secrets_older_than_180_days': secrets_old,
             'unused_service_principals': unused_spns,
             'identities_with_attack_paths': attack_path_identities,
-            'total_credentials': cred_row['total_credentials'] or 0,
-            'expired_credentials': cred_row['expired_credentials'] or 0,
-            'expiring_soon_credentials': cred_row['expiring_soon_credentials'] or 0,
+            'total_credentials': cred_row.get('total_credentials') or 0,
+            'expired_credentials': cred_row.get('expired_credentials') or 0,
+            'expiring_soon_credentials': cred_row.get('expiring_soon_credentials') or 0,
         }
 
     def save_identity_credential(self, org_id, connection_id, identity_id,
@@ -18869,6 +19058,8 @@ class Database:
             ('first_detected_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
             ('last_detected_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
             ('occurrence_count', 'INTEGER NOT NULL DEFAULT 1'),
+            ('identity_id', "TEXT NOT NULL DEFAULT ''"),
+            ('identity_name', 'TEXT'),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE security_findings ADD COLUMN IF NOT EXISTS {col} {defn}")
@@ -18876,11 +19067,34 @@ class Database:
             except Exception:
                 self._rollback()
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sf_fingerprint ON security_findings(finding_fingerprint)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sf_identity_id ON security_findings(identity_id)")
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sf_org_fingerprint
             ON security_findings(organization_id, finding_fingerprint)
             WHERE finding_fingerprint IS NOT NULL
         """)
+        # Backfill identity_id from entity_id for existing rows where entity_type = 'identity'
+        try:
+            cursor.execute("""
+                UPDATE security_findings
+                SET identity_id = entity_id
+                WHERE identity_id = '' AND entity_type = 'identity' AND entity_id != ''
+            """)
+            self._commit()
+        except Exception:
+            self._rollback()
+        # Backfill identity_name from metadata->>'display_name' for existing rows
+        try:
+            cursor.execute("""
+                UPDATE security_findings
+                SET identity_name = metadata->>'display_name'
+                WHERE identity_name IS NULL
+                  AND metadata->>'display_name' IS NOT NULL
+                  AND metadata->>'display_name' != ''
+            """)
+            self._commit()
+        except Exception:
+            self._rollback()
         self._commit()
         cursor.close()
         Database._security_findings_ensured = True
@@ -18900,6 +19114,9 @@ class Database:
         count = 0
         for f in findings:
             fp = f.get('finding_fingerprint')
+            meta = f.get('metadata') or {}
+            f_identity_id = f.get('entity_id') or '' if f.get('entity_type') == 'identity' else ''
+            f_identity_name = meta.get('display_name') or ''
             if fp:
                 # Fingerprint-based UPSERT: one row per fingerprint per org
                 cursor.execute("""
@@ -18907,9 +19124,10 @@ class Database:
                         (discovery_run_id, organization_id, entity_type, entity_id,
                          finding_type, severity, risk_score, title, description,
                          recommended_fix, metadata, finding_fingerprint,
+                         identity_id, identity_name,
                          first_detected_at, last_detected_at, occurrence_count)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            NOW(), NOW(), 1)
+                            %s, %s, NOW(), NOW(), 1)
                     ON CONFLICT (organization_id, finding_fingerprint)
                         WHERE finding_fingerprint IS NOT NULL
                     DO UPDATE SET
@@ -18920,6 +19138,8 @@ class Database:
                         description = EXCLUDED.description,
                         recommended_fix = EXCLUDED.recommended_fix,
                         metadata = EXCLUDED.metadata,
+                        identity_id = EXCLUDED.identity_id,
+                        identity_name = EXCLUDED.identity_name,
                         last_detected_at = NOW(),
                         occurrence_count = security_findings.occurrence_count + 1
                     WHERE security_findings.status = 'open'
@@ -18934,8 +19154,10 @@ class Database:
                     f['title'],
                     f['description'],
                     f.get('recommended_fix'),
-                    json.dumps(f.get('metadata') or {}),
+                    json.dumps(meta),
                     fp,
+                    f_identity_id,
+                    f_identity_name,
                 ))
             else:
                 # Legacy fallback for findings without fingerprint
@@ -18944,9 +19166,10 @@ class Database:
                         (discovery_run_id, organization_id, entity_type, entity_id,
                          finding_type, severity, risk_score, title, description,
                          recommended_fix, metadata,
+                         identity_id, identity_name,
                          first_detected_at, last_detected_at, occurrence_count)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            NOW(), NOW(), 1)
+                            %s, %s, NOW(), NOW(), 1)
                     ON CONFLICT (discovery_run_id, entity_id, finding_type)
                     DO UPDATE SET
                         severity = EXCLUDED.severity,
@@ -18955,6 +19178,8 @@ class Database:
                         description = EXCLUDED.description,
                         recommended_fix = EXCLUDED.recommended_fix,
                         metadata = EXCLUDED.metadata,
+                        identity_id = EXCLUDED.identity_id,
+                        identity_name = EXCLUDED.identity_name,
                         last_detected_at = NOW(),
                         occurrence_count = security_findings.occurrence_count + 1
                     WHERE security_findings.status = 'open'
@@ -18969,7 +19194,9 @@ class Database:
                     f['title'],
                     f['description'],
                     f.get('recommended_fix'),
-                    json.dumps(f.get('metadata') or {}),
+                    json.dumps(meta),
+                    f_identity_id,
+                    f_identity_name,
                 ))
             count += 1
         self._commit()
@@ -19076,30 +19303,40 @@ class Database:
         return result
 
     def get_security_findings_stats(self) -> dict:
-        """Get security findings summary: total, open, by_type, by_severity, by_entity_type."""
+        """Get security findings summary: total, open, by_type, by_severity, by_entity_type.
+        Scoped to the current organization_id.
+        """
         self._ensure_security_findings_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT COUNT(*) as total FROM security_findings")
+        org_id = self._organization_id
+        org_filter = ""
+        org_open_filter = "WHERE status = 'open'"
+        org_params: tuple = ()
+        if org_id is not None:
+            org_filter = "WHERE organization_id = %s"
+            org_open_filter = "WHERE status = 'open' AND organization_id = %s"
+            org_params = (org_id,)
+        cursor.execute(f"SELECT COUNT(*) as total FROM security_findings {org_filter}", org_params)
         total = cursor.fetchone()['total']
-        cursor.execute("SELECT COUNT(*) as open FROM security_findings WHERE status = 'open'")
+        cursor.execute(f"SELECT COUNT(*) as open FROM security_findings {org_open_filter}", org_params)
         open_count = cursor.fetchone()['open']
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT finding_type, COUNT(*) as count
-            FROM security_findings WHERE status = 'open'
+            FROM security_findings {org_open_filter}
             GROUP BY finding_type ORDER BY count DESC
-        """)
+        """, org_params)
         by_type = {r['finding_type']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT severity, COUNT(*) as count
-            FROM security_findings WHERE status = 'open'
+            FROM security_findings {org_open_filter}
             GROUP BY severity ORDER BY count DESC
-        """)
+        """, org_params)
         by_severity = {r['severity']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT entity_type, COUNT(*) as count
-            FROM security_findings WHERE status = 'open'
+            FROM security_findings {org_open_filter}
             GROUP BY entity_type ORDER BY count DESC
-        """)
+        """, org_params)
         by_entity_type = {r['entity_type']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return {
@@ -19109,6 +19346,416 @@ class Database:
             'by_severity': by_severity,
             'by_entity_type': by_entity_type,
         }
+
+    # ================================================================
+    # Identity Exposures (Persisted)
+    # ================================================================
+
+    _identity_exposures_ensured = False
+
+    def _ensure_identity_exposures_table(self):
+        if Database._identity_exposures_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_exposures (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL,
+                discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                identity_db_id INTEGER,
+                identity_id TEXT,
+                identity_name TEXT,
+                identity_category VARCHAR(50),
+                cloud VARCHAR(20) DEFAULT 'azure',
+                exposure_type VARCHAR(60) NOT NULL,
+                severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+                risk_score INTEGER NOT NULL DEFAULT 0,
+                description TEXT,
+                details JSONB DEFAULT '{}',
+                status VARCHAR(20) NOT NULL DEFAULT 'open',
+                status_changed_by VARCHAR(100),
+                status_changed_at TIMESTAMPTZ,
+                fingerprint TEXT,
+                first_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ie_org ON identity_exposures(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ie_run ON identity_exposures(discovery_run_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ie_type ON identity_exposures(exposure_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ie_severity ON identity_exposures(severity)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ie_status ON identity_exposures(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ie_identity ON identity_exposures(identity_db_id)")
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ie_org_fingerprint
+            ON identity_exposures(organization_id, fingerprint)
+            WHERE fingerprint IS NOT NULL
+        """)
+        self._commit()
+        cursor.close()
+        Database._identity_exposures_ensured = True
+
+    def save_identity_exposures(self, run_id: int, exposures: list) -> int:
+        """Batch UPSERT identity exposures with fingerprint-based dedup."""
+        self._ensure_identity_exposures_table()
+        if not exposures:
+            return 0
+        cursor = self.conn.cursor()
+        count = 0
+        for e in exposures:
+            fp = e.get('fingerprint')
+            if fp:
+                cursor.execute("""
+                    INSERT INTO identity_exposures
+                        (organization_id, discovery_run_id, identity_db_id, identity_id,
+                         identity_name, identity_category, cloud, exposure_type,
+                         severity, risk_score, description, details, fingerprint,
+                         first_detected_at, last_detected_at, occurrence_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            NOW(), NOW(), 1)
+                    ON CONFLICT (organization_id, fingerprint)
+                        WHERE fingerprint IS NOT NULL
+                    DO UPDATE SET
+                        discovery_run_id = EXCLUDED.discovery_run_id,
+                        identity_name = EXCLUDED.identity_name,
+                        severity = EXCLUDED.severity,
+                        risk_score = EXCLUDED.risk_score,
+                        description = EXCLUDED.description,
+                        details = EXCLUDED.details,
+                        last_detected_at = NOW(),
+                        occurrence_count = identity_exposures.occurrence_count + 1
+                    WHERE identity_exposures.status = 'open'
+                """, (
+                    self._organization_id,
+                    run_id,
+                    e.get('identity_db_id'),
+                    e.get('identity_id'),
+                    e.get('identity_name'),
+                    e.get('identity_category'),
+                    e.get('cloud', 'azure'),
+                    e['exposure_type'],
+                    e['severity'],
+                    e.get('risk_score', 0),
+                    e.get('description', ''),
+                    json.dumps(e.get('details') or {}),
+                    fp,
+                ))
+            else:
+                cursor.execute("""
+                    INSERT INTO identity_exposures
+                        (organization_id, discovery_run_id, identity_db_id, identity_id,
+                         identity_name, identity_category, cloud, exposure_type,
+                         severity, risk_score, description, details,
+                         first_detected_at, last_detected_at, occurrence_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            NOW(), NOW(), 1)
+                """, (
+                    self._organization_id,
+                    run_id,
+                    e.get('identity_db_id'),
+                    e.get('identity_id'),
+                    e.get('identity_name'),
+                    e.get('identity_category'),
+                    e.get('cloud', 'azure'),
+                    e['exposure_type'],
+                    e['severity'],
+                    e.get('risk_score', 0),
+                    e.get('description', ''),
+                    json.dumps(e.get('details') or {}),
+                ))
+            count += 1
+        self._commit()
+        cursor.close()
+        return count
+
+    def get_identity_exposures_persisted(self, limit=200, offset=0,
+                                         exposure_type=None, severity=None,
+                                         status=None) -> list:
+        """Get persisted identity exposures with optional filters."""
+        self._ensure_identity_exposures_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = []
+        params = []
+        if exposure_type:
+            conditions.append("exposure_type = %s")
+            params.append(exposure_type)
+        if severity:
+            conditions.append("severity = %s")
+            params.append(severity)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.extend([limit, offset])
+        cursor.execute(f"""
+            SELECT * FROM identity_exposures {where}
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 3
+                    ELSE 4
+                END,
+                risk_score DESC,
+                created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            for ts in ('created_at', 'first_detected_at', 'last_detected_at',
+                       'status_changed_at'):
+                if d.get(ts):
+                    d[ts] = d[ts].isoformat()
+            if d.get('details') and isinstance(d['details'], str):
+                d['details'] = json.loads(d['details'])
+            rows.append(d)
+        cursor.close()
+        return rows
+
+    def get_identity_exposures_stats(self) -> dict:
+        """Summary stats for identity exposures."""
+        self._ensure_identity_exposures_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute("SELECT COUNT(*) as total FROM identity_exposures")
+        total = cursor.fetchone()['total']
+
+        cursor.execute("SELECT COUNT(*) as open FROM identity_exposures WHERE status = 'open'")
+        open_count = cursor.fetchone()['open']
+
+        cursor.execute("""
+            SELECT exposure_type, COUNT(*) as count
+            FROM identity_exposures WHERE status = 'open'
+            GROUP BY exposure_type ORDER BY count DESC
+        """)
+        by_type = {r['exposure_type']: r['count'] for r in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT severity, COUNT(*) as count
+            FROM identity_exposures WHERE status = 'open'
+            GROUP BY severity ORDER BY count DESC
+        """)
+        by_severity = {r['severity']: r['count'] for r in cursor.fetchall()}
+
+        cursor.close()
+        return {
+            'total': total,
+            'open': open_count,
+            'by_type': by_type,
+            'by_severity': by_severity,
+        }
+
+    def update_identity_exposure_status(self, exposure_id: int, status: str,
+                                         changed_by: str = None):
+        """Update an identity exposure's status."""
+        self._ensure_identity_exposures_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE identity_exposures
+            SET status = %s, status_changed_by = %s, status_changed_at = NOW()
+            WHERE id = %s
+            RETURNING *
+        """, (status, changed_by, exposure_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        if not row:
+            return None
+        d = dict(row)
+        for ts in ('created_at', 'first_detected_at', 'last_detected_at',
+                   'status_changed_at'):
+            if d.get(ts):
+                d[ts] = d[ts].isoformat()
+        if d.get('details') and isinstance(d['details'], str):
+            d['details'] = json.loads(d['details'])
+        return d
+
+    def normalize_findings_to_security_findings(self, run_id: int) -> int:
+        """Normalize risk_findings, attack_paths, graph_attack_findings into security_findings.
+
+        Copies detected risks from all three parallel pipelines into the
+        unified security_findings table using fingerprint-based dedup.
+        JOINs against identities to resolve external identity_id and display_name.
+        Returns total number of findings normalized.
+        """
+        self._ensure_security_findings_table()
+        normalized = []
+
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Build a display_name lookup for fallback resolution by name
+        # Scoped to this run to avoid cross-tenant name resolution
+        identity_name_map = {}  # display_name → identity_id
+        try:
+            cursor.execute("""
+                SELECT DISTINCT ON (identity_id) identity_id, display_name
+                FROM identities WHERE discovery_run_id = %s
+                ORDER BY identity_id, id DESC
+            """, (run_id,))
+            for r in cursor.fetchall():
+                if r.get('display_name'):
+                    identity_name_map[r['display_name']] = r['identity_id']
+        except Exception:
+            self._rollback()
+
+        # 1) risk_findings → security_findings
+        #    risk_findings.identity_id is TEXT (external UUID) — correct mapping
+        try:
+            cursor.execute("""
+                SELECT rf.id, rf.severity, rf.identity_id, rf.resource_id,
+                       rf.metadata, rf.status, rf.detected_at,
+                       rr.rule_key, rr.rule_name, rr.rule_type,
+                       i.display_name AS resolved_name
+                FROM risk_findings rf
+                LEFT JOIN risk_rules rr ON rr.id = rf.rule_id
+                LEFT JOIN LATERAL (
+                    SELECT display_name FROM identities
+                    WHERE identity_id = rf.identity_id
+                    ORDER BY id DESC LIMIT 1
+                ) i ON TRUE
+                WHERE rf.status = 'open'
+                ORDER BY rf.detected_at DESC
+            """)
+            for r in cursor.fetchall():
+                fp = f"rf_{r['id']}"
+                meta = r.get('metadata') if isinstance(r.get('metadata'), dict) else {}
+                eid = r.get('identity_id') or r.get('resource_id') or ''
+                display = r.get('resolved_name') or meta.get('display_name') or ''
+                # Fallback: resolve identity by display_name if identity_id is missing
+                if not eid and display and display in identity_name_map:
+                    eid = identity_name_map[display]
+                normalized.append({
+                    'entity_type': 'identity' if r.get('identity_id') else 'resource',
+                    'entity_id': eid,
+                    'finding_type': r.get('rule_type') or 'risk_rule',
+                    'severity': r['severity'],
+                    'risk_score': {'critical': 100, 'high': 70, 'medium': 40, 'low': 10, 'info': 0}.get(r['severity'], 0),
+                    'title': r.get('rule_name') or r.get('rule_key') or 'Risk Finding',
+                    'description': meta.get('reason', ''),
+                    'recommended_fix': meta.get('recommended_fix', ''),
+                    'metadata': {
+                        'source': 'risk_findings',
+                        'source_id': str(r['id']),
+                        'rule_key': r.get('rule_key'),
+                        'rule_name': r.get('rule_name'),
+                        'rule_type': r.get('rule_type'),
+                        'finding_category': r.get('rule_type') or 'risk',
+                        'display_name': display,
+                        'reason': meta.get('reason', ''),
+                        'escalation_path': meta.get('escalation_path'),
+                    },
+                    'finding_fingerprint': fp,
+                })
+        except Exception as e:
+            logger.warning(f"normalize: risk_findings query failed: {e}")
+            self._rollback()
+
+        # 2) attack_paths → security_findings
+        #    attack_paths.source_entity_id is TEXT (external UUID) — correct mapping
+        #    JOIN identities for live display_name resolution
+        try:
+            cursor.execute("""
+                SELECT ap.id, ap.path_id, ap.source_entity_id, ap.source_entity_name,
+                       ap.source_entity_type, ap.path_type, ap.risk_score, ap.severity,
+                       ap.description, ap.narrative, ap.impact, ap.path_fingerprint,
+                       i.display_name AS resolved_name
+                FROM attack_paths ap
+                LEFT JOIN LATERAL (
+                    SELECT display_name FROM identities
+                    WHERE identity_id = ap.source_entity_id
+                    ORDER BY id DESC LIMIT 1
+                ) i ON TRUE
+                WHERE ap.discovery_run_id = %s OR ap.discovery_run_id IS NULL
+                ORDER BY ap.risk_score DESC
+            """, (run_id,))
+            for r in cursor.fetchall():
+                fp = f"ap_{r.get('path_fingerprint') or r['id']}"
+                display = r.get('resolved_name') or r.get('source_entity_name') or ''
+                eid = r.get('source_entity_id') or ''
+                # Fallback: resolve identity by display_name if source_entity_id is missing
+                if not eid and display and display in identity_name_map:
+                    eid = identity_name_map[display]
+                normalized.append({
+                    'entity_type': r.get('source_entity_type') or 'identity',
+                    'entity_id': eid,
+                    'finding_type': 'attack_path',
+                    'severity': r['severity'],
+                    'risk_score': r.get('risk_score', 0),
+                    'title': f"Attack Path: {r.get('path_type', 'unknown')}",
+                    'description': r.get('description') or '',
+                    'recommended_fix': r.get('impact') or '',
+                    'metadata': {
+                        'source': 'attack_paths',
+                        'source_id': str(r['id']),
+                        'rule_key': f"attack_path_{r.get('path_type', 'unknown')}",
+                        'rule_name': f"Attack Path: {r.get('path_type', 'unknown')}",
+                        'rule_type': 'attack_path',
+                        'finding_category': 'attack_path',
+                        'display_name': display,
+                        'reason': r.get('narrative') or r.get('description') or '',
+                    },
+                    'finding_fingerprint': fp,
+                })
+        except Exception as e:
+            logger.warning(f"normalize: attack_paths query failed: {e}")
+            self._rollback()
+
+        # 3) graph_attack_findings → security_findings
+        #    CRITICAL: graph_attack_findings.identity_id is INTEGER (DB row id),
+        #    NOT the external UUID. Must JOIN identities to resolve the real identity_id.
+        try:
+            cursor.execute("""
+                SELECT gaf.id, gaf.identity_id AS identity_db_id,
+                       gaf.finding_type, gaf.severity, gaf.risk_score,
+                       gaf.title, gaf.description, gaf.remediation,
+                       gaf.fingerprint, gaf.status,
+                       i.identity_id AS resolved_identity_id,
+                       i.display_name AS resolved_name
+                FROM graph_attack_findings gaf
+                LEFT JOIN identities i ON i.id = gaf.identity_id
+                WHERE gaf.status = 'open'
+                ORDER BY gaf.risk_score DESC
+            """)
+            for r in cursor.fetchall():
+                fp = f"gaf_{r.get('fingerprint') or r['id']}"
+                finding_type = r.get('finding_type') or ''
+                # Use the resolved external identity_id, not the numeric DB id
+                eid = r.get('resolved_identity_id') or ''
+                display = r.get('resolved_name') or ''
+                normalized.append({
+                    'entity_type': 'identity',
+                    'entity_id': eid,
+                    'finding_type': finding_type or 'graph_attack',
+                    'severity': r['severity'],
+                    'risk_score': r.get('risk_score', 0),
+                    'title': r.get('title') or 'Graph Attack Finding',
+                    'description': r.get('description') or '',
+                    'recommended_fix': r.get('remediation') or '',
+                    'metadata': {
+                        'source': 'graph_attack_findings',
+                        'source_id': str(r['id']),
+                        'rule_key': finding_type or 'graph_attack',
+                        'rule_name': r.get('title') or 'Graph Attack Finding',
+                        'rule_type': 'graph_attack',
+                        'finding_category': 'privilege_escalation' if 'escalat' in finding_type.lower() else 'graph_attack',
+                        'display_name': display,
+                        'reason': r.get('description') or '',
+                    },
+                    'finding_fingerprint': fp,
+                })
+        except Exception as e:
+            logger.warning(f"normalize: graph_attack_findings query failed: {e}")
+            self._rollback()
+
+        cursor.close()
+
+        if normalized:
+            return self.save_security_findings(run_id, normalized)
+        return 0
 
     # ================================================================
     # Phase 3: Attack Path Analysis
@@ -19143,6 +19790,7 @@ class Database:
                 occurrence_count INTEGER NOT NULL DEFAULT 1,
                 last_seen_run_id INTEGER,
                 affected_resource_count INTEGER NOT NULL DEFAULT 0,
+                path_length INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(discovery_run_id, source_entity_id, path_type, description)
             )
@@ -19161,6 +19809,9 @@ class Database:
             ('occurrence_count', 'INTEGER NOT NULL DEFAULT 1'),
             ('last_seen_run_id', 'INTEGER'),
             ('affected_resource_count', 'INTEGER NOT NULL DEFAULT 0'),
+            ('path_length', 'INTEGER NOT NULL DEFAULT 0'),
+            ('target_resource_id', 'TEXT'),
+            ('target_resource_type', 'VARCHAR(60)'),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE attack_paths ADD COLUMN IF NOT EXISTS {col} {defn}")
@@ -19174,6 +19825,33 @@ class Database:
             ON attack_paths(organization_id, path_fingerprint)
             WHERE path_fingerprint IS NOT NULL
         """)
+        # Cleanup migration: delete orphaned attack paths whose source identity
+        # no longer exists in any discovery run (stale seed/demo data).
+        try:
+            cursor.execute("""
+                DELETE FROM attack_paths
+                WHERE source_entity_id NOT IN (
+                    SELECT DISTINCT identity_id FROM identities
+                )
+            """)
+            deleted = cursor.rowcount
+            if deleted:
+                logger.info(f"Cleaned up {deleted} orphaned attack paths")
+            self._commit()
+        except Exception:
+            self._rollback()
+        # Backfill target_resource_id from path_nodes for existing rows
+        try:
+            cursor.execute("""
+                UPDATE attack_paths
+                SET target_resource_id = path_nodes->-1->>'id',
+                    target_resource_type = path_nodes->-1->>'type'
+                WHERE target_resource_id IS NULL
+                  AND jsonb_array_length(path_nodes) > 0
+            """)
+            self._commit()
+        except Exception:
+            self._rollback()
         self._commit()
         cursor.close()
         Database._attack_paths_ensured = True
@@ -19194,6 +19872,9 @@ class Database:
         for p in paths:
             fp = p.get('path_fingerprint')
             arc = p.get('affected_resource_count', 0)
+            pl = p.get('path_length', len(p.get('path_nodes', [])))
+            trid = p.get('target_resource_id')
+            trtype = p.get('target_resource_type')
             if fp:
                 # Fingerprint-based UPSERT: one row per fingerprint per org
                 cursor.execute("""
@@ -19203,9 +19884,10 @@ class Database:
                          risk_score, severity, path_nodes, description,
                          narrative, impact, path_fingerprint,
                          first_detected_at, last_detected_at, occurrence_count,
-                         last_seen_run_id, affected_resource_count)
+                         last_seen_run_id, affected_resource_count, path_length,
+                         target_resource_id, target_resource_type)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            NOW(), NOW(), 1, %s, %s)
+                            NOW(), NOW(), 1, %s, %s, %s, %s, %s)
                     ON CONFLICT (organization_id, path_fingerprint)
                         WHERE path_fingerprint IS NOT NULL
                     DO UPDATE SET
@@ -19220,7 +19902,10 @@ class Database:
                         last_detected_at = NOW(),
                         occurrence_count = attack_paths.occurrence_count + 1,
                         last_seen_run_id = EXCLUDED.last_seen_run_id,
-                        affected_resource_count = EXCLUDED.affected_resource_count
+                        affected_resource_count = EXCLUDED.affected_resource_count,
+                        path_length = EXCLUDED.path_length,
+                        target_resource_id = EXCLUDED.target_resource_id,
+                        target_resource_type = EXCLUDED.target_resource_type
                 """, (
                     run_id,
                     self._organization_id,
@@ -19237,6 +19922,9 @@ class Database:
                     fp,
                     run_id,
                     arc,
+                    pl,
+                    trid,
+                    trtype,
                 ))
             else:
                 # Legacy fallback for paths without fingerprint
@@ -19247,9 +19935,10 @@ class Database:
                          risk_score, severity, path_nodes, description,
                          narrative, impact,
                          first_detected_at, last_detected_at, occurrence_count,
-                         last_seen_run_id, affected_resource_count)
+                         last_seen_run_id, affected_resource_count, path_length,
+                         target_resource_id, target_resource_type)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            NOW(), NOW(), 1, %s, %s)
+                            NOW(), NOW(), 1, %s, %s, %s, %s, %s)
                     ON CONFLICT (discovery_run_id, source_entity_id, path_type, description)
                     DO UPDATE SET
                         risk_score = EXCLUDED.risk_score,
@@ -19260,7 +19949,10 @@ class Database:
                         last_detected_at = NOW(),
                         occurrence_count = attack_paths.occurrence_count + 1,
                         last_seen_run_id = EXCLUDED.last_seen_run_id,
-                        affected_resource_count = EXCLUDED.affected_resource_count
+                        affected_resource_count = EXCLUDED.affected_resource_count,
+                        path_length = EXCLUDED.path_length,
+                        target_resource_id = EXCLUDED.target_resource_id,
+                        target_resource_type = EXCLUDED.target_resource_type
                 """, (
                     run_id,
                     self._organization_id,
@@ -19276,6 +19968,9 @@ class Database:
                     p.get('impact'),
                     run_id,
                     arc,
+                    pl,
+                    trid,
+                    trtype,
                 ))
             count += 1
         self._commit()
@@ -19296,69 +19991,147 @@ class Database:
     def get_attack_paths(self, limit=50, offset=0, severity=None,
                          path_type=None, run_id=None,
                          source_entity_id=None) -> list:
-        """Get attack paths with optional filters, severity-priority ordering."""
+        """Get attack paths with optional filters, severity-priority ordering.
+
+        JOINs against identities to resolve source_entity_name at query time
+        instead of relying on stale stored display names.
+        Scoped to the current organization_id.
+        """
         self._ensure_attack_paths_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         conditions = []
         params = []
+        # Scope to current organization
+        org_id = self._organization_id
+        if org_id is not None:
+            conditions.append("ap.organization_id = %s")
+            params.append(org_id)
         if severity:
-            conditions.append("severity = %s")
+            conditions.append("ap.severity = %s")
             params.append(severity)
         if path_type:
-            conditions.append("path_type = %s")
+            conditions.append("ap.path_type = %s")
             params.append(path_type)
         if run_id:
-            conditions.append("discovery_run_id = %s")
+            conditions.append("ap.discovery_run_id = %s")
             params.append(run_id)
         if source_entity_id:
-            conditions.append("source_entity_id = %s")
+            conditions.append("ap.source_entity_id = %s")
             params.append(source_entity_id)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.extend([limit, offset])
         cursor.execute(f"""
-            SELECT * FROM attack_paths {where}
+            SELECT ap.*,
+                   latest_i.display_name AS resolved_source_name,
+                   latest_i.identity_category AS resolved_source_type
+            FROM attack_paths ap
+            LEFT JOIN LATERAL (
+                SELECT display_name, identity_category
+                FROM identities
+                WHERE identity_id = ap.source_entity_id
+                ORDER BY id DESC
+                LIMIT 1
+            ) latest_i ON TRUE
+            {where}
             ORDER BY
-                CASE severity
+                CASE ap.severity
                     WHEN 'critical' THEN 1
                     WHEN 'high' THEN 2
                     WHEN 'medium' THEN 3
                     WHEN 'low' THEN 4
                     ELSE 5
                 END,
-                risk_score DESC,
-                created_at DESC
+                ap.risk_score DESC,
+                ap.created_at DESC
             LIMIT %s OFFSET %s
         """, params)
-        rows = [self._format_attack_path_row(dict(r)) for r in cursor.fetchall()]
+        rows = []
+        for r in cursor.fetchall():
+            row = self._format_attack_path_row(dict(r))
+            # Override stored name with live JOIN result
+            if row.get('resolved_source_name'):
+                row['source_entity_name'] = row['resolved_source_name']
+            if row.get('resolved_source_type'):
+                row['source_entity_type'] = row['resolved_source_type']
+            row.pop('resolved_source_name', None)
+            row.pop('resolved_source_type', None)
+            rows.append(row)
         cursor.close()
         return rows
 
     def get_attack_path(self, path_id: int):
-        """Get a single attack path by ID."""
+        """Get a single attack path by ID with live-resolved source name.
+        Scoped to current organization_id.
+        """
         self._ensure_attack_paths_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM attack_paths WHERE id = %s", (path_id,))
+        org_id = self._organization_id
+        if org_id is not None:
+            cursor.execute("""
+                SELECT ap.*,
+                       latest_i.display_name AS resolved_source_name,
+                       latest_i.identity_category AS resolved_source_type
+                FROM attack_paths ap
+                LEFT JOIN LATERAL (
+                    SELECT display_name, identity_category
+                    FROM identities
+                    WHERE identity_id = ap.source_entity_id
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) latest_i ON TRUE
+                WHERE ap.id = %s AND ap.organization_id = %s
+            """, (path_id, org_id))
+        else:
+            cursor.execute("""
+                SELECT ap.*,
+                       latest_i.display_name AS resolved_source_name,
+                       latest_i.identity_category AS resolved_source_type
+                FROM attack_paths ap
+                LEFT JOIN LATERAL (
+                    SELECT display_name, identity_category
+                    FROM identities
+                    WHERE identity_id = ap.source_entity_id
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) latest_i ON TRUE
+                WHERE ap.id = %s
+            """, (path_id,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
             return None
-        return self._format_attack_path_row(dict(row))
+        result = self._format_attack_path_row(dict(row))
+        if result.get('resolved_source_name'):
+            result['source_entity_name'] = result['resolved_source_name']
+        if result.get('resolved_source_type'):
+            result['source_entity_type'] = result['resolved_source_type']
+        result.pop('resolved_source_name', None)
+        result.pop('resolved_source_type', None)
+        return result
 
     def get_attack_paths_stats(self) -> dict:
-        """Get attack path summary: total, by_severity, by_type."""
+        """Get attack path summary: total, by_severity, by_type.
+        Scoped to the current organization_id.
+        """
         self._ensure_attack_paths_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT COUNT(*) as total FROM attack_paths")
+        org_id = self._organization_id
+        org_filter = ""
+        org_params: tuple = ()
+        if org_id is not None:
+            org_filter = "WHERE organization_id = %s"
+            org_params = (org_id,)
+        cursor.execute(f"SELECT COUNT(*) as total FROM attack_paths {org_filter}", org_params)
         total = cursor.fetchone()['total']
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT severity, COUNT(*) as count
-            FROM attack_paths GROUP BY severity ORDER BY count DESC
-        """)
+            FROM attack_paths {org_filter} GROUP BY severity ORDER BY count DESC
+        """, org_params)
         by_severity = {r['severity']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT path_type, COUNT(*) as count
-            FROM attack_paths GROUP BY path_type ORDER BY count DESC
-        """)
+            FROM attack_paths {org_filter} GROUP BY path_type ORDER BY count DESC
+        """, org_params)
         by_type = {r['path_type']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return {
@@ -19668,36 +20441,46 @@ class Database:
         return self._format_fix_recommendation_row(dict(row))
 
     def get_fix_recommendations_stats(self) -> dict:
-        """Get fix recommendations summary: total, open, by_category, by_fix_type, by_effort, by_status."""
+        """Get fix recommendations summary: total, open, by_category, by_fix_type, by_effort, by_status.
+        Scoped to current organization_id.
+        """
         self._ensure_fix_recommendations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT COUNT(*) as total FROM fix_recommendations")
+        org_id = self._organization_id
+        org_filter = ""
+        org_open = "WHERE status = 'open'"
+        org_params: tuple = ()
+        if org_id is not None:
+            org_filter = "WHERE organization_id = %s"
+            org_open = "WHERE status = 'open' AND organization_id = %s"
+            org_params = (org_id,)
+        cursor.execute(f"SELECT COUNT(*) as total FROM fix_recommendations {org_filter}", org_params)
         total = cursor.fetchone()['total']
-        cursor.execute("SELECT COUNT(*) as open FROM fix_recommendations WHERE status = 'open'")
+        cursor.execute(f"SELECT COUNT(*) as open FROM fix_recommendations {org_open}", org_params)
         open_count = cursor.fetchone()['open']
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT fix_category, COUNT(*) as count
-            FROM fix_recommendations WHERE status = 'open'
+            FROM fix_recommendations {org_open}
             GROUP BY fix_category ORDER BY count DESC
-        """)
+        """, org_params)
         by_category = {r['fix_category']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT fix_type, COUNT(*) as count
-            FROM fix_recommendations WHERE status = 'open'
+            FROM fix_recommendations {org_open}
             GROUP BY fix_type ORDER BY count DESC
-        """)
+        """, org_params)
         by_fix_type = {r['fix_type']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT effort, COUNT(*) as count
-            FROM fix_recommendations WHERE status = 'open'
+            FROM fix_recommendations {org_open}
             GROUP BY effort ORDER BY count DESC
-        """)
+        """, org_params)
         by_effort = {r['effort']: r['count'] for r in cursor.fetchall()}
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT status, COUNT(*) as count
-            FROM fix_recommendations
+            FROM fix_recommendations {org_filter}
             GROUP BY status ORDER BY count DESC
-        """)
+        """, org_params)
         by_status = {r['status']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return {
@@ -21574,11 +22357,14 @@ class Database:
     # ── Phase 9: Posture scores + security events CRUD ───────────
 
     def compute_posture_score(self, org_id: int, run_id: int = None) -> dict:
-        """Compute a 0-100 security posture score from graph attack data.
+        """Compute security posture score from identity risk tables.
 
-        Factors: critical findings, high findings, attack paths,
-        privileged identities, stale credentials.
-        Score starts at 100 and deducts for each risk factor.
+        Aggregates from: identity_risk_scores, attack_paths, identities
+        (credentials/stale), role_assignments (privileged), security_findings,
+        graph_attack_findings.
+
+        Weighted scoring: Critical=+100, High=+70, Medium=+40, Low=+10
+        Posture Score = max(0, 1000 - total_weighted) / 10  → 0-100.
         """
         self._ensure_platform_ops_tables()
         cursor = self.conn.cursor()
@@ -21592,78 +22378,132 @@ class Database:
                 """, (org_id,))
                 row = cursor.fetchone()
                 if not row:
-                    return {'posture_score': 0, 'factors': {'no_data': True}}
+                    return {
+                        'posture_score': 0,
+                        'no_data': True,
+                        'message': 'No risks detected yet. Run discovery or risk analysis.',
+                        'critical_findings': 0, 'high_findings': 0,
+                        'attack_paths_count': 0, 'privileged_identities': 0,
+                        'stale_credentials': 0, 'high_risk_identities': 0,
+                    }
                 run_id = row[0]
 
-            # 1. Critical + high findings (graph_attack_findings)
-            cursor.execute("""
-                SELECT
-                    COUNT(*) FILTER (WHERE severity = 'critical') as critical,
-                    COUNT(*) FILTER (WHERE severity = 'high') as high
-                FROM graph_attack_findings
-                WHERE organization_id = %s AND discovery_run_id = %s AND status = 'open'
-            """, (org_id, run_id))
-            row = cursor.fetchone()
-            critical_findings = row[0] or 0
-            high_findings = row[1] or 0
+            import logging as _logging
+            _ps_log = _logging.getLogger('posture_score')
 
-            # Also check security_findings table
+            _ps_log.info("POSTURE_CALC_START org_id=%d run_id=%d", org_id, run_id)
+
+            # ── 1. Critical findings: security_findings, severity=critical, status=open ──
+            cursor.execute("""
+                SELECT COUNT(*) FROM security_findings
+                WHERE organization_id = %s AND severity = 'critical' AND status = 'open'
+            """, (org_id,))
+            critical_findings = cursor.fetchone()[0] or 0
+            _ps_log.info("  critical_findings=%d (security_findings WHERE severity=critical AND status=open)", critical_findings)
+
+            # ── 2. High findings: security_findings, severity=high ──
+            cursor.execute("""
+                SELECT COUNT(*) FROM security_findings
+                WHERE organization_id = %s AND severity = 'high'
+            """, (org_id,))
+            high_findings = cursor.fetchone()[0] or 0
+            _ps_log.info("  high_findings=%d (security_findings WHERE severity=high)", high_findings)
+
+            # Medium + low for weighted scoring
             cursor.execute("""
                 SELECT
-                    COUNT(*) FILTER (WHERE severity = 'critical') as critical,
-                    COUNT(*) FILTER (WHERE severity = 'high') as high
+                    COUNT(*) FILTER (WHERE severity = 'medium') as medium,
+                    COUNT(*) FILTER (WHERE severity = 'low') as low
                 FROM security_findings
                 WHERE organization_id = %s AND status = 'open'
             """, (org_id,))
             row = cursor.fetchone()
-            critical_findings += (row[0] or 0)
-            high_findings += (row[1] or 0)
+            medium_findings = row[0] or 0
+            low_findings = row[1] or 0
+            _ps_log.info("  medium_findings=%d low_findings=%d", medium_findings, low_findings)
 
-            # 2. Attack paths count
+            # ── 3. Attack paths from attack_paths table ──
+            self._ensure_attack_paths_table()
             cursor.execute("""
-                SELECT COUNT(*) FROM graph_attack_findings
-                WHERE organization_id = %s AND discovery_run_id = %s AND status = 'open'
-            """, (org_id, run_id))
+                SELECT COUNT(*) FROM attack_paths
+                WHERE organization_id = %s
+            """, (org_id,))
             attack_paths_count = cursor.fetchone()[0] or 0
+            _ps_log.info("  attack_paths_count=%d (attack_paths WHERE organization_id)", attack_paths_count)
 
-            # 3. Privileged identities (Owner, Contributor, Global Admin roles)
+            # ── 4. Privileged identities ──
             cursor.execute("""
                 SELECT COUNT(DISTINCT ra.identity_id)
                 FROM role_assignments ra
                 WHERE ra.discovery_run_id = %s
-                  AND ra.role_name IN ('Owner', 'Contributor',
+                  AND ra.role_name IN (
+                       'Owner', 'Contributor',
                        'Global Administrator', 'User Access Administrator',
-                       'Privileged Role Administrator')
+                       'Privileged Role Administrator', 'Application Administrator',
+                       'Cloud Application Administrator', 'Exchange Administrator',
+                       'Security Administrator', 'Conditional Access Administrator')
             """, (run_id,))
             privileged_identities = cursor.fetchone()[0] or 0
+            _ps_log.info("  privileged_identities=%d (role_assignments CRITICAL_ROLES)", privileged_identities)
 
-            # 4. Stale credentials
+            # ── 5. Stale credentials (inactive/stale identities) ──
             cursor.execute("""
                 SELECT COUNT(DISTINCT i.id)
                 FROM identities i
                 WHERE i.discovery_run_id = %s
-                  AND i.activity_status IN ('stale', 'inactive')
-                  AND i.risk_level IN ('critical', 'high')
+                  AND i.activity_status IN ('stale', 'inactive', 'never_used')
             """, (run_id,))
             stale_credentials = cursor.fetchone()[0] or 0
+            _ps_log.info("  stale_credentials=%d (identities stale/inactive/never_used)", stale_credentials)
 
-            # 5. High-risk identities (risk_score >= 60)
+            # ── 6. Credential findings (expired / expiring / high credential risk) ──
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                WHERE i.discovery_run_id = %s
+                  AND (i.credential_risk IN ('critical', 'high')
+                       OR i.next_expiry < NOW())
+            """, (run_id,))
+            credential_findings = cursor.fetchone()[0] or 0
+            _ps_log.info("  credential_findings=%d (credential_risk critical/high OR expired)", credential_findings)
+
+            # ── 7. High-risk identities from identity_risk_scores ──
             cursor.execute("""
                 SELECT COUNT(*) FROM identity_risk_scores
                 WHERE organization_id = %s AND discovery_run_id = %s
-                  AND risk_score >= 60
+                  AND risk_level IN ('high', 'critical')
             """, (org_id, run_id))
             high_risk_identities = cursor.fetchone()[0] or 0
 
-            # Compute score: start at 100, deduct for risk factors
-            score = 100
-            score -= min(30, critical_findings * 10)   # Up to -30
-            score -= min(20, high_findings * 3)          # Up to -20
-            score -= min(15, attack_paths_count * 2)     # Up to -15
-            score -= min(15, privileged_identities * 2)  # Up to -15
-            score -= min(10, stale_credentials * 3)      # Up to -10
-            score -= min(10, high_risk_identities * 2)   # Up to -10
-            score = max(0, score)
+            # Fallback: if identity_risk_scores empty, use identities table
+            hri_source = 'identity_risk_scores'
+            if high_risk_identities == 0:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM identities
+                    WHERE discovery_run_id = %s
+                      AND risk_level IN ('critical', 'high')
+                """, (run_id,))
+                high_risk_identities = cursor.fetchone()[0] or 0
+                hri_source = 'identities (fallback)'
+            _ps_log.info("  high_risk_identities=%d (source: %s)", high_risk_identities, hri_source)
+
+            # ── Weighted scoring ──
+            # Critical=+100, High=+70, Medium=+40, Low=+10
+            total_weighted = (
+                critical_findings * 100 +
+                high_findings * 70 +
+                medium_findings * 40 +
+                low_findings * 10 +
+                privileged_identities * 30 +
+                stale_credentials * 20 +
+                credential_findings * 25
+            )
+
+            # Posture Score = max(0, 1000 - total_weighted) / 10 → 0-100
+            score = max(0, min(100, (max(0, 1000 - total_weighted)) / 10))
+            score = round(score)
+            _ps_log.info("POSTURE_CALC_DONE org_id=%d run_id=%d weighted_total=%d score=%d",
+                         org_id, run_id, total_weighted, score)
 
             factors = {
                 'critical_findings': critical_findings,
@@ -21672,6 +22512,8 @@ class Database:
                 'privileged_identities': privileged_identities,
                 'stale_credentials': stale_credentials,
                 'high_risk_identities': high_risk_identities,
+                'credential_findings': credential_findings,
+                'weighted_risk_total': total_weighted,
             }
 
             # Persist

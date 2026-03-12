@@ -91,8 +91,18 @@ def generate_security_findings(connection_id, db):
     run_row = cursor.fetchone()
     org_id = run_row['organization_id'] if run_row else None
 
+    # Build a set of valid identity_ids for reference validation
+    valid_identity_ids = set()
+    try:
+        cursor.execute("SELECT identity_id FROM identities WHERE discovery_run_id = %s", (run_id,))
+        valid_identity_ids = {r['identity_id'] for r in cursor.fetchall()}
+        logger.info(f"Loaded {len(valid_identity_ids)} valid identity_ids for run #{run_id}")
+    except Exception as e:
+        logger.warning(f"Failed to load identity_ids for validation: {e}")
+
     findings = []
     seen = set()  # Deduplicate by (identity_id, finding_type)
+    skipped_invalid = 0
 
     for ra in assignments:
         identity_id = ra['identity_id']
@@ -148,6 +158,14 @@ def generate_security_findings(connection_id, db):
                     ),
                 })
 
+    # Validate: drop findings that reference invalid identity_ids
+    if valid_identity_ids:
+        pre_count = len(findings)
+        findings = [f for f in findings if f['identity_id'] in valid_identity_ids]
+        skipped_invalid = pre_count - len(findings)
+        if skipped_invalid > 0:
+            logger.warning(f"Dropped {skipped_invalid} finding(s) referencing invalid identity_ids")
+
     # Delete existing findings from this engine for this connection
     cursor.execute("""
         DELETE FROM security_findings
@@ -183,6 +201,6 @@ def generate_security_findings(connection_id, db):
     cursor.close()
 
     logger.info(f"Security findings engine: {inserted} finding(s) for connection {connection_id} "
-                f"(run #{run_id})")
+                f"(run #{run_id}, {skipped_invalid} invalid refs dropped)")
 
-    return {'findings_count': inserted}
+    return {'findings_count': inserted, 'skipped_invalid_refs': skipped_invalid}

@@ -174,21 +174,25 @@ def scim_list_users():
     from psycopg2.extras import RealDictCursor
     cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-    where = "organization_id = %s"
+    from psycopg2 import sql as psql
+
+    where_parts = [psql.SQL("organization_id = %s")]
     params = [org_id]
 
     parsed = parse_scim_filter(filter_str)
     if parsed:
         col, val = parsed
-        where += f" AND {col} = %s"
+        where_parts.append(psql.SQL("{} = %s").format(psql.Identifier(col)))
         params.append(val)
 
-    cursor.execute(f"SELECT COUNT(*) FROM users WHERE {where}", params)
+    where_composed = psql.SQL(" AND ").join(where_parts)
+
+    cursor.execute(psql.SQL("SELECT COUNT(*) FROM users WHERE {}").format(where_composed), params)
     total = cursor.fetchone()['count']
 
     offset = max(0, start_index - 1)
     cursor.execute(
-        f"SELECT * FROM users WHERE {where} ORDER BY id LIMIT %s OFFSET %s",
+        psql.SQL("SELECT * FROM users WHERE {} ORDER BY id LIMIT %s OFFSET %s").format(where_composed),
         params + [count, offset],
     )
     rows = [dict(r) for r in cursor.fetchall()]

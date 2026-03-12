@@ -1,7 +1,8 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SEVERITY_COLORS, DRIFT_EVENT_LABELS } from '../constants/metrics';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -17,6 +18,10 @@ interface DriftReport {
   total_changes: number;
   created_at: string;
   run_completed_at: string | null;
+  max_severity?: string | null;
+  privilege_escalation_count?: number;
+  attack_path_created_count?: number;
+  identity_resurrection_count?: number;
 }
 
 interface IdentityData {
@@ -44,6 +49,10 @@ interface FullDriftReport {
   previous_run_id: number;
   total_changes: number;
   events?: DriftEvent[];
+  max_severity?: string;
+  privilege_escalation_count?: number;
+  attack_path_created_count?: number;
+  identity_resurrection_count?: number;
   changes: {
     new_identities: IdentityData[];
     removed_identities: IdentityData[];
@@ -52,6 +61,13 @@ interface FullDriftReport {
       identity: IdentityData;
       added_roles: string[];
       removed_roles: string[];
+      role_deltas?: Array<{
+        change_type: 'added' | 'removed' | 'modified';
+        previous_role?: string;
+        new_role?: string;
+        scope_type: string;
+        scope: string;
+      }>;
       change_reason?: string;
     }>;
     risk_changes: Array<{
@@ -265,7 +281,7 @@ export default function DriftHistory() {
           <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Drift History</h2>
           <div className="flex items-center gap-2 mt-1">
             <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-              Timeline of identity changes across snapshots
+              All identity and permission changes
             </p>
             {reports.length > 0 && (
               <>
@@ -467,6 +483,7 @@ export default function DriftHistory() {
                   <th className="px-3 py-2.5 font-medium uppercase text-gray-600">Snapshot Comparison</th>
                   <th className="px-3 py-2.5 font-medium uppercase text-gray-600">Date</th>
                   <th className="px-3 py-2.5 font-medium uppercase text-gray-600 text-center">Total</th>
+                  <th className="px-3 py-2.5 font-medium uppercase text-gray-600 text-center">Severity</th>
                   <th className="px-3 py-2.5 font-medium uppercase text-green-700 text-center">New</th>
                   <th className="px-3 py-2.5 font-medium uppercase text-red-700 text-center">Removed</th>
                   <th className="px-3 py-2.5 font-medium uppercase text-orange-700 text-center">Perms</th>
@@ -517,6 +534,15 @@ export default function DriftHistory() {
                           <span className="font-bold text-gray-900">{report.total_changes}</span>
                         )}
                       </td>
+                      <td className="px-3 py-2 text-center">
+                        {report.max_severity ? (
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${SEVERITY_COLORS[report.max_severity] || 'bg-gray-100 text-gray-500'}`}>
+                            {report.max_severity}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">—</span>
+                        )}
+                      </td>
                       <CountCell count={report.new_identities_count} color="text-green-600" />
                       <CountCell count={report.removed_identities_count} color="text-red-600" />
                       <CountCell count={report.permission_changes_count} color="text-orange-600" />
@@ -527,7 +553,7 @@ export default function DriftHistory() {
                     {/* Expanded detail row */}
                     {expandedSnapshotId === report.current_run_id && (
                       <tr>
-                        <td colSpan={9} className="bg-gray-50 px-3 py-2">
+                        <td colSpan={10} className="bg-gray-50 px-3 py-2">
                           {detailLoading && (
                             <div className="flex items-center gap-2 text-sm text-gray-500">
                               <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
@@ -647,6 +673,22 @@ function DetailView({
 
   const nonEmpty = sections.filter(s => s.count > 0);
 
+  // Build event lookup by identity_id for section-level badges
+  // (must be called unconditionally — React hooks rules)
+  const eventsByIdentity = useMemo(() => {
+    const map: Record<string, DriftEvent[]> = {};
+    for (const e of (detail.events || [])) {
+      const id = e.identity_id;
+      if (id) {
+        if (!map[id]) map[id] = [];
+        map[id].push(e);
+      }
+    }
+    return map;
+  }, [detail.events]);
+
+  const hasIntel = !!(detail.max_severity || (detail.events?.length ?? 0) > 0);
+
   if (nonEmpty.length === 0) {
     return (
       <div className="flex items-center gap-2 p-3 bg-green-50 rounded-lg">
@@ -660,6 +702,43 @@ function DetailView({
 
   return (
     <div className="space-y-3">
+      {/* Security Intelligence summary panel */}
+      {hasIntel && (
+        <div className="rounded-lg border p-4 mb-3 bg-gray-50">
+          <div className="text-xs font-semibold uppercase tracking-wide mb-2 text-gray-500">
+            Security Intelligence
+          </div>
+          <div className="flex items-center gap-4 flex-wrap">
+            <IntelCard
+              label="Max Severity"
+              value={detail.max_severity || 'low'}
+              badgeClass={SEVERITY_COLORS[detail.max_severity || 'low'] || 'bg-gray-100 text-gray-500'}
+              isBadge
+            />
+            <IntelCard
+              label="Privilege Escalations"
+              value={detail.privilege_escalation_count || 0}
+              badgeClass={detail.privilege_escalation_count ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-400'}
+            />
+            <IntelCard
+              label="New Attack Paths"
+              value={detail.attack_path_created_count || 0}
+              badgeClass={detail.attack_path_created_count ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-400'}
+            />
+            <IntelCard
+              label="Resurrections"
+              value={detail.identity_resurrection_count || 0}
+              badgeClass={detail.identity_resurrection_count ? 'bg-orange-50 text-orange-700' : 'bg-gray-50 text-gray-400'}
+            />
+            <IntelCard
+              label="Events"
+              value={detail.events?.length || 0}
+              badgeClass="bg-blue-50 text-blue-700"
+            />
+          </div>
+        </div>
+      )}
+
       {nonEmpty.map(section => (
         <div key={section.key} className="border rounded-lg bg-white overflow-hidden">
           {/* Section header */}
@@ -686,7 +765,7 @@ function DetailView({
           {openSections[section.key] && (
             <div className="px-4 py-3">
               {section.key === 'new_identities' && (
-                <NewIdentitiesSection items={detail.changes.new_identities} />
+                <NewIdentitiesSection items={detail.changes.new_identities} eventsByIdentity={eventsByIdentity} />
               )}
               {section.key === 'removed_identities' && (
                 <RemovedIdentitiesSection items={detail.changes.removed_identities} />
@@ -695,7 +774,7 @@ function DetailView({
                 <MicrosoftRemovedSection items={detail.changes.microsoft_removed_identities || []} />
               )}
               {section.key === 'permission_changes' && (
-                <PermissionChangesSection items={detail.changes.permission_changes} />
+                <PermissionChangesSection items={detail.changes.permission_changes} eventsByIdentity={eventsByIdentity} />
               )}
               {section.key === 'risk_changes' && (
                 <RiskChangesSection items={detail.changes.risk_changes} />
@@ -728,23 +807,62 @@ function IdentityLink({ identity }: { identity: IdentityData }) {
   );
 }
 
-function NewIdentitiesSection({ items }: { items: IdentityData[] }) {
+const NEW_REASON_TOOLTIPS: Record<string, string> = {
+  'Created in Entra ID': 'This identity was newly created in Entra ID between the two scans.',
+  'First discovered': 'This identity existed before AuditGraph monitoring began and is appearing for the first time.',
+  'Moved into monitored scope': 'This identity already existed but was assigned RBAC roles on a monitored subscription.',
+};
+
+const DRIFT_REASON_TOOLTIPS: Record<string, string> = {
+  'Disabled': 'This identity was explicitly disabled in Entra ID between snapshots.',
+  'Service principal removed': 'The service principal was deleted but its app registration still exists. This may indicate a deployment reset or manual cleanup.',
+  'Removed from monitored scope': 'This identity still exists in Entra ID but no longer has RBAC role assignments on any monitored subscription.',
+  'Not observed in latest scan': 'This identity was not found in the latest discovery scan. It may have been deleted from Entra ID, or an API error prevented its discovery.',
+};
+
+function reasonTooltip(reason: string | undefined, tooltips: Record<string, string>): string | undefined {
+  if (!reason) return undefined;
+  return Object.entries(tooltips).find(([k]) => reason.startsWith(k))?.[1];
+}
+
+function NewIdentitiesSection({ items, eventsByIdentity }: { items: IdentityData[]; eventsByIdentity?: Record<string, DriftEvent[]> }) {
   return (
     <div className="space-y-2">
-      {items.map((item, i) => (
-        <div key={item.identity_id || i}>
-          <div className="flex items-center gap-3 text-sm">
-            <span className="text-green-600 font-mono font-bold">+</span>
-            <IdentityLink identity={item} />
-            <span className="text-gray-400">·</span>
-            <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
-            {riskBadge(item.risk_level)}
+      {items.map((item, i) => {
+        const matchingEvent = eventsByIdentity?.[item.identity_id]?.find(
+          e => e.event_type === 'identity_added' || e.event_type === 'identity_resurrection'
+        );
+        const br = matchingEvent?.details?.blast_radius as Record<string, unknown> | undefined;
+        return (
+          <div key={item.identity_id || i}>
+            <div className="flex items-center gap-2 text-sm flex-wrap">
+              <span className="text-green-600 font-mono font-bold">+</span>
+              <IdentityLink identity={item} />
+              <span className="text-gray-400">·</span>
+              <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
+              {riskBadge(item.risk_level)}
+              {matchingEvent?.severity && (
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${SEVERITY_COLORS[matchingEvent.severity] || ''}`}>
+                  {matchingEvent.severity}
+                </span>
+              )}
+              {matchingEvent?.event_type && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">
+                  {DRIFT_EVENT_LABELS[matchingEvent.event_type] || matchingEvent.event_type}
+                </span>
+              )}
+              {br && Number(br.resource_count) > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">
+                  {String(br.resource_count)} resources at risk
+                </span>
+              )}
+            </div>
+            {!!item.change_reason && (
+              <div className="ml-5 mt-0.5 text-xs text-gray-500 italic cursor-help" title={reasonTooltip(item.change_reason, NEW_REASON_TOOLTIPS)}>{item.change_reason}</div>
+            )}
           </div>
-          {!!item.change_reason && (
-            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -761,7 +879,7 @@ function RemovedIdentitiesSection({ items }: { items: IdentityData[] }) {
             <span className="text-xs text-gray-500">{categoryLabel(item.identity_category)}</span>
           </div>
           {!!item.change_reason && (
-            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
+            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic cursor-help" title={reasonTooltip(item.change_reason, DRIFT_REASON_TOOLTIPS)}>{item.change_reason}</div>
           )}
         </div>
       ))}
@@ -793,30 +911,138 @@ function MicrosoftRemovedSection({ items }: { items: IdentityData[] }) {
   );
 }
 
-function PermissionChangesSection({ items }: { items: FullDriftReport['changes']['permission_changes'] }) {
+type RoleDelta = {
+  change_type: 'added' | 'removed' | 'modified';
+  previous_role?: string;
+  new_role?: string;
+  scope_type: string;
+  scope: string;
+};
+
+/** Parse legacy role signature "RoleName:scope_type:/scope/path" into a RoleDelta */
+function parseRoleSignature(sig: string, changeType: 'added' | 'removed'): RoleDelta {
+  const parts = sig.split(':');
+  const roleName = parts[0] || '';
+  const scopeType = parts[1] || '';
+  const scope = parts.slice(2).join(':');
+  return {
+    change_type: changeType,
+    ...(changeType === 'added' ? { new_role: roleName } : { previous_role: roleName }),
+    scope_type: scopeType,
+    scope,
+  };
+}
+
+/** Build deltas from legacy added/removed strings when role_deltas is absent */
+function buildFallbackDeltas(addedRoles: string[], removedRoles: string[]): RoleDelta[] {
+  const added = addedRoles.map(s => parseRoleSignature(s, 'added'));
+  const removed = removedRoles.map(s => parseRoleSignature(s, 'removed'));
+
+  // Try to match added+removed on same scope as "modified"
+  const deltas: RoleDelta[] = [];
+  const usedRemoved = new Set<number>();
+  for (const a of added) {
+    const matchIdx = removed.findIndex(
+      (r, idx) => !usedRemoved.has(idx) && r.scope_type === a.scope_type && r.scope === a.scope
+    );
+    if (matchIdx >= 0) {
+      usedRemoved.add(matchIdx);
+      deltas.push({
+        change_type: 'modified',
+        previous_role: removed[matchIdx].previous_role,
+        new_role: a.new_role,
+        scope_type: a.scope_type,
+        scope: a.scope,
+      });
+    } else {
+      deltas.push(a);
+    }
+  }
+  removed.forEach((r, idx) => { if (!usedRemoved.has(idx)) deltas.push(r); });
+  return deltas;
+}
+
+const CHANGE_TYPE_STYLES: Record<string, { label: string; badge: string }> = {
+  added:    { label: 'Role Added',    badge: 'bg-green-100 text-green-700 border-green-200' },
+  removed:  { label: 'Role Removed',  badge: 'bg-red-100 text-red-700 border-red-200' },
+  modified: { label: 'Role Modified', badge: 'bg-orange-100 text-orange-700 border-orange-200' },
+};
+
+function PermissionChangesSection({ items, eventsByIdentity }: { items: FullDriftReport['changes']['permission_changes']; eventsByIdentity?: Record<string, DriftEvent[]> }) {
   return (
-    <div className="space-y-3">
-      {items.map((item, i) => (
-        <div key={item.identity?.identity_id || i} className="text-sm">
-          <div className="flex items-center gap-2 mb-1">
-            <IdentityLink identity={item.identity} />
+    <div className="space-y-4">
+      {items.map((item, i) => {
+        const deltas: RoleDelta[] = item.role_deltas && item.role_deltas.length > 0
+          ? item.role_deltas
+          : buildFallbackDeltas(item.added_roles, item.removed_roles);
+
+        const matchingEvent = eventsByIdentity?.[item.identity?.identity_id]?.find(
+          e => ['role_assigned', 'role_removed', 'privilege_escalated', 'privilege_deescalated'].includes(e.event_type)
+        );
+        const br = matchingEvent?.details?.blast_radius as Record<string, unknown> | undefined;
+
+        return (
+          <div key={item.identity?.identity_id || i} className="space-y-2">
+            {deltas.map((delta, j) => {
+              const style = CHANGE_TYPE_STYLES[delta.change_type] || CHANGE_TYPE_STYLES.added;
+              return (
+                <div
+                  key={j}
+                  className="rounded-lg border p-3 text-sm"
+                  style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)' }}
+                >
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <IdentityLink identity={item.identity} />
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase border ${style.badge}`}>
+                      {style.label}
+                    </span>
+                    {matchingEvent?.severity && (
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${SEVERITY_COLORS[matchingEvent.severity] || ''}`}>
+                        {matchingEvent.severity}
+                      </span>
+                    )}
+                    {br && Number(br.resource_count) > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">
+                        {String(br.resource_count)} resources at risk
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 ml-1 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    {delta.change_type === 'modified' && (
+                      <>
+                        <span className="font-medium" style={{ color: 'var(--text-primary)' }}>Previous Role</span>
+                        <span className="text-red-600 font-medium">{delta.previous_role}</span>
+                        <span className="font-medium" style={{ color: 'var(--text-primary)' }}>New Role</span>
+                        <span className="text-green-600 font-medium">{delta.new_role}</span>
+                      </>
+                    )}
+                    {delta.change_type === 'added' && (
+                      <>
+                        <span className="font-medium" style={{ color: 'var(--text-primary)' }}>New Role</span>
+                        <span className="text-green-600 font-medium">{delta.new_role}</span>
+                      </>
+                    )}
+                    {delta.change_type === 'removed' && (
+                      <>
+                        <span className="font-medium" style={{ color: 'var(--text-primary)' }}>Previous Role</span>
+                        <span className="text-red-600 font-medium">{delta.previous_role}</span>
+                      </>
+                    )}
+                    <span className="font-medium" style={{ color: 'var(--text-primary)' }}>Scope</span>
+                    <span className="font-mono text-[11px] truncate" title={delta.scope}>{delta.scope || 'N/A'}</span>
+                    {delta.scope_type && (
+                      <>
+                        <span className="font-medium" style={{ color: 'var(--text-primary)' }}>Scope Type</span>
+                        <span>{delta.scope_type.replace(/_/g, ' ')}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          <div className="ml-5 space-y-0.5">
-            {item.added_roles.map((role, j) => (
-              <div key={`add-${j}`} className="flex items-center gap-2 text-xs">
-                <span className="text-green-600 font-mono">+</span>
-                <span className="text-green-700">{role}</span>
-              </div>
-            ))}
-            {item.removed_roles.map((role, j) => (
-              <div key={`rem-${j}`} className="flex items-center gap-2 text-xs">
-                <span className="text-red-600 font-mono">-</span>
-                <span className="text-red-700">{role}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -903,6 +1129,30 @@ function ClassificationChangesSection({ items }: { items: NonNullable<FullDriftR
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Intel Card ──────────────────────────────────────────────
+
+function IntelCard({ label, value, badgeClass, isBadge }: {
+  label: string;
+  value: string | number;
+  badgeClass: string;
+  isBadge?: boolean;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1 min-w-[80px]">
+      <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">{label}</span>
+      {isBadge ? (
+        <span className={`px-2 py-0.5 rounded text-xs font-bold uppercase ${badgeClass}`}>
+          {value}
+        </span>
+      ) : (
+        <span className={`text-lg font-bold px-2 py-0.5 rounded ${badgeClass}`}>
+          {value}
+        </span>
+      )}
     </div>
   );
 }

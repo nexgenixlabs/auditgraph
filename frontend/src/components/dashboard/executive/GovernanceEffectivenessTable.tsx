@@ -73,10 +73,10 @@ export function GovernanceEffectivenessTable({ gei, maturity }: GovernanceEffect
               </div>
               {!c.configured ? (
                 <span
-                  onClick={() => navigate('/settings')}
+                  onClick={() => navigate(c.name === 'Access Reviews' ? '/access-reviews' : '/settings')}
                   style={{ fontSize: 9, color: COLORS.accent, fontFamily: FONT.mono, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dashed' as const }}
                 >
-                  Not configured
+                  {c.name === 'Access Reviews' ? 'No access reviews configured' : 'Not configured'}
                 </span>
               ) : (
                 <DN navigateTo="/service-accounts">

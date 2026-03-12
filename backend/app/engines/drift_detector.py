@@ -85,7 +85,7 @@ class DriftDetector:
 
         # Detect changes (legacy + events)
         new_identities = self._detect_new_identities(current_identities, previous_identities, prev_run_ts, first_run_ts, events)
-        removed_identities = self._detect_removed_identities(current_identities, previous_identities, events)
+        removed_identities = self._detect_removed_identities(current_identities, previous_identities, current_run_id, events)
         permission_changes = self._detect_permission_changes(current_identities, previous_identities, events)
         risk_changes = self._detect_risk_changes(current_identities, previous_identities, events)
         credential_changes = self._detect_credential_changes(current_identities, previous_identities, events)
@@ -170,14 +170,16 @@ class DriftDetector:
                 i.id as db_id,
                 COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
                 COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
-                i.owner_display_name
+                i.owner_display_name,
+                i.app_id
             FROM identities i
             LEFT JOIN role_assignments r ON r.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
             GROUP BY i.id, i.identity_id, i.display_name, i.identity_type, i.identity_category,
                      i.risk_level, i.credential_status, i.activity_status, i.credential_expiration,
                      i.created_datetime, i.enabled, i.risk_score, i.risk_reasons,
-                     i.is_microsoft_system, i.ca_mfa_enforced, i.owner_display_name
+                     i.is_microsoft_system, i.ca_mfa_enforced, i.owner_display_name,
+                     i.app_id
         """, (run_id,))
 
         identities = {}
@@ -200,6 +202,7 @@ class DriftDetector:
                 'is_microsoft_system': row[14],
                 'ca_mfa_enforced': row[15],
                 'owner_display_name': row[16],
+                'app_id': row[17],
             }
 
         cursor.close()
@@ -260,8 +263,26 @@ class DriftDetector:
         return "First discovered in this scan"
 
     def _detect_removed_identities(self, current: Dict, previous: Dict,
+                                    current_run_id: int = None,
                                     events: list = None) -> List[Dict]:
         """Detect removed identities with change reasons."""
+        # Bulk-fetch app_ids that still have app registrations in current run
+        spn_app_ids = [data.get('app_id') for iid, data in previous.items()
+                       if iid not in current and data.get('app_id')
+                       and data.get('identity_category') == 'service_principal']
+        active_app_ids: set = set()
+        if spn_app_ids and current_run_id:
+            try:
+                cursor = self.db.conn.cursor()
+                cursor.execute("""
+                    SELECT app_id FROM app_registrations
+                    WHERE discovery_run_id = %s AND app_id = ANY(%s)
+                """, (current_run_id, spn_app_ids))
+                active_app_ids = {r[0] for r in cursor.fetchall()}
+                cursor.close()
+            except Exception as e:
+                logger.warning(f"Could not query app_registrations for drift classification: {e}")
+
         removed = []
         for identity_id, data in previous.items():
             if identity_id not in current:
@@ -269,10 +290,13 @@ class DriftDetector:
                 enabled = data.get('enabled')
                 if enabled is False:
                     entry['change_reason'] = "Disabled — account status changed to disabled"
+                elif (data.get('identity_category') == 'service_principal'
+                      and data.get('app_id') and data['app_id'] in active_app_ids):
+                    entry['change_reason'] = "Service principal removed — app registration still exists in Entra ID"
                 elif data.get('roles'):
                     entry['change_reason'] = "Removed from monitored scope — no longer has RBAC on any monitored subscription"
                 else:
-                    entry['change_reason'] = "Deleted from Entra ID"
+                    entry['change_reason'] = "Not observed in latest scan — may have been deleted or fallen out of discovery scope"
                 removed.append(entry)
 
                 if events is not None:
@@ -355,10 +379,15 @@ class DriftDetector:
                     parts.append(f"+ Added: {sig.replace(':', ' on ', 1)}")
                 for sig in sorted(removed_roles):
                     parts.append(f"- Removed: {sig.replace(':', ' on ', 1)}")
+
+                # Build structured role_deltas
+                role_deltas = self._compute_role_deltas(added_roles, removed_roles)
+
                 changes.append({
                     'identity': current[identity_id],
                     'added_roles': list(added_roles),
                     'removed_roles': list(removed_roles),
+                    'role_deltas': role_deltas,
                     'change_reason': '; '.join(parts),
                 })
 
@@ -732,6 +761,110 @@ class DriftDetector:
         return classification_changes
 
     # ── Helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_role_signature(sig: str) -> Dict:
+        """Parse a role signature string into components."""
+        parts = sig.split(':', 2)
+        return {
+            'role_name': parts[0] if len(parts) > 0 else '',
+            'scope_type': parts[1] if len(parts) > 1 else '',
+            'scope': parts[2] if len(parts) > 2 else '',
+        }
+
+    def _compute_role_deltas(self, added_roles: set, removed_roles: set) -> List[Dict]:
+        """
+        Compute structured role deltas from added/removed role signature sets.
+
+        Matches added+removed roles sharing the same scope as 'modified',
+        unmatched added as 'added', unmatched removed as 'removed'.
+        """
+        deltas = []
+
+        # Index by (scope_type, scope) for matching
+        added_by_scope: Dict[tuple, list] = {}
+        for sig in added_roles:
+            parsed = self._parse_role_signature(sig)
+            key = (parsed['scope_type'], parsed['scope'])
+            added_by_scope.setdefault(key, []).append(parsed)
+
+        removed_by_scope: Dict[tuple, list] = {}
+        for sig in removed_roles:
+            parsed = self._parse_role_signature(sig)
+            key = (parsed['scope_type'], parsed['scope'])
+            removed_by_scope.setdefault(key, []).append(parsed)
+
+        matched_added_scopes = set()
+        matched_removed_scopes = set()
+
+        # Find modified: same scope, different role
+        for scope_key in set(added_by_scope.keys()) & set(removed_by_scope.keys()):
+            a_list = list(added_by_scope[scope_key])
+            r_list = list(removed_by_scope[scope_key])
+            # Pair them up one-to-one
+            pairs = min(len(a_list), len(r_list))
+            for idx in range(pairs):
+                new_role = a_list[idx]['role_name']
+                prev_role = r_list[idx]['role_name']
+                # Privilege drift if the new role is critical and the previous was not
+                is_escalation = new_role in CRITICAL_ROLES and prev_role not in CRITICAL_ROLES
+                deltas.append({
+                    'change_type': 'modified',
+                    'previous_role': prev_role,
+                    'new_role': new_role,
+                    'scope_type': scope_key[0],
+                    'scope': scope_key[1],
+                    'drift_classification': 'privilege_drift' if is_escalation else 'normal_drift',
+                })
+            # Leftover added
+            for idx in range(pairs, len(a_list)):
+                new_role = a_list[idx]['role_name']
+                deltas.append({
+                    'change_type': 'added',
+                    'new_role': new_role,
+                    'scope_type': scope_key[0],
+                    'scope': scope_key[1],
+                    'drift_classification': 'privilege_drift' if new_role in CRITICAL_ROLES else 'normal_drift',
+                })
+            # Leftover removed
+            for idx in range(pairs, len(r_list)):
+                deltas.append({
+                    'change_type': 'removed',
+                    'previous_role': r_list[idx]['role_name'],
+                    'scope_type': scope_key[0],
+                    'scope': scope_key[1],
+                    'drift_classification': 'normal_drift',
+                })
+            matched_added_scopes.add(scope_key)
+            matched_removed_scopes.add(scope_key)
+
+        # Pure additions (scopes not in removed)
+        for scope_key, a_list in added_by_scope.items():
+            if scope_key in matched_added_scopes:
+                continue
+            for parsed in a_list:
+                deltas.append({
+                    'change_type': 'added',
+                    'new_role': parsed['role_name'],
+                    'scope_type': parsed['scope_type'],
+                    'scope': parsed['scope'],
+                    'drift_classification': 'privilege_drift' if parsed['role_name'] in CRITICAL_ROLES else 'normal_drift',
+                })
+
+        # Pure removals (scopes not in added)
+        for scope_key, r_list in removed_by_scope.items():
+            if scope_key in matched_removed_scopes:
+                continue
+            for parsed in r_list:
+                deltas.append({
+                    'change_type': 'removed',
+                    'previous_role': parsed['role_name'],
+                    'scope_type': parsed['scope_type'],
+                    'scope': parsed['scope'],
+                    'drift_classification': 'normal_drift',
+                })
+
+        return deltas
 
     def _role_signature(self, role: Dict) -> str:
         """Create a unique signature for a role assignment"""

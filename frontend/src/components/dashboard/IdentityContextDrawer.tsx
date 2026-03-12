@@ -600,6 +600,162 @@ function IdentityTimeline({ identityId }: { identityId: string }) {
   );
 }
 
+// ─── AI Explanation Panel ────────────────────────────────────────
+
+interface AIExplanation {
+  summary: string;
+  drivers: string[];
+  implications: string;
+  recommended_action: string;
+}
+
+function AIExplanationPanel({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
+  const [explanation, setExplanation] = useState<AIExplanation | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState('');
+
+  const fetchExplanation = useCallback(() => {
+    if (explanation || loading) return;
+    setLoading(true);
+    setError('');
+    fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/ai-risk-explanation`))
+      .then(r => r.ok ? r.json() : Promise.reject('Failed to load'))
+      .then(data => { setExplanation(data); setLoading(false); })
+      .catch(e => { setError(String(e)); setLoading(false); });
+  }, [identityId, withConnection, explanation, loading]);
+
+  const handleToggle = () => {
+    if (!expanded && !explanation && !loading) fetchExplanation();
+    setExpanded(prev => !prev);
+  };
+
+  const AI_ACCENT = '#A855F7';
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <button
+        onClick={handleToggle}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+          background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, lineHeight: 1 }}>&#x2728;</span>
+        <span style={{
+          fontSize: 11, fontWeight: 700, color: AI_ACCENT, fontFamily: FONT.ui,
+          textTransform: 'uppercase', letterSpacing: '0.05em',
+        }}>
+          AI Explanation
+        </span>
+        <span style={{
+          marginLeft: 'auto', fontSize: 10, color: COLORS.textDim,
+          fontFamily: FONT.ui, transition: 'transform 0.2s',
+          transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
+        }}>
+          &#x25BC;
+        </span>
+      </button>
+
+      {expanded && (
+        <div style={{
+          marginTop: 8, padding: '12px 14px', borderRadius: 8,
+          background: `${AI_ACCENT}08`,
+          border: `1px solid ${AI_ACCENT}25`,
+        }}>
+          {loading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0' }}>
+              <div style={{
+                width: 14, height: 14, borderRadius: '50%',
+                border: `2px solid ${COLORS.border}`, borderTopColor: AI_ACCENT,
+                animation: 'spin 1s linear infinite',
+              }} />
+              <span style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+                Generating AI analysis...
+              </span>
+            </div>
+          ) : error ? (
+            <div style={{ fontSize: 11, color: COLORS.danger, fontFamily: FONT.ui }}>
+              {error}
+            </div>
+          ) : explanation ? (
+            <>
+              {/* Summary */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{
+                  fontSize: 9, fontWeight: 700, color: AI_ACCENT, fontFamily: FONT.ui,
+                  textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4,
+                }}>
+                  Summary
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui, lineHeight: 1.5 }}>
+                  {explanation.summary}
+                </div>
+              </div>
+
+              {/* Key Drivers */}
+              {explanation.drivers.length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{
+                    fontSize: 9, fontWeight: 700, color: AI_ACCENT, fontFamily: FONT.ui,
+                    textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4,
+                  }}>
+                    Key Risk Drivers
+                  </div>
+                  {explanation.drivers.map((d, i) => (
+                    <div key={i} style={{
+                      fontSize: 11, color: COLORS.text, fontFamily: FONT.ui,
+                      padding: '3px 0', paddingLeft: 12, position: 'relative', lineHeight: 1.4,
+                    }}>
+                      <span style={{
+                        position: 'absolute', left: 0, top: 5,
+                        width: 4, height: 4, borderRadius: '50%',
+                        background: AI_ACCENT,
+                      }} />
+                      {d}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Implications */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{
+                  fontSize: 9, fontWeight: 700, color: AI_ACCENT, fontFamily: FONT.ui,
+                  textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4,
+                }}>
+                  Security Implications
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui, lineHeight: 1.5 }}>
+                  {explanation.implications}
+                </div>
+              </div>
+
+              {/* Recommended Action */}
+              <div style={{
+                padding: '8px 10px', borderRadius: 6,
+                background: `${AI_ACCENT}12`,
+                border: `1px solid ${AI_ACCENT}20`,
+              }}>
+                <div style={{
+                  fontSize: 9, fontWeight: 700, color: AI_ACCENT, fontFamily: FONT.ui,
+                  textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3,
+                }}>
+                  Recommended Action
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui, fontWeight: 600, lineHeight: 1.4 }}>
+                  {explanation.recommended_action}
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Risk Score Breakdown ────────────────────────────────────────
 
 function computeDetailRisk(d: IdentityDetail): { label: string; points: number; max: number }[] {
@@ -1341,6 +1497,9 @@ function DetailView({ detail, loading, onBack, onClose, onOpenFull, onNavigate }
             ))}
           </div>
         )}
+
+        {/* AI Explanation Panel */}
+        <AIExplanationPanel identityId={detail.identity_id} />
 
         {/* Privilege Comparison */}
         <PrivilegeComparison detail={detail} />

@@ -1,7 +1,7 @@
 """
 Enhanced Drift Event Taxonomy
 
-Defines 13 typed drift events with severity classification,
+Defines 20 typed drift events with severity classification,
 a builder function, and backward-compatible legacy format converter.
 """
 from datetime import datetime
@@ -28,6 +28,8 @@ class DriftEventType:
     CLASSIFICATION_ADDED = 'classification_added'
     CLASSIFICATION_REMOVED = 'classification_removed'
     CLASSIFICATION_CHANGED = 'classification_changed'
+    ATTACK_PATH_CREATED = 'attack_path_created'
+    IDENTITY_RESURRECTION = 'identity_resurrection'
 
 
 EVENT_SEVERITY: Dict[str, str] = {
@@ -49,6 +51,8 @@ EVENT_SEVERITY: Dict[str, str] = {
     DriftEventType.CLASSIFICATION_ADDED: 'medium',
     DriftEventType.CLASSIFICATION_REMOVED: 'high',
     DriftEventType.CLASSIFICATION_CHANGED: 'medium',
+    DriftEventType.ATTACK_PATH_CREATED: 'critical',
+    DriftEventType.IDENTITY_RESURRECTION: 'high',
 }
 
 # Maps typed events to legacy 5-bucket keys for backward compatibility
@@ -71,6 +75,8 @@ EVENT_TO_LEGACY_BUCKET: Dict[str, str] = {
     DriftEventType.CLASSIFICATION_ADDED: 'classification_changes',
     DriftEventType.CLASSIFICATION_REMOVED: 'classification_changes',
     DriftEventType.CLASSIFICATION_CHANGED: 'classification_changes',
+    DriftEventType.ATTACK_PATH_CREATED: 'risk_changes',
+    DriftEventType.IDENTITY_RESURRECTION: 'new_identities',
 }
 
 

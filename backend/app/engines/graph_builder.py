@@ -38,6 +38,14 @@ class GraphBuilder:
         role_assignments = self._get_role_assignments(run_id)
         subscriptions = self._extract_subscriptions(role_assignments)
 
+        logger.info(f"Graph build input for connection {connection_id}: "
+                    f"{len(identities)} identities, {len(role_assignments)} role_assignments, "
+                    f"{len(subscriptions)} subscriptions")
+
+        if not identities:
+            logger.warning(f"Graph build: 0 identities for run #{run_id}, skipping")
+            return {'node_count': 0, 'edge_count': 0}
+
         # Build nodes
         node_map = {}  # external_id -> node UUID
 
@@ -155,9 +163,15 @@ class GraphBuilder:
                     )
                     edge_count += 1
 
+        # Count nodes by type for validation
+        identity_nodes = sum(1 for k in node_map if not k.startswith('role:') and not k.startswith('/'))
+        role_nodes = sum(1 for k in node_map if k.startswith('role:'))
+        scope_nodes = sum(1 for k in node_map if k.startswith('/'))
         node_count = len(node_map)
+
         logger.info(f"IAM graph built for connection {connection_id}: "
-                     f"{node_count} nodes, {edge_count} edges")
+                     f"{node_count} nodes ({identity_nodes} identity, {role_nodes} role, "
+                     f"{len(subscriptions)} subscription, {scope_nodes} scope), {edge_count} edges")
 
         return {'node_count': node_count, 'edge_count': edge_count}
 

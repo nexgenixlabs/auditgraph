@@ -796,7 +796,15 @@ def seed_security_findings(db, org_id, run_id, identity_map):
                 title, desc, fix, run_id, json.dumps({}), fp,
             ))
 
+    # Validate: all findings must reference valid identity_ids from identity_map
+    valid_ids = set(identity_map.keys())
+    inserted = 0
+    skipped = 0
     for f in findings:
+        entity_id = f[2]  # entity_id is at index 2 in the tuple
+        if entity_id not in valid_ids:
+            skipped += 1
+            continue
         cursor.execute("""
             INSERT INTO security_findings
                 (organization_id, entity_type, entity_id, finding_type, severity,
@@ -807,10 +815,14 @@ def seed_security_findings(db, org_id, run_id, identity_map):
                     'open', NOW(), NOW())
             -- data is cleaned before seeding, no conflict expected
         """, f)
+        inserted += 1
 
     db.conn.commit()
     cursor.close()
-    logger.info("Seeded %d security findings.", len(findings))
+    if skipped:
+        logger.warning("Seeded %d security findings (%d skipped — invalid entity_id).", inserted, skipped)
+    else:
+        logger.info("Seeded %d security findings.", inserted)
 
 
 def seed_attack_paths(db, org_id, run_id, identity_map):
@@ -949,7 +961,15 @@ def seed_attack_paths(db, org_id, run_id, identity_map):
         },
     ]
 
+    # Validate: all attack path source identities must exist in identity_map
+    valid_sources = set(identity_map.keys())
+    skipped = 0
+    inserted = 0
     for p in paths:
+        if p["source"] not in valid_sources:
+            logger.warning("  Skipping attack path: source '%s' not in identity_map", p["source"])
+            skipped += 1
+            continue
         fp = hashlib.sha256(f"{p['source']}:{p['type']}:{p['desc'][:50]}".encode()).hexdigest()
         cursor.execute("""
             INSERT INTO attack_paths
@@ -967,10 +987,14 @@ def seed_attack_paths(db, org_id, run_id, identity_map):
             json.dumps(p["nodes"]), p["desc"], p["narrative"], p["impact"],
             fp, p["resources"], run_id,
         ))
+        inserted += 1
 
     db.conn.commit()
     cursor.close()
-    logger.info("Seeded %d attack paths.", len(paths))
+    if skipped:
+        logger.warning("Seeded %d attack paths (%d skipped — invalid source identity).", inserted, skipped)
+    else:
+        logger.info("Seeded %d attack paths.", inserted)
 
 
 def seed_blast_radius(db, org_id, run_id, identity_map):

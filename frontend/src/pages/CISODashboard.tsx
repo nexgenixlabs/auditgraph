@@ -783,7 +783,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
           d.governance.metrics = [
             { label: 'Ownership Coverage', value: `${Math.round(ownerPct)}%`, target: '80%', status: govStatus(ownerPct), icon: '\uD83D\uDC64' },
             { label: 'PIM Enforcement', value: pimPct > 0 ? `${Math.round(pimPct)}%` : '\u2014', target: '100%', status: govStatus(pimPct), icon: '\uD83D\uDD10' },
-            { label: 'Access Reviews', value: gov.access_reviews_done > 0 ? `${gov.access_reviews_done} done` : '\u2014', target: 'quarterly', status: gov.access_reviews_done > 0 ? 'good' : 'not-configured', icon: '\uD83D\uDCCB' },
+            { label: 'Access Reviews', value: gov.access_reviews_done > 0 ? `${gov.access_reviews_done} done` : 'No access reviews configured', target: 'quarterly', status: gov.access_reviews_done > 0 ? 'good' : 'not-configured', icon: '\uD83D\uDCCB' },
             { label: 'Privileged Monitoring', value: reviewPct > 0 ? `${Math.round(reviewPct)}%` : '\u2014', target: 'active', status: govStatus(reviewPct), icon: '\uD83D\uDCE1' },
           ];
 
@@ -1035,7 +1035,18 @@ function useCISOData(): { data: TenantData; loading: boolean } {
           const reviewPct = gov.privileged_under_review_pct || 0;
           const accessReviewsDone = gov.access_reviews_done || 0;
           const accessReviewScore = accessReviewsDone > 0 ? Math.min(accessReviewsDone * 20, 100) : 0;
-          const geiScore = Math.round((ownerPct + pimPct + accessReviewScore + reviewPct) / 4 * 100) / 100;
+
+          const geiComponents = [
+            { name: 'Ownership Coverage', score: ownerPct, configured: ownerPct > 0 || og.total_spns > 0 },
+            { name: 'PIM Adoption', score: pimPct, configured: pimPct > 0 },
+            { name: 'Access Reviews', score: accessReviewScore, configured: accessReviewsDone > 0 },
+            { name: 'Monitoring (P2)', score: reviewPct, configured: reviewPct > 0 },
+          ];
+          // Only average configured components to avoid dilution from unconfigured ones
+          const configuredGei = geiComponents.filter(c => c.configured);
+          const geiScore = configuredGei.length > 0
+            ? Math.round(configuredGei.reduce((s, c) => s + c.score, 0) / configuredGei.length * 100) / 100
+            : 0;
 
           const agirs_score = Math.round((0.40 * hiriScore + 0.40 * nhiriScore + 0.20 * geiScore) * 100) / 100;
           const agirsTier = agirs_score >= 90 ? 'A' : agirs_score >= 75 ? 'B' : agirs_score >= 60 ? 'C' : agirs_score >= 40 ? 'D' : 'F';
@@ -1052,12 +1063,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             },
             gei: {
               score: geiScore,
-              components: [
-                { name: 'Ownership Coverage', score: ownerPct, configured: ownerPct > 0 || og.total_spns > 0 },
-                { name: 'PIM Adoption', score: pimPct, configured: pimPct > 0 },
-                { name: 'Access Reviews', score: accessReviewScore, configured: accessReviewsDone > 0 },
-                { name: 'Monitoring (P2)', score: reviewPct, configured: reviewPct > 0 },
-              ],
+              components: geiComponents,
             },
             dangerous_identities: agirstData?.dangerous_identities || [],
             previous: agirstData?.previous || null,

@@ -21,6 +21,7 @@ from app.security import rate_limit, add_security_headers
 
 from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access, require_portal_role, require_feature
 from app.api.handlers import (
+    _safe_handler,
     get_stats,
     get_identities,
     get_identity_details,
@@ -57,6 +58,7 @@ from app.api.handlers import (
     get_remediation_status,
     post_remediation_action,
     get_remediation_dashboard_summary,
+    get_generated_remediations_handler,
     post_bulk_remediation,
     get_role_usage_stats,
     get_role_mining,
@@ -371,7 +373,10 @@ from app.api.handlers import (
     process_copilot_query_handler,
     get_copilot_history_handler,
     get_cloud_risk_summary_handler,
+    get_security_overview_handler,
     get_security_findings_handler,
+    acknowledge_security_finding_handler,
+    resolve_security_finding_handler,
     get_security_dashboard_handler,
     get_graph_visualization_handler,
     get_graph_debug_handler,
@@ -398,6 +403,7 @@ from app.api.handlers import (
     get_attack_paths_list,
     get_attack_path_detail,
     get_identity_persisted_attack_paths,
+    trigger_attack_path_analysis,
     get_fix_recommendations_list,
     get_fix_recommendations_stats_handler,
     get_fix_recommendation_detail,
@@ -475,6 +481,8 @@ from app.api.handlers import (
     get_plan_limits_handler,
     # Phase 16: Continuous Identity Risk Monitoring
     get_identity_exposures_handler,
+    acknowledge_identity_exposure_handler,
+    resolve_identity_exposure_handler,
     get_privilege_drift_handler,
     simulate_attack_path_handler,
     # Phase 17: Enterprise Identity Integration
@@ -2059,6 +2067,10 @@ def create_app():
     def remediation_summary():
         return get_remediation_dashboard_summary()
 
+    @app.get("/api/remediation/generated")
+    def remediation_generated():
+        return get_generated_remediations_handler()
+
     # -----------------------
     # Bulk Operations (Phase 25)
     # -----------------------
@@ -3008,7 +3020,7 @@ def create_app():
     # -----------------------
     @app.get("/api/security/recommendations")
     def security_recommendations():
-        return get_policy_recommendations_handler()
+        return _safe_handler(get_policy_recommendations_handler, {'recommendations': [], 'stats': None})
 
     @app.post("/api/security/recommendations/<rec_id>/accept")
     def security_recommendation_accept(rec_id):
@@ -3046,21 +3058,21 @@ def create_app():
 
     @app.get("/api/security/attack-simulations")
     def attack_simulations_list():
-        return get_attack_simulations_list_handler()
+        return _safe_handler(get_attack_simulations_list_handler, {'simulations': []})
 
     # -----------------------
     # Phase 14: Security Benchmarking
     # -----------------------
     @app.get("/api/security/benchmark")
     def security_benchmark():
-        return get_security_benchmark_handler()
+        return _safe_handler(get_security_benchmark_handler, {'error': 'unavailable'})
 
     # -----------------------
     # Phase 15: AI Security Advisor
     # -----------------------
     @app.get("/api/security/advisor")
     def security_advisor():
-        return get_security_advisor_handler()
+        return _safe_handler(get_security_advisor_handler, {'recommendations': []})
 
     # -----------------------
     # Phase 17: Multi-Cloud Identity Support
@@ -3070,7 +3082,7 @@ def create_app():
     # -----------------------
     @app.get("/api/security/risk-forecast")
     def risk_forecast():
-        return get_risk_forecast_handler()
+        return _safe_handler(get_risk_forecast_handler, {'forecast': None})
 
     # -----------------------
     # Phase 19: Least-Privilege Policy Generation
@@ -3081,7 +3093,7 @@ def create_app():
 
     @app.get("/api/security/generated-policies")
     def generated_policies_list():
-        return get_generated_policies_list_handler()
+        return _safe_handler(get_generated_policies_list_handler, {'policies': [], 'stats': None})
 
     @app.post("/api/security/generated-policies/<policy_id>/apply")
     def apply_generated_policy(policy_id):
@@ -3096,7 +3108,7 @@ def create_app():
     # -----------------------
     @app.get("/api/security/threat-events")
     def threat_events():
-        return get_threat_events_handler()
+        return _safe_handler(get_threat_events_handler, {'events': [], 'stats': None})
 
     @app.post("/api/security/threat-events/<event_id>/acknowledge")
     def acknowledge_threat_event(event_id):
@@ -3115,14 +3127,14 @@ def create_app():
 
     @app.get("/api/security/activity-events")
     def activity_events():
-        return get_activity_events_handler()
+        return _safe_handler(get_activity_events_handler, {'events': []})
 
     # -----------------------
     # Phase 23: Identity Attack Replay & Forensics
     # -----------------------
     @app.get("/api/security/incidents")
     def attack_incidents():
-        return get_attack_incidents_handler()
+        return _safe_handler(get_attack_incidents_handler, {'incidents': [], 'stats': None})
 
     @app.get("/api/security/attack-replay/<incident_id>")
     def attack_replay(incident_id):
@@ -3137,7 +3149,7 @@ def create_app():
     # -----------------------
     @app.get("/api/security/response-actions")
     def response_actions():
-        return get_response_actions_handler()
+        return _safe_handler(get_response_actions_handler, {'actions': [], 'stats': None})
 
     @app.post("/api/security/response-actions/<action_id>/approve")
     def approve_response_action(action_id):
@@ -3152,21 +3164,21 @@ def create_app():
     # -----------------------
     @app.get("/api/security/attack-predictions")
     def attack_predictions():
-        return get_attack_predictions_handler()
+        return _safe_handler(get_attack_predictions_handler, {'predictions': [], 'stats': None})
 
     # -----------------------
     # Phase 27: Identity Graph Intelligence
     # -----------------------
     @app.get("/api/security/graph-insights")
     def graph_insights():
-        return get_graph_insights_handler()
+        return _safe_handler(get_graph_insights_handler, {'insights': [], 'stats': None})
 
     # -----------------------
     # Phase 28: Identity Governance
     # -----------------------
     @app.get("/api/security/governance-actions")
     def governance_actions():
-        return get_governance_actions_handler()
+        return _safe_handler(get_governance_actions_handler, {'actions': [], 'stats': None})
 
     # -----------------------
     # Phase 29: Identity Risk Simulation
@@ -3177,14 +3189,14 @@ def create_app():
 
     @app.get("/api/security/risk-simulations")
     def risk_simulations_list():
-        return get_risk_simulations_handler()
+        return _safe_handler(get_risk_simulations_handler, {'simulations': [], 'stats': None})
 
     # -----------------------
     # Phase 30: Enterprise Security Integrations
     # -----------------------
     @app.get("/api/security/integrations")
     def security_integrations():
-        return get_integration_events_handler()
+        return _safe_handler(get_integration_events_handler, {'events': [], 'stats': None})
 
     @app.post("/api/security/integrations/configure")
     def configure_integration():
@@ -3195,25 +3207,25 @@ def create_app():
     # -----------------------
     @app.get("/api/security/governance-metrics")
     def governance_metrics():
-        return get_governance_metrics_handler()
+        return _safe_handler(get_governance_metrics_handler, {'metrics': [], 'stats': None})
 
     @app.get("/api/security/governance-trends")
     def governance_trends():
-        return get_governance_trends_handler()
+        return _safe_handler(get_governance_trends_handler, {'trends': [], 'stats': None})
 
     # -----------------------
     # Phase 32: Security Strategy Advisor
     # -----------------------
     @app.get("/api/security/strategy-advisor")
     def strategy_advisor():
-        return get_strategy_advisor_handler()
+        return _safe_handler(get_strategy_advisor_handler, {'recommendations': [], 'stats': None})
 
     # -----------------------
     # Phase 33: Security Command Center
     # -----------------------
     @app.get("/api/security/command-center")
     def command_center():
-        return get_command_center_handler()
+        return _safe_handler(get_command_center_handler, {'posture': None, 'stats': None})
 
     # -----------------------
     # Phase 25: AI Security Copilot
@@ -3230,9 +3242,21 @@ def create_app():
     def security_findings_list():
         return get_security_findings_handler()
 
+    @app.post("/api/security/findings/<finding_id>/acknowledge")
+    def security_finding_acknowledge(finding_id):
+        return acknowledge_security_finding_handler(finding_id)
+
+    @app.post("/api/security/findings/<finding_id>/resolve")
+    def security_finding_resolve(finding_id):
+        return resolve_security_finding_handler(finding_id)
+
     @app.get("/api/security/cloud-summary")
     def cloud_risk_summary():
         return get_cloud_risk_summary_handler()
+
+    @app.get("/api/security/overview")
+    def security_overview():
+        return get_security_overview_handler()
 
     @app.get("/api/security/dashboard")
     def security_dashboard():
@@ -3271,6 +3295,10 @@ def create_app():
     @app.get("/api/identities/<identity_id>/persisted-attack-paths")
     def identity_persisted_attack_paths(identity_id):
         return get_identity_persisted_attack_paths(identity_id)
+
+    @app.post("/api/attack-paths/analyze")
+    def attack_paths_analyze():
+        return trigger_attack_path_analysis()
 
     # -----------------------
     # Phase 8: Graph Attack Findings & Identity Risk Scores
@@ -3319,10 +3347,12 @@ def create_app():
         return get_identity_ai_risk_explanation(identity_id)
 
     @app.post("/api/ai/explain-attack-path")
+    @require_feature('ai_copilot')
     def ai_explain_attack_path():
         return post_ai_attack_path_explanation()
 
     @app.post("/api/ai/executive-narrative")
+    @require_feature('ai_copilot')
     def ai_executive_narrative():
         return post_ai_executive_narrative()
 
@@ -3360,12 +3390,24 @@ def create_app():
     def identity_exposures():
         return get_identity_exposures_handler()
 
+    @app.post("/api/identity-exposures/<exposure_id>/acknowledge")
+    def identity_exposure_acknowledge(exposure_id):
+        return acknowledge_identity_exposure_handler(exposure_id)
+
+    @app.post("/api/identity-exposures/<exposure_id>/resolve")
+    def identity_exposure_resolve(exposure_id):
+        return resolve_identity_exposure_handler(exposure_id)
+
     @app.get("/api/privilege-drift")
     def privilege_drift():
         return get_privilege_drift_handler()
 
     @app.post("/api/attack-path/simulate")
     def attack_path_simulate():
+        return simulate_attack_path_handler()
+
+    @app.post("/api/attack/simulate")
+    def attack_simulate():
         return simulate_attack_path_handler()
 
     # -----------------------

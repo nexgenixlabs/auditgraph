@@ -497,7 +497,7 @@ export function ConnectionsTab({
                               <input
                                 value={wizardClientId}
                                 onChange={e => setWizardClientId(e.target.value)}
-                                placeholder="AKIA..."
+                                placeholder="e.g. your AWS access key"
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
                               />
                             </div>
@@ -839,7 +839,7 @@ export function ConnectionsTab({
                         type="text"
                         value={settings?.aws_access_key_id || ''}
                         onChange={e => update('aws_access_key_id' as keyof SettingsData, e.target.value)}
-                        placeholder="AKIAIOSFODNN7EXAMPLE"
+                        placeholder="e.g. your AWS access key"
                         className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       />
                     </div>

@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 
 interface RiskFinding {
   id: string;
@@ -7,6 +8,7 @@ interface RiskFinding {
   rule_key: string;
   rule_type: string;
   identity_id: string | null;
+  identity_name: string | null;
   resource_id: string | null;
   metadata: Record<string, unknown>;
   status: string;
@@ -37,10 +39,11 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 const SecurityFindings: React.FC = () => {
+  const [searchParams] = useSearchParams();
   const [findings, setFindings] = useState<RiskFinding[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [severityFilter, setSeverityFilter] = useState('');
+  const [severityFilter, setSeverityFilter] = useState(searchParams.get('severity') || '');
   const [statusFilter, setStatusFilter] = useState('');
 
   const fetchFindings = useCallback(async () => {
@@ -49,7 +52,7 @@ const SecurityFindings: React.FC = () => {
       const params = new URLSearchParams();
       if (severityFilter) params.set('severity', severityFilter);
       if (statusFilter) params.set('status', statusFilter);
-      const res = await fetch(`/api/risk/findings?${params.toString()}`);
+      const res = await fetch(`/api/security/findings?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setFindings(data.findings || []);
@@ -66,7 +69,7 @@ const SecurityFindings: React.FC = () => {
 
   const handleAction = async (findingId: string, action: 'acknowledge' | 'resolve') => {
     try {
-      const res = await fetch(`/api/risk/findings/${findingId}/${action}`, { method: 'POST' });
+      const res = await fetch(`/api/security/findings/${findingId}/${action}`, { method: 'POST' });
       if (res.ok) fetchFindings();
     } catch (err) {
       console.error(`Failed to ${action} finding:`, err);
@@ -186,8 +189,17 @@ const SecurityFindings: React.FC = () => {
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-slate-300 font-mono text-xs">
-                    {(f.metadata as Record<string, string>)?.display_name || f.identity_id || '-'}
+                  <td className="px-4 py-3 text-xs">
+                    {f.identity_id ? (
+                      <Link
+                        to={`/identities/${f.identity_id}`}
+                        className="text-blue-400 hover:text-blue-300 hover:underline font-medium"
+                      >
+                        {f.identity_name || f.identity_id}
+                      </Link>
+                    ) : (
+                      <span className="text-slate-500">-</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_BADGE[f.status] || ''}`}>

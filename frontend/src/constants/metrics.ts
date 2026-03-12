@@ -60,6 +60,20 @@ export const CATEGORY_DISPLAY_ORDER: IdentityCategory[] = [
   'gcp_user',
 ];
 
+/** Return only categories whose cloud provider is in the enabled set */
+export function getCategoriesForClouds(enabledClouds: string[]): IdentityCategory[] {
+  if (!enabledClouds.length) return CATEGORY_DISPLAY_ORDER; // fallback: show all
+  return CATEGORY_DISPLAY_ORDER.filter(key => {
+    const cloud = IDENTITY_CATEGORIES[key]?.cloud;
+    return cloud && enabledClouds.includes(cloud);
+  });
+}
+
+/** Get the cloud provider key for a category */
+export function getCategoryCloud(cat?: string): string | undefined {
+  return IDENTITY_CATEGORIES[cat || '']?.cloud;
+}
+
 export const CATEGORY_FILTER_OPTIONS: { value: IdentityCategory | 'all'; label: string }[] = [
   { value: 'all', label: 'All Categories' },
   ...CATEGORY_DISPLAY_ORDER.map(key => ({
@@ -376,6 +390,38 @@ export function getAGIRSTier(score: number): string {
 export function getAGIRSColor(score: number): string {
   return AGIRS_COLORS[getAGIRSTier(score)] || AGIRS_COLORS.F;
 }
+
+// ── Drift Event Intelligence ─────────────────────────────────
+
+export const SEVERITY_COLORS: Record<string, string> = {
+  critical: 'bg-red-100 text-red-700',
+  high: 'bg-orange-100 text-orange-700',
+  medium: 'bg-yellow-100 text-yellow-700',
+  low: 'bg-blue-100 text-blue-600',
+};
+
+export const DRIFT_EVENT_LABELS: Record<string, string> = {
+  identity_added: 'Identity Added',
+  identity_removed: 'Identity Removed',
+  identity_disabled: 'Identity Disabled',
+  identity_reactivated: 'Identity Reactivated',
+  role_assigned: 'Role Assigned',
+  role_removed: 'Role Removed',
+  privilege_escalated: 'Privilege Escalated',
+  privilege_deescalated: 'Privilege De-escalated',
+  risk_escalated: 'Risk Escalated',
+  risk_deescalated: 'Risk De-escalated',
+  spn_credential_expired: 'SPN Credential Expired',
+  spn_credential_added: 'SPN Credential Added',
+  mfa_disabled: 'MFA Disabled',
+  owner_changed: 'Owner Changed',
+  microsoft_spn_modified: 'Microsoft SPN Modified',
+  classification_added: 'Classification Added',
+  classification_removed: 'Classification Removed',
+  classification_changed: 'Classification Changed',
+  attack_path_created: 'Attack Path Created',
+  identity_resurrection: 'Identity Resurrection',
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

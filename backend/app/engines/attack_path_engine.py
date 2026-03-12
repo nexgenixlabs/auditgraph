@@ -121,6 +121,10 @@ class AttackPathEngine:
         # Track how many paths each identity has accumulated
         identity_path_counts: Dict[str, int] = defaultdict(int)
 
+        # Load valid identity_ids for source_entity validation
+        valid_ids = self._load_valid_identity_ids(run_id)
+        logger.info(f"Attack path engine: {len(valid_ids)} identities for run #{run_id}")
+
         detectors = [
             ('direct_escalation', self._detect_direct_escalation),
             ('ownership_chain', self._detect_ownership_chain),
@@ -153,8 +157,18 @@ class AttackPathEngine:
                 if accepted:
                     logger.info(f"  Attack path '{name}': {len(accepted)} path(s) "
                                 f"({len(results) - len(accepted)} capped)")
+                else:
+                    logger.info(f"  Attack path '{name}': 0 path(s)")
             except Exception as e:
                 logger.error(f"  Attack path detector '{name}' failed: {e}")
+
+        # Validate: all source_entity_ids reference real identities
+        if valid_ids:
+            pre_count = len(all_paths)
+            all_paths = [p for p in all_paths if p['source_entity_id'] in valid_ids]
+            orphaned = pre_count - len(all_paths)
+            if orphaned > 0:
+                logger.warning(f"  Dropped {orphaned} attack path(s) with orphaned source_entity_id")
 
         logger.info(f"Attack path engine: {len(all_paths)} total path(s) for run #{run_id}")
         return all_paths
@@ -182,6 +196,9 @@ class AttackPathEngine:
 
         fp = compute_path_fingerprint(source_entity_id, path_type, path_nodes)
 
+        # Extract target resource from last node in the path chain
+        target_node = path_nodes[-1] if path_nodes else {}
+
         return {
             'path_type': path_type,
             'source_entity_id': source_entity_id,
@@ -190,11 +207,14 @@ class AttackPathEngine:
             'risk_score': risk_score,
             'severity': _severity_from_score(risk_score),
             'path_nodes': path_nodes,
+            'path_length': len(path_nodes),
             'path_fingerprint': fp,
             'description': description,
             'narrative': narrative or '',
             'impact': impact or '',
             'affected_resource_count': affected_resource_count,
+            'target_resource_id': target_node.get('id', ''),
+            'target_resource_type': target_node.get('type', ''),
         }
 
     # ------------------------------------------------------------------
@@ -217,6 +237,18 @@ class AttackPathEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _load_valid_identity_ids(self, run_id: int) -> set:
+        """Load all identity_ids for a run to validate source_entity references."""
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT identity_id FROM identities WHERE discovery_run_id = %s", (run_id,))
+            ids = {row[0] for row in cursor.fetchall()}
+            cursor.close()
+            return ids
+        except Exception as e:
+            logger.warning(f"Failed to load identity_ids for validation: {e}")
+            return set()
 
     def _count_resources_for_scope(self, run_id: int, scope: str) -> int:
         """Estimate affected resource count by matching scope against discovered resources."""

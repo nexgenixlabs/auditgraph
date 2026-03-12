@@ -35,6 +35,7 @@ interface RemediationAction {
   playbook_id?: number;
   playbook_name?: string;
   created_at?: string;
+  source?: string;
 }
 
 interface RemediationStats {
@@ -70,47 +71,75 @@ export default function RemediationCenter() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [soarRes, playbookRes] = await Promise.all([
-        fetch(withConnection('/api/soar/actions/stats')),
+      const [generatedRes, playbookRes] = await Promise.all([
+        fetch(withConnection('/api/remediation/generated')),
         fetch(withConnection('/api/soar/playbooks')),
       ]);
-      const soarStats = soarRes.ok ? await soarRes.json() : {};
-      const pbData = playbookRes.ok ? await playbookRes.json() : {};
 
-      // Derive stats from SOAR actions — API returns flat counts, not nested by_status
-      setStats({
-        open: soarStats.total || 0,
-        critical: soarStats.failed_count || 0,
-        in_progress: soarStats.pending_count || 0,
-        completed_this_week: soarStats.success_count || 0,
-      });
+      // Primary source: auto-generated remediations from risk tables
+      const genData = generatedRes.ok ? await generatedRes.json() : { actions: [], stats: {} };
 
-      setPlaybooks((pbData.playbooks || []).map((p: any) => ({
+      setPlaybooks((playbookRes.ok ? (await playbookRes.json()).playbooks || [] : []).map((p: any) => ({
         id: p.id, name: p.name, trigger_type: p.trigger_type, enabled: p.enabled,
       })));
 
-      // Fetch actions list
-      const actionsRes = await fetch(withConnection('/api/soar/actions?limit=100'));
-      if (actionsRes.ok) {
-        const ad = await actionsRes.json();
-        setActions((ad.actions || []).map((a: any, idx: number) => ({
-          id: a.id || idx,
-          title: a.action_type || 'Remediation Action',
-          description: a.details || '',
-          risk_reduction: a.risk_reduction || 0,
-          affected_count: a.affected_count || 1,
-          blast_radius: a.blast_radius || 'unknown',
-          automation_ready: a.automation_ready ?? false,
-          confidence: a.confidence || 0,
-          status: a.status || 'new',
-          priority: a.priority || 'medium',
-          identity_id: a.identity_id,
-          identity_name: a.identity_name,
-          playbook_id: a.playbook_id,
-          playbook_name: a.playbook_name,
-          created_at: a.created_at,
-        })));
-      }
+      // Map generated actions directly (backend returns correct shape)
+      const generatedActions: RemediationAction[] = (genData.actions || []).map((a: any) => ({
+        id: a.id,
+        title: a.title || 'Remediation Action',
+        description: a.description || '',
+        risk_reduction: a.risk_reduction || 0,
+        affected_count: a.affected_count || 1,
+        blast_radius: a.blast_radius || 'unknown',
+        automation_ready: a.automation_ready ?? false,
+        confidence: a.confidence || 0,
+        status: a.status || 'new',
+        priority: a.priority || 'medium',
+        identity_id: a.identity_id,
+        identity_name: a.identity_name,
+        playbook_id: a.playbook_id,
+        playbook_name: a.playbook_name,
+        created_at: a.created_at,
+      }));
+
+      // Also fetch SOAR actions to merge completed/in-progress items
+      try {
+        const soarRes = await fetch(withConnection('/api/soar/actions?limit=100'));
+        if (soarRes.ok) {
+          const ad = await soarRes.json();
+          const soarActions: RemediationAction[] = (ad.actions || []).map((a: any, idx: number) => ({
+            id: 10000 + (a.id || idx),
+            title: a.action_type || 'SOAR Action',
+            description: a.details || '',
+            risk_reduction: a.risk_reduction || 0,
+            affected_count: a.affected_count || 1,
+            blast_radius: a.blast_radius || 'unknown',
+            automation_ready: a.automation_ready ?? false,
+            confidence: a.confidence || 0,
+            status: a.status === 'success' ? 'verified' : a.status === 'failed' ? 'new' : a.status || 'in_progress',
+            priority: a.priority || 'medium',
+            identity_id: a.identity_id,
+            identity_name: a.identity_name,
+            playbook_id: a.playbook_id,
+            playbook_name: a.playbook_name,
+            created_at: a.created_at,
+          }));
+          generatedActions.push(...soarActions);
+        }
+      } catch { /* SOAR fallback — generated items are primary */ }
+
+      setActions(generatedActions);
+
+      // Use generated stats as primary, augment with SOAR completed count
+      const gStats = genData.stats || {};
+      const completedFromSoar = generatedActions.filter(a => a.status === 'verified').length;
+      const inProgress = generatedActions.filter(a => a.status === 'in_progress').length;
+      setStats({
+        open: gStats.open || generatedActions.filter(a => a.status === 'new').length,
+        critical: gStats.critical || generatedActions.filter(a => a.priority === 'critical').length,
+        in_progress: inProgress,
+        completed_this_week: completedFromSoar,
+      });
     } catch {
       // silent
     } finally {
@@ -246,7 +275,14 @@ export default function RemediationCenter() {
                     style={{ borderColor: R.surfaceBorder }}
                   >
                     <td className="px-4 py-3">
-                      <div className="font-medium" style={{ color: R.text }}>{a.title}</div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium" style={{ color: R.text }}>{a.title}</span>
+                        {a.source && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-300 whitespace-nowrap">
+                            {a.source.replace('_', ' ')}
+                          </span>
+                        )}
+                      </div>
                       {a.identity_name && (
                         <div className="text-xs mt-0.5" style={{ color: R.textMuted }}>{a.identity_name}</div>
                       )}

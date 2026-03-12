@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { RISK_LEVELS, RISK_SOLID, getCategoryLabel } from '../../constants/metrics';
+import { RISK_LEVELS, RISK_SOLID, CLOUD_BADGE, getCategoryLabel, getCategoryCloud } from '../../constants/metrics';
 
 interface CategoryRiskData {
   key: string;
@@ -59,7 +59,14 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
             {categories.map(cat => (
               <tr key={cat.key} className="hover:bg-gray-50">
                 <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                  {getCategoryLabel(cat.key)}
+                  <span className="flex items-center gap-1.5">
+                    {getCategoryLabel(cat.key)}
+                    {getCategoryCloud(cat.key) && (
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${CLOUD_BADGE[getCategoryCloud(cat.key)!] || 'bg-gray-100 text-gray-600'}`}>
+                        {getCategoryCloud(cat.key)!.toUpperCase()}
+                      </span>
+                    )}
+                  </span>
                 </td>
                 {RISK_LEVELS.map(level => {
                   const count = cat[level as keyof CategoryRiskData] as number;

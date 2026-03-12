@@ -4,60 +4,59 @@ import { useCopilot } from '../contexts/CopilotContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
-interface PostureScore {
+/** Shape from GET /api/security/overview */
+interface SecurityOverview {
   posture_score: number;
-  previous_score: number | null;
-  trend: number | null;
-  critical_findings: number;
-  high_findings: number;
-  attack_paths_count: number;
-  privileged_identities: number;
-  stale_credentials: number;
-  high_risk_identities: number;
+  risk_score: number;
+  identities: {
+    total: number;
+    users: number;
+    service_principals: number;
+    managed_identities: number;
+    guests: number;
+  };
+  findings: { critical: number; high: number; medium: number; low: number };
+  nhi: {
+    secrets_without_expiry: number;
+    secrets_older_than_180_days: number;
+    unused_service_principals: number;
+  };
+  attack_paths: { identities_with_paths: number };
+  credentials: { total: number; expired: number; expiring_soon: number };
+  cloud_providers: { cloud: string; identities: number; attack_paths: number; findings: number; subscriptions: number }[];
+  discovery_metadata: { run_ids: number[]; data_as_of: string | null };
 }
 
 interface RiskyIdentity {
   identity_id: number;
-  identity_name: string;
-  identity_type: string;
-  risk_score: number;
-  risk_level: string;
-  identity_category: string;
-  activity_status: string;
-  attack_paths: number;
-  privileged_roles: number;
-  factors: Record<string, number>;
-}
-
-interface RemediationItem {
-  id: number;
-  finding_type: string;
-  severity: string;
-  risk_score: number;
-  title: string;
-  remediation: string;
-  identity_name: string | null;
-  identity_category: string | null;
-}
-
-interface PrivilegedIdentity {
-  identity_id: number;
   display_name: string;
   identity_category: string;
-  risk_level: string;
   risk_score: number;
+  risk_level: string;
   activity_status: string;
-  privileged_roles: string[];
-  role_count: number;
+  attack_path_count: number;
+  rbac_role_count: number;
+  entra_role_count: number;
 }
 
-interface SecurityEvent {
+interface FixRecommendation {
   id: number;
-  event_type: string;
-  severity: string;
+  fix_category: string;
+  severity?: string;
+  priority_score: number;
   title: string;
-  description: string | null;
-  identity_name: string | null;
+  description: string;
+  entity_name: string | null;
+  effort: string | null;
+  status: string;
+}
+
+interface ActivityEntry {
+  id: number;
+  action_type: string;
+  description: string;
+  user_display_name: string | null;
+  user_username: string | null;
   created_at: string;
 }
 
@@ -68,8 +67,6 @@ const SEVERITY_BADGE: Record<string, string> = {
   high: 'bg-orange-500/20 text-orange-400 border border-orange-500/30',
   medium: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30',
   low: 'bg-blue-500/20 text-blue-400 border border-blue-500/30',
-  warning: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30',
-  info: 'bg-slate-500/20 text-slate-400 border border-slate-500/30',
 };
 
 const RISK_BADGE: Record<string, string> = {
@@ -79,19 +76,18 @@ const RISK_BADGE: Record<string, string> = {
   low: 'bg-emerald-500/20 text-emerald-400',
 };
 
-const TYPE_LABEL: Record<string, string> = {
-  PRIVILEGE_ESCALATION: 'Priv Escalation',
-  KEYVAULT_SECRET_ACCESS: 'KeyVault Access',
-  SPN_SECRET_EXPOSURE: 'SPN Exposure',
-  ROLE_CHAINING: 'Role Chaining',
-};
-
 const CATEGORY_LABEL: Record<string, string> = {
   human_user: 'User',
   service_principal: 'SPN',
   managed_identity_system: 'Sys MI',
   managed_identity_user: 'User MI',
   guest: 'Guest',
+};
+
+const EFFORT_BADGE: Record<string, string> = {
+  low: 'text-emerald-400',
+  medium: 'text-yellow-400',
+  high: 'text-orange-400',
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -124,11 +120,10 @@ function timeAgo(dateStr: string): string {
 export default function SecurityCommandCenter() {
   const navigate = useNavigate();
   const { openCopilot } = useCopilot();
-  const [posture, setPosture] = useState<PostureScore | null>(null);
+  const [overview, setOverview] = useState<SecurityOverview | null>(null);
   const [riskyIdentities, setRiskyIdentities] = useState<RiskyIdentity[]>([]);
-  const [remediation, setRemediation] = useState<RemediationItem[]>([]);
-  const [privileged, setPrivileged] = useState<PrivilegedIdentity[]>([]);
-  const [events, setEvents] = useState<SecurityEvent[]>([]);
+  const [recommendations, setRecommendations] = useState<FixRecommendation[]>([]);
+  const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [copilotSummary, setCopilotSummary] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -136,18 +131,43 @@ export default function SecurityCommandCenter() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [postureRes, riskyRes, remRes, privRes, eventsRes] = await Promise.all([
-        fetch('/api/posture-score'),
-        fetch('/api/risky-identities?limit=10'),
-        fetch('/api/remediation-priority?limit=10'),
-        fetch('/api/privileged-identities?limit=10'),
-        fetch('/api/security-events?limit=15'),
+      // Single primary call + lazy-loaded lists in parallel
+      const [overviewRes, riskyRes, recsRes, activityRes] = await Promise.all([
+        fetch('/api/security/overview'),
+        fetch('/api/identities?risk_level=critical&limit=10'),
+        fetch('/api/fix-recommendations?limit=10&status=open'),
+        fetch('/api/activity?limit=15'),
       ]);
-      if (postureRes.ok) setPosture(await postureRes.json());
-      if (riskyRes.ok) { const d = await riskyRes.json(); setRiskyIdentities(d.identities || []); }
-      if (remRes.ok) { const d = await remRes.json(); setRemediation(d.items || []); }
-      if (privRes.ok) { const d = await privRes.json(); setPrivileged(d.identities || []); }
-      if (eventsRes.ok) { const d = await eventsRes.json(); setEvents(d.events || []); }
+
+      if (overviewRes.ok) setOverview(await overviewRes.json());
+
+      if (riskyRes.ok) {
+        const d = await riskyRes.json();
+        let identities = d.identities || [];
+        // If fewer than 10 critical, backfill with high-risk
+        if (identities.length < 10) {
+          try {
+            const highRes = await fetch(`/api/identities?risk_level=high&limit=${10 - identities.length}`);
+            if (highRes.ok) {
+              const hd = await highRes.json();
+              const existingIds = new Set(identities.map((i: RiskyIdentity) => i.identity_id));
+              const highIdentities = (hd.identities || []).filter((i: RiskyIdentity) => !existingIds.has(i.identity_id));
+              identities = [...identities, ...highIdentities];
+            }
+          } catch { /* ignore */ }
+        }
+        setRiskyIdentities(identities);
+      }
+
+      if (recsRes.ok) {
+        const d = await recsRes.json();
+        setRecommendations(d.recommendations || []);
+      }
+
+      if (activityRes.ok) {
+        const d = await activityRes.json();
+        setActivities(d.entries || []);
+      }
     } catch (err) {
       console.error('Failed to fetch command center data:', err);
     } finally {
@@ -177,6 +197,19 @@ export default function SecurityCommandCenter() {
     );
   }
 
+  // Derived metrics from overview
+  const postureScore = overview?.posture_score ?? 0;
+  const find = overview?.findings || { critical: 0, high: 0, medium: 0, low: 0 };
+  const attackPathCount = overview?.attack_paths?.identities_with_paths ?? 0;
+  const cred = overview?.credentials || { total: 0, expired: 0, expiring_soon: 0 };
+  const nhi = overview?.nhi || { secrets_without_expiry: 0, secrets_older_than_180_days: 0, unused_service_principals: 0 };
+  const ident = overview?.identities || { total: 0, users: 0, service_principals: 0, managed_identities: 0, guests: 0 };
+
+  // High-risk identities = critical + high from the risky list
+  const highRiskCount = riskyIdentities.length;
+  // Stale credentials = secrets older than 180 days
+  const staleCredentials = nhi.secrets_older_than_180_days;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -185,6 +218,11 @@ export default function SecurityCommandCenter() {
           <h1 className="text-2xl font-bold text-white">Security Command Center</h1>
           <p className="text-sm text-slate-400 mt-1">
             Real-time security posture, risk analysis, and remediation priorities
+            {overview?.discovery_metadata?.data_as_of && (
+              <span className="ml-3 text-slate-500">
+                Data as of: {new Date(overview.discovery_metadata.data_as_of).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex gap-2">
@@ -210,48 +248,65 @@ export default function SecurityCommandCenter() {
         </div>
       </div>
 
+      {/* Fallback: no data */}
+      {!overview && (
+        <div className="bg-slate-800/60 border border-amber-500/30 rounded-xl p-4 flex items-center gap-3">
+          <svg className="w-5 h-5 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-sm text-amber-300">
+            No security data available yet. Run a discovery scan to populate the dashboard.
+          </span>
+        </div>
+      )}
+
       {/* Row 1: Posture Score Gauge + Summary Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* Posture Score Gauge */}
         <div className="lg:col-span-4 bg-slate-800/60 border border-slate-700/50 rounded-xl p-6 flex flex-col items-center justify-center">
-          <PostureGauge score={posture?.posture_score ?? 0} trend={posture?.trend ?? null} />
+          <PostureGauge score={postureScore} />
         </div>
 
         {/* Summary Cards */}
         <div className="lg:col-span-8 grid grid-cols-2 md:grid-cols-3 gap-3">
           <MetricCard
             label="Critical Findings"
-            value={posture?.critical_findings ?? 0}
+            value={find.critical}
             color="text-red-400"
             bgColor="bg-red-500/10 border-red-500/20"
+            onClick={() => navigate('/security-findings?severity=critical')}
           />
           <MetricCard
             label="High Findings"
-            value={posture?.high_findings ?? 0}
+            value={find.high}
             color="text-orange-400"
             bgColor="bg-orange-500/10 border-orange-500/20"
+            onClick={() => navigate('/security-findings?severity=high')}
           />
           <MetricCard
             label="Attack Paths"
-            value={posture?.attack_paths_count ?? 0}
+            value={attackPathCount}
             color="text-purple-400"
             bgColor="bg-purple-500/10 border-purple-500/20"
+            onClick={() => navigate('/attack-paths')}
           />
           <MetricCard
             label="High Risk Identities"
-            value={posture?.high_risk_identities ?? 0}
+            value={highRiskCount}
             color="text-amber-400"
             bgColor="bg-amber-500/10 border-amber-500/20"
+            onClick={() => navigate('/identities?risk_level=high')}
           />
           <MetricCard
-            label="Privileged Identities"
-            value={posture?.privileged_identities ?? 0}
+            label="Total Identities"
+            value={ident.total}
             color="text-blue-400"
             bgColor="bg-blue-500/10 border-blue-500/20"
+            onClick={() => navigate('/identities')}
           />
           <MetricCard
             label="Stale Credentials"
-            value={posture?.stale_credentials ?? 0}
+            value={staleCredentials}
             color="text-slate-400"
             bgColor="bg-slate-500/10 border-slate-500/20"
           />
@@ -265,7 +320,7 @@ export default function SecurityCommandCenter() {
           <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-white">Top Risky Identities</h2>
             <button
-              onClick={() => navigate('/identities')}
+              onClick={() => navigate('/identities?risk_level=high')}
               className="text-xs text-blue-400 hover:text-blue-300"
             >
               View All
@@ -282,11 +337,13 @@ export default function SecurityCommandCenter() {
               >
                 <RiskBar score={identity.risk_score} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm text-white truncate">{identity.identity_name || `ID-${identity.identity_id}`}</div>
+                  <div className="text-sm text-white truncate">{identity.display_name || `ID-${identity.identity_id}`}</div>
                   <div className="text-xs text-slate-500">
                     {CATEGORY_LABEL[identity.identity_category] || identity.identity_category}
-                    {identity.attack_paths > 0 && <span className="ml-2 text-red-400">{identity.attack_paths} attack paths</span>}
-                    {identity.privileged_roles > 0 && <span className="ml-2 text-amber-400">{identity.privileged_roles} priv roles</span>}
+                    {identity.attack_path_count > 0 && <span className="ml-2 text-red-400">{identity.attack_path_count} attack paths</span>}
+                    {(identity.rbac_role_count + identity.entra_role_count) > 0 && (
+                      <span className="ml-2 text-amber-400">{identity.rbac_role_count + identity.entra_role_count} roles</span>
+                    )}
                   </div>
                 </div>
                 <span className={`px-2 py-0.5 text-xs rounded ${RISK_BADGE[identity.risk_level] || 'bg-slate-600 text-slate-300'}`}>
@@ -302,95 +359,102 @@ export default function SecurityCommandCenter() {
           <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-white">Remediation Priority</h2>
             <button
-              onClick={() => navigate('/graph-findings')}
+              onClick={() => navigate('/remediation')}
               className="text-xs text-blue-400 hover:text-blue-300"
             >
               View All
             </button>
           </div>
           <div className="divide-y divide-slate-700/30">
-            {remediation.length === 0 ? (
-              <div className="px-4 py-6 text-center text-sm text-slate-500">No open findings</div>
-            ) : remediation.map((item) => (
-              <div key={item.id} className="px-4 py-2.5 flex items-start gap-3">
-                <span className={`mt-0.5 px-2 py-0.5 text-[10px] font-medium rounded whitespace-nowrap ${SEVERITY_BADGE[item.severity] || 'bg-slate-600 text-slate-300'}`}>
-                  {item.severity.toUpperCase()}
+            {recommendations.length === 0 ? (
+              <div className="px-4 py-6 text-center text-sm text-slate-500">No open recommendations</div>
+            ) : recommendations.map((rec) => (
+              <div key={rec.id} className="px-4 py-2.5 flex items-start gap-3">
+                <span className={`mt-0.5 px-2 py-0.5 text-[10px] font-medium rounded whitespace-nowrap ${SEVERITY_BADGE[rec.effort || 'medium'] || 'bg-slate-600 text-slate-300'}`}>
+                  {(rec.effort || 'medium').toUpperCase()}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm text-white truncate">{item.title}</div>
+                  <div className="text-sm text-white truncate">{rec.title}</div>
                   <div className="text-xs text-slate-500 mt-0.5">
-                    {TYPE_LABEL[item.finding_type] || item.finding_type}
-                    {item.identity_name && <span className="ml-1">— {item.identity_name}</span>}
+                    {rec.fix_category}
+                    {rec.entity_name && <span className="ml-1">— {rec.entity_name}</span>}
                   </div>
-                  {item.remediation && (
-                    <div className="text-xs text-emerald-400/80 mt-1 truncate">{item.remediation}</div>
+                  {rec.description && (
+                    <div className="text-xs text-emerald-400/80 mt-1 truncate">{rec.description}</div>
                   )}
                 </div>
-                <span className="text-xs text-slate-500 whitespace-nowrap">Risk {item.risk_score}</span>
+                <span className={`text-xs whitespace-nowrap ${EFFORT_BADGE[rec.effort || 'medium'] || 'text-slate-500'}`}>
+                  Priority {rec.priority_score}
+                </span>
               </div>
             ))}
           </div>
         </div>
       </div>
 
-      {/* Row 3: Privileged Identities + Security Timeline */}
+      {/* Row 3: NHI Security + Activity Timeline */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Privileged Identities */}
+        {/* NHI Security Overview */}
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl">
           <div className="px-4 py-3 border-b border-slate-700/50">
-            <h2 className="text-sm font-semibold text-white">Privileged Identities</h2>
+            <h2 className="text-sm font-semibold text-white">Credential & NHI Security</h2>
           </div>
           <div className="divide-y divide-slate-700/30">
-            {privileged.length === 0 ? (
-              <div className="px-4 py-6 text-center text-sm text-slate-500">No privileged identities found</div>
-            ) : privileged.map((p) => (
-              <button
-                key={p.identity_id}
-                onClick={() => navigate(`/identities/${p.identity_id}`)}
-                className="w-full px-4 py-2.5 flex items-center gap-3 hover:bg-slate-700/30 transition-colors text-left"
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-white truncate">{p.display_name}</div>
-                  <div className="text-xs text-slate-500 flex flex-wrap gap-1 mt-0.5">
-                    {(p.privileged_roles || []).slice(0, 3).map((role) => (
-                      <span key={role} className="px-1.5 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded text-[10px]">
-                        {role}
-                      </span>
-                    ))}
-                    {(p.privileged_roles || []).length > 3 && (
-                      <span className="text-[10px] text-slate-500">+{p.privileged_roles.length - 3} more</span>
-                    )}
-                  </div>
-                </div>
-                <span className={`px-2 py-0.5 text-xs rounded ${RISK_BADGE[p.risk_level] || 'bg-slate-600 text-slate-300'}`}>
-                  {p.risk_level || 'unknown'}
-                </span>
-              </button>
-            ))}
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-300">Total credentials tracked</span>
+              <span className="text-lg font-bold text-slate-300">{cred.total}</span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-300">Expired credentials</span>
+              <span className={`text-lg font-bold ${cred.expired > 0 ? 'text-red-400' : 'text-slate-300'}`}>{cred.expired}</span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-300">Expiring within 30 days</span>
+              <span className={`text-lg font-bold ${cred.expiring_soon > 0 ? 'text-orange-400' : 'text-slate-300'}`}>{cred.expiring_soon}</span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-300">Secrets without expiry</span>
+              <span className={`text-lg font-bold ${nhi.secrets_without_expiry > 0 ? 'text-red-400' : 'text-slate-300'}`}>{nhi.secrets_without_expiry}</span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-300">Secrets older than 180 days</span>
+              <span className={`text-lg font-bold ${nhi.secrets_older_than_180_days > 0 ? 'text-orange-400' : 'text-slate-300'}`}>{nhi.secrets_older_than_180_days}</span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-300">Unused service principals</span>
+              <span className={`text-lg font-bold ${nhi.unused_service_principals > 0 ? 'text-yellow-400' : 'text-slate-300'}`}>{nhi.unused_service_principals}</span>
+            </div>
           </div>
         </div>
 
-        {/* Security Timeline */}
+        {/* Activity Timeline */}
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl">
-          <div className="px-4 py-3 border-b border-slate-700/50">
-            <h2 className="text-sm font-semibold text-white">Security Timeline</h2>
+          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-white">Activity Timeline</h2>
+            <button
+              onClick={() => navigate('/activity')}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              View All
+            </button>
           </div>
           <div className="divide-y divide-slate-700/30 max-h-[400px] overflow-y-auto">
-            {events.length === 0 ? (
-              <div className="px-4 py-6 text-center text-sm text-slate-500">No security events yet</div>
-            ) : events.map((evt) => (
-              <div key={evt.id} className="px-4 py-2.5 flex items-start gap-3">
+            {activities.length === 0 ? (
+              <div className="px-4 py-6 text-center text-sm text-slate-500">No activity yet</div>
+            ) : activities.map((entry) => (
+              <div key={entry.id} className="px-4 py-2.5 flex items-start gap-3">
                 <div className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${
-                  evt.severity === 'critical' ? 'bg-red-400' :
-                  evt.severity === 'high' || evt.severity === 'warning' ? 'bg-orange-400' :
+                  entry.action_type.includes('delete') || entry.action_type.includes('fail') ? 'bg-red-400' :
+                  entry.action_type.includes('create') || entry.action_type.includes('discover') ? 'bg-emerald-400' :
                   'bg-blue-400'
                 }`} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm text-white">{evt.title}</div>
-                  {evt.description && <div className="text-xs text-slate-500 mt-0.5 truncate">{evt.description}</div>}
-                  {evt.identity_name && <div className="text-xs text-blue-400 mt-0.5">{evt.identity_name}</div>}
+                  <div className="text-sm text-white">{entry.description || entry.action_type}</div>
+                  {entry.user_display_name && (
+                    <div className="text-xs text-blue-400 mt-0.5">{entry.user_display_name}</div>
+                  )}
                 </div>
-                <span className="text-[10px] text-slate-600 whitespace-nowrap">{timeAgo(evt.created_at)}</span>
+                <span className="text-[10px] text-slate-600 whitespace-nowrap">{timeAgo(entry.created_at)}</span>
               </div>
             ))}
           </div>
@@ -416,34 +480,23 @@ export default function SecurityCommandCenter() {
           </div>
         </div>
       )}
-
-      {/* Copilot is now in global CopilotPanel — opened via useCopilot() hook */}
     </div>
   );
 }
 
 // ─── Sub-components ───────────────────────────────────────────────
 
-function PostureGauge({ score, trend }: { score: number; trend: number | null }) {
+function PostureGauge({ score }: { score: number }) {
   const color = scoreColor(score);
   const label = scoreLabel(score);
-  // SVG arc for gauge
   const radius = 60;
-  const circumference = Math.PI * radius; // semi-circle
+  const circumference = Math.PI * radius;
   const offset = circumference - (score / 100) * circumference;
 
   return (
     <div className="flex flex-col items-center">
       <svg width="160" height="100" viewBox="0 0 160 100">
-        {/* Background arc */}
-        <path
-          d="M 10 90 A 60 60 0 0 1 150 90"
-          fill="none"
-          stroke="#334155"
-          strokeWidth="12"
-          strokeLinecap="round"
-        />
-        {/* Score arc */}
+        <path d="M 10 90 A 60 60 0 0 1 150 90" fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
         <path
           d="M 10 90 A 60 60 0 0 1 150 90"
           fill="none"
@@ -454,27 +507,22 @@ function PostureGauge({ score, trend }: { score: number; trend: number | null })
           strokeDashoffset={offset}
           style={{ transition: 'stroke-dashoffset 1s ease-out' }}
         />
-        {/* Score text */}
-        <text x="80" y="78" textAnchor="middle" fill="white" fontSize="28" fontWeight="bold">
-          {score}
-        </text>
-        <text x="80" y="95" textAnchor="middle" fill={color} fontSize="12" fontWeight="500">
-          {label}
-        </text>
+        <text x="80" y="78" textAnchor="middle" fill="white" fontSize="28" fontWeight="bold">{score}</text>
+        <text x="80" y="95" textAnchor="middle" fill={color} fontSize="12" fontWeight="500">{label}</text>
       </svg>
       <div className="text-xs text-slate-500 mt-1">Security Posture Score</div>
-      {trend !== null && (
-        <div className={`text-xs mt-1 ${trend > 0 ? 'text-emerald-400' : trend < 0 ? 'text-red-400' : 'text-slate-500'}`}>
-          {trend > 0 ? '+' : ''}{trend} from previous scan
-        </div>
-      )}
     </div>
   );
 }
 
-function MetricCard({ label, value, color, bgColor }: { label: string; value: number; color: string; bgColor: string }) {
+function MetricCard({ label, value, color, bgColor, onClick }: {
+  label: string; value: number; color: string; bgColor: string; onClick?: () => void;
+}) {
   return (
-    <div className={`rounded-xl p-4 border ${bgColor}`}>
+    <div
+      className={`rounded-xl p-4 border ${bgColor} ${onClick ? 'cursor-pointer hover:brightness-125 transition-all' : ''}`}
+      onClick={onClick}
+    >
       <div className={`text-2xl font-bold ${color}`}>{value}</div>
       <div className="text-xs text-slate-400 mt-1">{label}</div>
     </div>

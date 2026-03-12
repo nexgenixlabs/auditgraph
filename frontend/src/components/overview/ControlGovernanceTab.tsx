@@ -56,9 +56,13 @@ export function ControlGovernanceTab({ d, nav }: { d: TenantData; nav: Nav }) {
               ) : (
                 <>
                   <div style={{ fontFamily: F.data, fontSize: 22, fontWeight: 800, color: P.textFaint, marginBottom: 4 }}>&mdash;</div>
-                  <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, textTransform: 'uppercase', letterSpacing: 0.5 }}>Not Configured</div>
+                  <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    {m.label === 'Access Reviews Done' ? 'No access reviews configured' : 'Not Configured'}
+                  </div>
                   <div style={{ marginTop: 6 }}>
-                    <span onClick={() => nav('/settings')} style={{ fontFamily: F.data, fontSize: 10, color: P.accentStrong, cursor: 'pointer' }}>Configure &rarr;</span>
+                    <span onClick={() => nav(m.label === 'Access Reviews Done' ? '/access-reviews' : '/settings')} style={{ fontFamily: F.data, fontSize: 10, color: P.accentStrong, cursor: 'pointer' }}>
+                      {m.label === 'Access Reviews Done' ? 'Create review \u2192' : 'Configure \u2192'}
+                    </span>
                   </div>
                 </>
               )}

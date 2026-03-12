@@ -867,6 +867,10 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 89: Run resource anomaly detection
         _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
 
+        # Identity exposure detection (persisted to identity_exposures)
+        _track_job('identity_exposures', db_org_id,
+                   _run_identity_exposure_detection, current_run_id, db)
+
         # Phase 2: Security findings engine (tracked by Phase 8)
         _track_job('security_findings', db_org_id,
                    _run_security_findings, current_run_id, db)
@@ -894,6 +898,10 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 5: Blast radius analysis (tracked by Phase 8)
         _track_job('blast_radius', db_org_id,
                    _run_blast_radius_analysis, current_run_id, db)
+
+        # Drift intelligence enrichment (after attack paths + blast radius)
+        _track_job('drift_intelligence', db_org_id,
+                   _run_drift_intelligence, db_org_id, db)
 
         # Phase 6: Risk evaluation (rules-based findings per connection)
         _track_job('risk_evaluation', db_org_id,
@@ -986,6 +994,10 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 8 (v2): BFS graph attack engine (after graph intelligence)
         _track_job('graph_attack_engine', db_org_id,
                    _run_graph_attack_engine, current_run_id, db_org_id, db)
+
+        # Normalize all risk pipelines into unified security_findings
+        _track_job('findings_normalization', db_org_id,
+                   _run_findings_normalization, current_run_id, db)
 
         # Phase 9: Compute security posture score (after graph attack engine)
         _track_job('posture_score', db_org_id,
@@ -1398,7 +1410,14 @@ def _run_security_findings(current_run_id: int, db: Database):
         engine = SecurityFindingsEngine(db)
         findings = engine.analyze(current_run_id)
 
+        # Validation: log severity distribution
         if findings:
+            sev_counts = {}
+            for f in findings:
+                sev = f.get('severity', 'unknown')
+                sev_counts[sev] = sev_counts.get(sev, 0) + 1
+            logger.info(f"Security findings distribution for run #{current_run_id}: {sev_counts}")
+
             count = db.save_security_findings(current_run_id, findings)
             logger.info(f"Security findings engine: {count} finding(s) saved for run #{current_run_id}")
 
@@ -1432,6 +1451,35 @@ def _run_security_findings(current_run_id: int, db: Database):
 
     except Exception as e:
         logger.error(f"Security findings engine failed: {e}")
+        logger.exception(e)
+
+
+def _run_identity_exposure_detection(current_run_id: int, db: Database):
+    """Run identity exposure detection engine and persist results."""
+    try:
+        from app.engines.identity_exposure_engine import IdentityExposureEngine
+
+        engine = IdentityExposureEngine(db)
+        exposures = engine.analyze(current_run_id)
+
+        if exposures:
+            count = db.save_identity_exposures(current_run_id, exposures)
+            logger.info(f"Identity exposure detection: {count} exposure(s) saved for run #{current_run_id}")
+        else:
+            logger.info(f"Identity exposure detection: no exposures found for run #{current_run_id}")
+
+    except Exception as e:
+        logger.error(f"Identity exposure detection failed: {e}")
+        logger.exception(e)
+
+
+def _run_findings_normalization(current_run_id: int, db: Database):
+    """Normalize risk_findings, attack_paths, graph_attack_findings into unified security_findings."""
+    try:
+        count = db.normalize_findings_to_security_findings(current_run_id)
+        logger.info(f"Findings normalization: {count} finding(s) normalized for run #{current_run_id}")
+    except Exception as e:
+        logger.error(f"Findings normalization failed: {e}")
         logger.exception(e)
 
 
@@ -1474,9 +1522,69 @@ def _run_attack_path_analysis(current_run_id: int, db: Database):
         else:
             logger.info(f"Attack path analysis: no paths found for run #{current_run_id}")
 
+        # BFS graph engine — converts BFS paths into attack_paths table format
+        _run_bfs_attack_paths(current_run_id, db)
+
     except Exception as e:
         logger.error(f"Attack path analysis failed: {e}")
         logger.exception(e)
+
+
+def _convert_bfs_path_to_attack_path(bfs_path: dict) -> dict:
+    """Convert a BFS GraphAttackEngine path dict into save_attack_paths() format."""
+    from app.engines.attack_path_engine import compute_path_fingerprint
+    nodes = bfs_path.get('attack_path_nodes', [])
+    # Convert BFS node format {id, type, name, cloud} → {type, id, label, detail}
+    path_nodes = []
+    for n in nodes:
+        path_nodes.append({
+            'type': n.get('type', ''),
+            'id': n.get('id', ''),
+            'label': n.get('name', ''),
+            'detail': n.get('cloud', 'azure'),
+        })
+    source_name = bfs_path.get('source_name', '')
+    source_type = bfs_path.get('source_type', '')
+    # Extract source_entity_id: strip "identity:" prefix if present
+    raw_src = bfs_path.get('source_identity', '')
+    source_entity_id = raw_src.replace('identity:', '') if raw_src.startswith('identity:') else raw_src
+    finding_type = bfs_path.get('finding_type', 'PRIVILEGE_ESCALATION')
+    target = bfs_path.get('target_privilege', '')
+    description = f'{source_name} → {target} ({finding_type})'
+    fp = compute_path_fingerprint(source_entity_id, finding_type, path_nodes)
+    return {
+        'path_type': finding_type.lower(),
+        'source_entity_id': source_entity_id,
+        'source_entity_name': source_name,
+        'source_entity_type': source_type,
+        'risk_score': bfs_path.get('risk_score', 0),
+        'severity': bfs_path.get('severity', 'medium'),
+        'path_nodes': path_nodes,
+        'path_length': len(path_nodes),
+        'path_fingerprint': fp,
+        'description': description,
+        'narrative': f'{source_name} can reach {target} through a {bfs_path.get("depth", len(nodes))}-step path.',
+        'impact': f'Escalation to {target}',
+        'affected_resource_count': 0,
+    }
+
+
+def _run_bfs_attack_paths(current_run_id: int, db: Database):
+    """Run BFS GraphAttackEngine and save discovered paths to attack_paths table."""
+    try:
+        from app.engines.graph_attack_engine import GraphAttackEngine
+        org_id = db._organization_id if hasattr(db, '_organization_id') else 1
+        engine = GraphAttackEngine(db)
+        result = engine.analyze(org_id, current_run_id)
+        bfs_paths = result.get('paths', [])
+        if bfs_paths:
+            converted = [_convert_bfs_path_to_attack_path(p) for p in bfs_paths]
+            count = db.save_attack_paths(current_run_id, converted)
+            logger.info(f"BFS attack path analysis: {count} path(s) saved for run #{current_run_id}")
+        else:
+            logger.info(f"BFS attack path analysis: no paths for run #{current_run_id}")
+    except Exception as e:
+        logger.error(f"BFS attack path analysis failed (non-critical): {e}")
 
 
 def _run_fix_recommendations(current_run_id: int, db: Database):
@@ -1575,6 +1683,59 @@ def _run_blast_radius_analysis(current_run_id: int, db: Database):
 
     except Exception as e:
         logger.error(f"Blast radius engine failed: {e}")
+        logger.exception(e)
+
+
+def _run_drift_intelligence(db_org_id: int, db: Database):
+    """Enrich recent un-enriched drift reports with security intelligence."""
+    try:
+        from app.engines.analysis import DriftIntelligenceEngine
+
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id, current_run_id, previous_run_id, events
+            FROM drift_reports
+            WHERE max_severity IS NULL
+              AND events IS NOT NULL
+              AND created_at > NOW() - INTERVAL '1 hour'
+            ORDER BY created_at DESC
+            LIMIT 10
+        """)
+        reports = cursor.fetchall()
+        cursor.close()
+
+        if not reports:
+            logger.info("Drift intelligence: no un-enriched reports found")
+            return
+
+        intel = DriftIntelligenceEngine(db)
+        for report_id, current_run_id, previous_run_id, events_json in reports:
+            try:
+                events = events_json if isinstance(events_json, list) else json.loads(events_json or '[]')
+                if not events:
+                    continue
+
+                result = intel.enrich(events, current_run_id, previous_run_id)
+                db.update_drift_report_intelligence(
+                    report_id,
+                    result['events'],
+                    result['max_severity'],
+                    result['privilege_escalation_count'],
+                    result['attack_path_created_count'],
+                    result['identity_resurrection_count'],
+                )
+                logger.info(
+                    f"Drift intelligence: enriched report #{report_id} "
+                    f"(max_severity={result['max_severity']}, "
+                    f"priv_esc={result['privilege_escalation_count']}, "
+                    f"attack_paths={result['attack_path_created_count']}, "
+                    f"resurrections={result['identity_resurrection_count']})"
+                )
+            except Exception as e:
+                logger.warning(f"Drift intelligence: failed for report #{report_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"Drift intelligence engine failed: {e}")
         logger.exception(e)
 
 

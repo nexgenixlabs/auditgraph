@@ -237,11 +237,18 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
     compFrameworks['Core Governance'] = [{ name: 'No data', passed: 0, total: 1, pct: 0, failingIdentities: 0, controlMappingSource: 'Capture a snapshot', coverageTrend30d: null, controls: [], key: 'none', category: 'Core Governance' }];
   }
 
+  const accessReviewsDone = gov.access_reviews_done || 0;
+  const accessReviewsConfigured = accessReviewsDone > 0;
+  // Access reviews: show privileged_under_review_pct when reviews exist, 0 otherwise
+  const accessReviewPct = accessReviewsConfigured
+    ? Math.round(gov.privileged_under_review_pct || 0)
+    : 0;
+
   const govMetrics: GovMetric[] = [
     { label: 'Ownership Coverage', value: Math.round(gov.ownership_coverage_pct || 0), target: 80, icon: '\uD83D\uDC64', trend30d: null, configured: gov.ownership_coverage_pct != null && gov.ownership_coverage_pct > 0 },
     { label: 'PIM Coverage', value: Math.round(gov.pim_adoption_pct || 0), target: 90, icon: '\uD83D\uDD10', trend30d: null, configured: gov.pim_adoption_pct != null && gov.pim_adoption_pct > 0 },
     { label: 'Privileged Under Review', value: Math.round(gov.privileged_under_review_pct || 0), target: 100, icon: '\uD83D\uDCCB', trend30d: null, configured: gov.privileged_under_review_pct != null && gov.privileged_under_review_pct > 0 },
-    { label: 'Access Reviews Done', value: Math.round(gov.access_reviews_done ? Math.min(100, (gov.access_reviews_done / Math.max(1, totalIds)) * 100) : 0), target: 95, icon: '\u2713', trend30d: null, configured: gov.access_reviews_done != null && gov.access_reviews_done > 0 },
+    { label: 'Access Reviews Done', value: accessReviewPct, target: 95, icon: '\u2713', trend30d: null, configured: accessReviewsConfigured },
   ];
   const effectivenessConfigured = govMetrics.some(m => m.configured);
 
@@ -252,7 +259,11 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
   if (gov.ownership_coverage_pct != null && gov.ownership_coverage_pct < 50) policyGaps.operationalGaps.push({ label: `Ownership coverage at ${Math.round(gov.ownership_coverage_pct)}%`, count: we.flags?.orphaned || 0, severity: 'high' });
   if (ao.dormant_privileged_count) policyGaps.operationalGaps.push({ label: 'Dormant privileged accounts active', count: ao.dormant_privileged_count, severity: 'medium' });
 
-  const effScore = Math.round((govMetrics.reduce((s, m) => s + m.value, 0) / govMetrics.length));
+  // Effectiveness: only average configured metrics to avoid dilution from unconfigured ones
+  const configuredMetrics = govMetrics.filter(m => m.configured);
+  const effScore = configuredMetrics.length > 0
+    ? Math.round(configuredMetrics.reduce((s, m) => s + m.value, 0) / configuredMetrics.length)
+    : 0;
 
   const lifecycleDist = we.lifecycle_distribution || {};
   const blindCount = lifecycleDist.blind || 0;

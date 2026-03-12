@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { CATEGORY_DISPLAY_ORDER, EXPOSURE_LEVEL_CONFIG } from '../constants/metrics';
+import { CATEGORY_DISPLAY_ORDER, EXPOSURE_LEVEL_CONFIG, getCategoriesForClouds } from '../constants/metrics';
 import { DASHBOARD_TABS, type DashboardTab, COLORS } from '../constants/design';
 import { useConnection } from '../contexts/ConnectionContext';
 import { formatDate } from '../utils/displayHelpers';
@@ -141,6 +141,7 @@ export default function Dashboard() {
     retention: Record<string, { retained: number; total: number; rate: number }>;
   } | null>(null);
   const [discoveryStatus, setDiscoveryStatus] = useState<{ has_snapshot: boolean; total_completed: number; latest_run: any } | null>(null);
+  const [enabledClouds, setEnabledClouds] = useState<string[]>([]);
 
   // Dashboard customization (Phase 44)
   const [customizeOpen, setCustomizeOpen] = useState(false);
@@ -201,7 +202,17 @@ export default function Dashboard() {
         let discStatusJson = null;
         try { const r = await fetch('/api/discovery/status'); if (r.ok) discStatusJson = await r.json(); } catch {}
 
+        let cloudCfg: string[] = [];
+        try {
+          const r = await fetch('/api/tenant/config');
+          if (r.ok) {
+            const cfg = await r.json();
+            cloudCfg = ['azure', 'aws', 'gcp'].filter(k => cfg?.cloud_providers?.[k]?.enabled);
+          }
+        } catch {}
+
         if (!cancelled) {
+          setEnabledClouds(cloudCfg);
           setStats(statsJson);
           setSummary(summaryJson);
           setPosture(postureJson);
@@ -253,11 +264,12 @@ export default function Dashboard() {
 
   const categoryCards = useMemo(() => {
     const categories = summary?.categories || {};
-    return CATEGORY_DISPLAY_ORDER.map((key) => {
+    const displayOrder = getCategoriesForClouds(enabledClouds);
+    return displayOrder.map((key) => {
       const v = categories[key] || { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0, unknown: 0 };
       return { key, ...v };
     });
-  }, [summary]);
+  }, [summary, enabledClouds]);
 
   const riskCounts = useMemo(() => {
     const cats = summary?.categories || {};

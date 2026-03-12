@@ -14,6 +14,7 @@ interface DriftChange {
   severity: string;
   risk_level: string;
   timestamp: string | null;
+  drift_classification: 'privilege_drift' | 'normal_drift';
 }
 
 interface DriftStats {
@@ -49,6 +50,7 @@ export default function PrivilegeDrift() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [showAll, setShowAll] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -71,14 +73,15 @@ export default function PrivilegeDrift() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const privilegedCount = stats?.privileged_changes ?? 0;
+  const displayedChanges = showAll ? changes : changes.filter(c => c.drift_classification === 'privilege_drift');
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Privilege Drift Detection</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Privilege Drift</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Compares identity privileges between the latest two discovery snapshots to detect role escalations, removals, and risk score changes.
+          Risky privilege escalations
         </p>
       </div>
 
@@ -121,6 +124,21 @@ export default function PrivilegeDrift() {
         })}
       </div>
 
+      {/* Classification filter toggle */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setShowAll(!showAll)}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+            showAll ? 'bg-gray-100 text-gray-600' : 'bg-red-50 text-red-700 border border-red-200'
+          }`}
+        >
+          {showAll ? 'Showing All Changes' : 'Showing Escalations Only'}
+        </button>
+        <span className="text-[10px] text-gray-400">
+          {displayedChanges.length} of {changes.length} changes
+        </span>
+      </div>
+
       {/* Table */}
       <div className="bg-white border rounded-xl overflow-hidden">
         {loading ? (
@@ -132,7 +150,7 @@ export default function PrivilegeDrift() {
             </svg>
             <div className="text-sm font-semibold text-gray-600">{message}</div>
           </div>
-        ) : changes.length === 0 ? (
+        ) : displayedChanges.length === 0 ? (
           <div className="p-12 text-center">
             <svg className="w-10 h-10 text-green-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
@@ -153,7 +171,7 @@ export default function PrivilegeDrift() {
               </tr>
             </thead>
             <tbody className="divide-y">
-              {changes.map((c, i) => (
+              {displayedChanges.map((c, i) => (
                 <tr key={`${c.identity_id}-${c.change_type}-${i}`} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
                     <button
@@ -174,8 +192,10 @@ export default function PrivilegeDrift() {
                       <span className="text-xs font-medium text-gray-700">
                         {CHANGE_CONFIG[c.change_type]?.label || c.change_type}
                       </span>
-                      {c.is_privileged && (
-                        <span className="px-1 py-px rounded text-[9px] font-bold bg-red-100 text-red-700">PRIV</span>
+                      {c.drift_classification === 'privilege_drift' ? (
+                        <span className="px-1 py-px rounded text-[9px] font-bold bg-red-100 text-red-700">ESCALATION</span>
+                      ) : (
+                        <span className="px-1 py-px rounded text-[9px] font-bold bg-gray-100 text-gray-500">NORMAL</span>
                       )}
                     </div>
                   </td>

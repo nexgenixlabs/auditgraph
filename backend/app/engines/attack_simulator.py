@@ -29,24 +29,38 @@ class AttackSimulator:
         """Run an identity compromise simulation.
 
         Steps:
-        1. Load IAM graph nodes and edges for this connection
-        2. BFS traverse from the compromised identity
-        3. Detect reachable identities, roles, resources
-        4. Calculate blast radius
-        5. Store simulation + attack paths
-        6. Optionally create risk finding if blast radius exceeds threshold
+        1. Verify identity exists in the identities table
+        2. Load IAM graph nodes and edges for this connection
+        3. If graph is empty, rebuild it via GraphBuilder
+        4. BFS traverse from the compromised identity
+        5. Detect reachable identities, roles, resources
+        6. Calculate blast radius
+        7. Store simulation + attack paths
+        8. Optionally create risk finding if blast radius exceeds threshold
 
         Returns the simulation result dict.
         """
-        # Load graph
-        nodes, edges = self._load_graph(connection_id)
-        if not nodes:
-            return {'error': 'No IAM graph data available for this connection'}
+        # Step 1: Verify identity exists in identities table
+        if not self._identity_exists(identity_id):
+            return {'error': 'Identity not present in graph snapshot'}
 
-        # Find the starting node
+        # Step 2: Load graph
+        nodes, edges = self._load_graph(connection_id)
+
+        # Step 3: If graph is empty, rebuild it
+        if not nodes:
+            logger.info(f"Graph empty for connection {connection_id}, rebuilding...")
+            from app.engines.graph_builder import GraphBuilder
+            result = GraphBuilder(self.db).build_iam_graph(connection_id, org_id)
+            logger.info(f"Graph rebuild: {result.get('node_count', 0)} nodes, {result.get('edge_count', 0)} edges")
+            nodes, edges = self._load_graph(connection_id)
+            if not nodes:
+                return {'error': 'No IAM graph data available for this connection'}
+
+        # Step 4: Find the starting node
         start_node = self._find_identity_node(nodes, identity_id)
         if not start_node:
-            return {'error': f'Identity {identity_id} not found in IAM graph'}
+            return {'error': 'Identity not present in graph snapshot'}
 
         # BFS traversal
         traversal = self._bfs_traverse(start_node, nodes, edges, max_depth)
@@ -84,6 +98,11 @@ class AttackSimulator:
                 connection_id, org_id, identity_id, metrics['blast_radius']
             )
 
+        # Build graph visualization data from traversal
+        graph_nodes, graph_edges = self._build_graph_data(
+            start_node, traversal, nodes, edges
+        )
+
         return {
             'simulation_id': str(simulation['id']) if simulation else None,
             'identity_id': identity_id,
@@ -95,6 +114,8 @@ class AttackSimulator:
             'nodes_traversed': metrics['nodes_traversed'],
             'max_depth_reached': metrics['max_depth_reached'],
             'paths': paths[:50],  # Limit returned paths
+            'nodes': graph_nodes[:200],
+            'edges': graph_edges[:500],
         }
 
     def _load_graph(self, connection_id):
@@ -118,6 +139,21 @@ class AttackSimulator:
         cursor.close()
 
         return nodes, edges
+
+    def _identity_exists(self, identity_id):
+        """Check if identity exists in the identities table."""
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM identities WHERE identity_id = %s LIMIT 1",
+                (identity_id,)
+            )
+            exists = cursor.fetchone() is not None
+            cursor.close()
+            return exists
+        except Exception as e:
+            logger.warning(f"Failed to check identity existence: {e}")
+            return False
 
     def _find_identity_node(self, nodes, identity_id):
         """Find the graph node matching an identity_id."""
@@ -262,6 +298,40 @@ class AttackSimulator:
                 break
         path.reverse()
         return path
+
+    def _build_graph_data(self, start_node_id, traversal, nodes, edges):
+        """Build graph nodes/edges for frontend visualization."""
+        visited_ids = set(traversal.keys())
+        graph_nodes = []
+        for node_id in visited_ids:
+            node = nodes.get(node_id)
+            if not node:
+                continue
+            info = traversal[node_id]
+            graph_nodes.append({
+                'id': node_id,
+                'label': node.get('display_name') or node.get('node_id', node_id),
+                'type': node.get('node_type', 'unknown'),
+                'depth': info['depth'],
+                'is_start': node_id == start_node_id,
+            })
+
+        graph_edges = []
+        seen_edges = set()
+        for edge in edges:
+            src = str(edge['source_node_id'])
+            tgt = str(edge['target_node_id'])
+            if src in visited_ids and tgt in visited_ids:
+                edge_key = (src, tgt)
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    graph_edges.append({
+                        'source': src,
+                        'target': tgt,
+                        'label': edge.get('edge_type', ''),
+                    })
+
+        return graph_nodes, graph_edges
 
     def _create_blast_radius_finding(self, connection_id, org_id, identity_id, blast_radius):
         """Create a risk finding for large blast radius."""
