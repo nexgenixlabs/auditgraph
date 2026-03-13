@@ -19112,11 +19112,15 @@ class Database:
             return 0
         cursor = self.conn.cursor()
         count = 0
+        # Entity types that represent identities (entity_id is an identity UUID)
+        _IDENTITY_ENTITY_TYPES = {'identity', 'service_principal', 'managed_identity', 'role_assignment'}
+
         for f in findings:
             fp = f.get('finding_fingerprint')
             meta = f.get('metadata') or {}
-            f_identity_id = f.get('entity_id') or '' if f.get('entity_type') == 'identity' else ''
-            f_identity_name = meta.get('display_name') or ''
+            # Populate identity_id for all identity-related entity types
+            f_identity_id = f.get('entity_id') or '' if f.get('entity_type') in _IDENTITY_ENTITY_TYPES else ''
+            f_identity_name = f.get('identity_name') or meta.get('display_name') or ''
             if fp:
                 # Fingerprint-based UPSERT: one row per fingerprint per org
                 cursor.execute("""
@@ -19206,11 +19210,18 @@ class Database:
     def get_security_findings(self, limit=50, offset=0, finding_type=None,
                               severity=None, status=None, entity_type=None,
                               run_id=None, entity_id=None) -> list:
-        """Get security findings with optional filters, ordered by severity priority."""
+        """Get security findings with optional filters, ordered by severity priority.
+        Scoped to the current organization_id to prevent cross-tenant data leakage.
+        """
         self._ensure_security_findings_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         conditions = []
         params = []
+        # Organization scoping — prevent cross-tenant data leakage
+        org_id = self._organization_id
+        if org_id is not None:
+            conditions.append("organization_id = %s")
+            params.append(org_id)
         if finding_type:
             conditions.append("finding_type = %s")
             params.append(finding_type)

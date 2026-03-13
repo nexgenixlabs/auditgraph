@@ -37,13 +37,7 @@ const GEI_TOOLTIPS: Record<string, string> = {
 
 export function GovernanceEffectivenessTable({ gei, maturity }: GovernanceEffectivenessTableProps) {
   const navigate = useNavigate();
-  const defaultComponents = [
-    { name: 'Ownership Coverage', score: 0, configured: true },
-    { name: 'PIM Adoption', score: 0, configured: true },
-    { name: 'Access Reviews', score: 0, configured: false },
-    { name: 'Monitoring (P2)', score: 0, configured: true },
-  ];
-  const components = gei?.components ?? defaultComponents;
+  const components = gei?.components ?? [];
   const avgScore = components.filter(c => c.configured).reduce((s, c) => s + c.score, 0) / Math.max(1, components.filter(c => c.configured).length);
   const geiLabel = avgScore >= 80 ? 'Strong' : avgScore >= 50 ? 'Developing' : avgScore > 0 ? 'Weak' : 'Not Assessed';
   const geiColor = avgScore >= 80 ? COLORS.success : avgScore >= 50 ? COLORS.warning : avgScore > 0 ? COLORS.danger : COLORS.textDim;
@@ -62,6 +56,11 @@ export function GovernanceEffectivenessTable({ gei, maturity }: GovernanceEffect
         </div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {components.length === 0 && (
+          <div style={{ padding: '12px 0', fontSize: 11, color: COLORS.textDim, fontFamily: FONT.ui }}>
+            No governance data available. Capture a snapshot to populate governance metrics.
+          </div>
+        )}
         {components.map((c, i) => (
           <div key={i}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>

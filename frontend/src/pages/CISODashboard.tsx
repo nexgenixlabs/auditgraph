@@ -559,6 +559,7 @@ function useCISOData(): { data: TenantData; loading: boolean } {
         const d = buildEmptyData();
 
         // ── Tenant metadata ──
+        const subCount = summary?.monitored_resources?.azure?.subscriptions || 0;
         if (attack?.data_integrity) {
           const di = attack.data_integrity;
           d.tenant.id = String(di.organization_id || di.tenant_id || '');
@@ -569,12 +570,14 @@ function useCISOData(): { data: TenantData; loading: boolean } {
           d.tenant.scanDuration = di.scan_duration_seconds || 0;
           d.tenant.scanCompleteness = di.data_completeness_pct || 0;
           d.tenant.scanConfidence = di.confidence || 'Low';
-          d.tenant.sources = ['Azure RBAC', 'Entra ID', 'Graph API'];
+          // Sources derived from actual cloud connections — not hardcoded
+          d.tenant.sources = [
+            ...(subCount > 0 ? ['Azure RBAC', 'Entra ID', 'Graph API'] : []),
+          ];
         }
         if (attack) {
           d.tenant.identityCount = attack.total_identities || 0;
         }
-        const subCount = summary?.monitored_resources?.azure?.subscriptions || 0;
         d.tenant.subscriptions = subCount;
 
         // ── Risk Score ──
@@ -673,7 +676,11 @@ function useCISOData(): { data: TenantData; loading: boolean } {
         d.ghostAccounts.privileged = Math.min(dormantPrivCount, ghostTotal);
         d.ghostAccounts.nonPrivileged = Math.max(0, ghostTotal - d.ghostAccounts.privileged);
         if (ghostTotal > 0) {
-          d.ghostAccounts.complianceImpact = ['SOC2 CC6.1', 'HIPAA', 'NIST AC-2', 'SOX'];
+          // Derive compliance impact from actual loaded compliance frameworks
+          const loadedFrameworks = comp && typeof comp === 'object'
+            ? Object.values(comp as Record<string, any>).filter((fw: any) => fw?.name).map((fw: any) => fw.short_name || fw.name)
+            : [];
+          d.ghostAccounts.complianceImpact = loadedFrameworks.length > 0 ? loadedFrameworks : [];
           d.ghostAccounts.lastDetected = d.tenant.lastScan;
         }
 
@@ -848,17 +855,25 @@ function useCISOData(): { data: TenantData; loading: boolean } {
         }
 
         // ── Remediations (dynamic from attack surface data) ──
+        // Gains computed from actual pillar weights (SSOT from backend)
         const remCards: Remediation[] = [];
         if (attack) {
-          const ep = attack.pillars?.effective_privilege?.detail || {};
+          const epPillar = attack.pillars?.effective_privilege || {};
+          const ep = epPillar.detail || {};
           const ao = attack.attack_opportunities || {};
-          const cr = attack.pillars?.credential_risk?.detail || {};
-          const og = attack.pillars?.ownership_governance?.detail || {};
+          const crPillar = attack.pillars?.credential_risk || {};
+          const cr = crPillar.detail || {};
+          const ogPillar = attack.pillars?.ownership_governance || {};
+          const og = ogPillar.detail || {};
+          const udPillar = attack.pillars?.usage_dormancy || {};
           const current = d.riskScore.current;
           const target = d.riskScore.target;
+          const gap = Math.max(0, target - current);
 
+          // Gain = pillar weight fraction of the gap (weight/100)
           if ((ep.t0t1 || 0) > 0) {
-            const gain = Math.round((target - current) * 0.3);
+            const weight = epPillar.weight || 0;
+            const gain = weight > 0 ? Math.round(gap * weight / 100) : 0;
             remCards.push({
               id: 'r1', type: 'identity-remediation',
               title: 'Reduce over-privileged identities',
@@ -871,7 +886,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             });
           }
           if ((ao.dormant_privileged_count || 0) > 0) {
-            const gain = Math.round((target - current) * 0.2);
+            const weight = udPillar.weight || 0;
+            const gain = weight > 0 ? Math.round(gap * weight / 100) : 0;
             remCards.push({
               id: 'r2', type: 'identity-remediation',
               title: 'Remediate dormant privileged accounts',
@@ -884,7 +900,9 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             });
           }
           if (ghostTotal > 0) {
-            const gain = Math.round((target - current) * 0.15);
+            // Ghost accounts span privilege + dormancy — use half of each weight
+            const combinedWeight = ((epPillar.weight || 0) + (udPillar.weight || 0)) / 2;
+            const gain = combinedWeight > 0 ? Math.round(gap * combinedWeight / 100) : 0;
             remCards.push({
               id: 'r2b', type: 'identity-remediation',
               title: 'Revoke roles from disabled accounts',
@@ -897,7 +915,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             });
           }
           if ((og.unowned_spns || 0) > 0) {
-            const gain = Math.round((target - current) * 0.1);
+            const weight = ogPillar.weight || 0;
+            const gain = weight > 0 ? Math.round(gap * weight / 100) : 0;
             remCards.push({
               id: 'r3', type: 'identity-remediation',
               title: 'Assign ownership to unowned SPNs',
@@ -910,7 +929,8 @@ function useCISOData(): { data: TenantData; loading: boolean } {
             });
           }
           if ((cr.expired || 0) > 0) {
-            const gain = Math.round((target - current) * 0.15);
+            const weight = crPillar.weight || 0;
+            const gain = weight > 0 ? Math.round(gap * weight / 100) : 0;
             remCards.push({
               id: 'r4', type: 'identity-remediation',
               title: 'Rotate expired credentials',

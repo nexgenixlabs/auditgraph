@@ -2,23 +2,10 @@ import React from 'react';
 import {
   TenantData, Nav,
   F, P, GOV_NAV, POLICY_GAP_NAV,
-  getTierColor,
+  getTier, getTierColor, getTierBg,
   Card, SectionTitle, TooltipWrap, TrendArrow, MiniProgressBar,
   SeverityDot, MaturityBadge, DrillableNumber,
 } from './overview-shared';
-
-function getTier(score: number): string {
-  if (score === 0) return 'No Data';
-  if (score <= 40) return 'Critical';
-  if (score <= 60) return 'Elevated';
-  if (score <= 80) return 'Controlled';
-  return 'Resilient';
-}
-
-function getTierBg(tier: string): string {
-  const m: Record<string, string> = { 'No Data': 'rgba(90,111,150,0.12)', Critical: 'rgba(255,68,68,0.15)', Elevated: 'rgba(255,140,0,0.15)', Controlled: 'rgba(234,179,8,0.15)', Resilient: 'rgba(34,197,94,0.15)' };
-  return m[tier] || 'rgba(255,255,255,0.05)';
-}
 
 function RiskTierBadge({ tier }: { tier: string }) {
   return (

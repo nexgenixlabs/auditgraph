@@ -66,7 +66,6 @@ import RemediationCenter from './pages/RemediationCenter';
 import SecurityFindings from './pages/SecurityFindings';
 import GraphFindings from './pages/GraphFindings';
 import SecurityCommandCenter from './pages/SecurityCommandCenter';
-import SecurityDashboard from './pages/SecurityDashboard';
 import IdentityGraph from './pages/IdentityGraph';
 import IdentityExposures from './pages/IdentityExposures';
 import PrivilegeDrift from './pages/PrivilegeDrift';
@@ -296,7 +295,8 @@ function AppContent() {
                   <Route path="/security-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityFindings /></ErrorBoundary>} />
                   <Route path="/graph-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><GraphFindings /></ErrorBoundary>} />
                   <Route path="/command-center" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityCommandCenter /></ErrorBoundary>} />
-                  <Route path="/security-dashboard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityDashboard /></ErrorBoundary>} />
+                  {/* SecurityDashboard removed — consolidated into Executive Posture + Command Center */}
+                  <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identity-exposures" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExposures /></ErrorBoundary>} />
                   <Route path="/privilege-drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PrivilegeDrift /></ErrorBoundary>} />

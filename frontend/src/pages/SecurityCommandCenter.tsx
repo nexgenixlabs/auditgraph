@@ -309,6 +309,7 @@ export default function SecurityCommandCenter() {
             value={staleCredentials}
             color="text-slate-400"
             bgColor="bg-slate-500/10 border-slate-500/20"
+            onClick={() => navigate('/workload-identities')}
           />
         </div>
       </div>
@@ -400,27 +401,27 @@ export default function SecurityCommandCenter() {
             <h2 className="text-sm font-semibold text-white">Credential & NHI Security</h2>
           </div>
           <div className="divide-y divide-slate-700/30">
-            <div className="px-4 py-3 flex items-center justify-between">
+            <div className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-700/30 transition-colors" onClick={() => navigate('/workload-identities')}>
               <span className="text-sm text-slate-300">Total credentials tracked</span>
               <span className="text-lg font-bold text-slate-300">{cred.total}</span>
             </div>
-            <div className="px-4 py-3 flex items-center justify-between">
+            <div className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-700/30 transition-colors" onClick={() => navigate('/workload-identities?credential_filter=expired')}>
               <span className="text-sm text-slate-300">Expired credentials</span>
               <span className={`text-lg font-bold ${cred.expired > 0 ? 'text-red-400' : 'text-slate-300'}`}>{cred.expired}</span>
             </div>
-            <div className="px-4 py-3 flex items-center justify-between">
+            <div className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-700/30 transition-colors" onClick={() => navigate('/workload-identities?credential_filter=expiring')}>
               <span className="text-sm text-slate-300">Expiring within 30 days</span>
               <span className={`text-lg font-bold ${cred.expiring_soon > 0 ? 'text-orange-400' : 'text-slate-300'}`}>{cred.expiring_soon}</span>
             </div>
-            <div className="px-4 py-3 flex items-center justify-between">
+            <div className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-700/30 transition-colors" onClick={() => navigate('/workload-identities?credential_filter=no_expiry')}>
               <span className="text-sm text-slate-300">Secrets without expiry</span>
               <span className={`text-lg font-bold ${nhi.secrets_without_expiry > 0 ? 'text-red-400' : 'text-slate-300'}`}>{nhi.secrets_without_expiry}</span>
             </div>
-            <div className="px-4 py-3 flex items-center justify-between">
+            <div className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-700/30 transition-colors" onClick={() => navigate('/workload-identities?credential_filter=old')}>
               <span className="text-sm text-slate-300">Secrets older than 180 days</span>
               <span className={`text-lg font-bold ${nhi.secrets_older_than_180_days > 0 ? 'text-orange-400' : 'text-slate-300'}`}>{nhi.secrets_older_than_180_days}</span>
             </div>
-            <div className="px-4 py-3 flex items-center justify-between">
+            <div className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-700/30 transition-colors" onClick={() => navigate('/identities?activity_status=never_used&identity_category=service_principal')}>
               <span className="text-sm text-slate-300">Unused service principals</span>
               <span className={`text-lg font-bold ${nhi.unused_service_principals > 0 ? 'text-yellow-400' : 'text-slate-300'}`}>{nhi.unused_service_principals}</span>
             </div>

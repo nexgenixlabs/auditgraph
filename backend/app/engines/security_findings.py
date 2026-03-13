@@ -46,7 +46,7 @@ _BROAD_RBAC_ROLES = {'Owner', 'Contributor', 'User Access Administrator'}
 
 
 class SecurityFindingsEngine:
-    """Evaluate snapshot state against 14 security detection rules."""
+    """Evaluate snapshot state against 15 security detection rules."""
 
     def __init__(self, db):
         self.db = db
@@ -63,6 +63,7 @@ class SecurityFindingsEngine:
         findings: List[Dict] = []
 
         detectors = [
+            ('unused_service_principal', self._detect_unused_spn),
             ('dormant_privileged_identity', self._detect_dormant_privileged),
             ('disabled_account_active_role', self._detect_disabled_active_role),
             ('guest_admin', self._detect_guest_admin),
@@ -81,10 +82,10 @@ class SecurityFindingsEngine:
 
         for name, detector in detectors:
             try:
+                logger.info(f"Running rule {name}")
                 results = detector(run_id)
                 findings.extend(results)
-                if results:
-                    logger.info(f"  Security finding '{name}': {len(results)} finding(s)")
+                logger.info(f"{len(results)} findings generated")
             except Exception as e:
                 logger.error(f"  Security finding detector '{name}' failed: {e}")
 
@@ -113,7 +114,11 @@ class SecurityFindingsEngine:
         description: str,
         recommended_fix: str = None,
         metadata: dict = None,
+        identity_name: str = None,
     ) -> Dict:
+        meta = metadata or {}
+        if identity_name:
+            meta['display_name'] = identity_name
         return {
             'finding_type': finding_type,
             'entity_type': entity_type,
@@ -123,13 +128,52 @@ class SecurityFindingsEngine:
             'title': title,
             'description': description,
             'recommended_fix': recommended_fix,
-            'metadata': metadata or {},
+            'metadata': meta,
             'finding_fingerprint': compute_finding_fingerprint(entity_id, finding_type),
+            'identity_name': identity_name or '',
         }
 
     # ------------------------------------------------------------------
     # Detection rules
     # ------------------------------------------------------------------
+
+    def _detect_unused_spn(self, run_id: int) -> List[Dict]:
+        """Rule 0: Service principal inactive for 90+ days."""
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT i.identity_id, i.display_name, i.activity_status, i.last_sign_in
+                FROM identities i
+                WHERE i.discovery_run_id = %s
+                  AND i.is_microsoft_system = FALSE
+                  AND i.identity_category = 'service_principal'
+                  AND i.activity_status IN ('stale', 'dormant', 'never_used')
+            """, (run_id,))
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        findings = []
+        for row in rows:
+            identity_id, display_name, activity_status, last_sign_in = row
+            findings.append(self._build_finding(
+                finding_type='unused_service_principal',
+                entity_type='service_principal',
+                entity_id=identity_id,
+                severity='high',
+                risk_score=70,
+                title=f'Unused service principal: {display_name}',
+                description=(
+                    f'Service principal {display_name} has not been used in over 90 days '
+                    f'(status: {activity_status}). Last activity: '
+                    f'{last_sign_in.isoformat() if last_sign_in else "never"}. '
+                    f'Unused SPNs may represent abandoned automation with stale permissions.'
+                ),
+                recommended_fix='Review whether this service principal is still needed. If unused, disable or delete it.',
+                metadata={'activity_status': activity_status},
+                identity_name=display_name,
+            ))
+        return findings
 
     def _detect_dormant_privileged(self, run_id: int) -> List[Dict]:
         """Rule 1: Dormant identity with privileged roles (RBAC or Entra)."""
@@ -165,8 +209,8 @@ class SecurityFindingsEngine:
                 finding_type='dormant_privileged_identity',
                 entity_type='identity',
                 entity_id=identity_id,
-                severity='critical',
-                risk_score=90,
+                severity='high',
+                risk_score=80,
                 title=f'Dormant privileged identity: {display_name}',
                 description=(
                     f'{display_name} ({category}) is {activity_status} but holds '
@@ -175,6 +219,7 @@ class SecurityFindingsEngine:
                 ),
                 recommended_fix='Remove privileged role assignments or disable the identity.',
                 metadata={'activity_status': activity_status, 'category': category},
+                identity_name=display_name,
             ))
         return findings
 
@@ -213,6 +258,7 @@ class SecurityFindingsEngine:
                 ),
                 recommended_fix='Remove all role assignments from the disabled account.',
                 metadata={'category': category},
+                identity_name=display_name,
             ))
         return findings
 
@@ -253,6 +299,7 @@ class SecurityFindingsEngine:
                 ),
                 recommended_fix='Remove administrative roles from guest accounts or convert to member.',
                 metadata={'admin_roles': admin_roles},
+                identity_name=display_name,
             ))
         return findings
 
@@ -287,6 +334,7 @@ class SecurityFindingsEngine:
                     f'Accounts without MFA are vulnerable to credential theft.'
                 ),
                 recommended_fix='Enable MFA via conditional access policy for all human users.',
+                identity_name=display_name,
             ))
         return findings
 
@@ -313,14 +361,15 @@ class SecurityFindingsEngine:
                 finding_type='spn_without_owner',
                 entity_type='service_principal',
                 entity_id=identity_id,
-                severity='high',
-                risk_score=65,
-                title=f'Service principal without owner: {display_name}',
+                severity='medium',
+                risk_score=55,
+                title=f'Unowned service principal: {display_name}',
                 description=(
                     f'{display_name} has no assigned owner. Unowned service principals '
-                    f'lack accountability and may accumulate stale permissions.'
+                    f'lack accountability and may indicate unmanaged automation.'
                 ),
                 recommended_fix='Assign an owner to this service principal in Entra ID.',
+                identity_name=display_name,
             ))
         return findings
 
@@ -347,14 +396,16 @@ class SecurityFindingsEngine:
                 finding_type='spn_secret_expired',
                 entity_type='service_principal',
                 entity_id=identity_id,
-                severity='high',
-                risk_score=75,
-                title=f'Expired credential: {display_name}',
+                severity='critical',
+                risk_score=90,
+                title=f'Expired service principal credential: {display_name}',
                 description=(
-                    f'{display_name} has expired credentials. Expired secrets may indicate '
-                    f'an abandoned app or a rotation failure.'
+                    f'{display_name} has expired credentials. Expired secrets indicate '
+                    f'a rotation failure or abandoned application, posing authentication '
+                    f'and security risks.'
                 ),
                 recommended_fix='Rotate or remove the expired credential. If the SPN is unused, disable it.',
+                identity_name=display_name,
             ))
         return findings
 
@@ -396,6 +447,7 @@ class SecurityFindingsEngine:
                 metadata={
                     'credential_expiration': cred_exp.isoformat() if cred_exp else None,
                 },
+                identity_name=display_name,
             ))
         return findings
 
@@ -435,6 +487,7 @@ class SecurityFindingsEngine:
                 ),
                 recommended_fix='Narrow scope to resource group or individual resource level.',
                 metadata={'roles': roles},
+                identity_name=display_name,
             ))
         return findings
 
@@ -473,6 +526,7 @@ class SecurityFindingsEngine:
                 ),
                 recommended_fix='Use PIM for just-in-time Owner activation. Reduce standing Owner assignments.',
                 metadata={'category': category, 'scope': scope},
+                identity_name=display_name,
             ))
         return findings
 
@@ -546,7 +600,7 @@ class SecurityFindingsEngine:
                         entity_id=identity_id,
                         severity='medium',
                         risk_score=60,
-                        title=f'Access to sensitive resource: {display_name} → {res["name"]}',
+                        title=f'Access to sensitive resource: {display_name} \u2192 {res["name"]}',
                         description=(
                             f'{display_name} ({category}) has {role_name} access to '
                             f'{res["name"]} (classified: {res["classification"]}) '
@@ -559,6 +613,7 @@ class SecurityFindingsEngine:
                             'role': role_name,
                             'scope_type': scope_type,
                         },
+                        identity_name=display_name,
                     ))
         return findings
 
@@ -597,6 +652,7 @@ class SecurityFindingsEngine:
                 ),
                 recommended_fix='Narrow to resource group scope or use more specific built-in roles.',
                 metadata={'role_name': role_name, 'category': category, 'scope': scope},
+                identity_name=display_name,
             ))
         return findings
 

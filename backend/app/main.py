@@ -375,6 +375,7 @@ from app.api.handlers import (
     get_cloud_risk_summary_handler,
     get_security_overview_handler,
     get_security_findings_handler,
+    get_security_findings_summary_handler,
     acknowledge_security_finding_handler,
     resolve_security_finding_handler,
     get_security_dashboard_handler,
@@ -3241,6 +3242,10 @@ def create_app():
     @app.get("/api/security/findings")
     def security_findings_list():
         return get_security_findings_handler()
+
+    @app.get("/api/security/findings/summary")
+    def security_findings_summary():
+        return get_security_findings_summary_handler()
 
     @app.post("/api/security/findings/<finding_id>/acknowledge")
     def security_finding_acknowledge(finding_id):

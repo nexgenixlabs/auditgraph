@@ -106,15 +106,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
           { to: '/command-center', label: 'Command Center', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
-          { to: '/drift', label: 'Drift History', icon: driftIcon },
-          { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
           { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
-          { to: '/graph-findings', label: 'Attack Paths', icon: findingsIcon },
-          { to: '/security-dashboard', label: 'Security Dashboard', icon: dashboardIcon },
-          { to: '/identity-graph', label: 'Identity Graph', icon: dashboardIcon },
-          { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
-          { to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon },
-          { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
+          { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
+          { to: '/drift', label: 'Drift History', icon: driftIcon },
         ],
       },
       {
@@ -124,6 +118,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
           { to: '/workload-identities', label: 'Non-Human Identities', icon: nonHumanIcon },
           { to: '/service-accounts', label: 'Privileged Access', icon: governanceIcon },
+          { to: '/identity-graph', label: 'Identity Graph', icon: accessGraphIcon },
         ],
       },
       {
@@ -136,6 +131,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
           { to: '/key-vaults', label: 'Secrets & Keys', icon: secretsIcon },
           { to: '/storage-accounts', label: 'Storage Exposure', icon: storageIcon },
+        ],
+      },
+      {
+        label: 'Attack Surface',
+        color: '#dc2626',
+        items: [
+          { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
+          { to: '/graph-findings', label: 'Attack Paths', icon: findingsIcon },
+          { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
+          { to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon },
         ],
       },
       {

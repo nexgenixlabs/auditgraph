@@ -15,8 +15,8 @@ export interface BlastRadius { identities: number; subscriptions: number; worklo
 export interface Remediation {
   rank: number; action: string; description: string; gain: number;
   complexity: 'LOW' | 'MEDIUM' | 'HIGH'; affectedIds: number; confidence?: number | null;
-  estimatedDays: number; automation: 'full' | 'partial' | 'manual';
-  blastRadius: BlastRadius; rollbackSafety: 'safe' | 'requires-validation' | 'irreversible';
+  estimatedDays: number | null; automation: 'full' | 'partial' | 'manual' | null;
+  blastRadius: BlastRadius; rollbackSafety: 'safe' | 'requires-validation' | 'irreversible' | null;
   impactsProduction: boolean;
   type: 'identity-remediation' | 'system-action' | 'configuration';
 }

@@ -53,35 +53,34 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
 
   // Single source of truth: 6-pillar attack surface score (higher = worse risk).
   // Invert to posture (higher = better). If attack-surface API unavailable, derive
-  // from pillar data or fall back to posture endpoint (capped to avoid inflated scores).
+  // from posture endpoint. No fabricated scores — show 0 and flag insufficientData.
   const postureScore = (() => {
     if (as?.score != null) return Math.round((100 - as.score) * 10) / 10;
-    // Fallback: posture endpoint uses simple (total - risky) / total formula which inflates.
-    // Cap at 75 to avoid showing "Resilient" when attack surface data is missing.
     const fallback = posture?.posture_score;
-    if (fallback != null) return Math.min(fallback, 75);
-    return 50; // No attack surface data — display as "Awaiting Data" tier
+    if (fallback != null) return fallback;
+    return 0; // No data available — insufficientData flag will show "Awaiting Data" state
   })();
   const insufficientData = as?.score == null && posture?.posture_score == null;
-  const tier = getTier(postureScore);
-  const grade = getGrade(postureScore);
+  const tier = insufficientData ? 'No Data' : getTier(postureScore);
+  const grade = insufficientData ? '—' : getGrade(postureScore);
   const prevPosture: number | null = posture?.previous_posture_score != null
-    ? Math.min(posture.previous_posture_score, as?.score != null ? 100 : 75)
+    ? posture.previous_posture_score
     : (stats?.previous_run ? (100 - (stats.previous_run.avg_risk_score || 0)) : null);
   const delta30d = prevPosture != null ? Math.round((postureScore - prevPosture) * 10) / 10 : null;
 
   const pillars: PillarData[] = PILLAR_ORDER.map(k => {
-    const p = as?.pillars?.[k] || { score: 0, weight: 10, detail: {} };
+    const p = as?.pillars?.[k] || { score: 0, weight: 0, detail: {} };
     return {
       name: PILLAR_NAMES[k] || k,
       score: p.score || 0,
-      weight: p.weight || 10,
+      weight: p.weight || 0,
       detail: detailToString(k, p.detail || {}),
       drilldown: detailToDrilldown(k, p.detail || {}),
     };
   });
 
-  const potentialGain = remed?.potential_gain ?? Math.round(pillars.reduce((s, p) => s + (p.score > 50 ? p.weight * 0.3 : 0), 0) * 10) / 10;
+  // Use API value when available; derive from pillar weights only when API provides weights
+  const potentialGain = remed?.potential_gain ?? Math.round(pillars.reduce((s, p) => s + (p.score > 50 && p.weight > 0 ? p.weight * 0.3 : 0), 0) * 10) / 10;
 
   const history: { day: number; score: number }[] = [];
   if (Array.isArray(trends)) {
@@ -101,7 +100,6 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
     }
   }
   if (ao.privileged_nhi_count) topDrivers.push({ label: `${ao.privileged_nhi_count} privileged non-human identities`, impact: 'medium', pillar: 'Privilege' });
-  while (topDrivers.length < 5) topDrivers.push({ label: 'No additional risk drivers', impact: 'low', pillar: '' });
 
   const remedList: Remediation[] = [];
   const remedItems = remed?.items || remed?.remediations || [];
@@ -113,10 +111,10 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
         rank: i + 1, action: r.action || r.label || `Action ${i + 1}`,
         description: r.description || '', gain: r.gain || r.score_impact || 0,
         complexity: comp, affectedIds: r.affected_ids || r.affectedIds || 0,
-        confidence: r.confidence || 85, estimatedDays: r.estimated_days || (comp === 'LOW' ? 3 : comp === 'MEDIUM' ? 7 : 14),
-        automation: r.automation || (comp === 'LOW' ? 'full' : comp === 'MEDIUM' ? 'partial' : 'manual'),
-        blastRadius: r.blast_radius || { identities: r.affected_ids || 0, subscriptions: 1, workloads: 0 },
-        rollbackSafety: r.rollback_safety || (comp === 'LOW' ? 'safe' : comp === 'HIGH' ? 'irreversible' : 'requires-validation'),
+        confidence: r.confidence ?? null, estimatedDays: r.estimated_days ?? null,
+        automation: r.automation || null,
+        blastRadius: r.blast_radius || { identities: r.affected_ids || 0, subscriptions: 0, workloads: 0 },
+        rollbackSafety: r.rollback_safety || null,
         impactsProduction: r.impacts_production ?? (r.blast_radius?.workloads > 0),
         type: rType === 'system-action' || rType === 'configuration' ? rType : 'identity-remediation',
       });
@@ -129,61 +127,67 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
     const pils = as.pillars;
     if (pils.effective_privilege?.score > 15) {
       const d = pils.effective_privilege.detail || {};
+      const w = pils.effective_privilege.weight || 0;
       pillarRemediations.push({
         action: 'Reduce over-privileged identities',
         description: `${d.t0t1 || 0} identities hold T0/T1 privileges — review and remove unnecessary Global Admin, Owner, and Contributor roles.`,
-        gain: Math.round(pils.effective_privilege.score * 0.3 * (pils.effective_privilege.weight || 30) / 10),
+        gain: w > 0 ? Math.round(pils.effective_privilege.score * 0.3 * w / 10) : 0,
         complexity: pils.effective_privilege.score > 60 ? 'HIGH' : 'MEDIUM',
         affectedIds: d.t0t1 || 0, nav: '/identities?risk_level=critical',
       });
     }
     if (pils.credential_risk?.score > 15) {
       const d = pils.credential_risk.detail || {};
+      const w = pils.credential_risk.weight || 0;
       const badCreds = (d.expired || 0) + (d.expiring || 0);
       pillarRemediations.push({
         action: 'Rotate expired & expiring credentials',
         description: `${badCreds} credentials are expired or expiring within 30 days — rotate secrets and certificates immediately.`,
-        gain: Math.round(pils.credential_risk.score * 0.3 * (pils.credential_risk.weight || 20) / 10),
+        gain: w > 0 ? Math.round(pils.credential_risk.score * 0.3 * w / 10) : 0,
         complexity: 'LOW',
         affectedIds: badCreds, nav: '/workload-identities',
       });
     }
     if (pils.usage_dormancy?.score > 15) {
       const d = pils.usage_dormancy.detail || {};
+      const w = pils.usage_dormancy.weight || 0;
       pillarRemediations.push({
         action: 'Disable dormant identities',
         description: `${d.dormant || 0} identities are stale or never used — disable or remove to reduce attack surface.`,
-        gain: Math.round(pils.usage_dormancy.score * 0.3 * (pils.usage_dormancy.weight || 10) / 10),
+        gain: w > 0 ? Math.round(pils.usage_dormancy.score * 0.3 * w / 10) : 0,
         complexity: 'LOW',
         affectedIds: d.dormant || 0, nav: '/identities?activity_status=stale',
       });
     }
     if (pils.ownership_governance?.score > 15) {
       const d = pils.ownership_governance.detail || {};
+      const w = pils.ownership_governance.weight || 0;
       pillarRemediations.push({
         action: 'Assign owners to unowned service principals',
         description: `${d.unowned_spns || 0} of ${d.total_spns || 0} service principals lack owners — assign accountability for each.`,
-        gain: Math.round(pils.ownership_governance.score * 0.3 * (pils.ownership_governance.weight || 10) / 10),
+        gain: w > 0 ? Math.round(pils.ownership_governance.score * 0.3 * w / 10) : 0,
         complexity: 'LOW',
         affectedIds: d.unowned_spns || 0, nav: '/workload-identities',
       });
     }
     if (pils.trust_federation?.score > 15) {
       const d = pils.trust_federation.detail || {};
+      const w = pils.trust_federation.weight || 0;
       pillarRemediations.push({
         action: 'Review guest & external privileged access',
         description: `${d.guest_with_roles || 0} guest identities hold privileged roles — audit and restrict external access.`,
-        gain: Math.round(pils.trust_federation.score * 0.3 * (pils.trust_federation.weight || 20) / 10),
+        gain: w > 0 ? Math.round(pils.trust_federation.score * 0.3 * w / 10) : 0,
         complexity: 'MEDIUM',
         affectedIds: d.guest_with_roles || 0, nav: '/identities?identity_category=guest',
       });
     }
     if (pils.external_exposure?.score > 15) {
       const d = pils.external_exposure.detail || {};
+      const w = pils.external_exposure.weight || 0;
       pillarRemediations.push({
         action: 'Scope down tenant-wide permissions',
         description: `${d.tenant_scope || 0} identities have tenant-wide scope — apply least-privilege at subscription or resource group level.`,
-        gain: Math.round(pils.external_exposure.score * 0.3 * (pils.external_exposure.weight || 10) / 10),
+        gain: w > 0 ? Math.round(pils.external_exposure.score * 0.3 * w / 10) : 0,
         complexity: 'HIGH',
         affectedIds: d.tenant_scope || 0, nav: '/identities',
       });
@@ -194,10 +198,9 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
       remedList.push({
         rank: i + 1, action: pr.action, description: pr.description, gain: pr.gain,
         complexity: pr.complexity, affectedIds: pr.affectedIds,
-        estimatedDays: pr.complexity === 'LOW' ? 3 : pr.complexity === 'MEDIUM' ? 7 : 14,
-        automation: pr.complexity === 'LOW' ? 'full' : pr.complexity === 'MEDIUM' ? 'partial' : 'manual',
-        blastRadius: { identities: pr.affectedIds, subscriptions: 1, workloads: 0 },
-        rollbackSafety: pr.complexity === 'LOW' ? 'safe' : pr.complexity === 'HIGH' ? 'irreversible' : 'requires-validation',
+        estimatedDays: null, automation: null,
+        blastRadius: { identities: pr.affectedIds, subscriptions: 0, workloads: 0 },
+        rollbackSafety: null,
         impactsProduction: false, type: 'identity-remediation',
       });
     });
@@ -233,9 +236,7 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
       });
     });
   }
-  if (!Object.keys(compFrameworks).length) {
-    compFrameworks['Core Governance'] = [{ name: 'No data', passed: 0, total: 1, pct: 0, failingIdentities: 0, controlMappingSource: 'Capture a snapshot', coverageTrend30d: null, controls: [], key: 'none', category: 'Core Governance' }];
-  }
+  // No dummy framework — empty state handled by UI components
 
   const accessReviewsDone = gov.access_reviews_done || 0;
   const accessReviewsConfigured = accessReviewsDone > 0;
@@ -281,7 +282,12 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
       subscriptions: subs,
       lastScan: di.last_scan || lr.completed_at || new Date().toISOString(),
       scanDuration: di.scan_duration_seconds || 0, scanCompleteness: di.data_completeness_pct || 100,
-      scanConfidence: di.confidence || 'Medium', sources: ['Azure RBAC', 'Entra ID', 'Graph API'],
+      scanConfidence: di.confidence || 'Medium',
+      sources: [
+        ...(azureSubs > 0 ? ['Azure RBAC', 'Entra ID', 'Graph API'] : []),
+        ...(awsAccounts > 0 ? ['AWS IAM'] : []),
+        ...(gcpProjects > 0 ? ['GCP IAM'] : []),
+      ],
       confidenceModelBasis: `Based on ${di.confidence || 'trend'} confidence — ${di.data_completeness_pct || 100}% data completeness`,
       scanCoverage: subs > 0 ? Math.round((di.data_completeness_pct || 100)) : 0,
       dataCompleteness: Math.round(di.data_completeness_pct || 100),
@@ -332,9 +338,7 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
     riskScore: (() => {
       const remedGain = remedList.filter(r => r.type === 'identity-remediation').reduce((s, r) => s + r.gain, 0);
       const finalGain = remedGain > 0 ? remedGain : potentialGain;
-      // Cap projected score: never show 100 if there are open remediation items — cap at 95
       const hasOpenRemediations = remedList.some(r => r.type === 'identity-remediation') || (critCount + highCount > 0);
-      const maxProjected = hasOpenRemediations ? 95 : 100;
       return {
         current: postureScore, grade, tier, previous30d: prevPosture, delta30d,
         industryAvg: as?.industry_avg ?? null,
@@ -343,7 +347,7 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
         projectedNoAction: delta30d != null
           ? Math.max(0, postureScore - (delta30d < 0 ? Math.abs(delta30d) : (critCount + highCount > 0 ? 3 : 1)))
           : null,
-        projectedRemediated: Math.min(maxProjected, postureScore + finalGain),
+        projectedRemediated: Math.min(100, postureScore + finalGain),
         history,
       };
     })(),

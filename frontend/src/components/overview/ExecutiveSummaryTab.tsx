@@ -94,8 +94,8 @@ export function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openCompl
                   <div style={{ fontFamily: F.ui, fontSize: 13, color: P.textLight, fontWeight: 600 }}>{r.action}</div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
                     <span style={{ fontFamily: F.data, fontSize: 16, color: '#22c55e', fontWeight: 700 }}>+{r.gain}</span>
-                    <AutomationBadge level={r.automation} />
-                    <RollbackBadge safety={r.rollbackSafety} />
+                    {r.automation && <AutomationBadge level={r.automation} />}
+                    {r.rollbackSafety && <RollbackBadge safety={r.rollbackSafety} />}
                   </div>
                 </div>
               </div>

@@ -20528,7 +20528,8 @@ def get_workload_stats():
         """, (run_ids, cats))
         id_stats = dict(cursor.fetchone())
 
-        # App reg stats
+        # App reg stats — only count standalone app registrations (no linked SPN)
+        # App regs WITH a linked SPN are already counted via identities table above
         cursor.execute("""
             SELECT
                 COUNT(*) as ar_total,
@@ -20541,6 +20542,7 @@ def get_workload_stats():
                 COALESCE(AVG(a.exposure_score), 0) as ar_avg
             FROM app_registrations a
             WHERE a.discovery_run_id = ANY(%s)
+              AND NOT COALESCE(a.has_service_principal, false)
         """, (run_ids,))
         ar_stats = dict(cursor.fetchone())
 
@@ -20795,9 +20797,14 @@ def get_workload_list():
                 items.append(r)
 
         # ── Query app_registrations ────────────────────────────────
+        # When showing 'all', exclude app regs that have a linked SPN
+        # (those are already represented by the SPN row from identities table)
         if include_ar:
             ar_where = ["a.discovery_run_id = ANY(%s)"]
             ar_params = [run_ids]
+
+            if wtype == 'all':
+                ar_where.append("NOT COALESCE(a.has_service_principal, false)")
 
             if exposure_level:
                 ranges = {'critical': (80, 100), 'high': (60, 79), 'medium': (35, 59), 'low': (0, 34)}
@@ -25211,8 +25218,10 @@ def get_security_findings_handler():
                 except Exception:
                     meta = {}
             # Prefer the dedicated identity_id column; fall back to entity_id
+            # for all identity-related entity types
+            _IDENTITY_TYPES = {'identity', 'service_principal', 'managed_identity', 'role_assignment'}
             identity_id = r.get('identity_id') or ''
-            if not identity_id and r.get('entity_type') == 'identity':
+            if not identity_id and r.get('entity_type') in _IDENTITY_TYPES:
                 identity_id = r.get('entity_id') or ''
             identity_name = r.get('identity_name') or meta.get('display_name') or ''
             findings.append({
@@ -25244,6 +25253,30 @@ def get_security_findings_handler():
         import traceback
         traceback.print_exc()
         return jsonify({'findings': [], 'count': 0, 'stats': {'total': 0, 'open': 0, 'by_severity': {}, 'by_rule_type': {}}})
+    finally:
+        db.close()
+
+
+def get_security_findings_summary_handler():
+    """GET /api/security/findings/summary — severity counts for dashboard cards.
+
+    Returns {critical, high, medium, low, total} from open security findings.
+    """
+    db = _db()
+    try:
+        stats = db.get_security_findings_stats()
+        by_sev = stats.get('by_severity', {})
+        return jsonify({
+            'critical': by_sev.get('critical', 0),
+            'high': by_sev.get('high', 0),
+            'medium': by_sev.get('medium', 0),
+            'low': by_sev.get('low', 0),
+            'total': stats.get('open', 0),
+        })
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'total': 0})
     finally:
         db.close()
 
