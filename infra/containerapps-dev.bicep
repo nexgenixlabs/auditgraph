@@ -102,23 +102,27 @@ resource cae 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
 }
 
-// ── Existing Managed Certificates (created via az CLI, referenced here to persist across deploys)
-resource certApi 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
-  parent: cae
-  name: 'mc-dev-cae-ext-dev-api-auditgra-2025'
-}
-resource certApp 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
-  parent: cae
-  name: 'mc-dev-cae-ext-dev-app-auditgra-8561'
-}
-resource certAdmin 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
-  parent: cae
-  name: 'mc-dev-cae-ext-dev-admin-auditg-9679'
-}
-resource certDemo 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
-  parent: cae
-  name: 'mc-dev-cae-ext-demo-auditgraph'
-}
+// ── Managed Certificates ──────────────────────────────────────────────────────
+// Custom domains & certs are added AFTER initial deploy via az CLI:
+//   az containerapp hostname add ...
+//   az containerapp hostname bind --hostname ... --environment dev-cae-ext --validation-method CNAME
+// Uncomment these once certificates exist:
+// resource certApi 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
+//   parent: cae
+//   name: 'mc-dev-cae-ext-dev-api-auditgra-2025'
+// }
+// resource certApp 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
+//   parent: cae
+//   name: 'mc-dev-cae-ext-dev-app-auditgra-8561'
+// }
+// resource certAdmin 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
+//   parent: cae
+//   name: 'mc-dev-cae-ext-dev-admin-auditg-9679'
+// }
+// resource certDemo 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' existing = {
+//   parent: cae
+//   name: 'mc-dev-cae-ext-demo-auditgraph'
+// }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // API Container App — auditgraph-api-dev
@@ -136,13 +140,6 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 8000
         transport: 'auto'
         allowInsecure: false
-        customDomains: [
-          {
-            name: 'dev.api.auditgraph.ai'
-            certificateId: certApi.id
-            bindingType: 'SniEnabled'
-          }
-        ]
       }
       registries: [
         {
@@ -256,18 +253,6 @@ resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 3000
         transport: 'auto'
         allowInsecure: false
-        customDomains: [
-          {
-            name: 'dev.app.auditgraph.ai'
-            certificateId: certApp.id
-            bindingType: 'SniEnabled'
-          }
-          {
-            name: 'demo.auditgraph.ai'
-            certificateId: certDemo.id
-            bindingType: 'SniEnabled'
-          }
-        ]
       }
       registries: [
         {
@@ -327,13 +312,6 @@ resource adminApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 3001
         transport: 'auto'
         allowInsecure: false
-        customDomains: [
-          {
-            name: 'dev.admin.auditgraph.ai'
-            certificateId: certAdmin.id
-            bindingType: 'SniEnabled'
-          }
-        ]
       }
       registries: [
         {
