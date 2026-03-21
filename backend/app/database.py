@@ -5059,6 +5059,30 @@ class Database:
         if Database._users_ensured:
             return
         cursor = self.conn.cursor()
+        # Fix all tables with integer id columns missing SERIAL sequences
+        # (happens when CREATE TABLE IF NOT EXISTS runs but table already
+        #  exists from a partial startup without the sequence attached)
+        try:
+            cursor.execute("""
+                DO $$ DECLARE tbl TEXT; seq_name TEXT; BEGIN
+                    FOR tbl IN
+                        SELECT c.table_name FROM information_schema.columns c
+                        WHERE c.table_schema = 'public' AND c.column_name = 'id'
+                          AND c.data_type = 'integer' AND c.column_default IS NULL
+                    LOOP
+                        seq_name := tbl || '_id_seq';
+                        EXECUTE format('CREATE SEQUENCE IF NOT EXISTS %I', seq_name);
+                        EXECUTE format('ALTER TABLE %I ALTER COLUMN id SET DEFAULT nextval(%L)', tbl, seq_name);
+                        EXECUTE format('SELECT setval(%L, COALESCE((SELECT MAX(id) FROM %I), 0) + 1, false)', seq_name, tbl);
+                    END LOOP;
+                END $$
+            """)
+            self._commit()
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -10202,6 +10226,14 @@ class Database:
             )
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_slug ON organizations(slug)")
+        # Ensure SERIAL sequence exists (fixes tables created without sequence)
+        cursor.execute("""
+            DO $$ BEGIN
+                CREATE SEQUENCE IF NOT EXISTS organizations_id_seq;
+                ALTER TABLE organizations ALTER COLUMN id SET DEFAULT nextval('organizations_id_seq');
+                PERFORM setval('organizations_id_seq', COALESCE((SELECT MAX(id) FROM organizations), 0) + 1, false);
+            END $$
+        """)
         # Phase 77: Add license columns
         cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS license_activated_at TIMESTAMPTZ")
         cursor.execute("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS license_expires_at TIMESTAMPTZ")
@@ -16738,64 +16770,92 @@ class Database:
         return result
 
     def delete_organization(self, organization_id):
-        """Delete an organization and all associated data using 7-tier cascade.
+        """Delete an organization and ALL associated data.
 
-        Tier 1: Tables with non-CASCADE FK to users (created_by, attested_by, etc.)
-        Tier 2: Tables with FK to playbooks/webhooks
-        Tier 3: Standalone organization-scoped tables (no cross-table FK)
-        Tier 4: risk_scores (FK to discovery_runs)
-        Tier 5: discovery_runs — CASCADE auto-deletes identities + 11 children,
-                 compliance_snapshots, azure_storage_accounts, azure_key_vaults,
-                 app_registrations, anomalies, drift_reports, identity_subscription_access,
-                 ca_policies
-        Tier 6: users — CASCADE auto-deletes refresh_tokens, sso_auth_codes,
-                 dashboard_preferences, saved_views
-        Tier 7: settings, activity_log, organizations
+        Comprehensive 12-phase cascade covering all org-scoped tables.
+        Every delete uses SAVEPOINT for fault tolerance (handles tables
+        that may not exist yet or have no matching rows).
+
+        Phase order: deepest FK leaves → identity children → identities →
+        risk_scores → discovery_runs → cloud infra → user children →
+        users → billing/org-level → final (settings, activity_log, org).
         """
         self._ensure_organizations_table()
         cursor = self.conn.cursor()
+        warnings = []
 
-        # Tier 1 — tables with non-CASCADE FK to users
-        tier1_tables = [
-            'campaign_audit_log', 'campaign_reviews', 'access_review_campaigns',
-            'sa_attestations', 'governance_decisions', 'identity_group_members',
-            'identity_groups', 'api_keys',
-        ]
-        for tbl in tier1_tables:
+        def _safe_del(table, where='organization_id = %s', params=None):
+            if params is None:
+                params = (organization_id,)
             try:
-                cursor.execute(f"SAVEPOINT sp_{tbl}")
-                cursor.execute(f"DELETE FROM {tbl} WHERE organization_id = %s", (organization_id,))
-                cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
-            except Exception:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
+                cursor.execute(f"SAVEPOINT sp_{table}")
+                cursor.execute(f"DELETE FROM {table} WHERE {where}", params)
+                cursor.execute(f"RELEASE SAVEPOINT sp_{table}")
+            except Exception as e:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{table}")
+                warnings.append(f"{table}: {e}")
 
-        # Tier 2 — tables with FK to playbooks/webhooks
-        tier2_tables = [
-            'soar_actions', 'soar_playbooks', 'webhook_deliveries', 'webhooks',
-        ]
-        for tbl in tier2_tables:
-            try:
-                cursor.execute(f"SAVEPOINT sp_{tbl}")
-                cursor.execute(f"DELETE FROM {tbl} WHERE organization_id = %s", (organization_id,))
-                cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
-            except Exception:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
+        # ── Phase 1: Deep leaf tables (FK to other org-scoped tables) ──
+        for t in [
+            'review_evidence', 'review_assignments',
+            'campaign_audit_log', 'campaign_reviews',
+            'invoice_documents', 'report_outputs',
+            'soar_actions', 'webhook_deliveries',
+            'identity_group_members', 'governance_decisions',
+        ]:
+            _safe_del(t)
 
-        # Tier 3 — standalone organization-scoped tables
-        tier3_tables = [
-            'notifications', 'custom_risk_rules', 'copilot_conversations',
-            'remediation_actions', 'ca_policies', 'drift_reports',
-            'cloud_subscriptions', 'cloud_connections', 'billing_events',
-        ]
-        for tbl in tier3_tables:
-            try:
-                cursor.execute(f"SAVEPOINT sp_{tbl}")
-                cursor.execute(f"DELETE FROM {tbl} WHERE organization_id = %s", (organization_id,))
-                cursor.execute(f"RELEASE SAVEPOINT sp_{tbl}")
-            except Exception:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{tbl}")
+        # ── Phase 2: Mid-level tables (parents of Phase 1) ──
+        for t in [
+            'access_review_campaigns', 'access_reviews',
+            'report_runs', 'reports',
+            'invoices', 'identity_groups',
+            'soar_playbooks', 'webhooks',
+            'sa_attestations', 'api_keys',
+        ]:
+            _safe_del(t)
 
-        # Tier 4 — risk_scores (may not exist; keyed by run_id)
+        # ── Phase 3: Identity/run-scoped analytics tables ──
+        for t in [
+            'workload_signin_events', 'workload_anomaly_events',
+            'workload_activity_stats',
+            'attack_paths', 'blast_radius_results',
+            'agirs_scores',
+            'spn_exposure_findings', 'app_reg_exposure_findings',
+            'orphaned_privileged_findings', 'security_findings',
+            'fix_recommendations', 'human_identities',
+            'identity_links', 'rbac_hygiene_scans',
+            'role_activity_log', 'resource_findings',
+            'resource_risk_history', 'discovery_integrity_metrics',
+        ]:
+            _safe_del(t)
+
+        # ── Phase 4: Identity child tables (normally CASCADE from identities,
+        #     but explicit delete prevents FK errors if CASCADE is missing) ──
+        for t in [
+            'credentials', 'graph_api_permissions',
+            'sp_ownership', 'sp_app_roles',
+            'identity_roles', 'role_assignments',
+            'entra_role_assignments',
+            'pim_eligible_assignments', 'pim_activations',
+            'ca_identity_coverage', 'identity_subscription_access',
+        ]:
+            _safe_del(t)
+
+        # ── Phase 5: Run-scoped tables ──
+        for t in [
+            'ca_policies', 'drift_reports',
+            'remediation_actions', 'anomalies',
+            'compliance_snapshots',
+            'azure_storage_accounts', 'azure_key_vaults',
+            'app_registrations',
+        ]:
+            _safe_del(t)
+
+        # ── Phase 6: Identities ──
+        _safe_del('identities')
+
+        # ── Phase 7: risk_scores (FK to discovery_runs, NOT CASCADE) ──
         try:
             cursor.execute("SAVEPOINT sp_risk_scores")
             cursor.execute("""
@@ -16803,27 +16863,87 @@ class Database:
                 WHERE run_id IN (SELECT id FROM discovery_runs WHERE organization_id = %s)
             """, (organization_id,))
             cursor.execute("RELEASE SAVEPOINT sp_risk_scores")
-        except Exception:
+        except Exception as e:
             cursor.execute("ROLLBACK TO SAVEPOINT sp_risk_scores")
+            warnings.append(f"risk_scores: {e}")
 
-        # Tier 5 — discovery_runs (CASCADE deletes identities + 11 children,
-        #           compliance_snapshots, azure_storage_accounts, azure_key_vaults,
-        #           app_registrations, anomalies, drift_reports, identity_subscription_access,
-        #           ca_policies)
-        cursor.execute("DELETE FROM discovery_runs WHERE organization_id = %s", (organization_id,))
+        # ── Phase 8: discovery_runs ──
+        _safe_del('discovery_runs')
 
-        # Tier 6 — users (CASCADE deletes refresh_tokens, sso_auth_codes,
-        #           dashboard_preferences, saved_views)
-        cursor.execute("DELETE FROM users WHERE organization_id = %s", (organization_id,))
+        # ── Phase 9: Cloud infra (cloud_connections CASCADE-deletes
+        #     graph_nodes/graph_edges, but explicit delete for safety) ──
+        for t in ['graph_nodes', 'graph_edges']:
+            _safe_del(t)
+        _safe_del('cloud_connections')
+        _safe_del('cloud_subscriptions')
 
-        # Tier 7 — settings, activity_log, organizations
-        cursor.execute("DELETE FROM settings WHERE organization_id = %s", (organization_id,))
-        cursor.execute("DELETE FROM activity_log WHERE organization_id = %s", (organization_id,))
+        # ── Phase 10: User-scoped tables (before deleting users) ──
+        for t in [
+            'refresh_tokens', 'sso_auth_codes',
+            'dashboard_preferences', 'saved_views',
+            'copilot_conversations', 'custom_risk_rules',
+            'notifications',
+        ]:
+            _safe_del(t)
+        _safe_del('users')
+
+        # ── Phase 11: Billing & org-level tables ──
+        for t in [
+            'billing_events', 'billing_audit_log',
+            'organization_billing_snapshots',
+            'organization_entitlements',
+            'organization_usage', 'organization_usage_counters',
+            'tenant_health', 'scan_schedules', 'job_runs',
+        ]:
+            _safe_del(t)
+        _safe_del('msp_relationships',
+                  'msp_organization_id = %s OR client_organization_id = %s',
+                  (organization_id, organization_id))
+        _safe_del('admin_audit_log',
+                  'target_organization_id = %s',
+                  (organization_id,))
+
+        # ── Phase 12: Final cleanup ──
+        _safe_del('settings')
+        _safe_del('activity_log')
+        # The org row itself — must succeed
         cursor.execute("DELETE FROM organizations WHERE id = %s", (organization_id,))
         deleted = cursor.rowcount > 0
 
         self._commit()
         cursor.close()
+
+        if warnings:
+            _db_logger.warning(
+                "Non-fatal warnings during org %s delete: %s",
+                organization_id, warnings,
+            )
+        return deleted
+
+    def delete_organizations_by_pattern(self, name_pattern):
+        """Delete all organizations matching a name pattern (e.g. 'Benchmark%').
+
+        Returns list of deleted org dicts [{id, name, slug}, ...].
+        Skips the 'default' organization.
+        """
+        self._ensure_organizations_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, name, slug FROM organizations
+            WHERE name LIKE %s AND slug != 'default'
+            ORDER BY id
+        """, (name_pattern,))
+        orgs = cursor.fetchall()
+        cursor.close()
+
+        deleted = []
+        for org in orgs:
+            try:
+                self.delete_organization(org['id'])
+                deleted.append(dict(org))
+            except Exception as e:
+                _db_logger.error("Failed to delete org %s (%s): %s",
+                                 org['id'], org['name'], e)
         return deleted
 
     # ── Phase 54: SSO Methods ──────────────────────────────────────────
