@@ -130,7 +130,7 @@ resource cae 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
 
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'auditgraph-api-dev'
-  location: resourceGroup().location
+  location: 'centralus'
   properties: {
     managedEnvironmentId: cae.id
     configuration: {
@@ -243,7 +243,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
 
 resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'auditgraph-app-dev'
-  location: resourceGroup().location
+  location: 'centralus'
   properties: {
     managedEnvironmentId: cae.id
     configuration: {
@@ -302,7 +302,7 @@ resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
 
 resource adminApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'auditgraph-admin-dev'
-  location: resourceGroup().location
+  location: 'centralus'
   properties: {
     managedEnvironmentId: cae.id
     configuration: {
