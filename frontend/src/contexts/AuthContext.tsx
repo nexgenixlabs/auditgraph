@@ -119,6 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const switchOrganization = useCallback((orgId: number | null, orgName?: string) => {
+    const prevOrgId = localStorage.getItem('active_org_id');
     setActiveOrgId(orgId);
     setActiveOrgName(orgName || null);
     if (orgId !== null) {
@@ -127,6 +128,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } else {
       localStorage.removeItem('active_org_id');
       localStorage.removeItem('active_org_name');
+    }
+    // Force full page reload on org switch to guarantee all components refetch
+    // with the new org context. Without this, stale data from the previous org
+    // remains in component state (subscriptions, groups, identities, etc.)
+    const newOrgId = orgId !== null ? String(orgId) : null;
+    if (prevOrgId !== newOrgId && prevOrgId !== null) {
+      window.location.reload();
     }
   }, []);
 

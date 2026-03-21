@@ -89,3 +89,7 @@ gunicorn
 Flask>=3.0.0
 APScheduler>=3.10.0
 sendgrid>=6.10.0
+
+# API Security & Validation
+jsonschema>=4.20.0
+tenacity>=8.2.0

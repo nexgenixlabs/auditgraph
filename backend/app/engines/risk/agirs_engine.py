@@ -65,11 +65,36 @@ class AGIRSEngine:
         self.db = db
 
     def compute(self, organization_id: int, run_id: int) -> Dict:
-        """Run full AGIRS computation, persist results, and update blast_radius_score on identities."""
+        """Run full AGIRS computation, persist results, and update blast_radius_score on identities.
+
+        DEPRECATED: Use compute_only() via RiskSummaryEngine instead.
+        This method is kept for backward compatibility but now delegates to compute_only().
+        """
+        run_ids = self._get_run_ids_for_org(organization_id)
+        if not run_ids:
+            logger.warning(f"AGIRS: No completed runs for organization {organization_id}")
+            return self._empty_result()
+
+        result = self.compute_only(organization_id, run_ids)
+
+        # Persist to legacy agirs_scores table (backward compat)
+        try:
+            self.db.save_agirs_scores(run_id, result)
+        except Exception as e:
+            logger.warning(f"AGIRS: failed to save to legacy agirs_scores: {e}")
+
+        return result
+
+    def compute_only(self, organization_id: int, run_ids: List[int]) -> Dict:
+        """Compute AGIRS scores without persisting to agirs_scores table.
+
+        Called by RiskSummaryEngine as the canonical AGIRS computation path.
+        Results are persisted to risk_summary table by the caller.
+        """
         cursor = self.db.conn.cursor()
         try:
-            # Get all run_ids for this organization's latest completed runs
-            run_ids = self._get_run_ids(cursor, organization_id)
+            if not run_ids:
+                run_ids = self._get_run_ids_for_org(organization_id)
             if not run_ids:
                 logger.warning(f"AGIRS: No completed runs for organization {organization_id}")
                 return self._empty_result()
@@ -87,7 +112,7 @@ class AGIRSEngine:
             # Get top dangerous identities
             dangerous = self._get_top_dangerous(cursor, run_ids, n=5)
 
-            result = {
+            return {
                 'agirs_score': agirs_score,
                 'hiri_score': hiri['score'],
                 'nhiri_score': nhiri['score'],
@@ -100,15 +125,18 @@ class AGIRSEngine:
                 'nhi_count': nhiri['nhi_count'],
             }
 
-            # Persist to agirs_scores table
-            self.db.save_agirs_scores(run_id, result)
-
-            return result
-
         except Exception as e:
             logger.error(f"AGIRS computation failed: {e}")
             self.db._rollback()
             raise
+        finally:
+            cursor.close()
+
+    def _get_run_ids_for_org(self, organization_id: int) -> List[int]:
+        """Get latest completed discovery run IDs for this organization."""
+        cursor = self.db.conn.cursor()
+        try:
+            return self._get_run_ids(cursor, organization_id)
         finally:
             cursor.close()
 

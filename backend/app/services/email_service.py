@@ -77,7 +77,7 @@ class EmailService:
         self.tenant_id = os.getenv('AZURE_TENANT_ID')
         self.client_id = os.getenv('AZURE_CLIENT_ID')
         self.client_secret = os.getenv('AZURE_CLIENT_SECRET')
-        self.from_email = os.getenv('EMAIL_FROM', 'bhupathireddys@nexgenixlabs.com')
+        self.from_email = os.getenv('EMAIL_FROM', 'noreply@auditgraph.ai')
         self.to_email = os.getenv('EMAIL_TO', 'info@nexgenixlabs.com')
 
         # Check if credentials are configured
@@ -469,6 +469,111 @@ class EmailService:
         <div class="identity-list">{''.join(items)}</div>
     </div>
 """
+
+    # ====================================================================
+    # Phase 2 (AI Agent Governance): Orphaned Agent Alert
+    # ====================================================================
+
+    def send_orphan_agent_alert(self, findings: List[Dict], run_id: int,
+                                organization_id: int = None) -> bool:
+        """Send critical alert email for orphaned AI agent SPN findings.
+
+        Args:
+            findings: List of finding dicts from AgentOrphanDetector.
+            run_id: Discovery run ID.
+            organization_id: Tenant org ID.
+
+        Returns:
+            True if email sent, False otherwise.
+        """
+        if not findings:
+            return True
+
+        count = len(findings)
+        if count == 1:
+            name = findings[0].get('identity_name') or findings[0].get('metadata', {}).get('display_name', 'Unknown')
+            subject = f"[AuditGraph] Critical: Orphaned AI Agent SPN Detected — {name}"
+        else:
+            subject = f"[AuditGraph] Critical: {count} Orphaned AI Agent SPNs Detected"
+
+        # Build HTML table rows
+        rows_html = ""
+        for f in findings:
+            meta = f.get('metadata', {})
+            name = meta.get('display_name', f.get('identity_name', 'Unknown'))
+            platform = meta.get('detected_platform', 'unknown')
+            days = meta.get('days_inactive', '?')
+            days_str = f'{days} days' if days != 999 else 'Never signed in'
+            roles = ', '.join(meta.get('rbac_roles', [])[:3]) or 'elevated roles'
+            rows_html += f"""
+                <tr>
+                    <td style="padding:8px;border:1px solid #ddd;">{name}</td>
+                    <td style="padding:8px;border:1px solid #ddd;">{platform}</td>
+                    <td style="padding:8px;border:1px solid #ddd;">{days_str}</td>
+                    <td style="padding:8px;border:1px solid #ddd;">{roles}</td>
+                    <td style="padding:8px;border:1px solid #ddd;color:#dc2626;font-weight:bold;">Critical</td>
+                </tr>"""
+
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head><style>{self._get_css_styles()}</style></head>
+<body>
+    <div class="header" style="background:#dc2626;">
+        <h1>Orphaned AI Agent SPN Alert</h1>
+        <p>Run #{run_id} &bull; {timestamp}</p>
+    </div>
+    <div class="section">
+        <h2 class="section-title">Finding: IASM-AG-001</h2>
+        <p><strong>{count}</strong> AI agent service principal(s) detected as orphaned —
+           inactive but still enabled with elevated RBAC permissions.</p>
+        <table style="width:100%;border-collapse:collapse;margin-top:12px;">
+            <thead>
+                <tr style="background:#f1f5f9;">
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Agent Name</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Platform</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Inactive</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Elevated Roles</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Severity</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+    </div>
+    <div class="section">
+        <h2 class="section-title">Recommended Actions</h2>
+        <ul>
+            <li>Disable the service principal in Entra ID immediately</li>
+            <li>Remove elevated RBAC role assignments (Owner, Contributor, UAA)</li>
+            <li>Investigate whether the agent platform has been decommissioned</li>
+            <li>If confirmed decommissioned, delete the SPN and associated app registration</li>
+            <li>An AGIRS penalty of +15 has been applied to affected identities</li>
+        </ul>
+    </div>
+    <div class="footer">
+        <p>AuditGraph — AI Agent Governance &bull; NexGenix Labs</p>
+    </div>
+</body>
+</html>
+"""
+        to_email = self.to_email
+        try:
+            from app.database import Database
+            db = Database()
+            db_email = db.get_system_setting('email_to')
+            if db_email and '@' in db_email:
+                to_email = db_email
+            db.close()
+        except Exception:
+            pass
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        finally:
+            loop.close()
 
     # ====================================================================
     # Phase 18: Test Email & Scheduled Report

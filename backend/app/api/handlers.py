@@ -16,6 +16,8 @@ import json
 
 logger = logging.getLogger(__name__)
 
+MAX_LIMIT = 1000  # Global safety cap for all paginated endpoints
+
 from psycopg2.extras import RealDictCursor
 from app.database import Database, SecurityViolationError
 from app.engines.drift_detector import DriftDetector
@@ -70,7 +72,8 @@ def _get_pillar_filter_sql(pillar: str) -> str:
             AND i.activity_status IN ('stale', 'never_used')""",
         "ownership_governance": """
             AND COALESCE(i.identity_category, '') IN ('service_principal', 'managed_identity_user')
-            AND (i.owner_count = 0 OR i.owner_count IS NULL)""",
+            AND (i.owner_count = 0 OR i.owner_count IS NULL)
+            AND COALESCE(i.is_microsoft_system, FALSE) = FALSE""",
         "external_exposure": """
             AND (
                 EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
@@ -298,6 +301,41 @@ def _connection_id():
     return int(val) if val else None
 
 
+def _active_subscription_ids(cursor, org_id, connection_id=None):
+    """Return subscription IDs that are activated (monitored=true) for the given org/connection.
+
+    Used to gate resource endpoints (Key Vaults, Storage, Resources) to only show data
+    from subscriptions the customer has paid for. Identity data is tenant-scoped
+    (Entra ID level) and should NOT be filtered by this function.
+
+    Returns:
+        tuple: (active_ids: list[str], total_count: int, active_count: int)
+    """
+    try:
+        if connection_id:
+            cursor.execute("""
+                SELECT account_id, monitored FROM cloud_subscriptions
+                WHERE organization_id = %s AND cloud_connection_id = %s AND deleted = false
+            """, (org_id, connection_id))
+        else:
+            cursor.execute("""
+                SELECT account_id, monitored FROM cloud_subscriptions
+                WHERE organization_id = %s AND deleted = false
+            """, (org_id,))
+        rows = cursor.fetchall()
+        all_ids = []
+        active_ids = []
+        for r in rows:
+            aid = r[0] if not isinstance(r, dict) else r.get('account_id')
+            mon = r[1] if not isinstance(r, dict) else r.get('monitored')
+            all_ids.append(aid)
+            if mon:
+                active_ids.append(aid)
+        return active_ids, len(all_ids), len(active_ids)
+    except Exception:
+        return [], 0, 0
+
+
 def _latest_run_ids(cursor, organization_id=None, connection_id=None):
     """Get latest completed discovery run IDs — one per ACTIVE cloud_connection_id.
 
@@ -312,7 +350,8 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
             return row.get('id') or row.get('max')
         return row[0]
 
-    if connection_id:
+    if connection_id and str(connection_id) != 'all':
+        # Case 1: Single connection — latest run for this connection
         cursor.execute("""
             SELECT MAX(id) AS id FROM discovery_runs
             WHERE status = 'completed' AND organization_id = %s AND cloud_connection_id = %s
@@ -322,7 +361,9 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
         return [run_id] if run_id else []
 
     if organization_id is not None:
-        # Only include runs whose cloud_connection_id still exists
+        # Case 2: All connections — latest run PER connection across org
+        # DISTINCT ON gets one row per connection_id (the most recent)
+        # Only include runs from connections with status='connected' (active).
         cursor.execute("""
             SELECT DISTINCT ON (dr.cloud_connection_id)
                 dr.id
@@ -330,6 +371,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
             JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
             WHERE dr.status = 'completed' AND dr.organization_id = %s
               AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
+              AND cc.status = 'connected'
             ORDER BY dr.cloud_connection_id, dr.id DESC
         """, (organization_id,))
         rows = cursor.fetchall()
@@ -348,7 +390,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
     user = getattr(g, 'current_user', None)
     if not user or not user.get('is_superadmin'):
         return []
-    # Only include runs whose cloud_connection_id still exists
+    # Only include runs whose cloud_connection_id still exists and is active
     cursor.execute("""
         SELECT DISTINCT ON (dr.cloud_connection_id)
             dr.id
@@ -356,6 +398,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
         JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
         WHERE dr.status = 'completed'
           AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
+          AND cc.status = 'connected'
         ORDER BY dr.cloud_connection_id, dr.id DESC
     """)
 
@@ -555,19 +598,12 @@ def get_stats():
         except Exception:
             pass
 
-        # Ghost identities: disabled/deleted but retaining role assignments
+        # Ghost identities: read from persisted risk_summary (canonical SSOT)
         ghost_count = 0
         try:
-            cursor.execute("""
-                SELECT COUNT(DISTINCT i.id)
-                FROM identities i
-                WHERE i.discovery_run_id = ANY(%s)
-                  AND (i.deleted_at IS NOT NULL OR i.enabled = false
-                       OR COALESCE(i.status, 'active') IN ('disabled', 'deleted'))
-                  AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
-                       OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
-            """, (run_ids,))
-            ghost_count = cursor.fetchone()[0] or 0
+            rs = db.get_latest_risk_summary(tid)
+            if rs:
+                ghost_count = rs.get('ghost_accounts', 0)
         except Exception:
             pass
 
@@ -625,6 +661,23 @@ def get_stats():
         except Exception:
             pass
 
+        # Identity count separation (total including Microsoft)
+        customer_count = microsoft_count = total_including_microsoft = 0
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE NOT COALESCE(i.is_microsoft_system, false)),
+                    COUNT(*) FILTER (WHERE COALESCE(i.is_microsoft_system, false)),
+                    COUNT(*)
+                FROM identities i WHERE i.discovery_run_id = ANY(%s)
+            """, (run_ids,))
+            ms_row = cursor.fetchone()
+            customer_count = ms_row[0] or 0
+            microsoft_count = ms_row[1] or 0
+            total_including_microsoft = ms_row[2] or 0
+        except Exception:
+            pass
+
         result = {
             "latest_run": latest,
             "previous_run": previous_run,
@@ -635,6 +688,9 @@ def get_stats():
             "deleted_count": deleted_count,
             "new_identities_count": new_identities_count,
             "removed_identities_count": removed_identities_count,
+            "customer_count": customer_count,
+            "microsoft_count": microsoft_count,
+            "total_including_microsoft": total_including_microsoft,
         }
         if workload_exposure:
             result["workload_exposure"] = workload_exposure
@@ -675,8 +731,9 @@ def get_identities():
     cloud_filter = request.args.get("cloud")
     search = request.args.get("search")
     limit = request.args.get("limit", type=int)
+    if limit is not None:
+        limit = min(limit, MAX_LIMIT)
     offset = request.args.get("offset", default=0, type=int)
-    hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
     show_deleted = request.args.get('show_deleted', 'false').lower() == 'true'
     contributing_pillar = request.args.get("contributing_pillar")
     status_filter = request.args.get("status")
@@ -699,8 +756,7 @@ def get_identities():
         if not show_deleted:
             query += HIDE_DELETED_SQL
 
-        if hide_microsoft:
-            query += HIDE_MICROSOFT_SQL
+        query += HIDE_MICROSOFT_SQL
 
         # contributing_pillar: filter to identities the attack-surface-score
         # engine counted for a specific pillar (exact count match)
@@ -1020,22 +1076,66 @@ def get_identity_details(identity_id: str):
         try:
             graph_permissions = db.get_graph_permissions(identity_db_id)
         except Exception as e:
-            print(f"Error getting graph permissions: {e}")
+            logger.error("Error getting graph permissions: %s", e)
             graph_permissions = []
 
         try:
             app_roles = db.get_app_roles(identity_db_id)
         except Exception as e:
-            print(f"Error getting app roles: {e}")
+            logger.error("Error getting app roles: %s", e)
             app_roles = []
 
         try:
             owners = db.get_ownership(identity_db_id)
         except Exception as e:
-            print(f"Error getting owners: {e}")
+            logger.error("Error getting owners: %s", e)
             owners = []
 
         roles = db.get_identity_roles_enriched(identity_db_id)
+
+        # Enrich each role with derived usage fields
+        from datetime import datetime, timezone
+        _now = datetime.now(timezone.utc)
+        removable_count = 0
+        for role in roles:
+            lu = role.get("last_used_at")
+            if lu:
+                role["last_used_at"] = lu.isoformat() if hasattr(lu, 'isoformat') else lu
+                delta = (_now - lu).days if hasattr(lu, 'date') else None
+                role["days_since_used"] = delta
+                if delta is not None:
+                    if delta == 0:
+                        role["last_used_display"] = "Today"
+                    elif delta == 1:
+                        role["last_used_display"] = "Yesterday"
+                    elif delta < 30:
+                        role["last_used_display"] = f"{delta} days ago"
+                    elif delta < 365:
+                        months = delta // 30
+                        role["last_used_display"] = f"{months} month{'s' if months > 1 else ''} ago"
+                    else:
+                        role["last_used_display"] = f"{delta // 365}+ years ago"
+                else:
+                    role["last_used_display"] = "Unknown"
+            else:
+                role["last_used_at"] = None
+                role["days_since_used"] = None
+                role["last_used_display"] = "Never used"
+            # Determine if role is removable
+            us = role.get("usage_status", "unknown")
+            role["is_removable"] = us in ("stale", "dormant", "never_used")
+            if role["is_removable"]:
+                removable_count += 1
+            # Serialize created_on
+            co = role.get("created_on")
+            if co and hasattr(co, 'isoformat'):
+                role["created_on"] = co.isoformat()
+            # Serialize last_activity_date
+            lad = role.get("last_activity_date")
+            if lad and hasattr(lad, 'isoformat'):
+                role["last_activity_date"] = lad.isoformat()
+
+        identity["removable_role_count"] = removable_count
 
         # Gather compliance and attack intelligence for each role
         role_intelligence = []
@@ -1648,7 +1748,8 @@ def get_latest_drift():
     """Get the most recent drift report summary for the dashboard widget."""
     db = _db()
     try:
-        report = db.get_latest_drift_report()
+        conn_id = _connection_id()
+        report = db.get_latest_drift_report(connection_id=conn_id)
         if not report:
             return jsonify({"has_drift_data": False})
 
@@ -1663,8 +1764,9 @@ def get_drift_history():
     """Get drift report history for change timeline."""
     db = _db()
     try:
-        limit = request.args.get('limit', 20, type=int)
-        reports = db.get_drift_history(limit=limit)
+        limit = min(request.args.get('limit', 20, type=int), MAX_LIMIT)
+        conn_id = _connection_id()
+        reports = db.get_drift_history(limit=limit, connection_id=conn_id)
 
         for r in reports:
             r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
@@ -1874,20 +1976,25 @@ def get_identity_risk_history(identity_id):
     try:
         limit = min(max(request.args.get('limit', 20, type=int), 2), 50)
         conn_id = _connection_id()
+        org_id = _org_id()
 
         conn_filter = "AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0"
-        params = [identity_id]
+        params = [identity_id, org_id, org_id]
         if conn_id:
             conn_filter += " AND dr.cloud_connection_id = %s"
             params.append(conn_id)
         params.append(limit)
 
+        # Join through cloud_connections to enforce connector ownership
         cursor.execute(f"""
             SELECT i.discovery_run_id, dr.completed_at,
                    COALESCE(i.risk_score, 0), i.risk_level
             FROM identities i
             JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
             WHERE i.identity_id = %s AND dr.status = 'completed'
+              AND dr.organization_id = %s
+              AND cc.organization_id = %s
               {conn_filter}
             ORDER BY dr.id DESC
             LIMIT %s
@@ -1924,32 +2031,40 @@ def get_batch_risk_history():
         if not identity_ids or len(identity_ids) > 200:
             return jsonify({"error": "Provide 1-200 identity_ids"}), 400
 
+        org_id = _org_id()
         conn_id = _connection_id()
-        conn_filter = "AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0"
-        params = [_org_id()]
+        conn_filter = "AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0"
+        params = [org_id]
         if conn_id:
-            conn_filter += " AND cloud_connection_id = %s"
+            conn_filter += " AND dr.cloud_connection_id = %s"
             params.append(conn_id)
         params.append(run_limit)
 
         cursor.execute(f"""
-            SELECT id FROM discovery_runs
-            WHERE status = 'completed' AND organization_id = %s
+            SELECT dr.id FROM discovery_runs dr
+            JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
+            WHERE dr.status = 'completed' AND dr.organization_id = %s
+              AND cc.organization_id = dr.organization_id
               {conn_filter}
-            ORDER BY id DESC LIMIT %s
+            ORDER BY dr.id DESC LIMIT %s
         """, tuple(params))
         run_ids = [r[0] for r in cursor.fetchall()]
 
         if not run_ids:
             return jsonify({"histories": {}})
 
+        # Join through discovery_runs + cloud_connections to enforce
+        # connector ownership — never return data from other orgs
         cursor.execute("""
-            SELECT identity_id, discovery_run_id, COALESCE(risk_score, 0)
-            FROM identities
-            WHERE identity_id = ANY(%s)
-              AND discovery_run_id = ANY(%s)
-            ORDER BY identity_id, discovery_run_id ASC
-        """, (identity_ids, run_ids))
+            SELECT i.identity_id, i.discovery_run_id, COALESCE(i.risk_score, 0)
+            FROM identities i
+            JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+            JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
+            WHERE i.identity_id = ANY(%s)
+              AND i.discovery_run_id = ANY(%s)
+              AND cc.organization_id = %s
+            ORDER BY i.identity_id, i.discovery_run_id ASC
+        """, (identity_ids, run_ids, org_id))
 
         histories = {}
         for iid, rid, score in cursor.fetchall():
@@ -2280,7 +2395,7 @@ def get_identity_remediations(identity_id: str):
             SELECT i.id, i.identity_id, i.display_name, i.risk_level,
                    i.risk_reasons, i.activity_status, i.credential_status,
                    i.credential_risk, COALESCE(i.owner_count, 0) as owner_count,
-                   i.ca_coverage_status
+                   i.ca_coverage_status, COALESCE(i.is_microsoft_system, FALSE) as is_microsoft_system
             FROM identities i
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             LIMIT 1
@@ -2288,6 +2403,18 @@ def get_identity_remediations(identity_id: str):
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Identity not found"}), 404
+
+        # Block remediation lookups for Microsoft/system-managed identities
+        if row[10]:  # is_microsoft_system
+            return jsonify({
+                "identity_id": identity_id,
+                "display_name": row[2],
+                "risk_level": row[3],
+                "remediations": [],
+                "summary": {"total": 0, "by_category": {}},
+                "microsoft_system": True,
+                "message": "Microsoft/system-managed identities are excluded from remediation.",
+            })
 
         identity_db_id = row[0]
 
@@ -2409,7 +2536,7 @@ def export_audit_trail():
         start_date = request.args.get('start_date', start_default)
         action_type = request.args.get('action_type')
         export_format = request.args.get('format', 'json')
-        limit = min(request.args.get('limit', 10000, type=int), 50000)
+        limit = min(request.args.get('limit', 10000, type=int), MAX_LIMIT)
 
         current_user = getattr(g, 'current_user', None)
         tid = _org_id()
@@ -3073,7 +3200,8 @@ def _identity_list_select():
                 FROM graph_attack_findings gaf
                 WHERE gaf.identity_id = i.id
                   AND gaf.status IN ('open', 'acknowledged', 'in_progress')
-            ) as attack_path_count
+            ) as attack_path_count,
+            EXTRACT(EPOCH FROM (NOW() - i.created_datetime)) / 86400 as identity_age_days
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -3154,6 +3282,7 @@ def _map_identity_row(row):
             else "ok"
         ),
         "attack_path_count": int(row[46] or 0) if len(row) > 46 else 0,
+        "identity_age_days": int(row[47]) if len(row) > 47 and row[47] is not None else None,
     }
 
 
@@ -4011,10 +4140,12 @@ def get_attack_surface_score():
                 COUNT(*) FILTER (WHERE activity_status IN ('stale', 'never_used', 'inactive')
                     AND COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_system', 'managed_identity_user')) as dormant_nhi_count,
 
-                -- P5: Ownership (SPNs without owners)
+                -- P5: Ownership (SPNs without owners, excluding Microsoft system SPNs)
                 COUNT(*) FILTER (WHERE COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_user')
-                    AND (owner_count = 0 OR owner_count IS NULL)) as unowned_spns,
-                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_user')) as total_spns,
+                    AND (owner_count = 0 OR owner_count IS NULL)
+                    AND COALESCE(is_microsoft_system, FALSE) = FALSE) as unowned_spns,
+                COUNT(*) FILTER (WHERE COALESCE(identity_category, '') IN ('service_principal', 'managed_identity_user')
+                    AND COALESCE(is_microsoft_system, FALSE) = FALSE) as total_spns,
 
                 -- P6: External exposure (tenant-wide scope)
                 COUNT(*) FILTER (WHERE (
@@ -4305,7 +4436,8 @@ def get_attack_surface_score():
                     COUNT(*) FILTER (WHERE COALESCE(i.lifecycle_state, 'blind') = 'blind') as lc_blind,
                     COUNT(*) FILTER (WHERE COALESCE(i.can_escalate, false)) as flag_can_escalate,
                     COUNT(*) FILTER (WHERE COALESCE(i.cross_subscription, false)) as flag_cross_sub,
-                    COUNT(*) FILTER (WHERE COALESCE(i.owner_status, 'unknown') = 'orphaned') as flag_orphaned,
+                    COUNT(*) FILTER (WHERE COALESCE(i.owner_status, 'unknown') = 'orphaned'
+                        AND COALESCE(i.is_microsoft_system, FALSE) = FALSE) as flag_orphaned,
                     COUNT(*) FILTER (WHERE COALESCE(i.effective_scope_flag, '') = 'tenant') as scope_tenant,
                     COUNT(*) FILTER (WHERE COALESCE(i.effective_scope_flag, '') = 'management_group') as scope_mg,
                     COUNT(*) FILTER (WHERE COALESCE(i.effective_scope_flag, '') = 'subscription') as scope_sub,
@@ -4424,12 +4556,29 @@ def get_attack_surface_score():
         industry_avg_posture = max(0, min(100, round(100 - avg_risk_score))) if avg_risk_score > 0 else None
         posture_target_setting = db.get_setting('posture_target', organization_id=tid) if tid else None
 
+        # Ghost identities (disabled/deleted but retaining role assignments)
+        ghost_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                  AND (i.deleted_at IS NOT NULL OR i.enabled = false
+                       OR COALESCE(i.status, 'active') IN ('disabled', 'deleted'))
+                  AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                       OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
+            """, (run_ids,))
+            ghost_count = cursor.fetchone()[0] or 0
+        except Exception:
+            pass
+
         return jsonify({
             "score": score,
             "grade": grade,
             "severity": severity,
             "industry_avg": industry_avg_posture,
             "posture_target": int(posture_target_setting) if posture_target_setting else None,
+            "ghost_count": ghost_count,
             "pillars": {
                 "effective_privilege": {"score": round(p1, 1), "weight": 30, "detail": {"t0": t0_count, "t0t1": t0t1_count, "total": total_excl}},
                 "credential_risk": {"score": round(p2, 1), "weight": 20, "detail": {"expired": expired_creds, "expiring": expiring_creds, "with_creds": has_creds, "healthy": healthy_creds}},
@@ -4445,9 +4594,168 @@ def get_attack_surface_score():
             "data_integrity": data_integrity,
             "ciso_summary": ciso_summary,
             "workload_exposure": workload_agg,
+            "data_origin": "tenant_scan",
         })
     finally:
         cursor.close()
+        db.close()
+
+
+def get_risk_summary():
+    """Canonical risk aggregation — reads ONLY from persisted risk_summary table.
+
+    The RiskSummaryEngine computes all metrics at discovery time and persists
+    them to the risk_summary table. No live computation is performed here.
+    This guarantees all dashboards display identical, deterministic values.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        conn_id = _connection_id()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, conn_id)
+        cursor.close()
+        summary = db.get_latest_risk_summary(org_id, run_ids=run_ids or None)
+        if not summary:
+            return jsonify({
+                "status": "analysis_pending",
+                "message": "Risk summary not yet computed. Run a discovery scan first.",
+                "agirs": None,
+                "identity_risk_score": None,
+                "ghost_accounts": 0,
+                "orphaned_spns": 0,
+                "over_privileged": 0,
+                "dormant_privileged": 0,
+                "high_blast_radius": 0,
+                "attack_paths": 0,
+                "identity_counts": {"total": 0, "customer": 0, "microsoft": 0},
+                "source": "none",
+            })
+
+        agirs_data = None
+        if summary.get('agirs_score') is not None:
+            s = summary['agirs_score']
+            agirs_data = {
+                "score": s,
+                "tier": summary.get('agirs_tier') or (
+                    'A' if s >= 90 else 'B' if s >= 75 else 'C' if s >= 60 else 'D' if s >= 40 else 'F'
+                ),
+            }
+        return jsonify({
+            "agirs": agirs_data,
+            "identity_risk_score": summary.get('identity_risk_score'),
+            "ghost_accounts": summary.get('ghost_accounts', 0),
+            "orphaned_spns": summary.get('orphaned_spns', 0),
+            "over_privileged": summary.get('over_privileged', 0),
+            "dormant_privileged": summary.get('dormant_privileged', 0),
+            "high_blast_radius": summary.get('high_blast_radius', 0),
+            "attack_paths": summary.get('attack_paths', 0),
+            "identity_counts": {
+                "total": summary.get('total_identities', 0),
+                "customer": summary.get('customer_identities', 0),
+                "microsoft": summary.get('microsoft_identities', 0),
+            },
+            "source": "persisted",
+            "computed_at": summary.get('computed_at'),
+            "discovery_run_id": summary.get('discovery_run_id'),
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_summary():
+    """Canonical exposure: total resources, subscriptions, key vaults, privileged roles."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({"error": "No completed runs"}), 404
+
+        # Resource counts
+        sa_count = kv_count = 0
+        for table, var_name in [("azure_storage_accounts", "sa"), ("azure_key_vaults", "kv")]:
+            try:
+                cursor.execute(f"SAVEPOINT exp_{var_name}")
+                cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE discovery_run_id = ANY(%s)", (run_ids,))
+                val = cursor.fetchone()[0] or 0
+                if var_name == "sa":
+                    sa_count = val
+                else:
+                    kv_count = val
+                cursor.execute(f"RELEASE SAVEPOINT exp_{var_name}")
+            except Exception:
+                try:
+                    cursor.execute(f"ROLLBACK TO SAVEPOINT exp_{var_name}")
+                except Exception:
+                    pass
+
+        # Subscription count from role_assignments scopes
+        sub_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT SPLIT_PART(ra.scope, '/', 3))
+                FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE i.discovery_run_id = ANY(%s) AND ra.scope LIKE '/subscriptions/%%'
+            """, (run_ids,))
+            sub_count = cursor.fetchone()[0] or 0
+        except Exception:
+            pass
+
+        # Privileged identity count (T0/T1 roles)
+        priv_count = 0
+        try:
+            cursor.execute(f"""
+                SELECT COUNT(*) FROM identities i
+                WHERE i.discovery_run_id = ANY(%s)
+                {HIDE_MICROSOFT_SQL}
+                AND (
+                    EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN ('global administrator',
+                            'privileged role administrator','application administrator',
+                            'cloud application administrator'))
+                    OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner','user access administrator')
+                        AND (ra.scope IS NULL OR ra.scope = '/'
+                             OR (ra.scope LIKE '/subscriptions/%%'
+                                 AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')))
+                )
+            """, (run_ids,))
+            priv_count = cursor.fetchone()[0] or 0
+        except Exception:
+            pass
+
+        return jsonify({
+            "total_resources": sa_count + kv_count,
+            "storage_accounts": sa_count,
+            "key_vaults": kv_count,
+            "subscriptions": sub_count,
+            "privileged_roles": priv_count,
+        })
+    finally:
+        cursor.close()
+        db.close()
+
+
+def get_attack_path_count():
+    """Lightweight attack path count from graph_attack_findings."""
+    db = _db()
+    try:
+        stats = db.get_graph_attack_finding_stats(organization_id=_org_id())
+        return jsonify({
+            "total": stats.get('total', 0),
+            "open": stats.get('open', 0),
+            "critical": stats.get('critical', 0),
+            "high": stats.get('high', 0),
+            "medium": stats.get('medium', 0),
+            "low": stats.get('low', 0),
+            "affected_identities": stats.get('affected_identities', 0),
+        })
+    except Exception:
+        return jsonify({"total": 0, "open": 0, "critical": 0, "high": 0,
+                        "medium": 0, "low": 0, "affected_identities": 0})
+    finally:
         db.close()
 
 
@@ -5649,7 +5957,7 @@ def get_credential_intelligence():
                 COUNT(*) FILTER (WHERE c.age_days >= 365) as age_gt_365
             FROM (
                 SELECT i.id,
-                    EXTRACT(EPOCH FROM (NOW() - MIN(cr.start_date))) / 86400 as age_days
+                    EXTRACT(EPOCH FROM (NOW() - MIN(cr.start_datetime))) / 86400 as age_days
                 FROM identities i
                 JOIN credentials cr ON cr.identity_db_id = i.id
                 WHERE i.discovery_run_id = ANY(%s)
@@ -5685,18 +5993,18 @@ def get_credential_intelligence():
         # Rotation compliance — identities with creds needing rotation
         cursor.execute(f"""
             SELECT
-                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL AND cr.end_date < NOW()) as rotation_overdue,
-                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL
-                    AND cr.end_date >= NOW()
-                    AND cr.end_date < NOW() + INTERVAL '30 days') as rotation_soon,
-                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_date IS NOT NULL
-                    AND cr.end_date >= NOW() + INTERVAL '30 days') as rotation_ok,
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_datetime IS NOT NULL AND cr.end_datetime < NOW()) as rotation_overdue,
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_datetime IS NOT NULL
+                    AND cr.end_datetime >= NOW()
+                    AND cr.end_datetime < NOW() + INTERVAL '30 days') as rotation_soon,
+                COUNT(DISTINCT i.id) FILTER (WHERE cr.end_datetime IS NOT NULL
+                    AND cr.end_datetime >= NOW() + INTERVAL '30 days') as rotation_ok,
                 COUNT(DISTINCT i.id) as total_with_creds,
                 COUNT(DISTINCT i.id) FILTER (WHERE cr.credential_type = 'password'
-                    AND EXTRACT(EPOCH FROM (NOW() - cr.start_date)) / 86400 > 90) as stale_passwords,
+                    AND EXTRACT(EPOCH FROM (NOW() - cr.start_datetime)) / 86400 > 90) as stale_passwords,
                 COUNT(DISTINCT i.id) FILTER (WHERE (
                     SELECT COUNT(*) FROM credentials c2
-                    WHERE c2.identity_db_id = i.id AND (c2.end_date IS NULL OR c2.end_date > NOW())
+                    WHERE c2.identity_db_id = i.id AND (c2.end_datetime IS NULL OR c2.end_datetime > NOW())
                 ) > 1) as multi_active
             FROM identities i
             JOIN credentials cr ON cr.identity_db_id = i.id
@@ -6064,6 +6372,51 @@ def get_identity_graph_data(identity_id):
             LIMIT 1
         """, (identity_id, run_ids))
         row = cursor.fetchone()
+
+        # Fallback: check app_registrations if identity not found
+        if not row:
+            cursor.execute("""
+                SELECT linked_spn_id, app_object_id, app_id, display_name,
+                       risk_level, COALESCE(risk_score, 0), owner_count
+                FROM app_registrations
+                WHERE (app_object_id = %s OR app_id = %s)
+                  AND discovery_run_id = ANY(%s)
+                LIMIT 1
+            """, (identity_id, identity_id, run_ids))
+            ar_row = cursor.fetchone()
+            if ar_row and ar_row[0]:
+                # Has linked SPN — use the SPN's identity for graph data
+                cursor.execute("""
+                    SELECT id, identity_id, display_name, identity_category, risk_level,
+                           COALESCE(risk_score, 0), activity_status,
+                           COALESCE(cloud, 'azure'), COALESCE(owner_count, 0),
+                           COALESCE(credential_count, 0)
+                    FROM identities WHERE id = %s LIMIT 1
+                """, (ar_row[0],))
+                row = cursor.fetchone()
+            elif ar_row:
+                # App registration with no linked SPN — return empty graph
+                cursor.close()
+                return jsonify({
+                    "identity_id": ar_row[1] or ar_row[2],
+                    "display_name": ar_row[3] or "",
+                    "identity_category": "application",
+                    "risk_level": ar_row[4] or "info",
+                    "risk_score": int(ar_row[5]),
+                    "activity_status": "unknown",
+                    "cloud": "azure",
+                    "trust": {"federated_trusts": [], "ownership_edges": [], "role_edges": []},
+                    "effective_scope": {
+                        "subscription_count": 0, "resource_group_count": 0,
+                        "resource_count": 0, "scope_hierarchy": [],
+                        "entra_scopes": [], "blast_radius_label": "No scoped access",
+                        "cli_commands": [],
+                    },
+                    "secret_exposure": [],
+                    "graph": {"executive_nodes": [], "executive_edges": [],
+                              "technical_nodes": [], "technical_edges": []},
+                })
+
         if not row:
             return jsonify({"error": "Identity not found"}), 404
 
@@ -6088,6 +6441,39 @@ def get_identity_graph_data(identity_id):
 
         is_dormant = ident["activity_status"] in ("stale", "never_used")
         has_priv_roles = any(r.get("risk_level") in ("critical", "high") for r in roles)
+
+        # Phase 3: Check AI agent classification for graph node type
+        agent_graph_info = None
+        try:
+            from app.config import FEATURE_AI_AGENT_GOVERNANCE
+            if FEATURE_AI_AGENT_GOVERNANCE:
+                cursor.execute("""
+                    SELECT ac.agent_identity_type, ac.detected_platform,
+                           ac.classification_confidence,
+                           COALESCE(ac.agent_penalty_score, 0),
+                           i.last_sign_in, i.risk_score
+                    FROM agent_classifications ac
+                    JOIN identities i ON i.id = ac.identity_db_id
+                    WHERE ac.identity_db_id = %s
+                      AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                    ORDER BY ac.updated_at DESC LIMIT 1
+                """, (db_id,))
+                ac_row = cursor.fetchone()
+                if ac_row:
+                    from datetime import datetime, timezone
+                    days_inactive = None
+                    if ac_row[4]:
+                        days_inactive = (datetime.now(timezone.utc) - ac_row[4]).days
+                    has_orphan = ac_row[3] > 0
+                    agent_graph_info = {
+                        'detected_platform': ac_row[1],
+                        'classification_confidence': float(ac_row[2] or 0),
+                        'days_inactive': days_inactive,
+                        'agirs_score': int(ac_row[5] or 0) + int(ac_row[3]),
+                        'has_orphan_finding': has_orphan,
+                    }
+        except Exception:
+            pass  # Non-blocking — fall back to regular identity node
 
         # ── TRUST RELATIONSHIPS ──────────────────────────────────
         federated_trusts = []
@@ -6116,14 +6502,35 @@ def get_identity_graph_data(identity_id):
             "is_primary_owner": o.get("is_primary_owner", False),
         } for o in owners]
 
-        role_edges = [{
-            "role_name": r.get("role_name"),
-            "role_type": r.get("role_type", "azure"),
-            "scope": r.get("scope") or "",
-            "scope_type": r.get("scope_type") or "directory",
-            "risk_level": r.get("risk_level") or "low",
-            "usage_status": r.get("usage_status") or "unknown",
-        } for r in roles]
+        from datetime import datetime, timezone
+        _now_graph = datetime.now(timezone.utc)
+        role_edges = []
+        for r in roles:
+            us = r.get("usage_status") or "unknown"
+            lu = r.get("last_used_at")
+            if lu and hasattr(lu, 'date'):
+                delta = (_now_graph - lu).days
+                if delta == 0: lud = "Today"
+                elif delta == 1: lud = "Yesterday"
+                elif delta < 30: lud = f"{delta} days ago"
+                elif delta < 365:
+                    months = delta // 30
+                    lud = f"{months} month{'s' if months > 1 else ''} ago"
+                else: lud = f"{delta // 365}+ years ago"
+            elif lu:
+                lud = "Unknown"
+            else:
+                lud = "Never used"
+            role_edges.append({
+                "role_name": r.get("role_name"),
+                "role_type": r.get("role_type", "azure"),
+                "scope": r.get("scope") or "",
+                "scope_type": r.get("scope_type") or "directory",
+                "risk_level": r.get("risk_level") or "low",
+                "usage_status": us,
+                "last_used_display": lud,
+                "is_removable": us in ("stale", "dormant", "never_used"),
+            })
 
         trust = {
             "federated_trusts": federated_trusts,
@@ -6188,11 +6595,30 @@ def get_identity_graph_data(identity_id):
                 continue
             ds = r.get("scope") or "/"
             label = "Entire Directory" if ds == "/" else f"Scoped: {ds}"
+            us = r.get("usage_status") or "unknown"
+            # Compute last_used_display for entra scopes (same logic as role_edges)
+            lu = r.get("last_used_at")
+            if lu and hasattr(lu, 'date'):
+                delta = (_now_graph - lu).days
+                if delta == 0: e_lud = "Today"
+                elif delta == 1: e_lud = "Yesterday"
+                elif delta < 30: e_lud = f"{delta} days ago"
+                elif delta < 365:
+                    months = delta // 30
+                    e_lud = f"{months} month{'s' if months > 1 else ''} ago"
+                else: e_lud = f"{delta // 365}+ years ago"
+            elif lu:
+                e_lud = "Unknown"
+            else:
+                e_lud = "Never used"
             entra_scopes.append({
                 "role_name": r.get("role_name"),
                 "directory_scope": ds,
                 "scope_label": label,
                 "risk_level": r.get("risk_level") or "low",
+                "usage_status": us,
+                "last_used_display": e_lud,
+                "is_removable": us in ("stale", "dormant", "never_used"),
             })
 
         sub_count = len(subs)
@@ -6326,10 +6752,19 @@ def get_identity_graph_data(identity_id):
         # ── GRAPH PRE-COMPUTATION ────────────────────────────────
         cx, cy = 400, 250
 
+        # Phase 3: Use ai_agent node type for classified agents
+        _center_node_type = "identity"
+        _center_node_data = {
+            "label": ident["display_name"], "risk_level": ident["risk_level"],
+            "risk_score": ident["risk_score"], "category": ident["identity_category"],
+        }
+        if agent_graph_info:
+            _center_node_type = "ai_agent"
+            _center_node_data.update(agent_graph_info)
+
         # Executive mode (3-5 nodes)
-        exec_nodes = [{"id": "identity", "type": "identity", "position": {"x": cx, "y": cy},
-            "data": {"label": ident["display_name"], "risk_level": ident["risk_level"],
-                     "risk_score": ident["risk_score"], "category": ident["identity_category"]}}]
+        exec_nodes = [{"id": "identity", "type": _center_node_type, "position": {"x": cx, "y": cy},
+            "data": _center_node_data}]
         exec_edges = []
 
         risk_lines = []
@@ -6384,9 +6819,8 @@ def get_identity_graph_data(identity_id):
             exec_edges.append({"id": "e-owner-id", "source": "owner", "target": "identity", "label": "manages"})
 
         # Technical mode — hierarchical ARM tree layout
-        tech_nodes = [{"id": "identity", "type": "identity", "position": {"x": cx, "y": cy},
-            "data": {"label": ident["display_name"], "risk_level": ident["risk_level"],
-                     "risk_score": ident["risk_score"], "category": ident["identity_category"]}}]
+        tech_nodes = [{"id": "identity", "type": _center_node_type, "position": {"x": cx, "y": cy},
+            "data": dict(_center_node_data)}]
         tech_edges = []
 
         # Role risk lookup for badge coloring in the tree
@@ -6522,7 +6956,7 @@ def get_identity_graph_data(identity_id):
             "technical_nodes": tech_nodes, "technical_edges": tech_edges,
         }
 
-        return jsonify({
+        result = {
             "identity_id": ident["identity_id"],
             "display_name": ident["display_name"],
             "risk_level": ident["risk_level"],
@@ -6531,7 +6965,11 @@ def get_identity_graph_data(identity_id):
             "effective_scope": effective_scope,
             "secret_exposure": secret_exposure,
             "graph": graph,
-        })
+        }
+        # Phase 3: Include agent classification data for panel display
+        if agent_graph_info:
+            result["agent_info"] = agent_graph_info
+        return jsonify(result)
 
     finally:
         cursor.close()
@@ -6615,6 +7053,20 @@ def get_remediation_status(identity_id: str):
     """Get remediation action statuses for all playbooks for a specific identity."""
     db = _db()
     try:
+        # Block remediation status lookup for Microsoft/system identities
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.execute("""
+            SELECT COALESCE(i.is_microsoft_system, FALSE)
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            LIMIT 1
+        """, (identity_id, run_ids))
+        ms_row = cursor.fetchone()
+        cursor.close()
+        if ms_row and ms_row[0]:
+            return jsonify({'identity_id': identity_id, 'actions': {}, 'microsoft_system': True})
+
         actions = db.get_remediation_actions(identity_id)
         return jsonify({
             'identity_id': identity_id,
@@ -6628,6 +7080,20 @@ def post_remediation_action(identity_id: str):
     """Create or update a remediation action for an identity."""
     db = _db()
     try:
+        # Block creating remediation actions for Microsoft/system identities
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.execute("""
+            SELECT COALESCE(i.is_microsoft_system, FALSE)
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            LIMIT 1
+        """, (identity_id, run_ids))
+        ms_row = cursor.fetchone()
+        cursor.close()
+        if ms_row and ms_row[0]:
+            return jsonify({'error': 'Cannot create remediation actions for Microsoft/system-managed identities'}), 403
+
         body = request.get_json()
         if not body:
             return jsonify({'error': 'Request body required'}), 400
@@ -6764,6 +7230,16 @@ def _execute_remediation(action_type: str, identity: dict, playbook: dict, db) -
         'timestamp': datetime.now(timezone.utc).isoformat(),
     }
 
+    # ── SAFETY GUARD: Block destructive actions on Microsoft system identities ──
+    DESTRUCTIVE_ACTIONS = ('disable_identity', 'remove_identity', 'rotate_credential', 'remove_role')
+    if identity.get('is_microsoft_system') and action_type in DESTRUCTIVE_ACTIONS:
+        logger.warning(f"BLOCKED remediation: {action_type} on Microsoft system identity "
+                       f'"{identity.get("display_name")}" ({identity.get("identity_id")})')
+        log['result'] = 'blocked'
+        log['detail'] = f'Blocked: {action_type} cannot be executed on Microsoft/system-managed identity "{identity.get("display_name")}". Platform-managed identities are excluded from destructive remediation.'
+        log['simulated'] = False
+        return log
+
     # Check if Azure credentials are configured for real execution
     settings = db.get_settings(organization_id=_org_id())
     azure_configured = all(settings.get(k) for k in ('azure_directory_id', 'azure_client_id', 'azure_client_secret'))
@@ -6827,15 +7303,26 @@ def execute_remediation(identity_id: str):
         if action_type not in REMEDIATION_ACTIONS:
             return jsonify({'error': f'Invalid action_type. Must be one of: {", ".join(REMEDIATION_ACTIONS.keys())}'}), 400
 
-        # Fetch identity
+        # Fetch identity — scoped to latest runs for selected connection
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT identity_id, display_name, identity_category, risk_level,
-                   app_id, activity_status
-            FROM identities
-            WHERE identity_id = %s
-            ORDER BY discovery_run_id DESC LIMIT 1
-        """, (identity_id,))
+        conn_id = _connection_id()
+        run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
+        if run_ids:
+            cursor.execute("""
+                SELECT identity_id, display_name, identity_category, risk_level,
+                       app_id, activity_status
+                FROM identities
+                WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+                ORDER BY discovery_run_id DESC LIMIT 1
+            """, (identity_id, run_ids))
+        else:
+            cursor.execute("""
+                SELECT identity_id, display_name, identity_category, risk_level,
+                       app_id, activity_status
+                FROM identities
+                WHERE identity_id = %s
+                ORDER BY discovery_run_id DESC LIMIT 1
+            """, (identity_id,))
         identity = cursor.fetchone()
         cursor.close()
 
@@ -7116,37 +7603,35 @@ def get_generated_remediations_handler():
     db = _db()
     try:
         organization_id = _org_id()
-        cursor = db.conn.cursor(cursor_factory=__import__('psycopg2.extras', fromlist=['RealDictCursor']).RealDictCursor)
+        conn_id = _connection_id()
+        from psycopg2.extras import RealDictCursor as _RDC
+        cursor = db.conn.cursor(cursor_factory=_RDC)
 
-        # Resolve latest completed run
-        cursor.execute("""
-            SELECT id FROM discovery_runs
-            WHERE organization_id = %s AND status = 'completed'
-            ORDER BY id DESC LIMIT 1
-        """, (organization_id,))
-        row = cursor.fetchone()
-        if not row:
+        # Resolve latest completed run — scoped by connection_id
+        run_ids = _latest_run_ids(cursor, organization_id, conn_id)
+        if not run_ids:
             cursor.close()
             return jsonify({
                 'actions': [],
                 'stats': {'open': 0, 'critical': 0, 'in_progress': 0, 'completed_this_week': 0},
             })
-        run_id = row['id']
+        run_id = run_ids[0]
 
         actions = []
         action_id = 0
 
         # ── 1. Role escalation: identities with privileged roles ──
         cursor.execute("""
-            SELECT DISTINCT i.id, i.identity_id, i.display_name, i.identity_category,
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
                    i.risk_level, COALESCE(i.risk_score, 0) as risk_score,
                    ra.role_name, ra.scope
             FROM identities i
             JOIN role_assignments ra ON ra.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, FALSE)
               AND ra.role_name IN %s
-            ORDER BY i.risk_score DESC NULLS LAST
-            LIMIT 50
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT 200
         """, (run_id, PRIVILEGED_ROLES))
         # Group by identity
         escalation_map: dict = {}
@@ -7175,6 +7660,9 @@ def get_generated_remediations_handler():
                 'identity_id': data['identity_id'],
                 'identity_name': data['display_name'],
                 'source': 'privilege_drift',
+                'role_name': role_list[0] if len(role_list) == 1 else ', '.join(role_list[:3]),
+                'scope': data.get('scope', ''),
+                'roles': role_list,
             })
 
         # ── 2. Long-lived / expired credentials ──
@@ -7184,6 +7672,7 @@ def get_generated_remediations_handler():
                    COALESCE(i.risk_score, 0) as risk_score
             FROM identities i
             WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, FALSE)
               AND (i.credential_risk IN ('critical', 'high')
                    OR i.next_expiry < NOW())
             ORDER BY i.risk_score DESC NULLS LAST
@@ -7211,6 +7700,12 @@ def get_generated_remediations_handler():
             })
 
         # ── 3. Orphaned service principals (no owner) ──
+        # Microsoft first-party SPNs are suppressed UNLESS they have RBAC
+        # role assignments or a non-zero risk score. This prevents noisy
+        # "Remove Orphaned SPN" findings for platform-managed identities
+        # like Azure Cloud Shell, PowerApps Service, etc. that are ownerless
+        # by design — while still surfacing Microsoft SPNs with customer-
+        # granted roles or elevated risk that warrant attention.
         cursor.execute("""
             SELECT i.id, i.identity_id, i.display_name,
                    COALESCE(i.owner_count, 0) as owner_count,
@@ -7219,6 +7714,14 @@ def get_generated_remediations_handler():
             WHERE i.discovery_run_id = %s
               AND i.identity_category = 'service_principal'
               AND COALESCE(i.owner_count, 0) = 0
+              AND (
+                  NOT COALESCE(i.is_microsoft_system, FALSE)
+                  OR COALESCE(i.risk_score, 0) > 0
+                  OR EXISTS (
+                      SELECT 1 FROM role_assignments ra
+                      WHERE ra.identity_db_id = i.id
+                  )
+              )
             ORDER BY i.risk_score DESC NULLS LAST
             LIMIT 50
         """, (run_id,))
@@ -7244,16 +7747,16 @@ def get_generated_remediations_handler():
 
         # ── 4. External / guest users with privileged roles ──
         cursor.execute("""
-            SELECT DISTINCT i.id, i.identity_id, i.display_name,
+            SELECT i.id, i.identity_id, i.display_name,
                    i.risk_level, COALESCE(i.risk_score, 0) as risk_score,
-                   ra.role_name
+                   ra.role_name, ra.scope
             FROM identities i
             JOIN role_assignments ra ON ra.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
               AND i.identity_category = 'guest'
               AND ra.role_name IN %s
-            ORDER BY i.risk_score DESC NULLS LAST
-            LIMIT 30
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT 100
         """, (run_id, PRIVILEGED_ROLES))
         rule = _REMEDIATION_RULES[3]  # external_privileged
         ext_map: dict = {}
@@ -7265,14 +7768,15 @@ def get_generated_remediations_handler():
 
         for iid, data in ext_map.items():
             action_id += 1
+            role_list = list(set(data['roles']))
             actions.append({
                 'id': action_id,
                 'title': rule[1],
-                'description': f"Guest user {data['display_name']} holds {', '.join(list(set(data['roles']))[:2])}. {rule[2]}",
+                'description': f"Guest user {data['display_name']} holds {', '.join(role_list[:2])}. {rule[2]}",
                 'action_type': rule[3],
                 'priority': rule[4],
                 'risk_reduction': rule[5],
-                'affected_count': len(set(data['roles'])),
+                'affected_count': len(role_list),
                 'blast_radius': rule[6],
                 'automation_ready': rule[7],
                 'confidence': rule[8],
@@ -7280,89 +7784,667 @@ def get_generated_remediations_handler():
                 'identity_id': data['identity_id'],
                 'identity_name': data['display_name'],
                 'source': 'identity_exposures',
+                'role_name': role_list[0] if len(role_list) == 1 else ', '.join(role_list[:3]),
+                'roles': role_list,
             })
 
         # ── 5. Attack paths ──
-        db._ensure_attack_paths_table()
-        cursor.execute("""
-            SELECT ap.id, ap.source_entity_id, ap.source_entity_name, ap.path_type,
-                   ap.severity, ap.risk_score, ap.description, ap.narrative,
-                   ap.affected_resource_count
-            FROM attack_paths ap
-            WHERE ap.organization_id = %s AND ap.discovery_run_id = %s
-            ORDER BY ap.risk_score DESC NULLS LAST
-            LIMIT 30
-        """, (organization_id, run_id))
-        rule = _REMEDIATION_RULES[4]  # attack_path
-        for r in cursor.fetchall():
-            action_id += 1
-            sev = r['severity'] or 'medium'
-            br = 'high' if sev in ('critical', 'high') else 'medium'
-            rr = 85 if sev == 'critical' else 70 if sev == 'high' else 50
-            actions.append({
-                'id': action_id,
-                'title': f"Mitigate: {(r['path_type'] or 'unknown').replace('_', ' ').title()}",
-                'description': r['description'] or r['narrative'] or rule[2],
-                'action_type': rule[3],
-                'priority': sev if sev in ('critical', 'high', 'medium', 'low') else 'medium',
-                'risk_reduction': rr,
-                'affected_count': r['affected_resource_count'] or 1,
-                'blast_radius': br,
-                'automation_ready': rule[7],
-                'confidence': rule[8],
-                'status': 'new',
-                'identity_id': r['source_entity_id'],
-                'identity_name': r['source_entity_name'],
-                'source': 'attack_paths',
-            })
+        try:
+            db._ensure_attack_paths_table()
+            cursor.execute("""
+                SELECT ap.id, ap.source_entity_id, ap.source_entity_name, ap.path_type,
+                       ap.severity, ap.risk_score, ap.description, ap.narrative,
+                       ap.affected_resource_count
+                FROM attack_paths ap
+                WHERE ap.organization_id = %s AND ap.discovery_run_id = %s
+                ORDER BY ap.risk_score DESC NULLS LAST
+                LIMIT 30
+            """, (organization_id, run_id))
+            rule = _REMEDIATION_RULES[4]  # attack_path
+            for r in cursor.fetchall():
+                action_id += 1
+                sev = r['severity'] or 'medium'
+                br = 'high' if sev in ('critical', 'high') else 'medium'
+                rr = 85 if sev == 'critical' else 70 if sev == 'high' else 50
+                actions.append({
+                    'id': action_id,
+                    'title': f"Mitigate: {(r['path_type'] or 'unknown').replace('_', ' ').title()}",
+                    'description': r['description'] or r['narrative'] or rule[2],
+                    'action_type': rule[3],
+                    'priority': sev if sev in ('critical', 'high', 'medium', 'low') else 'medium',
+                    'risk_reduction': rr,
+                    'affected_count': r['affected_resource_count'] or 1,
+                    'blast_radius': br,
+                    'automation_ready': rule[7],
+                    'confidence': rule[8],
+                    'status': 'new',
+                    'identity_id': r['source_entity_id'],
+                    'identity_name': r['source_entity_name'],
+                    'source': 'attack_paths',
+                })
+        except Exception as e:
+            logger.warning(f"Attack paths remediation query failed (table may not exist): {e}")
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
 
         # ── 6. Stale privileged identities ──
         cursor.execute("""
-            SELECT DISTINCT i.id, i.identity_id, i.display_name,
-                   i.activity_status, COALESCE(i.risk_score, 0) as risk_score
+            SELECT i.id, i.identity_id, i.display_name,
+                   i.activity_status, COALESCE(i.risk_score, 0) as risk_score,
+                   ra.role_name, ra.scope
             FROM identities i
             JOIN role_assignments ra ON ra.identity_db_id = i.id
             WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, FALSE)
               AND i.activity_status IN ('stale', 'inactive', 'never_used')
               AND ra.role_name IN %s
-            ORDER BY i.risk_score DESC NULLS LAST
-            LIMIT 30
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT 100
         """, (run_id, PRIVILEGED_ROLES))
         rule = _REMEDIATION_RULES[5]  # stale_privileged
+        # Group by identity (may have multiple privileged roles)
+        stale_map: dict = {}
         for r in cursor.fetchall():
+            iid = r['identity_id']
+            if iid not in stale_map:
+                stale_map[iid] = {**dict(r), 'roles': []}
+            stale_map[iid]['roles'].append(r['role_name'])
+        for iid, data in stale_map.items():
             action_id += 1
+            role_list = list(set(data['roles']))
             actions.append({
                 'id': action_id,
                 'title': rule[1],
-                'description': f"{r['display_name']} — {r['activity_status']} with privileged roles. {rule[2]}",
+                'description': f"{data['display_name']} — {data['activity_status']} with privileged roles. {rule[2]}",
                 'action_type': rule[3],
                 'priority': rule[4],
                 'risk_reduction': rule[5],
-                'affected_count': 1,
+                'affected_count': len(role_list),
                 'blast_radius': rule[6],
                 'automation_ready': rule[7],
                 'confidence': rule[8],
                 'status': 'new',
-                'identity_id': r['identity_id'],
-                'identity_name': r['display_name'],
+                'identity_id': data['identity_id'],
+                'identity_name': data['display_name'],
                 'source': 'privilege_drift',
+                'role_name': role_list[0] if len(role_list) == 1 else ', '.join(role_list[:3]),
+                'scope': data.get('scope', ''),
+                'roles': role_list,
             })
 
         # Sort by priority weight then risk_reduction descending
         prio_weight = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
         actions.sort(key=lambda a: (prio_weight.get(a['priority'], 9), -a['risk_reduction']))
 
-        # Compute stats
-        critical_count = sum(1 for a in actions if a['priority'] == 'critical')
-        stats = {
-            'open': len(actions),
-            'critical': critical_count,
-            'in_progress': 0,
-            'completed_this_week': 0,
-        }
+        # Backfill role_name/scope for actions that don't have them
+        # (rules 2, 3, 5 don't JOIN role_assignments)
+        missing_ids = [a['identity_id'] for a in actions
+                       if not a.get('role_name') and a.get('identity_id')]
+        if missing_ids:
+            try:
+                from psycopg2.extras import RealDictCursor as _RDC2
+                cursor2 = db.conn.cursor(cursor_factory=_RDC2)
+                # Batch-fetch top role per identity
+                cursor2.execute("""
+                    SELECT DISTINCT ON (i.identity_id)
+                        i.identity_id,
+                        ra.role_name,
+                        ra.scope
+                    FROM identities i
+                    JOIN role_assignments ra ON ra.identity_db_id = i.id
+                    WHERE i.identity_id = ANY(%s)
+                      AND ra.role_name IS NOT NULL
+                      AND ra.scope IS NOT NULL
+                    ORDER BY i.identity_id,
+                        CASE ra.role_name
+                            WHEN 'Owner' THEN 1
+                            WHEN 'User Access Administrator' THEN 2
+                            WHEN 'Contributor' THEN 3
+                            ELSE 4
+                        END
+                """, (list(set(missing_ids)),))
+                role_map = {r['identity_id']: r for r in cursor2.fetchall()}
+                cursor2.close()
+
+                for a in actions:
+                    if not a.get('role_name') and a.get('identity_id') in role_map:
+                        rm = role_map[a['identity_id']]
+                        a['role_name'] = rm['role_name']
+                        a['scope'] = rm['scope']
+            except Exception as e:
+                logger.warning(f"Role backfill during generation failed: {e}")
 
         cursor.close()
-        return jsonify({'actions': actions, 'stats': stats})
+
+        # Persist generated actions (upsert — new items only)
+        for a in actions:
+            a['condition_key'] = f"{a.get('source', 'unknown')}_{a.get('action_type', 'review')}"
+        try:
+            db.upsert_generated_remediations(organization_id, run_id, actions)
+        except Exception as e:
+            logger.warning(f"Failed to persist generated remediations: {e}")
+
+        # Proactive cleanup: delete stale Microsoft entries from generated_remediations
+        # This ensures table stays clean even without a restart/backfill cycle
+        try:
+            db.cleanup_microsoft_remediations()
+        except Exception as e:
+            logger.debug(f"Inline Microsoft cleanup skipped: {e}")
+
+        # Read back from persisted table — scoped to current connection's run_ids
+        # Defense-in-depth: get_generated_remediations also filters is_microsoft_system
+        persisted = db.get_generated_remediations(organization_id, run_ids=run_ids)
+        critical_count = sum(1 for a in persisted if a.get('priority') == 'critical')
+        in_progress_count = sum(1 for a in persisted if a.get('status') == 'in_progress')
+        completed_count = sum(1 for a in persisted if a.get('status') == 'resolved')
+        stats = {
+            'open': sum(1 for a in persisted if a.get('status') in ('new', 'acknowledged')),
+            'critical': critical_count,
+            'in_progress': in_progress_count,
+            'completed_this_week': completed_count,
+        }
+
+        # Count Microsoft/system identities excluded from remediation
+        microsoft_excluded_count = 0
+        try:
+            ms_cursor = db.conn.cursor()
+            ms_cursor.execute("""
+                SELECT COUNT(*) FROM identities
+                WHERE discovery_run_id = %s
+                  AND COALESCE(is_microsoft_system, FALSE) = TRUE
+            """, (run_id,))
+            microsoft_excluded_count = ms_cursor.fetchone()[0]
+            ms_cursor.close()
+        except Exception:
+            pass
+
+        # Debug logging for remediation safety audit
+        logger.info(f"Remediation generation: {len(actions)} actions generated, "
+                     f"{len(persisted)} persisted, {microsoft_excluded_count} Microsoft identities excluded")
+
+        return jsonify({'actions': persisted, 'stats': stats, 'microsoft_excluded_count': microsoft_excluded_count})
+    except Exception as e:
+        logger.error(f"Generated remediations failed: {e}", exc_info=True)
+        return jsonify({
+            'actions': [],
+            'stats': {'open': 0, 'critical': 0, 'in_progress': 0, 'completed_this_week': 0},
+            'microsoft_excluded_count': 0,
+            'error': str(e),
+        })
+    finally:
+        db.close()
+
+
+def update_generated_remediation_handler(remediation_id):
+    """PATCH /api/remediation/generated/<id> — update status of a generated remediation."""
+    db = _db()
+    try:
+        data = request.get_json(silent=True) or {}
+        new_status = data.get('status', '').strip()
+        if new_status not in ('new', 'acknowledged', 'in_progress', 'resolved'):
+            return jsonify({'error': 'Invalid status. Use: new, acknowledged, in_progress, resolved'}), 400
+        user_id = _current_user_id()
+        success = db.update_generated_remediation_status(
+            int(remediation_id), new_status, resolved_by=user_id
+        )
+        if not success:
+            return jsonify({'error': 'Remediation not found'}), 404
+        return jsonify({'status': 'updated', 'id': int(remediation_id), 'new_status': new_status})
+    except Exception as e:
+        logger.error(f"Update generated remediation failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def trigger_remediation_generation_handler():
+    """POST /api/remediation/generate — trigger remediation generation manually."""
+    # This simply calls the existing handler which generates + persists
+    return get_generated_remediations_handler()
+
+
+def generate_remediation_scripts(rem: dict) -> dict:
+    """Generate PowerShell, Azure CLI, and Terraform notes for any remediation action."""
+    action = rem.get('action_type', '')
+    identity = rem.get('identity_name') or rem.get('identity_id', '')
+    obj_id = rem.get('identity_id', '')
+    role_raw = rem.get('role_name') or rem.get('role') or ''
+    scope = rem.get('scope') or rem.get('resource_scope') or ''
+    audit_id = str(rem.get('id', ''))[:8]
+
+    # Split comma-separated roles into individual entries
+    roles = [r.strip() for r in role_raw.split(',') if r.strip()]
+
+    # For actions that require specific role/scope, fail with a helpful error
+    _role_required_actions = ('reduce_privilege', 'remove_rbac_role', 'privilege_drift_reduce_privilege', 'access_review')
+    if action in _role_required_actions and (not roles or not scope):
+        _oid = obj_id or '(unknown)'
+        return {
+            'powershell': (
+                f"# ERROR: Role/scope data not available in AuditGraph.\n"
+                f"# Run a new discovery scan to populate role data, then regenerate.\n"
+                f"# Identity: {identity or '(unknown)'}\n"
+                f"#\n"
+                f"# To manually find roles for this identity:\n"
+                f"Get-AzRoleAssignment -ObjectId \"{_oid}\" | Format-Table RoleDefinitionName, Scope"
+            ),
+            'azure_cli': (
+                f"# ERROR: Role/scope data not available.\n"
+                f"# Run: az role assignment list --assignee \"{_oid}\" -o table"
+            ),
+            'terraform_note': "# Role data unavailable — run a new discovery scan.",
+        }
+
+    # Use first role for single-role actions (backwards compat)
+    role = roles[0] if roles else ''
+
+    if action in ('reduce_privilege', 'remove_rbac_role', 'privilege_drift_reduce_privilege'):
+        # Build one Remove block per role
+        role_display = ', '.join(roles)
+        role_count = len(roles)
+
+        ps_blocks = []
+        for i, r in enumerate(roles):
+            ps_blocks.append(f"""# --- Role {i + 1}/{role_count}: {r} ---
+$existing{i} = Get-AzRoleAssignment `
+  -ObjectId "{obj_id}" `
+  -RoleDefinitionName "{r}" `
+  -Scope "{scope}" `
+  -ErrorAction SilentlyContinue
+
+if ($existing{i}) {{
+  Write-Host "Removing {r} from {identity}..." -ForegroundColor Cyan
+  Remove-AzRoleAssignment `
+    -ObjectId "{obj_id}" `
+    -RoleDefinitionName "{r}" `
+    -Scope "{scope}"
+  Write-Host "Removed {r}" -ForegroundColor Green
+}} else {{
+  Write-Host "{r} not found — may already be removed" -ForegroundColor Yellow
+}}""")
+
+        ps = f"""# ============================================
+# AuditGraph Trust AI — Remove RBAC Role(s)
+# Identity:  {identity}
+# Roles:     {role_display}  ({role_count} role(s))
+# Scope:     {scope}
+# Audit ID:  {audit_id}
+# ============================================
+
+# Connect to Azure (skip if already connected)
+Connect-AzAccount
+
+{chr(10).join(ps_blocks)}
+
+# Verify all removals
+Write-Host "`nRemaining assignments at this scope:" -ForegroundColor Cyan
+Get-AzRoleAssignment -ObjectId "{obj_id}" |
+  Where-Object {{$_.Scope -eq "{scope}"}} |
+  Select-Object RoleDefinitionName, Scope"""
+
+        cli_blocks = []
+        for r in roles:
+            cli_blocks.append(f"""# Remove {r}
+ASSIGN_ID=$(az role assignment list \\
+  --assignee "{obj_id}" --role "{r}" \\
+  --scope "{scope}" --query "[0].id" -o tsv)
+[ -n "$ASSIGN_ID" ] && az role assignment delete --ids "$ASSIGN_ID" \\
+  && echo "Removed {r}" || echo "{r} not found" """)
+
+        cli = f"""# AuditGraph — Remove RBAC Role(s) (Azure CLI)
+# Identity: {identity} | Roles: {role_display}
+
+{chr(10).join(cli_blocks)}
+# Verify:
+az role assignment list --assignee "{obj_id}" \\
+  --scope "{scope}" -o table"""
+
+        tf_lines = '\n'.join([f'#   role_definition_name = "{r}"' for r in roles])
+        tf = f"""# Terraform: Remove azurerm_role_assignment block(s):
+{tf_lines}
+#   principal_id         = "{obj_id}"
+#   scope                = "{scope}"
+#
+# Delete or comment out those blocks,
+# then run: terraform plan && terraform apply"""
+
+    elif action in ('disable_identity', 'disable_account'):
+        ps = f"""# ============================================
+# AuditGraph Trust AI — Disable Identity
+# Identity:  {identity} ({obj_id})
+# Audit ID:  {audit_id}
+# ============================================
+
+Connect-MgGraph -Scopes "User.ReadWrite.All"
+
+# Disable the account
+Update-MgUser -UserId "{obj_id}" -AccountEnabled:$false
+
+# Verify
+$user = Get-MgUser -UserId "{obj_id}" -Property AccountEnabled
+if ($user.AccountEnabled) {{
+  Write-Host "WARNING: Account still enabled" -ForegroundColor Red
+}} else {{
+  Write-Host "SUCCESS: Account disabled" -ForegroundColor Green
+}}"""
+
+        cli = f"""# AuditGraph — Disable Azure AD Account
+az ad user update --id "{obj_id}" --account-enabled false
+az ad user show --id "{obj_id}" --query accountEnabled"""
+
+        tf = "# Terraform: Set account_enabled = false on the azuread_user resource."
+
+    elif action == 'remove_identity':
+        ps = f"""# ============================================
+# AuditGraph Trust AI — Remove Orphaned SPN
+# Identity:  {identity} ({obj_id})
+# Audit ID:  {audit_id}
+# ============================================
+
+Connect-AzAccount
+
+# Step 1: Verify no recent sign-in activity
+$spn = Get-AzADServicePrincipal -DisplayName "{identity}"
+Write-Host "Service Principal: $($spn.DisplayName) | AppId: $($spn.AppId)"
+
+# Step 2: Remove all role assignments first
+Get-AzRoleAssignment -ObjectId $spn.Id | ForEach-Object {{
+  Write-Host "Removing role: $($_.RoleDefinitionName) at $($_.Scope)"
+  Remove-AzRoleAssignment -ObjectId $spn.Id `
+    -RoleDefinitionName $_.RoleDefinitionName -Scope $_.Scope
+}}
+
+# Step 3: Remove the service principal
+Remove-AzADServicePrincipal -ObjectId $spn.Id -Confirm
+Write-Host "SPN removed. Audit ID: {audit_id}" -ForegroundColor Green"""
+
+        cli = f"""# AuditGraph — Remove Orphaned Service Principal
+# Step 1: List role assignments
+az role assignment list --assignee "{obj_id}" -o table
+
+# Step 2: Delete all role assignments
+az role assignment list --assignee "{obj_id}" --query "[].id" -o tsv | \\
+  xargs -I {{}} az role assignment delete --ids {{}}
+
+# Step 3: Delete the service principal
+az ad sp delete --id "{obj_id}" """
+
+        tf = "# Terraform: Remove the azuread_service_principal and azuread_application resources."
+
+    elif action == 'rotate_credential':
+        ps = f"""# ============================================
+# AuditGraph Trust AI — Rotate Credential
+# Identity:  {identity} ({obj_id})
+# Audit ID:  {audit_id}
+# ============================================
+
+Connect-MgGraph -Scopes "Application.ReadWrite.All"
+
+# Step 1: Find the application
+$app = Get-MgApplication -Filter "appId eq '{obj_id}'"
+if (-not $app) {{
+  Write-Host "Application not found for appId: {obj_id}" -ForegroundColor Red
+  exit 1
+}}
+
+# Step 2: List current credentials
+Write-Host "Current credentials:" -ForegroundColor Cyan
+$app.PasswordCredentials | Select-Object DisplayName, EndDateTime, KeyId | Format-Table
+
+# Step 3: Remove expired credentials
+$app.PasswordCredentials | Where-Object {{ $_.EndDateTime -lt (Get-Date) }} | ForEach-Object {{
+  Remove-MgApplicationPassword -ApplicationId $app.Id -KeyId $_.KeyId
+  Write-Host "Removed expired credential: $($_.DisplayName)" -ForegroundColor Yellow
+}}
+
+# Step 4: Add new credential (90-day expiry)
+$newCred = Add-MgApplicationPassword -ApplicationId $app.Id `
+  -PasswordCredential @{{
+    DisplayName = "AuditGraph-Rotated-$(Get-Date -Format yyyyMMdd)"
+    EndDateTime = (Get-Date).AddDays(90)
+  }}
+
+Write-Host "New credential created. Store securely:" -ForegroundColor Yellow
+Write-Host "Secret: $($newCred.SecretText)" -ForegroundColor Red
+Write-Host "Expires: $($newCred.EndDateTime)" """
+
+        cli = f"""# AuditGraph — Rotate Service Principal Credentials
+APP_ID=$(az ad sp show --id "{obj_id}" --query appId -o tsv)
+
+# List current credentials
+az ad app credential list --id "$APP_ID" -o table
+
+# Reset credential (generates new secret, 1-year expiry)
+az ad app credential reset --id "$APP_ID" --years 1"""
+
+        tf = "# Terraform: Update the azuread_application_password resource end_date."
+
+    elif action == 'access_review':
+        ps = f"""# ============================================
+# AuditGraph Trust AI — Access Review
+# Identity:  {identity} ({obj_id})
+# Role:      {role}
+# Audit ID:  {audit_id}
+# ============================================
+
+Connect-MgGraph -Scopes "AccessReview.ReadWrite.All"
+
+# Step 1: List all role assignments for review
+Write-Host "Role assignments for {identity}:" -ForegroundColor Cyan
+Get-AzRoleAssignment -ObjectId "{obj_id}" | Format-Table RoleDefinitionName, Scope
+
+# Step 2: Check Entra directory roles
+Get-MgDirectoryRole | ForEach-Object {{
+  $members = Get-MgDirectoryRoleMember -DirectoryRoleId $_.Id
+  if ($members.Id -contains "{obj_id}") {{
+    Write-Host "Entra role: $($_.DisplayName)" -ForegroundColor Yellow
+  }}
+}}
+
+# Step 3: Manual review required
+Write-Host ""
+Write-Host "ACTION: Verify business justification for all privileged roles" -ForegroundColor Red
+Write-Host "If no justification — remove the role assignment(s) above" """
+
+        cli = f"""# AuditGraph — Access Review
+# List all role assignments for this identity
+az role assignment list --assignee "{obj_id}" -o table
+
+# Review and remove as needed:
+# az role assignment delete --assignee "{obj_id}" --role "<RoleName>" --scope "<Scope>" """
+
+        tf = "# Terraform: Review and remove unnecessary azurerm_role_assignment resources."
+
+    elif action == 'break_attack_path':
+        role = roles[0] if roles else 'Owner'
+
+        # Pre-build conditional sections (backslashes not allowed in f-string exprs on Py3.9)
+        if scope:
+            _ps_step2 = (
+                'Remove-AzRoleAssignment `\n'
+                '  -ObjectId "{oid}" `\n'
+                '  -RoleDefinitionName "{r}" `\n'
+                '  -Scope "{s}"'
+            ).format(oid=obj_id, r=role, s=scope)
+        else:
+            _ps_step2 = (
+                '$target = $escalation | Where-Object {{ $_.RoleDefinitionName -eq "{r}" }} | Select-Object -First 1\n'
+                'if ($target) {{\n'
+                '  Remove-AzRoleAssignment `\n'
+                '    -ObjectId "{oid}" `\n'
+                '    -RoleDefinitionName $target.RoleDefinitionName `\n'
+                '    -Scope $target.Scope\n'
+                '}}'
+            ).format(oid=obj_id, r=role)
+
+        if scope:
+            _cli_step2 = (
+                'ASSIGN_ID=$(az role assignment list \\\n'
+                '  --assignee "{oid}" \\\n'
+                '  --role "{r}" \\\n'
+                '  --scope "{s}" \\\n'
+                '  --query "[0].id" -o tsv)\n'
+                '\n'
+                'if [ -n "$ASSIGN_ID" ]; then\n'
+                '  az role assignment delete --ids "$ASSIGN_ID" \\\n'
+                '    && echo "Attack path broken: {r} removed"\n'
+                'else\n'
+                '  echo "{r} assignment not found at scope"\n'
+                'fi'
+            ).format(oid=obj_id, r=role, s=scope)
+        else:
+            _cli_step2 = (
+                '# Find scope from Step 1, then:\n'
+                'az role assignment delete \\\n'
+                '  --assignee "{oid}" \\\n'
+                '  --role "{r}" \\\n'
+                '  --scope "<paste-scope-from-step-1>"'
+            ).format(oid=obj_id, r=role)
+
+        _tf_scope = '#   scope                = "{}"'.format(scope) if scope else '#   scope                = "<find in Azure Portal>"'
+
+        ps = f"""# ============================================
+# AuditGraph Trust AI — Break Attack Path
+# Identity:  {identity} ({obj_id})
+# Role:      {role}
+# Scope:     {scope if scope else 'See Step 1'}
+# Audit ID:  {audit_id}
+# ============================================
+
+Connect-AzAccount
+
+# Step 1: Identify the escalation chain
+Write-Host "Privileged role assignments for {identity}:" -ForegroundColor Cyan
+$escalation = Get-AzRoleAssignment -ObjectId "{obj_id}" | Where-Object {{
+  $_.RoleDefinitionName -in @(
+    "Owner", "User Access Administrator", "Contributor",
+    "Privileged Role Administrator", "Global Administrator"
+  )
+}}
+$escalation | Format-Table RoleDefinitionName, Scope
+
+# Step 2: Remove the highest-privilege role to break attack path
+{_ps_step2}
+Write-Host "Attack path broken. Audit ID: {audit_id}" -ForegroundColor Green
+
+# Step 3: Verify the attack path is broken
+Write-Host "Remaining privileged roles:" -ForegroundColor Cyan
+Get-AzRoleAssignment -ObjectId "{obj_id}" | Where-Object {{
+  $_.RoleDefinitionName -in @(
+    "Owner", "User Access Administrator", "Contributor",
+    "Global Administrator"
+  )
+}} | Format-Table RoleDefinitionName, Scope"""
+
+        cli = f"""# AuditGraph — Break Attack Path
+# Identity: {identity} | Role to remove: {role}
+
+# Step 1: View all privileged assignments:
+az role assignment list --assignee "{obj_id}" \\
+  --query "[?roleDefinitionName=='Owner' || roleDefinitionName=='User Access Administrator' || roleDefinitionName=='Contributor']" \\
+  -o table
+
+# Step 2: Remove the highest-privilege role:
+{_cli_step2}
+
+# Step 3: Verify:
+az role assignment list --assignee "{obj_id}" \\
+  --query "[?roleDefinitionName=='{role}']" -o table"""
+
+        tf = f"""# Terraform: Remove the azurerm_role_assignment that enables the escalation path.
+#
+#   role_definition_name = "{role}"
+#   principal_id         = "{obj_id}"
+{_tf_scope}
+#
+# Comment out or delete this resource block, then:
+# terraform plan && terraform apply"""
+
+    else:
+        ps = f"""# AuditGraph Trust AI — Remediation
+# Action:   {action}
+# Identity: {identity}
+# Audit ID: {audit_id}
+#
+# No automated script available for this action type.
+# Review AuditGraph recommendations and apply manually."""
+        cli = f"# No Azure CLI script available for action type: {action}"
+        tf = f"# No Terraform guidance available for action type: {action}"
+
+    return {
+        'powershell': ps,
+        'azure_cli': cli,
+        'terraform_note': tf,
+    }
+
+
+def get_remediation_script_handler(remediation_id):
+    """GET /api/remediation/<id>/script — generate scripts for a remediation action."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor as _RDC
+        cursor = db.conn.cursor(cursor_factory=_RDC)
+        cursor.execute("""
+            SELECT id, identity_id, identity_name, action_type, title,
+                   description, role_name, scope, priority, blast_radius
+            FROM generated_remediations
+            WHERE id = %s AND organization_id = %s
+        """, (int(remediation_id), _org_id()))
+        rem = cursor.fetchone()
+        cursor.close()
+
+        if not rem:
+            return jsonify({'error': 'Remediation not found'}), 404
+
+        rem = dict(rem)
+        # Backfill role_name/scope from actual role assignments if missing
+        if not rem.get('role_name') and rem.get('identity_id') and rem.get('action_type') in (
+            'reduce_privilege', 'remove_rbac_role', 'privilege_drift_reduce_privilege', 'access_review'
+        ):
+            try:
+                cursor2 = db.conn.cursor(cursor_factory=_RDC)
+                cursor2.execute("""
+                    SELECT ra.role_name, ra.scope
+                    FROM role_assignments ra
+                    JOIN identities i ON ra.identity_db_id = i.id
+                    WHERE i.identity_id = %s
+                      AND ra.role_name IS NOT NULL
+                      AND ra.scope IS NOT NULL
+                    ORDER BY CASE ra.role_name
+                        WHEN 'Owner' THEN 1
+                        WHEN 'User Access Administrator' THEN 2
+                        WHEN 'Contributor' THEN 3
+                        WHEN 'Privileged Role Administrator' THEN 4
+                        WHEN 'Global Administrator' THEN 5
+                        ELSE 6
+                    END
+                    LIMIT 1
+                """, (rem['identity_id'],))
+                top_role = cursor2.fetchone()
+                cursor2.close()
+                if top_role:
+                    rem['role_name'] = top_role['role_name']
+                    rem['scope'] = top_role['scope']
+            except Exception:
+                pass
+
+        scripts = generate_remediation_scripts(rem)
+        return jsonify({
+            'remediation_id': int(remediation_id),
+            'action_type': rem['action_type'],
+            'identity_name': rem.get('identity_name') or rem.get('identity_id', ''),
+            'role_name': rem.get('role_name'),
+            'scope': rem.get('scope'),
+            'title': rem.get('title'),
+            'powershell': scripts['powershell'],
+            'azure_cli': scripts['azure_cli'],
+            'terraform_note': scripts['terraform_note'],
+        })
+    except Exception as e:
+        logger.error(f"Remediation script generation failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
 
@@ -7416,6 +8498,9 @@ def auth_login():
                                 {'username': username, 'ip': request.remote_addr})
             except Exception:
                 pass
+            from app.security_events import SecurityEventLogger
+            evt = SecurityEventLogger.login_failed(username, request.remote_addr, 'user not found or disabled')
+            SecurityEventLogger.persist(evt)
             return jsonify({'error': 'Invalid credentials'}), 401
 
         # Phase 84: Account lockout check
@@ -7444,6 +8529,9 @@ def auth_login():
                                 {'username': username, 'ip': request.remote_addr})
             except Exception:
                 pass
+            from app.security_events import SecurityEventLogger
+            evt = SecurityEventLogger.login_failed(username, request.remote_addr, 'wrong password')
+            SecurityEventLogger.persist(evt)
             return jsonify({'error': 'Invalid credentials'}), 401
 
         # Portal access enforcement — runs regardless of org_slug
@@ -7511,6 +8599,16 @@ def auth_login():
     effective_slug = org_slug or _derive_org_slug()
     access_token = generate_access_token(user, portal=portal, org_slug=effective_slug)
     refresh_token = generate_refresh_token(user, portal=portal)
+
+    # Security event: successful login
+    from app.security_events import SecurityEventLogger
+    evt = SecurityEventLogger.login_success(
+        org_id=user.get('organization_id'),
+        user_id=user['id'],
+        username=user['username'],
+        ip_address=request.remote_addr,
+    )
+    SecurityEventLogger.persist(evt)
 
     return jsonify({
         'access_token': access_token,
@@ -8177,6 +9275,17 @@ def update_user_handler(user_id):
                 _log(db, 'role_change',
                      f'User "{existing["username"]}" role changed: {existing.get("role")} → {updates["role"]}',
                      {'user_id': user_id, 'old_role': existing.get('role'), 'new_role': updates['role']})
+                # Security event: role changed
+                from app.security_events import SecurityEventLogger
+                changer_id = g.current_user.get('id') if hasattr(g, 'current_user') and g.current_user else None
+                evt = SecurityEventLogger.role_changed(
+                    org_id=existing.get('organization_id'),
+                    target_user_id=user_id,
+                    old_role=existing.get('role'),
+                    new_role=updates['role'],
+                    changed_by=changer_id,
+                )
+                SecurityEventLogger.persist(evt, db)
         except Exception:
             pass
 
@@ -10268,12 +11377,10 @@ def query_identities():
         except ValueError:
             return jsonify({'error': 'Invalid query parameters'}), 400
 
-        hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
         query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"
         params = [run_ids]
 
-        if hide_microsoft:
-            query += HIDE_MICROSOFT_SQL
+        query += HIDE_MICROSOFT_SQL
 
         query += adv_where
         params.extend(adv_params)
@@ -10382,10 +11489,17 @@ def get_anomalies_list():
         if resolved_param is not None:
             resolved = resolved_param.lower() == 'true'
 
+        # Connection-scoped: filter anomalies to runs belonging to the selected connection
+        run_ids = None
+        if not run_id:
+            cursor = db.conn.cursor()
+            run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+            cursor.close()
+
         anomalies = db.get_anomalies(
             limit=limit, offset=offset, anomaly_type=anomaly_type,
             severity=severity, identity_id=identity_id, resolved=resolved,
-            run_id=run_id,
+            run_id=run_id, run_ids=run_ids,
         )
         return jsonify({'anomalies': anomalies, 'count': len(anomalies)})
     finally:
@@ -10396,7 +11510,10 @@ def get_anomaly_stats_handler():
     """GET /api/anomalies/stats — anomaly summary stats."""
     db = _db()
     try:
-        stats = db.get_anomaly_stats()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.close()
+        stats = db.get_anomaly_stats(run_ids=run_ids)
         return jsonify(stats)
     finally:
         db.close()
@@ -10469,8 +11586,11 @@ def get_dashboard_anomalies():
     db = _db()
     try:
         limit = min(int(request.args.get('limit', 5)), 20)
-        anomalies = db.get_anomalies_for_dashboard(limit=limit)
-        stats = db.get_anomaly_stats()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.close()
+        anomalies = db.get_anomalies_for_dashboard(limit=limit, run_ids=run_ids)
+        stats = db.get_anomaly_stats(run_ids=run_ids)
         return jsonify({
             'anomalies': anomalies,
             'unresolved_count': stats['unresolved'],
@@ -10820,7 +11940,9 @@ def get_soar_actions_list():
             playbook_id=playbook_id, status=status,
             identity_id=identity_id,
         )
-        return jsonify({'actions': actions, 'total': len(actions), 'limit': limit, 'offset': offset})
+        # Defense-in-depth: filter any Microsoft system identities that slipped through
+        safe_actions = [a for a in actions if not a.get('is_microsoft_system')]
+        return jsonify({'actions': safe_actions, 'total': len(safe_actions), 'limit': limit, 'offset': offset})
     finally:
         db.close()
 
@@ -11229,6 +12351,7 @@ def get_current_organization_handler():
 
 def get_organization_config():
     """GET /api/organization/config — cloud provider & add-on config for sidebar."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
     tid = _org_id()
     if not tid:
         # Superadmin without org context — default Azure-only
@@ -11242,12 +12365,19 @@ def get_organization_config():
             'addons': {
                 'extended_retention': False,
             },
+            'feature_flags': {
+                'ai_agent_governance': FEATURE_AI_AGENT_GOVERNANCE,
+            },
         })
     db = _db()
     try:
         cfg = db.get_organization_config(tid)
         if not cfg:
             return jsonify({'error': 'Tenant not found'}), 404
+        # Inject global feature flags (additive — does not modify existing fields)
+        cfg['feature_flags'] = {
+            'ai_agent_governance': FEATURE_AI_AGENT_GOVERNANCE,
+        }
         return jsonify(cfg)
     finally:
         db.close()
@@ -11985,10 +13115,11 @@ def create_client_connection():
         finally:
             check_db.close()
 
-    # Build metadata — store credentials securely in JSONB
+    # Build metadata — store credentials encrypted in JSONB
+    from app.encryption import encrypt_field
     metadata = data.get('metadata') or {}
     if client_secret:
-        metadata['client_secret'] = client_secret
+        metadata['client_secret'] = encrypt_field(client_secret)
 
     db = _db()
     try:
@@ -12111,6 +13242,12 @@ def create_client_connection():
             thread = threading.Thread(target=_run_initial_discovery, daemon=True)
             thread.start()
 
+        # Security event: connector created
+        from app.security_events import SecurityEventLogger
+        user_id = g.current_user.get('id') if hasattr(g, 'current_user') and g.current_user else None
+        evt = SecurityEventLogger.connector_created(tid, conn['id'], cloud, label, user_id)
+        SecurityEventLogger.persist(evt, db)
+
         result = dict(conn)
         result['discovered_count'] = discovered_count
         result['discovered_subscriptions'] = discovered_subs
@@ -12154,7 +13291,14 @@ def update_client_connection(connection_id):
 
 
 def delete_client_connection(connection_id):
-    """Delete a cloud connection."""
+    """Delete a cloud connection and ALL associated data.
+
+    Uses ConnectionLifecycleService to cascade-delete:
+    - discovery_runs (→ cascades to identities, role_assignments,
+      risk_summary, anomalies, app_registrations, resources, etc.)
+    - snapshot_jobs, cloud_subscriptions
+    - cloud_connections row itself
+    """
     tid = _org_id()
     if not tid or tid == -1:
         return jsonify({'error': 'Tenant context required'}), 403
@@ -12165,15 +13309,154 @@ def delete_client_connection(connection_id):
         if not existing or existing['organization_id'] != tid:
             return jsonify({'error': 'Connection not found'}), 404
 
-        db.delete_cloud_connection(connection_id, organization_id=tid)
-        _log(db, 'connection_deleted', f'Deleted connection: {existing["label"]}',
-             {'connection_id': connection_id, 'cloud': existing['cloud']})
+        connection_label = existing.get('label', '')
+        connection_cloud = existing.get('cloud', '')
 
-        # FIX1C: Track usage on connection removal
+        # Full lifecycle cleanup — deletes all data, then the connection row
+        from app.services.connection_lifecycle import ConnectionLifecycleService
+        service = ConnectionLifecycleService(db)
+        result = service.remove_connection_data(tid, connection_id)
+
+        _log(db, 'connection_deleted',
+             f'Deleted connection: {connection_label} — {result.get("total_deleted", 0)} data rows removed',
+             {'connection_id': connection_id, 'cloud': connection_cloud,
+              'runs_removed': result.get('runs_removed', 0),
+              'total_deleted': result.get('total_deleted', 0)})
+
+        # Track usage on connection removal
         from app.entitlements.service import track_usage
-        track_usage(db, tid, 'connection', str(connection_id), 'removed', {'cloud': existing['cloud']})
+        track_usage(db, tid, 'connection', str(connection_id), 'removed', {'cloud': connection_cloud})
 
-        return jsonify({'deleted': True})
+        return jsonify({
+            'deleted': True,
+            'connection_name': connection_label,
+            'data_removed': {
+                'runs_removed': result.get('runs_removed', 0),
+                'total_deleted': result.get('total_deleted', 0),
+                'details': result.get('rows_deleted', {}),
+            },
+        })
+    finally:
+        db.close()
+
+
+def cleanup_inactive_connections_handler():
+    """POST /api/admin/cleanup-inactive-connections
+
+    One-time cleanup: removes all data from connections that no longer
+    exist in cloud_connections table (deleted) or are marked 'removed'.
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = _db()
+    try:
+        from app.services.connection_lifecycle import ConnectionLifecycleService
+        service = ConnectionLifecycleService(db)
+        result = service.cleanup_orphaned_data(tid)
+
+        _log(db, 'admin_cleanup',
+             f'Inactive connection cleanup: {result.get("cleaned", 0)} connections, '
+             f'{result.get("total_rows_deleted", 0)} rows',
+             result)
+
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("Cleanup failed: %s", e)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def rotate_connector_credentials(connection_id):
+    """POST /api/connectors/<id>/rotate-credentials — update credentials and reset rotation timestamps."""
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    client_secret = (data.get('client_secret') or '').strip()
+    if not client_secret:
+        return jsonify({'error': 'client_secret is required'}), 400
+
+    db = _db()
+    try:
+        existing = db.get_cloud_connection_by_id(connection_id)
+        if not existing or existing.get('organization_id') != tid:
+            return jsonify({'error': 'Connection not found'}), 404
+
+        # Update metadata with new secret (encrypted)
+        from app.encryption import encrypt_field
+        metadata = existing.get('metadata') or {}
+        if isinstance(metadata, str):
+            import json as _json
+            metadata = _json.loads(metadata)
+        metadata['client_secret'] = encrypt_field(client_secret)
+
+        # Parse credential_expires_at if provided
+        credential_expires_at = None
+        if data.get('credential_expires_at'):
+            try:
+                from datetime import datetime
+                credential_expires_at = datetime.fromisoformat(data['credential_expires_at'].replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                return jsonify({'error': 'Invalid credential_expires_at format (use ISO 8601)'}), 400
+
+        from datetime import datetime, timezone
+        update_kwargs = {
+            'metadata': metadata,
+            'credential_last_rotated': datetime.now(timezone.utc),
+        }
+        if credential_expires_at:
+            update_kwargs['credential_expires_at'] = credential_expires_at
+
+        updated = db.update_cloud_connection(connection_id, **update_kwargs)
+
+        _log(db, 'credential_rotated',
+             f'Credentials rotated for connector: {existing["label"]}',
+             {'connection_id': connection_id, 'cloud': existing.get('cloud'),
+              'expires_at': data.get('credential_expires_at')})
+
+        # Security event: credential rotated
+        from app.security_events import SecurityEventLogger
+        user_id = g.current_user.get('id') if hasattr(g, 'current_user') and g.current_user else None
+        evt = SecurityEventLogger.credential_rotated(tid, connection_id, existing['label'], user_id)
+        SecurityEventLogger.persist(evt, db)
+
+        # Strip secret from response
+        if updated and updated.get('metadata'):
+            meta = updated['metadata']
+            if isinstance(meta, dict):
+                meta.pop('client_secret', None)
+                updated['metadata'] = meta
+
+        return jsonify({'connection': updated, 'rotated': True})
+    finally:
+        db.close()
+
+
+def check_connector_credential_expiry_handler():
+    """GET /api/connectors/expiring-credentials — list connectors with credentials expiring soon."""
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    warning_days = request.args.get('days', 30, type=int)
+    warning_days = min(max(warning_days, 1), 365)
+
+    db = _db()
+    try:
+        expiring = db.check_connector_credential_expiry(warning_days=warning_days)
+        # Filter to current org
+        org_expiring = [c for c in expiring if c.get('organization_id') == tid]
+        for c in org_expiring:
+            logger.warning("Connector credential expiring soon: id=%s, label=%s, days=%s",
+                           c['id'], c['label'], c.get('days_until_expiry'))
+        return jsonify({'expiring': org_expiring, 'warning_days': warning_days})
     finally:
         db.close()
 
@@ -12571,14 +13854,24 @@ def simulate_risk(identity_id):
         remove_perms = set(p.lower() for p in (data.get('remove_permissions') or []))
         add_perms = data.get('add_permissions') or []
 
-        # Fetch identity
+        # Fetch identity — scoped to latest runs for selected connection
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT id, identity_id, identity_category, risk_score, risk_level, risk_reasons,
-                   credential_status
-            FROM identities WHERE identity_id = %s
-            ORDER BY discovery_run_id DESC LIMIT 1
-        """, (identity_id,))
+        conn_id = _connection_id()
+        run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
+        if run_ids:
+            cursor.execute("""
+                SELECT id, identity_id, identity_category, risk_score, risk_level, risk_reasons,
+                       credential_status
+                FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+                ORDER BY discovery_run_id DESC LIMIT 1
+            """, (identity_id, run_ids))
+        else:
+            cursor.execute("""
+                SELECT id, identity_id, identity_category, risk_score, risk_level, risk_reasons,
+                       credential_status
+                FROM identities WHERE identity_id = %s
+                ORDER BY discovery_run_id DESC LIMIT 1
+            """, (identity_id,))
         row = cursor.fetchone()
         if not row:
             cursor.close()
@@ -12704,7 +13997,7 @@ def get_resources():
     try:
         _ensure_resource_tables(db)
         organization_id = _org_id()
-        limit = request.args.get('limit', 50, type=int)
+        limit = min(request.args.get('limit', 50, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
         resource_type = request.args.get('resource_type', '')
         risk_level = request.args.get('risk_level', '')
@@ -12797,15 +14090,37 @@ def get_resources():
 
         union_sql = " UNION ALL ".join(parts)
 
+        # Subscription activation gating — only show resources from activated subs
+        # unless the user explicitly selects a subscription via filter
+        conn_id = _connection_id()
+        active_sub_ids, total_sub_count, active_sub_count = _active_subscription_ids(
+            cursor, organization_id, conn_id)
+        inactive_sub_count = total_sub_count - active_sub_count
+
         # Wrap with filters
         where_clauses = []
         filter_params = []
+        subscription_ids = request.args.get('subscription_ids', '')
+        if subscription_ids:
+            # User explicitly selected subscription(s) — honor that
+            selected = [s.strip() for s in subscription_ids.split(',') if s.strip()]
+            if selected:
+                where_clauses.append("r.subscription_id = ANY(%s)")
+                filter_params.append(selected)
+        elif subscription:
+            # Legacy single subscription filter
+            where_clauses.append("r.subscription_id = %s")
+            filter_params.append(subscription)
+        elif active_sub_ids:
+            # Default: only show resources from activated subscriptions
+            where_clauses.append("r.subscription_id = ANY(%s)")
+            filter_params.append(active_sub_ids)
+        # If no active subs and no explicit filter: show nothing (empty active_sub_ids
+        # means no filter applied, so the query would return all — we gate that below)
+
         if risk_level:
             where_clauses.append("r.risk_level = %s")
             filter_params.append(risk_level)
-        if subscription:
-            where_clauses.append("r.subscription_id = %s")
-            filter_params.append(subscription)
         if search:
             where_clauses.append("(r.name ILIKE %s OR r.resource_group ILIKE %s)")
             filter_params.extend([f'%{search}%', f'%{search}%'])
@@ -12887,11 +14202,19 @@ def get_resources():
         except Exception:
             pass
 
-        return jsonify({
+        result = {
             'resources': resources,
             'count': len(resources),
             'total': total,
-        })
+        }
+        # Include subscription activation metadata for frontend banner
+        if total_sub_count > 0:
+            result['subscription_activation'] = {
+                'active_count': active_sub_count,
+                'inactive_count': inactive_sub_count,
+                'total_count': total_sub_count,
+            }
+        return jsonify(result)
     finally:
         db.close()
 
@@ -12913,6 +14236,7 @@ def get_resource_stats():
                 'at_risk': 0,
             })
 
+        conn_id = _connection_id()
         org_filter = ""
         params = [run_ids]
         if organization_id and organization_id > 0:
@@ -12921,6 +14245,14 @@ def get_resource_stats():
         elif organization_id is not None:
             org_filter = " AND organization_id = %s"
             params.append(organization_id)
+
+        # Subscription activation gating for resource stats
+        active_sub_ids, total_sub_count, active_sub_count = _active_subscription_ids(
+            cursor, organization_id, conn_id)
+        sub_filter = ""
+        if active_sub_ids:
+            sub_filter = " AND subscription_id = ANY(%s)"
+            params.append(active_sub_ids)
 
         include_sa = resource_type != 'key_vault'
         include_kv = resource_type != 'storage_account'
@@ -12937,7 +14269,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE risk_level = 'low') as low,
                        COUNT(*) FILTER (WHERE risk_level = 'info') as info
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = ANY(%s){org_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}{sub_filter}
             """, params)
             sa = dict(cursor.fetchone())
         else:
@@ -12953,7 +14285,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE risk_level = 'low') as low,
                        COUNT(*) FILTER (WHERE risk_level = 'info') as info
                 FROM azure_key_vaults
-                WHERE discovery_run_id = ANY(%s){org_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}{sub_filter}
             """, params)
             kv = dict(cursor.fetchone())
         else:
@@ -12975,7 +14307,7 @@ def get_resource_stats():
                        COUNT(*) FILTER (WHERE shared_key_access = true AND diagnostic_logging_enabled = true AND (sas_policy_enabled IS NULL OR sas_policy_enabled = false)) as partial,
                        COUNT(*) FILTER (WHERE shared_key_access = true AND (diagnostic_logging_enabled IS NULL OR diagnostic_logging_enabled = false)) as unauditable
                 FROM azure_storage_accounts
-                WHERE discovery_run_id = ANY(%s){org_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}{sub_filter}
             """, params)
             rotation_row = dict(cursor.fetchone())
             rotation_data = {
@@ -13005,7 +14337,7 @@ def get_resource_stats():
                        COALESCE(SUM(certs_expired), 0) as expired_certs,
                        COALESCE(SUM(certs_expiring_soon), 0) as expiring_certs
                 FROM azure_key_vaults
-                WHERE discovery_run_id = ANY(%s){org_filter}
+                WHERE discovery_run_id = ANY(%s){org_filter}{sub_filter}
             """, params)
             expiry_row = dict(cursor.fetchone())
             expiry_data = {
@@ -13038,6 +14370,12 @@ def get_resource_stats():
             result['audit_posture'] = audit_posture
         if expiry_data is not None:
             result['expiry_summary'] = expiry_data
+        if total_sub_count > 0:
+            result['subscription_activation'] = {
+                'active_count': active_sub_count,
+                'inactive_count': total_sub_count - active_sub_count,
+                'total_count': total_sub_count,
+            }
 
         return jsonify(result)
     finally:
@@ -13282,20 +14620,27 @@ def get_resource_anomalies(resource_id):
         resource_id = '/' + resource_id
     db = _db()
     try:
-        limit = request.args.get('limit', 20, type=int)
+        limit = min(request.args.get('limit', 20, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
+        conn_id = _connection_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
+        run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
+        run_filter = ""
+        run_params: list = []
+        if run_ids:
+            run_filter = " AND discovery_run_id = ANY(%s)"
+            run_params = [run_ids]
+        cursor.execute(f"""
             SELECT * FROM anomalies
-            WHERE details->>'resource_id' = %s
+            WHERE details->>'resource_id' = %s{run_filter}
             ORDER BY created_at DESC
             LIMIT %s OFFSET %s
-        """, (resource_id, limit, offset))
+        """, [resource_id] + run_params + [limit, offset])
         rows = [dict(r) for r in cursor.fetchall()]
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) as total FROM anomalies
-            WHERE details->>'resource_id' = %s
-        """, (resource_id,))
+            WHERE details->>'resource_id' = %s{run_filter}
+        """, [resource_id] + run_params)
         total = cursor.fetchone()['total']
         cursor.close()
         for r in rows:
@@ -15622,7 +16967,7 @@ def get_governance_identities():
         perm_map = {}
         if db_ids:
             cursor.execute("""
-                SELECT identity_db_id, permission_name, permission_type
+                SELECT identity_db_id, permission_name, risk_level
                 FROM graph_api_permissions
                 WHERE identity_db_id = ANY(%s)
             """, (db_ids,))
@@ -15758,14 +17103,14 @@ def get_governance_identity_detail(identity_id):
 
         # Fetch roles
         cursor.execute("""
-            SELECT role_name, scope, scope_type, assignment_type
+            SELECT role_name, scope, scope_type, role_type, risk_level
             FROM role_assignments WHERE identity_db_id = %s
         """, (db_id,))
         roles = [dict(r) for r in cursor.fetchall()]
 
         # Fetch entra roles
         cursor.execute("""
-            SELECT role_name, is_permanent, is_pim_eligible
+            SELECT role_name, role_definition_id, directory_scope, risk_level, role_type
             FROM entra_role_assignments WHERE identity_db_id = %s
         """, (db_id,))
         entra_roles = [dict(r) for r in cursor.fetchall()]
@@ -15779,14 +17124,14 @@ def get_governance_identity_detail(identity_id):
 
         # Fetch graph_api_permissions
         cursor.execute("""
-            SELECT permission_name, permission_type, resource_name
+            SELECT permission_name, risk_level, permission_description
             FROM graph_api_permissions WHERE identity_db_id = %s
         """, (db_id,))
         graph_perms = [dict(r) for r in cursor.fetchall()]
 
         # Fetch owners
         cursor.execute("""
-            SELECT owner_display_name, owner_id, owner_type
+            SELECT owner_display_name, owner_object_id as owner_id, owner_type
             FROM sp_ownership WHERE identity_db_id = %s
         """, (db_id,))
         owners = [dict(r) for r in cursor.fetchall()]
@@ -16192,6 +17537,38 @@ def health_check():
     # Connection pool
     from app.database import _PoolManager
     checks['connection_pool'] = _PoolManager.stats()
+
+    # External API reachability
+    external_apis = {}
+    import requests as _req
+    for name, url in [
+        ('microsoft_graph', 'https://graph.microsoft.com/v1.0/$metadata'),
+        ('azure_login', 'https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration'),
+    ]:
+        try:
+            t0 = time.time()
+            r = _req.get(url, timeout=5)
+            latency = round((time.time() - t0) * 1000, 1)
+            external_apis[name] = {
+                'status': 'reachable' if r.status_code < 500 else 'degraded',
+                'latency_ms': latency,
+                'http_status': r.status_code,
+            }
+        except Exception:
+            external_apis[name] = {'status': 'unreachable'}
+            overall = 'degraded'
+    checks['external_apis'] = external_apis
+
+    # Encryption status
+    from app.encryption import encryption_available
+    checks['encryption'] = 'configured' if encryption_available() else 'not_configured'
+
+    # Circuit breaker status
+    try:
+        from app.resilience import get_all_breaker_stats
+        checks['circuit_breakers'] = get_all_breaker_stats()
+    except Exception:
+        pass
 
     return jsonify({
         'service': 'AuditGraph API',
@@ -16825,7 +18202,7 @@ def get_spn_list():
     try:
         db._ensure_spn_exposure()
         organization_id = _org_id()
-        limit = request.args.get('limit', 50, type=int)
+        limit = min(request.args.get('limit', 50, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
         risk_level = request.args.get('risk_level', '')
         category = request.args.get('category', '')
@@ -16833,7 +18210,6 @@ def get_spn_list():
         blast = request.args.get('blast_radius', '')
         activity = request.args.get('activity', '')
         search_q = request.args.get('search', '')
-        hide_ms = request.args.get('hide_microsoft', 'true').lower() == 'true'
         sort_by = request.args.get('sort', 'risk_score')
         sort_dir = request.args.get('dir', 'desc')
         # New exposure filters
@@ -16853,8 +18229,7 @@ def get_spn_list():
         where = [" WHERE i.discovery_run_id = ANY(%s)", " AND i.identity_category IN %s"]
         params = [run_ids, SPN_CATEGORIES]
 
-        if hide_ms:
-            where.append(f" {HIDE_MICROSOFT_SQL}")
+        where.append(f" {HIDE_MICROSOFT_SQL}")
         if risk_level:
             where.append(" AND i.risk_level = %s")
             params.append(risk_level)
@@ -17369,7 +18744,7 @@ def get_app_reg_stats():
             'no_spn': no_spn,
             'expired_credentials': cred_row['expired'],
             'expiring_soon': cred_row['expiring_soon'],
-            'multi_tenant': multi_tenant,
+            'multi_tenant': multi_org,
             'third_party': third_party,
             'by_audience': by_audience,
         })
@@ -17398,16 +18773,14 @@ def get_app_reg_list():
         cred_filter = request.args.get('credential_status', '')
         audience_filter = request.args.get('audience', '')
         search = request.args.get('search', '').strip()
-        hide_microsoft = request.args.get('hide_microsoft', 'true').lower() == 'true'
         sort_field = request.args.get('sort', 'risk_score')
         sort_dir = request.args.get('dir', 'desc')
 
         where = ["ar.discovery_run_id = ANY(%s)"]
         params: list = [run_ids]
 
-        if hide_microsoft:
-            where.append("ar.is_third_party = false")
-            where.append("ar.app_owner_organization_id != ''")
+        where.append("ar.is_third_party = false")
+        where.append("ar.app_owner_organization_id != ''")
 
         if risk_filter:
             where.append("ar.risk_level = %s")
@@ -17868,7 +19241,7 @@ def copilot_conversations_list():
     db = _db()
     try:
         user_id = _current_user_id()
-        limit = request.args.get('limit', 20, type=int)
+        limit = min(request.args.get('limit', 20, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
         convs = db.list_copilot_conversations(user_id, limit, offset)
         return jsonify({'conversations': convs})
@@ -18153,7 +19526,7 @@ def get_identity_timeline(identity_id):
         event_types = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
         from_date = request.args.get('from')
         to_date = request.args.get('to')
-        limit = request.args.get('limit', 50, type=int)
+        limit = min(request.args.get('limit', 50, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
 
         events = []
@@ -18311,7 +19684,7 @@ def get_identity_attack_paths(identity_id):
         # 1. Direct escalation: dangerous Graph API permissions
         try:
             cursor.execute("""
-                SELECT permission_name, permission_type
+                SELECT permission_name, risk_level
                 FROM graph_api_permissions
                 WHERE identity_db_id = %s AND permission_name = ANY(%s)
             """, (db_id, list(DANGEROUS_PERMISSIONS)))
@@ -19088,21 +20461,59 @@ def reconcile_subscriptions():
 
 
 def get_subscriptions_distinct():
-    """GET /api/subscriptions/distinct — distinct subscription_id/name pairs from discovery_runs."""
+    """GET /api/subscriptions/distinct — individual subscriptions with activation status."""
     db = _db()
     try:
         cursor = db.conn.cursor()
-        cursor.execute("""
+        org_id = _org_id()
+        conn_id = _connection_id()
+
+        # Query cloud_subscriptions for individual rows with monitored status
+        if conn_id:
+            cursor.execute("""
+                SELECT account_id, account_name, monitored, status
+                FROM cloud_subscriptions
+                WHERE organization_id = %s AND cloud_connection_id = %s AND deleted = false
+                ORDER BY monitored DESC, account_name
+            """, (org_id, conn_id))
+        else:
+            cursor.execute("""
+                SELECT account_id, account_name, monitored, status
+                FROM cloud_subscriptions
+                WHERE organization_id = %s AND deleted = false
+                ORDER BY monitored DESC, account_name
+            """, (org_id,))
+
+        rows = cursor.fetchall()
+        cursor.close()
+
+        if rows:
+            return jsonify({'subscriptions': [
+                {
+                    'subscription_id': r[0],
+                    'subscription_name': r[1] or r[0],
+                    'monitored': r[2],
+                    'status': r[3],
+                }
+                for r in rows
+            ]})
+
+        # Fallback: parse comma-separated from discovery_runs if no cloud_subscriptions
+        run_ids = _latest_run_ids(cursor if not cursor.closed else db.conn.cursor(), org_id, conn_id)
+        if not run_ids:
+            return jsonify({'subscriptions': []})
+        cur2 = db.conn.cursor()
+        cur2.execute("""
             SELECT DISTINCT subscription_id, subscription_name
             FROM discovery_runs
-            WHERE organization_id = %s
+            WHERE id = ANY(%s)
               AND subscription_id IS NOT NULL
               AND subscription_id != ''
             ORDER BY subscription_name
-        """, (_org_id(),))
-        rows = cursor.fetchall()
-        cursor.close()
-        return jsonify({'subscriptions': [{'subscription_id': r[0], 'subscription_name': r[1] or r[0]} for r in rows]})
+        """, (run_ids,))
+        fallback_rows = cur2.fetchall()
+        cur2.close()
+        return jsonify({'subscriptions': [{'subscription_id': r[0], 'subscription_name': r[1] or r[0], 'monitored': True, 'status': 'active'} for r in fallback_rows]})
     except Exception:
         return jsonify({'subscriptions': []})
     finally:
@@ -20695,11 +22106,11 @@ def get_workload_list():
         scope_flag = request.args.get('scope')              # tenant, management_group, subscription
         cross_sub = request.args.get('cross_subscription')  # true
         risk_level = request.args.get('risk_level')         # critical, high, medium, low
+        credential_filter = request.args.get('credential_filter')  # expired, expiring, no_expiry, old
         sort_col = request.args.get('sort', 'exposure_score')
         sort_dir = request.args.get('dir', 'desc').lower()
         limit = min(request.args.get('limit', 50, type=int), 200)
         offset = request.args.get('offset', 0, type=int)
-        hide_ms = request.args.get('hide_microsoft', 'true').lower() == 'true'
 
         items = []
 
@@ -20721,8 +22132,7 @@ def get_workload_list():
             ]
             params = [run_ids, tuple(cat_filter)]
 
-            if hide_ms:
-                where_parts.append("NOT COALESCE(i.is_microsoft_system, false)")
+            where_parts.append("NOT COALESCE(i.is_microsoft_system, false)")
 
             if exposure_level:
                 ranges = {'critical': (80, 100), 'high': (60, 79), 'medium': (35, 59), 'low': (0, 34)}
@@ -20752,6 +22162,16 @@ def get_workload_list():
                 where_parts.append("COALESCE(i.risk_level, 'info') = %s")
                 params.append(risk_level)
 
+            if credential_filter:
+                if credential_filter == 'expired':
+                    where_parts.append("i.next_expiry IS NOT NULL AND i.next_expiry < NOW()")
+                elif credential_filter == 'expiring':
+                    where_parts.append("i.next_expiry IS NOT NULL AND i.next_expiry BETWEEN NOW() AND NOW() + INTERVAL '30 days'")
+                elif credential_filter == 'no_expiry':
+                    where_parts.append("i.next_expiry IS NULL AND COALESCE(i.credential_count, 0) > 0")
+                elif credential_filter == 'old':
+                    where_parts.append("COALESCE(i.credential_age_days, 0) > 180")
+
             if search:
                 where_parts.append("i.display_name ILIKE %s")
                 params.append(f'%{search}%')
@@ -20775,7 +22195,10 @@ def get_workload_list():
                        i.created_datetime,
                        i.owner_display_name,
                        COALESCE(i.owner_count, 0) as owner_count,
-                       i.last_sign_in
+                       i.last_sign_in,
+                       i.next_expiry,
+                       COALESCE(i.credential_count, 0) as credential_count,
+                       CASE WHEN i.next_expiry IS NOT NULL AND i.next_expiry < NOW() THEN true ELSE false END as has_expired_credentials
                 FROM identities i
                 WHERE {where_sql}
             """, params)
@@ -20791,7 +22214,7 @@ def get_workload_list():
                     r['identity_type'] = 'spn'
                 r['source_table'] = 'identities'
                 r['workload_id'] = str(r['id'])
-                for _dk in ('created_datetime', 'last_sign_in'):
+                for _dk in ('created_datetime', 'last_sign_in', 'next_expiry'):
                     if r.get(_dk) and hasattr(r[_dk], 'isoformat'):
                         r[_dk] = r[_dk].isoformat()
                 items.append(r)
@@ -20856,7 +22279,10 @@ def get_workload_list():
                        COALESCE(a.credential_age_days, 0) as credential_age_days,
                        a.sign_in_audience, a.owner_count, a.has_service_principal,
                        a.created_datetime,
-                       a.primary_owner as owner_display_name
+                       a.primary_owner as owner_display_name,
+                       a.next_expiry,
+                       COALESCE(a.secret_count, 0) as credential_count,
+                       COALESCE(a.has_expired_credential, false) as has_expired_credentials
                 FROM app_registrations a
                 WHERE {ar_where_sql}
             """, ar_params)
@@ -20867,8 +22293,9 @@ def get_workload_list():
                 r['identity_category'] = 'app_registration'
                 r['source_table'] = 'app_registrations'
                 r['workload_id'] = str(r['id'])
-                if r.get('created_datetime') and hasattr(r['created_datetime'], 'isoformat'):
-                    r['created_datetime'] = r['created_datetime'].isoformat()
+                for _dk in ('created_datetime', 'next_expiry'):
+                    if r.get(_dk) and hasattr(r[_dk], 'isoformat'):
+                        r[_dk] = r[_dk].isoformat()
                 items.append(r)
 
         # Enrich with P2 telemetry data if enabled
@@ -21470,7 +22897,7 @@ def get_correlation_linked_identities():
     db = _db()
     try:
         tid = _org_id()
-        limit = int(request.args.get('limit', 50))
+        limit = min(int(request.args.get('limit', 50)), MAX_LIMIT)
         offset = int(request.args.get('offset', 0))
         search = request.args.get('search')
         results, total = db.get_human_identities(tid, limit, offset, search)
@@ -21576,7 +23003,7 @@ def get_orphaned_findings_list():
     db = _db()
     try:
         tid = _org_id()
-        limit = int(request.args.get('limit', 50))
+        limit = min(int(request.args.get('limit', 50)), MAX_LIMIT)
         offset = int(request.args.get('offset', 0))
         status = request.args.get('status')
         severity = request.args.get('severity')
@@ -21887,10 +23314,10 @@ def get_correlation_accounts():
 # ─── AGIRS: Identity Risk Summary ────────────────────────────────
 
 def get_identity_risk_summary():
-    """SSOT endpoint for all AGIRS data (Rule 57). Reads persisted scores — no recomputation."""
+    """SSOT endpoint for all AGIRS data. Reads from risk_summary table (canonical source)."""
     db = _db()
     try:
-        latest, previous = db.get_latest_agirs_scores()
+        latest, previous = db.get_latest_risk_summaries()
 
         if not latest:
             return jsonify({
@@ -21906,10 +23333,10 @@ def get_identity_risk_summary():
         nhiri_bd = latest.get('nhiri_breakdown') or {}
         gei_bd = latest.get('gei_breakdown') or {}
 
-        # Compute tier from AGIRS score
+        # Tier from persisted agirs_tier, fallback to score-based
         agirs_score = latest.get('agirs_score')
-        tier = 'F'
-        if agirs_score is not None:
+        tier = latest.get('agirs_tier') or 'F'
+        if tier == 'F' and agirs_score is not None:
             if agirs_score >= 90:
                 tier = 'A'
             elif agirs_score >= 75:
@@ -21932,7 +23359,7 @@ def get_identity_risk_summary():
             },
             'hiri': {
                 'score': hiri_bd.get('score'),
-                'human_count': hiri_bd.get('human_count', 0),
+                'human_count': latest.get('human_count', hiri_bd.get('human_count', 0)),
                 'h1_ghost': hiri_bd.get('h1_ghost', 0),
                 'h2_dormant_priv': hiri_bd.get('h2_dormant_priv', 0),
                 'h3_over_priv': hiri_bd.get('h3_over_priv', 0),
@@ -21941,7 +23368,7 @@ def get_identity_risk_summary():
             } if hiri_bd else None,
             'nhiri': {
                 'score': nhiri_bd.get('score'),
-                'nhi_count': nhiri_bd.get('nhi_count', 0),
+                'nhi_count': latest.get('nhi_count', nhiri_bd.get('nhi_count', 0)),
                 'phantom_breakdown': nhiri_bd.get('phantom_breakdown', {}),
             } if nhiri_bd else None,
             'gei': {
@@ -21955,6 +23382,7 @@ def get_identity_risk_summary():
                 'nhiri': (previous.get('nhiri_breakdown') or {}).get('score'),
                 'gei': (previous.get('gei_breakdown') or {}).get('score'),
             } if previous else None,
+            'source': 'risk_summary',
         }
 
         return jsonify(result)
@@ -22037,6 +23465,45 @@ def get_dangerous_identities():
 # ──────────────────────────────────────────────────────────
 # Phase 5: Launch Readiness Validation
 # ──────────────────────────────────────────────────────────
+
+def platform_integrity_check_handler():
+    """GET /api/system/integrity-check — Platform integrity validation.
+
+    Runs 6 sub-checks: RLS enforcement, snapshot completeness,
+    risk consistency, discovery stages, snapshot integrity, AGIRS consistency.
+    """
+    from app.api.integrity import platform_integrity_check
+    from app.database import Database
+    db = Database(_admin_reason='integrity_check')
+    try:
+        return jsonify(platform_integrity_check(db))
+    finally:
+        db.close()
+
+
+def data_source_map_handler():
+    """GET /api/system/data-source-map — Debug endpoint showing which backend
+    source each dashboard component reads from."""
+    from app.api.integrity import data_source_map
+    return jsonify(data_source_map())
+
+
+def metric_integrity_debug_handler():
+    """GET /api/system/metric-integrity-debug — Compare live discovery data vs persisted risk_summary.
+
+    Returns CONSISTENT or INCONSISTENT with per-field comparison and mismatch list.
+    """
+    from app.api.integrity import metric_integrity_debug
+    from app.database import Database
+    db = Database(_admin_reason='metric_integrity_debug')
+    try:
+        org_id = _org_id()
+        conn_id = _connection_id()
+        result = metric_integrity_debug(db, org_id, conn_id)
+        return jsonify(result)
+    finally:
+        db.close()
+
 
 def validate_launch_readiness():
     """GET /api/system/launch-readiness — Comprehensive gate validation.
@@ -25195,18 +26662,29 @@ def get_security_findings_handler():
     Returns findings from the normalized security_findings table in the shape
     expected by SecurityFindings.tsx (RiskFinding interface), with stats.
     Supports ?severity= and ?status= query filters.
+    Scoped by connection_id via _latest_run_ids() to prevent cross-tenant leakage.
     """
     db = _db()
     try:
         severity_filter = request.args.get('severity')
         status_filter = request.args.get('status')
+        org_id = _org_id()
+        conn_id = _connection_id()
 
+        # Scope by discovery run_ids for the selected connection
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, conn_id)
+        cursor.close()
+
+        # Pass run_ids to scope findings to the correct connection(s)
+        # In All Connections mode, run_ids contains one run per connection
         findings_raw = db.get_security_findings(
             limit=200, offset=0,
             severity=severity_filter or None,
             status=status_filter or None,
+            run_id=run_ids if run_ids else None,
         )
-        stats = db.get_security_findings_stats()
+        stats = db.get_security_findings_stats(run_id=run_ids if run_ids else None)
 
         # Map to RiskFinding shape expected by frontend
         findings = []
@@ -25223,11 +26701,26 @@ def get_security_findings_handler():
             identity_id = r.get('identity_id') or ''
             if not identity_id and r.get('entity_type') in _IDENTITY_TYPES:
                 identity_id = r.get('entity_id') or ''
-            identity_name = r.get('identity_name') or meta.get('display_name') or ''
+            # Resolve display name: stored > JOIN-resolved > metadata > truncated UUID
+            identity_name = (r.get('identity_name') or meta.get('display_name') or '')
+            if not identity_name and identity_id:
+                identity_name = f"Identity {identity_id[:8]}..."
+            # Compute display_title: replace UUID in rule title with resolved name
+            raw_title = r.get('title') or meta.get('rule_name') or r.get('finding_type') or ''
+            display_title = raw_title
+            if identity_name and identity_id and identity_id in raw_title:
+                display_title = raw_title.replace(identity_id, identity_name)
+            elif identity_name and ':' in raw_title:
+                # Title pattern "Category: <uuid>" — replace uuid portion
+                import re
+                display_title = re.sub(
+                    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                    identity_name, raw_title, count=1, flags=re.IGNORECASE
+                )
             findings.append({
                 'id': str(r.get('id', '')),
                 'severity': r.get('severity') or 'low',
-                'rule_name': r.get('title') or meta.get('rule_name') or r.get('finding_type') or '',
+                'rule_name': display_title,
                 'rule_key': meta.get('rule_key') or r.get('finding_type') or '',
                 'rule_type': meta.get('rule_type') or r.get('finding_type') or 'risk',
                 'identity_id': identity_id or None,
@@ -25264,7 +26757,11 @@ def get_security_findings_summary_handler():
     """
     db = _db()
     try:
-        stats = db.get_security_findings_stats()
+        conn_id = _connection_id()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
+        cursor.close()
+        stats = db.get_security_findings_stats(run_id=run_ids or None)
         by_sev = stats.get('by_severity', {})
         return jsonify({
             'critical': by_sev.get('critical', 0),
@@ -25339,22 +26836,28 @@ def get_security_advisor_handler():
 # ================================================================
 
 def get_attack_paths_list():
-    """GET /api/attack-paths — list persisted attack paths with optional filters."""
+    """GET /api/attack-paths — list persisted attack paths with optional filters.
+    Scoped to the selected connection via _latest_run_ids().
+    """
     db = _db()
     try:
         limit = min(int(request.args.get('limit', 50)), 200)
         offset = int(request.args.get('offset', 0))
         severity = request.args.get('severity')
         path_type = request.args.get('type')
-        run_id = request.args.get('run_id', type=int)
         source_entity_id = request.args.get('entity_id')
+
+        # Scope to connection's run_ids to prevent cross-tenant leakage
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.close()
 
         paths = db.get_attack_paths(
             limit=limit, offset=offset, severity=severity,
-            path_type=path_type, run_id=run_id,
+            path_type=path_type, run_ids=run_ids,
             source_entity_id=source_entity_id,
         )
-        stats = db.get_attack_paths_stats()
+        stats = db.get_attack_paths_stats(run_ids=run_ids)
         return jsonify({'paths': paths, 'count': len(paths), 'stats': stats})
     finally:
         db.close()
@@ -26563,15 +28066,24 @@ def get_graph_attack_findings_handler():
         identity_id = request.args.get('identity_id', type=int)
         run_id = request.args.get('run_id', type=int)
 
+        # If no explicit run_id, scope to latest runs for selected connection
+        if not run_id:
+            conn_id = _connection_id()
+            cursor = db.conn.cursor()
+            run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
+            cursor.close()
+            # Use first run_id as scope (graph findings are per-run)
+            run_id = run_ids[0] if run_ids else None
+
         findings = db.get_graph_attack_findings(
-            organization_id=_tenant_id(),
+            organization_id=_org_id(),
             run_id=run_id, severity=severity,
             finding_type=finding_type, status=status,
             identity_id=identity_id,
             limit=limit, offset=offset,
         )
         stats = db.get_graph_attack_finding_stats(
-            organization_id=_tenant_id(), run_id=run_id,
+            organization_id=_org_id(), run_id=run_id,
         )
         return jsonify({'findings': findings, 'stats': stats, 'count': len(findings)})
     finally:
@@ -26590,7 +28102,7 @@ def get_graph_attack_finding_detail_handler(finding_id):
             FROM graph_attack_findings gaf
             LEFT JOIN identities i ON i.id = gaf.identity_id
             WHERE gaf.id = %s AND gaf.organization_id = %s
-        """, (finding_id, _tenant_id()))
+        """, (finding_id, _org_id()))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -26609,8 +28121,16 @@ def get_identity_risk_scores_handler():
         min_score = int(request.args.get('min_score', 0))
         run_id = request.args.get('run_id', type=int)
 
+        # If no explicit run_id, scope to latest runs for selected connection
+        if not run_id:
+            conn_id = _connection_id()
+            cursor = db.conn.cursor()
+            run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
+            cursor.close()
+            run_id = run_ids[0] if run_ids else None
+
         scores = db.get_identity_risk_scores(
-            organization_id=_tenant_id(),
+            organization_id=_org_id(),
             run_id=run_id, min_score=min_score,
             limit=limit, offset=offset,
         )
@@ -26625,14 +28145,22 @@ def run_graph_attack_analysis_handler():
 
     db = _db()
     try:
-        org_id = _tenant_id()
-        # Get latest completed discovery run
+        org_id = _org_id()
+        connection_id = _connection_id()
+        # Get latest completed discovery run (scoped to connection if provided)
         cursor = db.conn.cursor()
-        cursor.execute("""
-            SELECT id FROM discovery_runs
-            WHERE organization_id = %s AND status = 'completed'
-            ORDER BY id DESC LIMIT 1
-        """, (org_id,))
+        if connection_id:
+            cursor.execute("""
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND cloud_connection_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (org_id, connection_id))
+        else:
+            cursor.execute("""
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (org_id,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -27343,22 +28871,31 @@ def get_identity_exposures_handler():
 
     Reads from the identity_exposures table (populated by IdentityExposureEngine
     during scheduled discovery). Supports ?exposure_type=, ?severity=, ?status= filters.
+    Connection-scoped via _latest_run_ids().
     """
     db = _db()
     try:
         exposure_type_filter = request.args.get('exposure_type', '')
         severity_filter = request.args.get('severity', '')
         status_filter = request.args.get('status', '') or 'open'
-        limit = request.args.get('limit', 200, type=int)
+        limit = min(request.args.get('limit', 200, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
+
+        # Connection scoping
+        connection_id = request.args.get('connection_id') or request.headers.get('X-Connection-Id')
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        cursor.close()
 
         rows = db.get_identity_exposures_persisted(
             limit=limit, offset=offset,
             exposure_type=exposure_type_filter or None,
             severity=severity_filter or None,
             status=status_filter or None,
+            run_ids=run_ids or None,
         )
-        stats_raw = db.get_identity_exposures_stats()
+        stats_raw = db.get_identity_exposures_stats(run_ids=run_ids or None)
 
         # Map to frontend Exposure interface shape
         exposures = []
@@ -27464,18 +29001,27 @@ def get_privilege_drift_handler():
     db = _db()
     try:
         org_id = _org_id()
-        limit = request.args.get('limit', 100, type=int)
+        limit = min(request.args.get('limit', 100, type=int), MAX_LIMIT)
         offset = request.args.get('offset', 0, type=int)
         change_type_filter = request.args.get('change_type', '')
 
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        conn_id = _connection_id()
 
-        # Get latest two completed runs for this org
-        cursor.execute("""
+        # Get latest two completed runs for this org, scoped to connection
+        conn_filter = ""
+        params = [org_id]
+        if conn_id:
+            conn_filter = "AND cloud_connection_id = %s"
+            params.append(conn_id)
+        else:
+            conn_filter = "AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0"
+        cursor.execute(f"""
             SELECT id FROM discovery_runs
             WHERE organization_id = %s AND status = 'completed'
+              {conn_filter}
             ORDER BY completed_at DESC LIMIT 2
-        """, [org_id])
+        """, params)
         runs = [r['id'] for r in cursor.fetchall()]
 
         if len(runs) < 2:
@@ -27812,8 +29358,8 @@ def oidc_callback():
         base_url = _get_base_url()
         redirect_uri = f"{base_url}/api/auth/oidc/callback"
 
-        # Exchange code for tokens
-        token_data = exchange_oidc_code(oidc_config, code, redirect_uri)
+        # Exchange code for tokens (nonce forwarded for ID token verification)
+        token_data = exchange_oidc_code(oidc_config, code, redirect_uri, expected_nonce=nonce or None)
         if not token_data:
             return jsonify({'error': 'Failed to exchange OIDC code'}), 400
 
@@ -27889,12 +29435,16 @@ def save_oidc_settings():
     db = Database(organization_id=org_id)
     try:
         from app.api.oidc import OIDC_SETTING_KEYS
+        from app.encryption import encrypt_field
         for key in OIDC_SETTING_KEYS:
             if key in data:
                 val = data[key]
                 # Don't overwrite secret with mask
                 if key == 'oidc_client_secret' and val == '••••••••':
                     continue
+                # Encrypt client secret before storing
+                if key == 'oidc_client_secret' and val:
+                    val = encrypt_field(val)
                 db.save_setting(key, str(val), organization_id=org_id)
         _log(db, 'oidc_settings_updated', 'OIDC settings updated')
         return jsonify({'status': 'saved'})
@@ -28987,5 +30537,1243 @@ def get_graph_diff_handler():
             'removed_edges': len(diff.get('removed_edges', [])),
         }
         return jsonify(diff)
+    finally:
+        db.close()
+
+
+# ─── Consolidated Risk Summary (SSOT) ──────────────────────────────────
+
+def _agirs_status(score, total_identities):
+    """Derive AGIRS status label — aligned with enterprise tier thresholds."""
+    if total_identities == 0:
+        return "no_data"
+    if score is None:
+        return "no_data"
+    if score >= 92:
+        return "resilient"
+    if score >= 80:
+        return "controlled"
+    if score >= 65:
+        return "elevated"
+    if score >= 45:
+        return "high"
+    return "critical"
+
+
+def get_risk_summary_full():
+    """Consolidated SSOT endpoint — combines risk_summary + exposure + attack paths.
+
+    Replaces 9 separate API calls on CISODashboard with a single call.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        conn_id = _connection_id()
+
+        # Scope to connection's run_ids for all queries
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, conn_id)
+        cursor.close()
+
+        # 1. Latest + previous risk summaries from persisted table, scoped to run_ids
+        latest, previous = db.get_latest_risk_summaries(organization_id=org_id, run_ids=run_ids or None)
+
+        # If risk_summary is empty, compute live from identity tables.
+        # This happens when RiskSummaryEngine hasn't been called after a scan.
+        if not latest:
+            if not run_ids:
+                return jsonify({
+                    "status": "no_data",
+                    "message": "No completed discovery runs found.",
+                    "agirs": {"score": 0, "tier": "F", "status": "no_data", "grade": "F", "delta": None, "pillars": {}},
+                    "identity_risk_score": 0,
+                    "hiri": None, "nhiri": None, "gei": None,
+                    "risk_counts": {"ghost_accounts": 0, "orphaned_spns": 0, "over_privileged": 0,
+                                    "dormant_privileged": 0, "high_blast_radius": 0, "external_exposure": 0},
+                    "identity_counts": {"total": 0, "customer": 0, "microsoft": 0, "human": 0, "nhi": 0},
+                    "exposure": {"total_resources": 0, "storage_accounts": 0, "key_vaults": 0,
+                                 "subscriptions": 0, "privileged_roles": 0},
+                    "attack_paths": {"total": 0, "open": 0, "critical": 0, "high": 0,
+                                     "medium": 0, "low": 0, "affected_identities": 0},
+                    "blast_radius": {"severity": "low", "top_identity_name": None,
+                                     "top_identity_id": None, "description": ""},
+                    "dangerous_identities": [],
+                    "previous": {"agirs": None, "hiri": None, "nhiri": None, "gei": None},
+                    "attack_surface": {"total": 0, "privileged": 0, "machine": 0, "external": 0},
+                    "top_risks": [],
+                    "computed_at": None, "source": "none",
+                    "data_origin": "no_data",
+                })
+
+            # Live-compute identity risk counts from identities table
+            logger.info("risk_summary empty — computing live from run_ids=%s", run_ids)
+            try:
+                from app.engines.risk.risk_summary_engine import RiskSummaryEngine
+                engine = RiskSummaryEngine(db, org_id, run_ids)
+                summary = engine.compute()
+                engine.persist(summary)
+                logger.info("RiskSummaryEngine computed and persisted from /api/risk/summary/full")
+                # Re-read the now-persisted data (scoped to run_ids)
+                latest, previous = db.get_latest_risk_summaries(organization_id=org_id, run_ids=run_ids)
+            except Exception as e:
+                logger.error("Live RiskSummaryEngine failed: %s", e, exc_info=True)
+
+            # If persist/re-read still failed, build latest from live query
+            if not latest:
+                latest = {'agirs_score': 0, 'agirs_tier': 'F', 'total_identities': 0,
+                          'ghost_accounts': 0, 'orphaned_spns': 0, 'over_privileged': 0,
+                          'dormant_privileged': 0, 'high_blast_radius': 0, 'external_exposure': 0,
+                          'human_count': 0, 'nhi_count': 0, 'customer_identities': 0,
+                          'microsoft_identities': 0, 'hiri_breakdown': {}, 'nhiri_breakdown': {},
+                          'gei_breakdown': {}, 'dangerous_identities': [], 'computed_at': None,
+                          'discovery_run_id': run_ids[0] if run_ids else None}
+                previous = None
+
+        # Parse breakdowns from JSONB
+        hiri_bd = latest.get('hiri_breakdown') or {}
+        nhiri_bd = latest.get('nhiri_breakdown') or {}
+        gei_bd = latest.get('gei_breakdown') or {}
+
+        # AGIRS score + tier
+        agirs_score = latest.get('agirs_score') or 0
+        agirs_tier = latest.get('agirs_tier') or 'F'
+        if agirs_tier == 'F' and agirs_score is not None:
+            if agirs_score >= 92:
+                agirs_tier = 'A'
+            elif agirs_score >= 80:
+                agirs_tier = 'B'
+            elif agirs_score >= 65:
+                agirs_tier = 'C'
+            elif agirs_score >= 45:
+                agirs_tier = 'D'
+
+        # Use `or 0` pattern — dict.get(key, default) returns None (not default)
+        # when key exists but value IS None (NULL from DB). `or 0` handles both.
+        total_identities = latest.get('total_identities') or 0
+        # Customer-only count — excludes Microsoft first-party identities.
+        # Used as denominator for AGIRS pillars and attack_surface.total so
+        # Microsoft SPNs don't dilute risk percentages or inflate totals.
+        customer_identities = latest.get('customer_identities') or 0
+        agirs_grade = agirs_tier  # letter grade IS the grade
+        agirs_delta = None
+        if previous and agirs_score is not None and previous.get('agirs_score') is not None:
+            agirs_delta = round(agirs_score - (previous.get('agirs_score') or 0), 2)
+
+        # Risk counts — `or 0` guards against NULL values
+        ghost = latest.get('ghost_accounts') or 0
+        orphaned = latest.get('orphaned_spns') or 0
+        over_priv = latest.get('over_privileged') or 0
+        dormant = latest.get('dormant_privileged') or 0
+        high_blast = latest.get('high_blast_radius') or 0
+        ext_exposure = latest.get('external_exposure') or 0
+        human_count = latest.get('human_count') or 0
+        nhi_count = latest.get('nhi_count') or 0
+
+        # 2. Exposure data (live query for resources/subs) — computed before pillars
+        exp_cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(exp_cursor, org_id, conn_id)
+
+        sa_count = kv_count = sub_count = priv_count = 0
+        attack_path_count = 0
+        live_identity_count = 0
+        live_customer_count = 0
+        live_microsoft_count = 0
+        live_human_count = 0
+        live_nhi_count = 0
+        if run_ids:
+            # Live identity count — ensures denominator matches Identity Inventory
+            try:
+                exp_cursor.execute("""
+                    SELECT COUNT(*),
+                           COUNT(*) FILTER (WHERE NOT COALESCE(is_microsoft_system, false)),
+                           COUNT(*) FILTER (WHERE COALESCE(is_microsoft_system, false)),
+                           COUNT(*) FILTER (WHERE identity_category IN ('human_user', 'guest')
+                                            AND NOT COALESCE(is_microsoft_system, false)),
+                           COUNT(*) FILTER (WHERE identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                                            AND NOT COALESCE(is_microsoft_system, false))
+                    FROM identities
+                    WHERE discovery_run_id = ANY(%s)
+                      AND COALESCE(deleted_at, '9999-01-01') > NOW()
+                """, (run_ids,))
+                row = exp_cursor.fetchone()
+                live_identity_count = row[0] or 0
+                live_customer_count = row[1] or 0
+                live_microsoft_count = row[2] or 0
+                live_human_count = row[3] or 0
+                live_nhi_count = row[4] or 0
+            except Exception:
+                pass
+            # Override persisted counts with live values if available
+            if live_identity_count > 0:
+                total_identities = live_identity_count
+            if live_customer_count > 0:
+                customer_identities = live_customer_count
+            # Override human/nhi counts if persisted values are 0
+            if human_count == 0 and live_human_count > 0:
+                human_count = live_human_count
+            if nhi_count == 0 and live_nhi_count > 0:
+                nhi_count = live_nhi_count
+            for tbl, var in [("azure_storage_accounts", "sa"), ("azure_key_vaults", "kv")]:
+                try:
+                    exp_cursor.execute(f"SAVEPOINT full_{var}")
+                    exp_cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)", (run_ids,))
+                    val = exp_cursor.fetchone()[0] or 0
+                    if var == "sa":
+                        sa_count = val
+                    else:
+                        kv_count = val
+                    exp_cursor.execute(f"RELEASE SAVEPOINT full_{var}")
+                except Exception:
+                    try:
+                        exp_cursor.execute(f"ROLLBACK TO SAVEPOINT full_{var}")
+                    except Exception:
+                        pass
+
+            try:
+                exp_cursor.execute("""
+                    SELECT COUNT(DISTINCT SPLIT_PART(ra.scope, '/', 3))
+                    FROM role_assignments ra
+                    JOIN identities i ON i.id = ra.identity_db_id
+                    WHERE i.discovery_run_id = ANY(%s) AND ra.scope LIKE '/subscriptions/%%'
+                """, (run_ids,))
+                sub_count = exp_cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+
+            try:
+                exp_cursor.execute(f"""
+                    SELECT COUNT(*) FROM identities i
+                    WHERE i.discovery_run_id = ANY(%s)
+                    {HIDE_MICROSOFT_SQL}
+                    AND (
+                        EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                            AND LOWER(era.role_name) IN ('global administrator',
+                                'privileged role administrator','application administrator',
+                                'cloud application administrator'))
+                        OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                            AND LOWER(ra.role_name) IN ('owner','user access administrator')
+                            AND (ra.scope IS NULL OR ra.scope = '/'
+                                 OR (ra.scope LIKE '/subscriptions/%%'
+                                     AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')))
+                    )
+                """, (run_ids,))
+                priv_count = exp_cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+
+            # Attack path count — use graph_attack_findings (comprehensive BFS analysis)
+            # as the primary source, fall back to attack_paths table
+            graph_finding_count = 0
+            confirmed_path_count = 0
+            try:
+                exp_cursor.execute("""
+                    SELECT COUNT(*) FROM graph_attack_findings
+                    WHERE organization_id = %s
+                      AND discovery_run_id = ANY(%s)
+                """, (org_id, run_ids))
+                graph_finding_count = exp_cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+            try:
+                exp_cursor.execute("""
+                    SELECT COUNT(*) FROM attack_paths
+                    WHERE organization_id = %s
+                      AND discovery_run_id = ANY(%s)
+                """, (org_id, run_ids))
+                confirmed_path_count = exp_cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+            # Use the larger count for honest risk assessment
+            attack_path_count = max(graph_finding_count, confirmed_path_count)
+
+        # Live-compute NHI breakdown values when persisted breakdowns are empty
+        nhi_dormant = 0
+        nhi_expired = 0
+        nhi_ownerless = 0
+        if not nhiri_bd and run_ids:
+            try:
+                nhi_cursor = db.conn.cursor()
+                nhi_cursor.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE COALESCE(activity_status, 'unknown') IN ('stale', 'never_used')
+                            AND identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                            AND NOT COALESCE(is_microsoft_system, false)),
+                        COUNT(*) FILTER (WHERE next_expiry IS NOT NULL AND next_expiry < NOW()
+                            AND identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                            AND NOT COALESCE(is_microsoft_system, false)),
+                        COUNT(*) FILTER (WHERE COALESCE(owner_count, 0) = 0
+                            AND identity_category = 'service_principal'
+                            AND NOT COALESCE(is_microsoft_system, false)
+                            AND COALESCE(risk_level, 'info') IN ('critical', 'high'))
+                    FROM identities
+                    WHERE discovery_run_id = ANY(%s)
+                      AND COALESCE(deleted_at, '9999-01-01') > NOW()
+                """, (run_ids,))
+                nhi_row = nhi_cursor.fetchone()
+                nhi_dormant = nhi_row[0] or 0
+                nhi_expired = nhi_row[1] or 0
+                nhi_ownerless = nhi_row[2] or 0
+                nhi_cursor.close()
+            except Exception:
+                pass
+
+        exp_cursor.close()
+
+        # Build HIRI/NHIRI breakdowns from risk_counts if not persisted
+        if not hiri_bd:
+            hiri_bd = {
+                'score': 0,
+                'h1_ghost': ghost,
+                'h2_dormant_priv': dormant,
+                'h3_over_priv': over_priv,
+                'h4_ext_guest': ext_exposure,
+                'h5_zombie': 0,
+            }
+        if not nhiri_bd:
+            nhiri_bd = {
+                'score': 0,
+                'phantom_breakdown': {
+                    'orphaned': orphaned,
+                    'dormant': nhi_dormant,
+                    'zombie_nhi': 0,
+                    'expired_creds': nhi_expired,
+                    'ownerless_apps': nhi_ownerless,
+                },
+            }
+
+        # Exposure fallbacks (prefer live values, fallback to persisted)
+        exposure_subs = sub_count or (latest.get('subscriptions') or 0)
+        exposure_resources = (sa_count + kv_count) or (latest.get('total_resources') or 0)
+        exposure_sa = sa_count or (latest.get('storage_accounts') or 0)
+        exposure_kv = kv_count or (latest.get('key_vaults') or 0)
+        exposure_priv = priv_count or (latest.get('privileged_roles') or 0)
+
+        # ── AGIRS pillar deduction model ──
+        # Formula: AGIRS = 100 - Σ(risk_exposure × pillar_weight)
+        # Each pillar: risk_pct = (affected_count / customer_identities) × 100
+        #              score_impact = -(risk_pct / 100) × weight
+        # Denominator uses customer_identities (excludes Microsoft first-party)
+        # to match the numerators which also exclude Microsoft.
+        # Severity thresholds calibrated to enterprise benchmarks:
+        #   CRITICAL >= 25%, HIGH >= 10%, MEDIUM >= 5%, LOW < 5%
+
+        def _pillar(label, weight, affected, risk_pct_override=None):
+            rp = risk_pct_override if risk_pct_override is not None \
+                else min(100.0, affected / max(customer_identities, 1) * 100)
+            rp = round(rp, 1)
+            si = round(-(rp / 100.0) * weight, 1)
+            sev = ('critical' if rp >= 25 else 'high' if rp >= 10
+                   else 'medium' if rp >= 5 else 'low')
+            return {
+                "label": label, "weight": weight, "risk_pct": rp,
+                "score_impact": si, "severity": sev,
+                "affected_count": affected,
+            }
+
+        # Credential risk: expired creds from NHIRI breakdown
+        expired_creds = (nhiri_bd.get('phantom_breakdown') or {}).get('expired_creds', 0)
+
+        # Attack path exposure: capped risk_pct with amplifier
+        # (1 path per identity = 100% exposure; >1000 paths = CRITICAL)
+        ap_risk_pct = min(100.0, (attack_path_count / max(customer_identities, 1)) * 5)
+
+        pillars = {
+            "effective_privilege": _pillar("Effective Privilege", 30, over_priv),
+            "ownership_governance": _pillar("Ownership Governance", 10, orphaned + ghost),
+            "usage_dormancy": _pillar("Usage Dormancy", 10, dormant + ghost),
+            "credential_risk": _pillar("Credential Risk", 20, expired_creds),
+            "trust_federation": _pillar("Trust & Federation", 10, ext_exposure),
+            "external_exposure": _pillar("External Exposure", 10, ext_exposure),
+            "attack_path_exposure": _pillar("Attack Path Exposure", 10,
+                                            attack_path_count,
+                                            risk_pct_override=ap_risk_pct),
+        }
+
+        # AGIRS = 100 + sum(score_impact)  (score_impact values are negative)
+        if customer_identities > 0:
+            raw_agirs = 100.0 + sum(p['score_impact'] for p in pillars.values())
+            agirs_score = max(0.0, min(100.0, round(raw_agirs, 1)))
+
+            # Enterprise-calibrated tier thresholds
+            agirs_tier = ('A' if agirs_score >= 92 else 'B' if agirs_score >= 80
+                          else 'C' if agirs_score >= 65 else 'D' if agirs_score >= 45 else 'F')
+            agirs_grade = agirs_tier
+            if previous and previous.get('agirs_score') is not None:
+                prev_score = previous.get('agirs_score') or 0
+                agirs_delta = round(agirs_score - prev_score, 2) if prev_score else None
+            else:
+                agirs_delta = None
+
+        # Score analysis — dynamic narrative from actual pillar impacts
+        score_analysis = ""
+        if customer_identities > 0:
+            impactful = sorted(
+                [p for p in pillars.values() if p['score_impact'] < 0],
+                key=lambda p: p['score_impact']
+            )
+            top2 = impactful[:2]
+            crit_high = [p for p in impactful if p['severity'] in ('critical', 'high')]
+            improvement = abs(sum(p['score_impact'] for p in crit_high))
+            potential = min(98, round(agirs_score + improvement, 1))
+
+            if len(top2) >= 2:
+                score_analysis = (
+                    f"Your score is primarily impacted by "
+                    f"{top2[0]['label']} ({top2[0]['score_impact']:.1f} pts, "
+                    f"{top2[0]['affected_count']} identities) and "
+                    f"{top2[1]['label']} ({top2[1]['score_impact']:.1f} pts). "
+                    f"Remediating critical/high risks would improve AGIRS "
+                    f"from {agirs_score:.1f} to ~{potential}."
+                )
+            elif len(top2) == 1:
+                score_analysis = (
+                    f"Your score is primarily impacted by "
+                    f"{top2[0]['label']} ({top2[0]['score_impact']:.1f} pts, "
+                    f"{top2[0]['affected_count']} identities). "
+                    f"Remediating would improve AGIRS from {agirs_score:.1f} to ~{potential}."
+                )
+            else:
+                score_analysis = "No significant risk factors detected."
+
+            # Persist corrected score so other endpoints also read it
+            try:
+                run_id = latest.get('discovery_run_id')
+                if run_id:
+                    pcur = db.conn.cursor()
+                    pcur.execute("""
+                        UPDATE risk_summary
+                        SET agirs_score = %s, agirs_tier = %s
+                        WHERE organization_id = %s AND discovery_run_id = %s
+                    """, (agirs_score, agirs_tier, org_id, run_id))
+                    db.conn.commit()
+                    pcur.close()
+            except Exception:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+
+        # 3. Blast radius — find top identity
+        dangerous = latest.get('dangerous_identities') or []
+
+        # If dangerous_identities is empty, compute live from identities table
+        if not dangerous and run_ids:
+            try:
+                di_cursor = db.conn.cursor()
+                rid_tuple = tuple(run_ids)
+                # Try blast_radius_score first, fall back to risk_score
+                di_cursor.execute("""
+                    SELECT i.id, i.display_name, i.identity_category,
+                           COALESCE(i.blast_radius_score, 0) as blast_radius_score,
+                           COALESCE(i.risk_score, 0) as risk_score,
+                           COALESCE(i.privilege_tier, 'T3') as tier,
+                           COALESCE(i.activity_status, 'unknown') as activity_status
+                    FROM identities i
+                    WHERE i.discovery_run_id IN %s
+                      AND COALESCE(i.deleted_at, '9999-01-01') > NOW()
+                      AND COALESCE(i.risk_score, 0) > 0
+                      AND i.is_microsoft_system = FALSE
+                    ORDER BY COALESCE(i.blast_radius_score, 0) DESC,
+                             COALESCE(i.risk_score, 0) DESC
+                    LIMIT 5
+                """, (rid_tuple,))
+                for row in di_cursor.fetchall():
+                    id_, name, cat, br_score, risk, tier, activity = row
+                    risk_factors = []
+                    if tier in ('T0', 'T1'):
+                        risk_factors.append(f'{tier} Privilege')
+                    if activity in ('stale', 'never_used'):
+                        risk_factors.append(f'Dormant ({activity})')
+                    if risk >= 70:
+                        risk_factors.append(f'Risk score {risk}')
+                    dangerous.append({
+                        'id': id_, 'display_name': name or 'Unknown',
+                        'identity_category': cat,
+                        'blast_radius_score': float(br_score),
+                        'risk_score': int(risk), 'tier': tier,
+                        'key_risk_factors': risk_factors[:5],
+                    })
+                di_cursor.close()
+            except Exception:
+                pass
+
+        top_ident = dangerous[0] if dangerous else None
+        blast_sev = 'critical' if (exposure_subs >= 5 or exposure_resources >= 100 or exposure_kv >= 3 or exposure_priv >= 20) \
+            else 'high' if (exposure_subs >= 2 or exposure_resources >= 50 or exposure_kv >= 1 or exposure_priv >= 10) \
+            else 'medium' if (exposure_resources >= 10 or exposure_priv >= 5) else 'low'
+
+        # 5. Top risks to fix — compute score_improvement as actual AGIRS point gain
+        # Use pillar deduction model: each risk category maps to a pillar with a weight.
+        # improvement = (risk_count / customer_identities) * pillar_weight * 100
+        # This gives the AGIRS points gained if all instances of this risk were remediated.
+        ti = customer_identities or 1  # avoid division by zero
+        _pillar_weights = {
+            'over_privileged': 30,      # effective_privilege weight
+            'ghost_accounts': 10,       # ownership_governance weight
+            'dormant_privileged': 10,    # usage_dormancy weight
+            'orphaned_spns': 10,         # ownership_governance weight
+            'external_exposure': 10,     # external_exposure weight
+        }
+        def _score_imp(risk_id, count):
+            w = _pillar_weights.get(risk_id, 10)
+            return round(min((count / ti) * w, w), 1)
+
+        top_risks = sorted([
+            r for r in [
+                {"id": "over_privileged", "label": "Over-Privileged Identities", "count": over_priv,
+                 "severity": "critical", "score_improvement": _score_imp('over_privileged', over_priv)} if over_priv else None,
+                {"id": "ghost_accounts", "label": "Ghost Accounts", "count": ghost,
+                 "severity": "critical", "score_improvement": _score_imp('ghost_accounts', ghost)} if ghost else None,
+                {"id": "dormant_privileged", "label": "Dormant Privileged", "count": dormant,
+                 "severity": "critical", "score_improvement": _score_imp('dormant_privileged', dormant)} if dormant else None,
+                {"id": "orphaned_spns", "label": "Orphaned SPNs", "count": orphaned,
+                 "severity": "high", "score_improvement": _score_imp('orphaned_spns', orphaned)} if orphaned else None,
+                {"id": "external_exposure", "label": "External Exposure", "count": ext_exposure,
+                 "severity": "high", "score_improvement": _score_imp('external_exposure', ext_exposure)} if ext_exposure else None,
+            ] if r is not None
+        ], key=lambda x: -x['score_improvement'])[:4]
+
+        # Build response
+        result = {
+            "agirs": {
+                "score": agirs_score, "tier": agirs_tier,
+                "status": _agirs_status(agirs_score, total_identities),
+                "grade": agirs_grade, "delta": agirs_delta,
+                "pillars": pillars,
+            },
+            "identity_risk_score": latest.get('identity_risk_score', 0),
+            "hiri": {
+                "score": hiri_bd.get('score'),
+                "human_count": human_count,
+                "h1_ghost": hiri_bd.get('h1_ghost', 0),
+                "h2_dormant_priv": hiri_bd.get('h2_dormant_priv', 0),
+                "h3_over_priv": hiri_bd.get('h3_over_priv', 0),
+                "h4_ext_guest": hiri_bd.get('h4_ext_guest', 0),
+                "h5_zombie": hiri_bd.get('h5_zombie', 0),
+            } if hiri_bd else None,
+            "nhiri": {
+                "score": nhiri_bd.get('score'),
+                "nhi_count": nhi_count,
+                "phantom_breakdown": nhiri_bd.get('phantom_breakdown', {}),
+            } if nhiri_bd else None,
+            "gei": {
+                "score": gei_bd.get('score'),
+                "components": gei_bd.get('components', []),
+            } if gei_bd else None,
+            "risk_counts": {
+                "ghost_accounts": ghost, "orphaned_spns": orphaned,
+                "over_privileged": over_priv, "dormant_privileged": dormant,
+                "high_blast_radius": high_blast, "external_exposure": ext_exposure,
+            },
+            "identity_counts": {
+                "total": total_identities,
+                "customer": live_customer_count if live_customer_count > 0 else (latest.get('customer_identities') or 0),
+                "microsoft": live_microsoft_count if live_microsoft_count > 0 else (latest.get('microsoft_identities') or 0),
+                "human": human_count, "nhi": nhi_count,
+            },
+            "exposure": {
+                "total_resources": exposure_resources,
+                "storage_accounts": exposure_sa,
+                "key_vaults": exposure_kv,
+                "subscriptions": exposure_subs,
+                "privileged_roles": exposure_priv,
+            },
+            "attack_paths": {
+                "total": attack_path_count,
+                "confirmed": confirmed_path_count,
+                "graph_findings": graph_finding_count,
+                "severity": ("critical" if attack_path_count > 1000
+                             else "high" if attack_path_count > 100
+                             else "medium" if attack_path_count > 10
+                             else "low" if attack_path_count > 0 else "none"),
+            },
+            "blast_radius": {
+                "severity": blast_sev,
+                "top_identity_name": top_ident.get('display_name') if top_ident else None,
+                "top_identity_id": top_ident.get('id') if top_ident else None,
+                "description": "If this identity is compromised, an attacker could reach:" if top_ident else "",
+            },
+            "dangerous_identities": dangerous,
+            "previous": {
+                "agirs": previous.get('agirs_score') if previous else None,
+                "hiri": (previous.get('hiri_breakdown') or {}).get('score') if previous else None,
+                "nhiri": (previous.get('nhiri_breakdown') or {}).get('score') if previous else None,
+                "gei": (previous.get('gei_breakdown') or {}).get('score') if previous else None,
+            },
+            "attack_surface": {
+                "total": customer_identities,
+                "privileged": exposure_priv,
+                "machine": nhi_count,
+                "external": ext_exposure,
+            },
+            "top_risks": top_risks,
+            "score_analysis": score_analysis,
+            "potential_score": min(98, round(agirs_score + abs(
+                sum(p['score_impact'] for p in pillars.values()
+                    if p['severity'] in ('critical', 'high'))
+            ), 1)) if customer_identities > 0 else 0,
+            "data_coverage": [
+                {"source": "Azure RBAC roles", "status": "active" if customer_identities > 0 else "inactive",
+                 "detail": f"{customer_identities} customer identities scanned"},
+                {"source": "Entra ID directory roles", "status": "active" if customer_identities > 0 else "inactive",
+                 "detail": f"{customer_identities} customer identities"},
+                {"source": "Graph API permissions", "status": "active" if exposure_priv > 0 else "inactive",
+                 "detail": f"{exposure_priv} privileged role assignments"},
+                {"source": "Sign-in activity logs", "status": "partial",
+                 "detail": "P2 license — partial data"},
+                {"source": "Privileged Identity Mgmt", "status": "inactive",
+                 "detail": "PIM not configured"},
+                {"source": "Conditional Access", "status": "inactive",
+                 "detail": "Not connected"},
+            ],
+            "computed_at": str(latest.get('computed_at', '')),
+            "source": "consolidated",
+            "data_origin": "tenant_scan",
+        }
+
+        # Audit log: executive dashboard metrics accessed
+        try:
+            ic = result.get("identity_counts", {})
+            _log(db, 'dashboard_metrics_accessed', 'Executive dashboard risk summary loaded', {
+                'metric_source_verified': True,
+                'data_origin': 'tenant_scan',
+                'identity_count': ic.get('total', 0),
+                'agirs_score': result.get('agirs', {}).get('score', 0),
+            })
+        except Exception:
+            pass  # non-critical — don't block dashboard rendering
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Risk summary full failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ── AI Agent Governance: Pattern Reload ────────────────────────────
+def agent_patterns_reload():
+    """POST /api/admin/agent-patterns/reload — hot-reload AI agent pattern library."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.engines.discovery.agent_pattern_loader import load, get_version
+    try:
+        load()
+        return jsonify({
+            'message': 'AI agent patterns reloaded',
+            'version': get_version(),
+        })
+    except Exception as e:
+        logger.error("Failed to reload AI agent patterns: %s", e)
+        return jsonify({'error': f'Reload failed: {str(e)}'}), 500
+
+
+# ── AI Agent Governance: GET /api/agent-identities ─────────────────
+def get_agent_identities():
+    """GET /api/agent-identities — list identities classified as AI agents.
+
+    Query params:
+        page (int, default 1)
+        per_page (int, default 25, max 100)
+        sort_by: agirs_score | last_active | display_name (default: agirs_score)
+        sort_dir: asc | desc (default: desc)
+        platform: copilot_studio | azure_openai | langchain | power_automate | all
+        include_possible: true | false (include possible_ai_agent, default false)
+
+    Returns existing identity fields + additive classification fields.
+    Does NOT modify /api/identities — this is a separate endpoint.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        per_page = min(100, max(1, int(request.args.get('per_page', 25))))
+        sort_by = request.args.get('sort_by', 'agirs_score')
+        sort_dir = request.args.get('sort_dir', 'desc')
+        platform = request.args.get('platform', 'all')
+        include_possible = request.args.get('include_possible', 'false').lower() == 'true'
+
+        # Validate sort
+        SORT_MAP = {
+            'agirs_score': 'i.risk_score',
+            'last_active': 'i.last_sign_in',
+            'display_name': 'i.display_name',
+        }
+        order_col = SORT_MAP.get(sort_by, 'i.risk_score')
+        order_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+        nulls = 'NULLS LAST' if order_dir == 'DESC' else 'NULLS FIRST'
+
+        # Build WHERE clause
+        type_filter = "ac.agent_identity_type = 'ai_agent'"
+        if include_possible:
+            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')"
+
+        platform_filter = ""
+        params = []
+        if platform and platform != 'all':
+            platform_filter = " AND ac.detected_platform = %s"
+            params.append(platform)
+
+        # Count total
+        count_sql = f"""
+            SELECT COUNT(DISTINCT i.id)
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE {type_filter}{platform_filter}
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+        """
+        cursor = db.conn.cursor()
+        cursor.execute(count_sql, params)
+        total = cursor.fetchone()[0]
+
+        # Fetch identities + classification metadata
+        offset = (page - 1) * per_page
+        data_sql = f"""
+            SELECT
+                i.identity_id,
+                i.display_name,
+                i.identity_type,
+                COALESCE(i.identity_category, '') as identity_category,
+                i.risk_level,
+                i.risk_score,
+                i.credential_count,
+                i.credential_risk,
+                i.activity_status,
+                i.last_sign_in,
+                i.created_datetime,
+                i.cloud,
+                i.owner_display_name,
+                i.owner_count,
+                i.enabled,
+                COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
+                i.app_id,
+                i.object_id,
+                i.primary_subscription_id,
+                i.additional_subscription_count,
+                i.pim_eligible_count,
+                i.ca_coverage_status,
+                i.privilege_tier,
+                i.blast_radius_score,
+                -- classification fields (additive only)
+                ac.agent_identity_type,
+                ac.classification_confidence,
+                ac.classification_reason,
+                ac.detected_platform,
+                ac.classified_at,
+                ac.pattern_version,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE {type_filter}{platform_filter}
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY {order_col} {order_dir} {nulls}
+            LIMIT %s OFFSET %s
+        """
+        cursor.execute(data_sql, params + [per_page, offset])
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        cursor.close()
+
+        items = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            # Normalize types for JSON serialization
+            for dt_field in ('last_sign_in', 'created_datetime', 'classified_at',
+                             'last_service_principal_sign_in'):
+                if item.get(dt_field):
+                    item[dt_field] = item[dt_field].isoformat()
+            item['credential_count'] = int(item.get('credential_count') or 0)
+            item['risk_score'] = int(item.get('risk_score') or 0)
+            item['owner_count'] = int(item.get('owner_count') or 0)
+            item['pim_eligible_count'] = int(item.get('pim_eligible_count') or 0)
+            item['additional_subscription_count'] = int(item.get('additional_subscription_count') or 0)
+            item['blast_radius_score'] = int(item.get('blast_radius_score') or 0) if item.get('blast_radius_score') is not None else None
+            item['classification_confidence'] = float(item.get('classification_confidence') or 0.0)
+
+            # Phase 2: Inject AGIRS penalty for orphaned agents
+            penalty = db.get_agent_penalty(item.get('identity_id', ''))
+            if penalty:
+                item['agent_penalty_score'] = penalty['penalty_score']
+                item['agent_penalty_reason'] = penalty['penalty_reason']
+                item['risk_score_display'] = item['risk_score'] + penalty['penalty_score']
+            else:
+                item['agent_penalty_score'] = 0
+                item['agent_penalty_reason'] = None
+                item['risk_score_display'] = item['risk_score']
+
+            # Phase 2 B2-7: Compute effective last active from dual sources
+            interactive_sign_in = item.get('last_sign_in')
+            sp_sign_in = item.get('last_service_principal_sign_in')
+            item['last_interactive_sign_in'] = interactive_sign_in
+            # Compute effective_last_active (both are already ISO strings or None)
+            if interactive_sign_in and sp_sign_in:
+                item['effective_last_active'] = max(interactive_sign_in, sp_sign_in)
+            else:
+                item['effective_last_active'] = interactive_sign_in or sp_sign_in
+            # Determine detection source
+            if sp_sign_in and item['effective_last_active'] == sp_sign_in:
+                item['activity_detection_source'] = 'service_principal_sign_in'
+            elif interactive_sign_in and item['effective_last_active'] == interactive_sign_in:
+                item['activity_detection_source'] = 'interactive_sign_in'
+            else:
+                item['activity_detection_source'] = 'no_activity_recorded'
+
+            items.append(item)
+
+        return jsonify({
+            'items': items,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+        })
+    except Exception as e:
+        logger.error("get_agent_identities failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_agent_identity_count():
+    """GET /api/agent-identities/count — lightweight count for filter pill badge.
+
+    Returns {"ai_agent": N, "possible_ai_agent": N} without full identity data.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT
+                ac.agent_identity_type,
+                COUNT(DISTINCT i.id)
+            FROM agent_classifications ac
+            JOIN identities i ON i.id = ac.identity_db_id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            GROUP BY ac.agent_identity_type
+        """)
+        counts = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.close()
+        return jsonify({
+            'ai_agent': counts.get('ai_agent', 0),
+            'possible_ai_agent': counts.get('possible_ai_agent', 0),
+        })
+    except Exception as e:
+        logger.error("get_agent_identity_count failed: %s", e)
+        return jsonify({'ai_agent': 0, 'possible_ai_agent': 0})
+    finally:
+        db.close()
+
+
+def agent_identities_reclassify():
+    """POST /api/agent-identities/reclassify — run classifier on demand.
+
+    Admin-only. Re-classifies all SPNs in the caller's org using latest patterns.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if not org_id:
+            return jsonify({'error': 'Organization context required'}), 400
+
+        from app.services.agent_classifier import classify_tenant
+        stats = classify_tenant(db, org_id)
+
+        _log(db, 'agent_reclassify',
+             f"Agent classification: {stats.get('ai_agent', 0)} ai_agent, "
+             f"{stats.get('possible_ai_agent', 0)} possible",
+             stats)
+
+        return jsonify({
+            'message': 'Reclassification complete',
+            'stats': stats,
+        })
+    except Exception as e:
+        logger.error("agent_identities_reclassify failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_agent_risk_summary():
+    """GET /api/dashboard/agent-risk-summary — CISO tile data for AI agent risk.
+
+    Returns: { total_agents, avg_agirs, critical_orphans, highest_risk_agent }
+    Gated by FEATURE_AI_AGENT_GOVERNANCE.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Total AI agent count
+        cursor.execute("""
+            SELECT COUNT(DISTINCT i.id)
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+        """)
+        total_agents = cursor.fetchone()[0] or 0
+
+        # Average AGIRS score across AI agents
+        cursor.execute("""
+            SELECT COALESCE(AVG(i.risk_score), 0)
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+        """)
+        avg_agirs = round(float(cursor.fetchone()[0] or 0), 1)
+
+        # Critical orphans (open IASM-AG-001 findings)
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM security_findings
+            WHERE finding_type = 'orphaned_ai_agent_spn'
+              AND status = 'open'
+        """)
+        critical_orphans = cursor.fetchone()[0] or 0
+
+        # Highest risk agent
+        cursor.execute("""
+            SELECT i.display_name, COALESCE(i.risk_score, 0) as score
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY (COALESCE(i.risk_score, 0) + COALESCE(ac.agent_penalty_score, 0)) DESC,
+                     COALESCE(ac.days_inactive, 0) DESC,
+                     i.id ASC
+            LIMIT 1
+        """)
+        top_row = cursor.fetchone()
+        highest_risk_agent = {
+            'display_name': top_row[0] if top_row else None,
+            'risk_score': int(top_row[1]) if top_row else 0,
+        }
+
+        cursor.close()
+
+        return jsonify({
+            'total_agents': total_agents,
+            'avg_agirs': avg_agirs,
+            'critical_orphans': critical_orphans,
+            'highest_risk_agent': highest_risk_agent,
+        })
+    except Exception as e:
+        logger.error("get_agent_risk_summary failed: %s", e)
+        return jsonify({
+            'total_agents': 0, 'avg_agirs': 0,
+            'critical_orphans': 0,
+            'highest_risk_agent': {'display_name': None, 'risk_score': 0},
+        })
+    finally:
+        db.close()
+
+
+def get_agent_delegations():
+    """GET /api/agent-identities/delegations — list all agent-to-agent delegation edges."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        delegations = db.get_agent_delegations()
+        return jsonify({'delegations': delegations, 'total': len(delegations)})
+    except Exception as e:
+        logger.error("get_agent_delegations failed: %s", e)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def manage_agent_delegation():
+    """POST /api/agent-identities/delegations — create/update a delegation edge.
+
+    Body: { source_identity_id, target_identity_id, delegation_type? }
+    Admin-only. Supports manual override of agent-to-agent delegation.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        source_id = data.get('source_identity_id')
+        target_id = data.get('target_identity_id')
+        if not source_id or not target_id:
+            return jsonify({'error': 'source_identity_id and target_identity_id required'}), 400
+        if source_id == target_id:
+            return jsonify({'error': 'Cannot delegate to self'}), 400
+
+        delegation_type = data.get('delegation_type', 'manual')
+
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+
+        # Resolve both identities
+        cursor.execute("""
+            SELECT id, identity_id, display_name FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s) LIMIT 1
+        """, (source_id, run_ids))
+        src = cursor.fetchone()
+        cursor.execute("""
+            SELECT id, identity_id, display_name FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s) LIMIT 1
+        """, (target_id, run_ids))
+        tgt = cursor.fetchone()
+        cursor.close()
+
+        if not src or not tgt:
+            return jsonify({'error': 'One or both identities not found'}), 404
+
+        db.upsert_agent_delegation(
+            source_db_id=src[0], source_id=src[1], source_name=src[2],
+            target_db_id=tgt[0], target_id=tgt[1], target_name=tgt[2],
+            delegation_type=delegation_type, confidence=1.0 if delegation_type == 'manual' else 0.8,
+        )
+
+        _log(db, 'agent_delegation_created',
+             f"Agent delegation: {src[2]} → {tgt[2]} ({delegation_type})",
+             {'source': source_id, 'target': target_id, 'type': delegation_type})
+
+        return jsonify({
+            'message': 'Delegation created',
+            'source': {'identity_id': src[1], 'display_name': src[2]},
+            'target': {'identity_id': tgt[1], 'display_name': tgt[2]},
+            'delegation_type': delegation_type,
+        })
+    except Exception as e:
+        logger.error("manage_agent_delegation failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def delete_agent_delegation():
+    """DELETE /api/agent-identities/delegations — remove a delegation edge.
+
+    Body: { source_identity_id, target_identity_id }
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        data = request.get_json(force=True)
+        source_id = data.get('source_identity_id')
+        target_id = data.get('target_identity_id')
+        if not source_id or not target_id:
+            return jsonify({'error': 'source_identity_id and target_identity_id required'}), 400
+
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+
+        cursor.execute("SELECT id FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) LIMIT 1",
+                       (source_id, run_ids))
+        src = cursor.fetchone()
+        cursor.execute("SELECT id FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) LIMIT 1",
+                       (target_id, run_ids))
+        tgt = cursor.fetchone()
+        cursor.close()
+
+        if not src or not tgt:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        deleted = db.delete_agent_delegation(src[0], tgt[0])
+        if deleted:
+            _log(db, 'agent_delegation_deleted',
+                 f"Agent delegation removed: {source_id} → {target_id}",
+                 {'source': source_id, 'target': target_id})
+
+        return jsonify({'message': 'Delegation removed' if deleted else 'No delegation found',
+                        'deleted': deleted})
+    except Exception as e:
+        logger.error("delete_agent_delegation failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_agent_blast_radius(identity_id):
+    """GET /api/agent-identities/<id>/blast-radius — blast radius for an AI agent SPN.
+
+    Follows the ai_agent → SPN → role_assignments → resources traversal.
+    Returns same shape as GET /api/identities/<id>/blast-radius.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        # Resolve identity_id (Azure GUID string) → DB PK
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.execute("""
+            SELECT i.id
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s
+              AND i.discovery_run_id = ANY(%s)
+              AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+            LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+
+        if not row:
+            return jsonify({'error': 'Agent identity not found'}), 404
+
+        db_id = row[0]
+        result = db.get_blast_radius_for_identity(db_id)
+
+        if not result:
+            return jsonify({
+                'identity_id': db_id,
+                'identity_name': '',
+                'reachable_resource_count': 0,
+                'reachable_subscription_count': 0,
+                'reachable_resource_group_count': 0,
+                'sensitive_resource_count': 0,
+                'privilege_escalation_paths': 0,
+                'identity_exposure_level': 'LOW',
+                'risk_score': 0,
+                'resource_breakdown': {},
+            })
+
+        # Add agent delegation info if any
+        try:
+            dcursor = db.conn.cursor()
+            dcursor.execute("""
+                SELECT target_identity_id, target_display_name, delegation_type, confidence
+                FROM agent_delegations
+                WHERE source_identity_db_id = %s
+            """, (db_id,))
+            delegations = []
+            for drow in dcursor.fetchall():
+                delegations.append({
+                    'target_identity_id': drow[0],
+                    'target_display_name': drow[1],
+                    'delegation_type': drow[2],
+                    'confidence': float(drow[3] or 0),
+                })
+            dcursor.close()
+            if delegations:
+                result['delegations'] = delegations
+                # Compute combined blast radius
+                combined_resources = result.get('reachable_resource_count', 0)
+                combined_subs = result.get('reachable_subscription_count', 0)
+                for d in delegations:
+                    dcursor2 = db.conn.cursor()
+                    dcursor2.execute("""
+                        SELECT i.id FROM identities i
+                        WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+                        LIMIT 1
+                    """, (d['target_identity_id'], run_ids))
+                    trow = dcursor2.fetchone()
+                    dcursor2.close()
+                    if trow:
+                        delegate_br = db.get_blast_radius_for_identity(trow[0])
+                        if delegate_br:
+                            combined_resources += delegate_br.get('reachable_resource_count', 0)
+                            combined_subs += delegate_br.get('reachable_subscription_count', 0)
+                result['combined_blast_radius'] = {
+                    'reachable_resource_count': combined_resources,
+                    'reachable_subscription_count': combined_subs,
+                    'includes_delegations': [d['target_display_name'] for d in delegations],
+                }
+        except Exception:
+            pass  # agent_delegations table may not exist yet
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error("get_agent_blast_radius failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def scan_orphan_agents():
+    """POST /api/agent-identities/scan-orphans — on-demand orphan detection.
+
+    Admin-only. Runs auto-resolve + detection for the caller's latest run.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if not org_id:
+            return jsonify({'error': 'Organization context required'}), 400
+
+        # Get latest run for this org
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s
+            ORDER BY id DESC LIMIT 1
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+
+        if not row:
+            return jsonify({'error': 'No discovery runs found'}), 404
+
+        run_id = row[0]
+
+        from app.engines.agent_orphan_detector import AgentOrphanDetector
+        detector = AgentOrphanDetector(db)
+
+        # Auto-resolve first, then detect
+        resolved = detector.auto_resolve(run_id)
+        findings = detector.analyze(run_id)
+
+        if findings:
+            saved = db.save_security_findings(run_id, findings)
+        else:
+            saved = 0
+
+        _log(db, 'agent_orphan_scan',
+             f"Orphan scan: {len(findings)} found, {resolved} resolved, {saved} saved",
+             {'findings': len(findings), 'resolved': resolved, 'saved': saved})
+
+        return jsonify({
+            'message': 'Orphan scan complete',
+            'findings_count': len(findings),
+            'resolved_count': resolved,
+            'saved_count': saved,
+            'run_id': run_id,
+        })
+    except Exception as e:
+        logger.error("scan_orphan_agents failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()

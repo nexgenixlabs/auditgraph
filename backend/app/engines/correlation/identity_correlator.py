@@ -1,8 +1,8 @@
 """
 Identity Correlation Engine (ICE) — links regular ↔ privileged accounts.
 
-Many orgs create two accounts per employee: a regular account (bhupathi@company.com)
-and a privileged account (ep.bhupathi@company.com). This engine detects those pairs
+Many orgs create two accounts per employee: a regular account (jsmith@company.com)
+and a privileged account (ep.jsmith@company.com). This engine detects those pairs
 and links them to a single human identity for orphaned-account detection.
 """
 from difflib import SequenceMatcher

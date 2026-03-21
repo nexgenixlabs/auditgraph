@@ -329,7 +329,7 @@ class AttackPathEngine:
             placeholders = ','.join(['%s'] * len(_DANGEROUS_GRAPH_PERMS))
             cursor.execute(f"""
                 SELECT i.identity_id, i.display_name, i.identity_category,
-                       g.permission_name, g.permission_type
+                       g.permission_name, g.risk_level
                 FROM identities i
                 JOIN graph_api_permissions g ON g.identity_db_id = i.id
                 WHERE i.discovery_run_id = %s

@@ -68,9 +68,7 @@ class DriftDetector:
 
     def _compare_runs_internal(self, current_run_id: int, previous_run_id: int) -> Dict:
         """Internal comparison that produces both events and legacy format."""
-        print(f"\n🔄 Comparing Discovery Runs...")
-        print(f"  Current:  Run #{current_run_id}")
-        print(f"  Previous: Run #{previous_run_id}")
+        logger.info("Comparing Discovery Runs: Current Run #%s vs Previous Run #%s", current_run_id, previous_run_id)
 
         # Get run timestamps for change reason computation
         prev_run_ts = self._get_run_timestamp(previous_run_id)
@@ -754,7 +752,7 @@ class DriftDetector:
                         },
                     ))
         except Exception as e:
-            print(f"  ⚠️  Classification change detection error: {e}")
+            logger.warning("Classification change detection error: %s", e)
         finally:
             cursor.close()
 
@@ -894,10 +892,7 @@ class DriftDetector:
 
     def print_drift_report(self, changes: Dict, current_run_id: int, previous_run_id: int):
         """Print a formatted drift detection report"""
-        print("\n" + "="*60)
-        print("🔄 Drift Detection Report")
-        print("="*60)
-        print(f"Comparing: Run #{current_run_id} vs Run #{previous_run_id}\n")
+        logger.info("Drift Detection Report: Comparing Run #%s vs Run #%s", current_run_id, previous_run_id)
 
         total_changes = sum([
             len(changes.get('new_identities', [])),
@@ -908,55 +903,49 @@ class DriftDetector:
         ])
 
         if total_changes == 0:
-            print("✅ No changes detected - environment is stable")
+            logger.info("No changes detected - environment is stable")
             return
 
-        print(f"⚠️  {total_changes} changes detected:\n")
+        logger.info("%s changes detected", total_changes)
 
         if changes.get('new_identities'):
-            print(f"🆕 New Identities: {len(changes['new_identities'])}")
+            logger.info("New Identities: %s", len(changes['new_identities']))
             for identity in changes['new_identities']:
-                print(f"  + {identity['display_name']} ({identity['risk_level']} risk)")
-            print()
+                logger.info("  + %s (%s risk)", identity['display_name'], identity['risk_level'])
 
         if changes.get('removed_identities'):
-            print(f"❌ Removed Identities: {len(changes['removed_identities'])}")
+            logger.info("Removed Identities: %s", len(changes['removed_identities']))
             for identity in changes['removed_identities']:
-                print(f"  - {identity['display_name']}")
-            print()
+                logger.info("  - %s", identity['display_name'])
 
         ms_removed = changes.get('microsoft_removed_identities', [])
         if ms_removed:
-            print(f"🏢 Microsoft Removed: {len(ms_removed)}")
+            logger.info("Microsoft Removed: %s", len(ms_removed))
             for identity in ms_removed[:5]:
-                print(f"  - {identity['display_name']}")
+                logger.info("  - %s", identity['display_name'])
             if len(ms_removed) > 5:
-                print(f"  ... and {len(ms_removed) - 5} more")
-            print()
+                logger.info("  ... and %s more", len(ms_removed) - 5)
 
         if changes.get('permission_changes'):
-            print(f"⚠️  Permission Changes: {len(changes['permission_changes'])}")
+            logger.info("Permission Changes: %s", len(changes['permission_changes']))
             for change in changes['permission_changes']:
                 identity = change['identity']
-                print(f"  • {identity['display_name']}:")
+                logger.info("  %s:", identity['display_name'])
                 for role in change['added_roles']:
-                    print(f"    + Added: {role}")
+                    logger.info("    + Added: %s", role)
                 for role in change['removed_roles']:
-                    print(f"    - Removed: {role}")
-            print()
+                    logger.info("    - Removed: %s", role)
 
         if changes.get('risk_changes'):
-            print(f"📊 Risk Level Changes: {len(changes['risk_changes'])}")
+            logger.info("Risk Level Changes: %s", len(changes['risk_changes']))
             for change in changes['risk_changes']:
                 identity = change['identity']
                 severity = change['severity']
-                icon = "⬆️" if severity == 'escalation' else "⬇️"
-                print(f"  {icon} {identity['display_name']}: {change['previous_risk']} → {change['current_risk']}")
-            print()
+                direction = "UP" if severity == 'escalation' else "DOWN"
+                logger.info("  [%s] %s: %s -> %s", direction, identity['display_name'], change['previous_risk'], change['current_risk'])
 
         if changes.get('credential_changes'):
-            print(f"🔑 Credential Status Changes: {len(changes['credential_changes'])}")
+            logger.info("Credential Status Changes: %s", len(changes['credential_changes']))
             for change in changes['credential_changes']:
                 identity = change['identity']
-                print(f"  ⚠️  {identity['display_name']}: {change['previous_status']} → {change['current_status']}")
-            print()
+                logger.info("  %s: %s -> %s", identity['display_name'], change['previous_status'], change['current_status'])

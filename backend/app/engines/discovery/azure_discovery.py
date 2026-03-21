@@ -149,9 +149,13 @@ class AzureDiscoveryEngine:
         self.subscriptions = [s for s in all_subs if s.get('tenant_id') == self.azure_directory_id]
         self.foreign_subscriptions = [s for s in all_subs if s.get('tenant_id') != self.azure_directory_id]
         if self.foreign_subscriptions:
-            print(f"  ℹ️ Found {len(self.foreign_subscriptions)} subscription(s) from other tenants")
+            logger.info("Found %s subscription(s) from other tenants", len(self.foreign_subscriptions))
         sub_names = [f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions]
-        print(f"✓ Discovery Engine initialized for {len(self.subscriptions)} subscription(s): {', '.join(sub_names) or 'none'}")
+        logger.info("Discovery Engine initialized for %s subscription(s): %s", len(self.subscriptions), ', '.join(sub_names) or 'none')
+
+        # Cache resource SPN appRoles to avoid repeated API calls
+        # Key: resource_spn_id, Value: dict mapping appRoleId -> role value
+        self._resource_spn_cache: Dict[str, Dict[str, str]] = {}
 
     def _update_job_progress(self, stage, progress, discovery_run_id=None):
         """Report progress to snapshot_jobs. Non-fatal on failure."""
@@ -161,7 +165,17 @@ class AzureDiscoveryEngine:
         try:
             self.db.update_snapshot_job_progress(job_id, stage, progress, discovery_run_id)
         except Exception as e:
-            print(f"  (job progress update failed: {e}")
+            logger.warning("Job progress update failed: %s", e)
+
+    def _update_job_metrics(self, identities=0, resources=0, subscriptions=0):
+        """Update discovered counts on snapshot job. Non-fatal on failure."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id:
+            return
+        try:
+            self.db.update_snapshot_job_metrics(job_id, identities, resources, subscriptions)
+        except Exception:
+            pass
 
     def _discover_subscriptions(self) -> List[Dict[str, str]]:
         """Auto-discover all Azure subscriptions accessible to the service principal.
@@ -184,17 +198,17 @@ class AzureDiscoveryEngine:
                     if not sub_tenant:
                         sub_tenant = self.azure_directory_id
                     elif sub_tenant != self.azure_directory_id:
-                        print(f"  🔀 Detected cross-tenant subscription: {sub.display_name} ({sub.subscription_id[:8]}...) → tenant {sub_tenant[:8]}...")
+                        logger.info("Detected cross-tenant subscription: %s (%s...) -> tenant %s...", sub.display_name, sub.subscription_id[:8], sub_tenant[:8])
                     subs.append({
                         'id': sub.subscription_id,
                         'name': sub.display_name or sub.subscription_id,
                         'tenant_id': sub_tenant,
                     })
             if not subs:
-                print("  ⚠️ No Azure subscriptions found — SPN needs Reader RBAC on at least one subscription")
+                logger.warning("No Azure subscriptions found -- SPN needs Reader RBAC on at least one subscription")
             return subs
         except Exception as e:
-            print(f"  ⚠️ Subscription discovery failed: {e}")
+            logger.warning("Subscription discovery failed: %s", e)
             return []
 
     def run_discovery(self) -> DiscoveryResult:
@@ -211,51 +225,56 @@ class AzureDiscoveryEngine:
 
     async def _async_run_discovery(self) -> DiscoveryResult:
         sub_summary = ", ".join(f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions) or "No subscriptions"
-        print("\n" + "="*60)
-        print("🔍 AuditGraph Discovery Engine")
-        print("="*60)
-        print(f"\nSubscriptions: {sub_summary}")
-        print(f"Started: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
+        logger.info("=" * 60)
+        logger.info("AuditGraph Discovery Engine")
+        logger.info("=" * 60)
+        logger.info("Subscriptions: %s", sub_summary)
+        logger.info("Started: %s UTC", datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
         
         # Create discovery run using Database class method
-        print("📝 Creating discovery run...")
+        logger.info("Creating discovery run...")
         # Store all subscription IDs as comma-separated for the run record
         all_sub_ids = ",".join(s['id'] for s in self.subscriptions) if self.subscriptions else os.getenv('AZURE_SUBSCRIPTION_ID', '')
         all_sub_names = ", ".join(s['name'] for s in self.subscriptions) if self.subscriptions else os.getenv('AZURE_SUBSCRIPTION_NAME', 'Unknown')
         run_id = self.db.create_discovery_run(all_sub_ids, all_sub_names,
                                                cloud_connection_id=self.cloud_connection_id)
-        print(f"  ✓ Discovery run created (ID: {run_id})")
-        self._update_job_progress('discovering_subscriptions', 10, discovery_run_id=run_id)
-        
+        logger.info("Discovery run created (ID: %s)", run_id)
+        self._update_job_progress('initializing', 5, discovery_run_id=run_id)
+        self._update_job_metrics(subscriptions=len(self.subscriptions))
+
         # Step 1: Get role assignments FIRST
-        print("\n🎯 Discovering Role Assignments...")
+        logger.info("Discovering Role Assignments...")
+        self._update_job_progress('discovering_roles', 10)
         role_assignments = self._discover_role_assignments()
-        print(f"  Found {len(role_assignments)} role assignments")
-        
+        logger.info("Found %s role assignments", len(role_assignments))
+
         # Step 2: Extract principal IDs that have roles
         principal_ids_with_roles = set(ra['principal_id'] for ra in role_assignments)
-        print(f"  Found {len(principal_ids_with_roles)} unique principals with roles")
-        
+        logger.info("Found %s unique principals with roles", len(principal_ids_with_roles))
+
         # Step 2.5: Discover Entra ID directory roles
-        print("\n🔑 Discovering Entra ID Directory Roles...")
+        logger.info("Discovering Entra ID Directory Roles...")
+        self._update_job_progress('discovering_roles', 18)
         entra_roles = await self._discover_entra_roles()
-        
+
         # Merge principal IDs from both Azure RBAC and Entra roles
         entra_principal_ids = set(er['principal_id'] for er in entra_roles)
         all_principal_ids = principal_ids_with_roles.union(entra_principal_ids)
-        print(f"  Total unique principals (RBAC + Entra): {len(all_principal_ids)}")
-        
+        logger.info("Total unique principals (RBAC + Entra): %s", len(all_principal_ids))
+
         # Step 3: Discover Service Principals
-        print("\n📋 Discovering Service Principals...")
+        logger.info("Discovering Service Principals...")
+        self._update_job_progress('discovering_identities', 25)
         service_principals = await self._discover_service_principals()
-        print(f"  Found {len(service_principals)} service principals")
-        
+        logger.info("Found %s service principals", len(service_principals))
+
         # Step 3.5: Discover SPN Credentials
         credentials_map = await self._discover_credentials(service_principals)
-        
+        self._update_job_progress('discovering_identities', 30)
+
         # Step 3.6: Discover API Permissions
         permissions_map = await self._discover_permissions(service_principals)
-        
+
         # Step 3.7: Discover Custom App Roles
         app_roles_map = await self._discover_app_roles(service_principals)
 
@@ -267,41 +286,47 @@ class AzureDiscoveryEngine:
 
         # Step 3.10: Discover Conditional Access Policies
         ca_policies = await self._discover_conditional_access()
+        self._update_job_progress('discovering_identities', 35)
 
         # Step 4: Discover users who have Azure RBAC OR Entra roles
-        print("\n👥 Discovering Users with Roles...")
+        logger.info("Discovering Users with Roles...")
         users = await self._discover_users_with_roles(all_principal_ids)
-        print(f"  Found {len(users)} users with role assignments")
+        logger.info("Found %s users with role assignments", len(users))
         self._update_job_progress('discovering_identities', 40)
         
         # Step 5: Discover Managed Identities
-        print("\n🔐 Discovering Managed Identities...")
+        logger.info("Discovering Managed Identities...")
         managed_identities = []
-        print(f"  Found {len(managed_identities)} user-assigned managed identities")
+        logger.info("Found %s user-assigned managed identities", len(managed_identities))
         
         all_identities = service_principals + users + managed_identities
         
         # Step 6: Calculate risks (enhanced points-based scoring)
-        print("\n⚠️  Calculating Risk Levels...")
+        logger.info("Calculating Risk Levels...")
+        self._update_job_progress('analyzing_risk', 48)
         identities_with_risks = self._calculate_risks(
             all_identities, role_assignments, entra_roles,
             permissions_map, app_roles_map, credentials_map
         )
-        
+
         # Step 7: Check credentials
-        print("\n🔑 Checking Credential Expiration...")
+        logger.info("Checking Credential Expiration...")
+        self._update_job_progress('analyzing_risk', 52)
         identities_with_creds = self._check_credentials(identities_with_risks)
-        
+
         # Step 8: Check activity
-        print("\n🕐 Checking Last Activity...")
+        logger.info("Checking Last Activity...")
+        self._update_job_progress('analyzing_risk', 56)
         final_identities = self._check_activity(identities_with_creds)
-        self._update_job_progress('discovering_rbac', 60)
 
         # Step 9: Save to database using Database class methods
-        print("\n💾 Saving identities to database...")
+        logger.info("Saving identities to database...")
+        self._update_job_progress('saving_identities', 60)
         saved_count = self._save_identities(run_id, final_identities, role_assignments, credentials_map, permissions_map, app_roles_map, ownership_map, pim_map, ca_policies)
-        print(f"  ✓ Saved {saved_count} identities")
-        self._update_job_progress('discovering_resources', 75)
+        logger.info("Saved %s identities", saved_count)
+        self._identities_saved_count = saved_count
+        self._update_job_metrics(identities=saved_count, subscriptions=len(self.subscriptions))
+        self._update_job_progress('discovering_resources', 68)
 
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
         # MUST run before exposure scoring so fresh sign-in data is available
@@ -309,24 +334,24 @@ class AzureDiscoveryEngine:
         try:
             p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', organization_id=self.db._organization_id) == 'true'
             if p2_enabled:
-                print("\n📊 Ingesting P2 sign-in telemetry...")
+                logger.info("Ingesting P2 sign-in telemetry...")
                 from app.engines.telemetry.p2_ingestion import P2TelemetryService
                 telemetry = P2TelemetryService(self.credential, self.db)
                 org_id = self.db._organization_id
                 telemetry.ingest_signin_logs(run_id, org_id)
                 telemetry.compute_activity_stats(run_id, org_id)
                 telemetry.backfill_last_sign_in(run_id)
-                print("  ✓ P2 telemetry ingested — activity stats ready for scoring")
+                logger.info("P2 telemetry ingested -- activity stats ready for scoring")
         except Exception as e:
-            print(f"  ⚠️ P2 telemetry ingestion error: {e}")
+            logger.warning("P2 telemetry ingestion error: %s", e)
             self.db._rollback()
 
         # Step 9a-ii: Compute Workload Identity Exposure Scores (uses P2 data)
-        print("\n🎯 Computing workload identity exposure scores...")
+        logger.info("Computing workload identity exposure scores...")
         try:
             self._compute_workload_exposure(run_id)
         except Exception as e:
-            print(f"  ✗ Workload exposure computation error: {e}")
+            logger.error("Workload exposure computation error: %s", e)
             self.db._rollback()
 
         # Step 9a-iii: Behavioral anomaly detection (after scoring)
@@ -336,19 +361,19 @@ class AzureDiscoveryEngine:
                 anomaly_engine = BehavioralAnomalyEngine(self.db)
                 anomaly_engine.detect_anomalies(run_id, self.db._organization_id)
         except Exception as e:
-            print(f"  ⚠️ Behavioral anomaly detection error: {e}")
+            logger.warning("Behavioral anomaly detection error: %s", e)
             self.db._rollback()
 
         # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
-        print("\n🗄️  Discovering Azure Resources...")
+        logger.info("Discovering Azure Resources...")
         storage_accounts = []
         key_vaults = []
         org_id_val = getattr(self, '_organization_id', None) or self.db_org_id
         try:
             storage_accounts = self._discover_storage_accounts()
-            print(f"  ✓ Found {len(storage_accounts)} storage accounts")
+            logger.info("Found %s storage accounts", len(storage_accounts))
             key_vaults = self._discover_key_vaults()
-            print(f"  ✓ Found {len(key_vaults)} key vaults")
+            logger.info("Found %s key vaults", len(key_vaults))
 
             # Save resources to database
             for sa in storage_accounts:
@@ -356,29 +381,35 @@ class AzureDiscoveryEngine:
                 try:
                     self.db.save_storage_account(run_id, sa)
                 except Exception as e:
-                    print(f"  ⚠️ save_storage_account error: {e}")
+                    logger.warning("save_storage_account error: %s", e)
                     self.db._rollback()
             for kv in key_vaults:
                 kv['organization_id'] = org_id_val
                 try:
                     self.db.save_key_vault(run_id, kv)
                 except Exception as e:
-                    print(f"  ⚠️ save_key_vault error: {e}")
+                    logger.warning("save_key_vault error: %s", e)
                     self.db._rollback()
-            print(f"  ✓ Saved {len(storage_accounts)} storage accounts, {len(key_vaults)} key vaults")
+            logger.info("Saved %s storage accounts, %s key vaults", len(storage_accounts), len(key_vaults))
+            self._update_job_metrics(
+                identities=getattr(self, '_identities_saved_count', 0),
+                resources=len(storage_accounts) + len(key_vaults),
+                subscriptions=len(self.subscriptions),
+            )
         except Exception as e:
-            print(f"  ✗ Resource discovery error: {e}")
+            logger.error("Resource discovery error: %s", e)
             self.db._rollback()
 
         # Step 9b-2: Identity exposure enhancement + risk history persistence
         try:
             self._enhance_resources_with_identity_exposure(run_id, storage_accounts, key_vaults)
         except Exception as e:
-            print(f"  ⚠️ Identity exposure enhancement error: {e}")
+            logger.warning("Identity exposure enhancement error: %s", e)
             self.db._rollback()
 
         # Step 9c: Discover App Registrations
-        print("\n📋 Discovering App Registrations...")
+        self._update_job_progress('discovering_apps', 80)
+        logger.info("Discovering App Registrations...")
         try:
             from psycopg2.extras import RealDictCursor as RDC
             spn_cursor = self.db.conn.cursor(cursor_factory=RDC)
@@ -401,16 +432,14 @@ class AzureDiscoveryEngine:
             for ar in app_regs:
                 ar['organization_id'] = org_id_val
                 self.db.save_app_registration(run_id, ar)
-            print(f"  ✓ Saved {len(app_regs)} app registrations")
+            logger.info("Saved %s app registrations", len(app_regs))
         except Exception as e:
-            print(f"  ✗ App registration discovery error: {e}")
+            logger.error("App registration discovery error: %s", e, exc_info=True)
             self.db._rollback()
-            import traceback
-            traceback.print_exc()
 
         # Step 10: Complete discovery run
-        self._update_job_progress('finalizing', 90)
-        print("\n✅ Completing discovery run...")
+        self._update_job_progress('finalizing', 92)
+        logger.info("Completing discovery run...")
         try:
             critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
             high_count = sum(1 for i in final_identities if i['risk_level'] == 'high')
@@ -421,9 +450,9 @@ class AzureDiscoveryEngine:
                 run_id, len(final_identities),
                 critical_count, high_count, medium_count, low_count
             )
-            print(f"  ✓ Discovery run completed")
+            logger.info("Discovery run completed")
         except Exception as e:
-            print(f"  ✗ complete_discovery_run error: {e}")
+            logger.error("complete_discovery_run error: %s", e)
             self.db._rollback()
             # Try a simpler completion
             try:
@@ -432,9 +461,9 @@ class AzureDiscoveryEngine:
                                (len(final_identities), run_id))
                 cursor.close()
                 self.db._commit()
-                print(f"  ✓ Discovery run completed (fallback)")
+                logger.info("Discovery run completed (fallback)")
             except Exception as e2:
-                print(f"  ✗ Fallback completion also failed: {e2}")
+                logger.error("Fallback completion also failed: %s", e2)
                 self.db._rollback()
 
         # Sync discovered subscriptions into cloud_subscriptions registry
@@ -446,7 +475,7 @@ class AzureDiscoveryEngine:
                 run_row = cursor.fetchone()
                 run_org_id = run_row[0] if run_row and run_row[0] else 1
                 if not self.cloud_connection_id:
-                    print(f"  ⚠️ Skipping subscription sync — cloud_connection_id is required (NOT NULL)")
+                    logger.warning("Skipping subscription sync -- cloud_connection_id is required (NOT NULL)")
                     break
                 cursor.execute("""
                     INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status, cloud_connection_id)
@@ -456,9 +485,9 @@ class AzureDiscoveryEngine:
                 """, (run_org_id, sub['id'], sub['name'], self.cloud_connection_id))
                 self.db.safe_commit()
                 cursor.close()
-            print(f"  ✓ Synced {len(self.subscriptions)} subscription(s) to registry")
+            logger.info("Synced %s subscription(s) to registry", len(self.subscriptions))
         except Exception as e:
-            print(f"  ⚠️ Subscription sync warning: {e}")
+            logger.warning("Subscription sync warning: %s", e)
             self.db._rollback()
 
         # Sync foreign-tenant subscriptions to their own connections
@@ -482,7 +511,7 @@ class AzureDiscoveryEngine:
                 for sub in self.foreign_subscriptions:
                     foreign_by_tenant.setdefault(sub['tenant_id'], []).append(sub)
                 for foreign_tenant, tenant_subs in foreign_by_tenant.items():
-                    print(f"  🔀 Creating cloud connection for cross-tenant {foreign_tenant[:8]}... ({len(tenant_subs)} sub(s))")
+                    logger.info("Creating cloud connection for cross-tenant %s... (%s sub(s))", foreign_tenant[:8], len(tenant_subs))
                     foreign_conn = self.db.find_or_create_cloud_connection(
                         run_org_id, foreign_tenant,
                         label=f'Azure Tenant {foreign_tenant[:8]}...',
@@ -499,9 +528,9 @@ class AzureDiscoveryEngine:
                         """, (run_org_id, sub['id'], sub['name'], foreign_conn['id']))
                         self.db.safe_commit()
                         cursor.close()
-                print(f"  ✓ Synced {len(self.foreign_subscriptions)} foreign-tenant subscription(s) across {len(foreign_by_tenant)} tenant(s)")
+                logger.info("Synced %s foreign-tenant subscription(s) across %s tenant(s)", len(self.foreign_subscriptions), len(foreign_by_tenant))
             except Exception as e:
-                print(f"  ⚠️ Foreign subscription sync warning: {e}")
+                logger.warning("Foreign subscription sync warning: %s", e)
                 self.db._rollback()
 
         # Seed auto identity groups for this organization (Phase 38 + RLS fix)
@@ -512,9 +541,9 @@ class AzureDiscoveryEngine:
             cursor.close()
             if row and row[0]:
                 self.db.seed_auto_groups_for_organization(row[0])
-                print(f"  ✓ Auto identity groups seeded for organization {row[0]}")
+                logger.info("Auto identity groups seeded for organization %s", row[0])
         except Exception as e:
-            print(f"  ⚠️ Auto groups seed warning: {e}")
+            logger.warning("Auto groups seed warning: %s", e)
             self.db._rollback()
 
         # Create result object
@@ -548,18 +577,18 @@ class AzureDiscoveryEngine:
             if sps and sps.value:
                 for sp in sps.value:
                     if len(identities) < 10:
-                        print(f"    ✓ {sp.display_name} ({sp.id})")
-                    
+                        logger.info("SP: %s (%s)", sp.display_name, sp.id)
+
                     # DEBUG: Log first 3 service principals to see available fields
                     if len(identities) < 3:
-                        print(f"\n  DEBUG SP #{len(identities)+1}: {sp.display_name}")
-                        print(f"    - service_principal_type: {getattr(sp, 'service_principal_type', 'ATTR NOT FOUND')}")
-                        print(f"    - app_owner_organization_id: {getattr(sp, 'app_owner_organization_id', 'ATTR NOT FOUND')}")
-                        print(f"    - publisher_name: {getattr(sp, 'publisher_name', 'ATTR NOT FOUND')}")
-                        print(f"    - app_id: {sp.app_id}")
-                        print(f"    - Has additional_data: {hasattr(sp, 'additional_data')}")
+                        logger.info("DEBUG SP #%s: %s", len(identities)+1, sp.display_name)
+                        logger.info("  service_principal_type: %s", getattr(sp, 'service_principal_type', 'ATTR NOT FOUND'))
+                        logger.info("  app_owner_organization_id: %s", getattr(sp, 'app_owner_organization_id', 'ATTR NOT FOUND'))
+                        logger.info("  publisher_name: %s", getattr(sp, 'publisher_name', 'ATTR NOT FOUND'))
+                        logger.info("  app_id: %s", sp.app_id)
+                        logger.info("  Has additional_data: %s", hasattr(sp, 'additional_data'))
                         if hasattr(sp, 'additional_data') and sp.additional_data:
-                            print(f"    - additional_data keys: {list(sp.additional_data.keys())[:10]}")
+                            logger.info("  additional_data keys: %s", list(sp.additional_data.keys())[:10])
                     
                     created = None
                     if hasattr(sp, 'created_date_time') and sp.created_date_time:
@@ -653,14 +682,14 @@ class AzureDiscoveryEngine:
                         identities.append(identity_dict)
             
             if skipped_microsoft_count > 0 or skipped_sami_count > 0:
-                print(f"  🏷️ Flagged: {skipped_microsoft_count} Microsoft system apps (is_microsoft_system=True), excluded {skipped_sami_count} system-assigned MIs")
-                print(f"  ✅ Total: {len(identities)} identities ({len(identities) - skipped_microsoft_count} customer, {skipped_microsoft_count} Microsoft)")
+                logger.info("Flagged: %s Microsoft system apps (is_microsoft_system=True), excluded %s system-assigned MIs", skipped_microsoft_count, skipped_sami_count)
+                logger.info("Total: %s identities (%s customer, %s Microsoft)", len(identities), len(identities) - skipped_microsoft_count, skipped_microsoft_count)
 
             return identities
         except Exception as e:
-            print(f"  ❌ Error: {e}")
+            logger.error("Error discovering service principals: %s", e)
             return []
-    
+
     async def _discover_credentials(self, service_principals: List[Dict]) -> Dict[str, List[Dict]]:
         """
         Discover credentials (secrets, certificates, federated) for service principals
@@ -670,7 +699,7 @@ class AzureDiscoveryEngine:
         """
         credentials_map = {}
         
-        print("\n🔑 Discovering SPN Credentials...")
+        logger.info("Discovering SPN Credentials...")
         
         for sp in service_principals:
             try:
@@ -718,77 +747,138 @@ class AzureDiscoveryEngine:
                 if credentials:
                     credentials_map[sp['identity_id']] = credentials
                     if len(credentials_map) <= 5:  # Show first 5
-                        print(f"    ✓ {sp['display_name']}: {len(credentials)} credential(s)")
+                        logger.info("%s: %s credential(s)", sp['display_name'], len(credentials))
             
             except Exception as e:
                 # Don't fail entire discovery if one SPN fails
                 if len(credentials_map) == 0:  # Only show first error
-                    print(f"    ⚠️  Error getting credentials for {sp['display_name']}: {e}")
+                    logger.warning("Error getting credentials for %s: %s", sp['display_name'], e)
                 continue
         
-        print(f"  Found credentials for {len(credentials_map)} SPNs")
+        logger.info("Found credentials for %s SPNs", len(credentials_map))
         return credentials_map
 
 
+    async def _resolve_app_role_name(self, resource_spn_id: str, app_role_id: str) -> tuple:
+        """
+        Resolve appRoleId to (permission_name, resource_display_name) using cache.
+        Returns ('', '') if unresolvable.
+        """
+        resource_spn_id = str(resource_spn_id)
+        app_role_id = str(app_role_id)
+
+        if resource_spn_id not in self._resource_spn_cache:
+            try:
+                resource_sp = await self.graph_client.service_principals.by_service_principal_id(
+                    resource_spn_id
+                ).get()
+                roles_lookup = {}
+                if hasattr(resource_sp, 'app_roles') and resource_sp.app_roles:
+                    for role in resource_sp.app_roles:
+                        roles_lookup[str(role.id)] = role.value or ''
+                self._resource_spn_cache[resource_spn_id] = {
+                    'roles': roles_lookup,
+                    'display_name': resource_sp.display_name if resource_sp.display_name else 'Unknown',
+                }
+            except Exception as e:
+                logger.debug("Could not fetch resource SPN %s: %s", resource_spn_id, e)
+                self._resource_spn_cache[resource_spn_id] = {'roles': {}, 'display_name': 'Unknown'}
+
+        cached = self._resource_spn_cache[resource_spn_id]
+        perm_name = cached['roles'].get(app_role_id, '')
+        return perm_name, cached['display_name']
+
     async def _discover_permissions(self, service_principals: List[Dict]) -> Dict[str, List[Dict]]:
         """
-        Discover Graph API permissions for service principals
-        
+        Discover Graph API permissions for service principals.
+
+        Collects both:
+          - Application permissions (appRoleAssignments) — what the SPN can do as itself
+          - Delegated permissions (oauth2PermissionGrants) — what users consented to
+
         Returns:
             Dictionary mapping identity_id to list of permissions
         """
-        permissions_map = {}
-        
-        print("\n🔐 Discovering API Permissions...")
-        
+        permissions_map: Dict[str, List[Dict]] = {}
+        app_perm_total = 0
+        delegated_perm_total = 0
+        error_count = 0
+
+        logger.info("Discovering API Permissions...")
+
         for sp in service_principals:
-            try:
-                # Get app role assignments for this service principal
-                assignments = await self.graph_client.service_principals.by_service_principal_id(
-                    sp['object_id']
-                ).app_role_assignments.get()
-                
-                if not assignments or not assignments.value:
-                    continue
-                
-                permissions = []
-                
-                for assignment in assignments.value:
-                    # Get the resource service principal to fetch permission details
-                    resource_sp_id = assignment.resource_id
-                    
-                    try:
-                        resource_sp = await self.graph_client.service_principals.by_service_principal_id(
-                            resource_sp_id
-                        ).get()
-                        
-                        # Find the specific app role
-                        if hasattr(resource_sp, 'app_roles') and resource_sp.app_roles:
-                            for app_role in resource_sp.app_roles:
-                                if str(app_role.id) == str(assignment.app_role_id):
-                                    permissions.append({
-                                        'name': app_role.value if app_role.value else 'Unknown',
-                                        'description': app_role.display_name if app_role.display_name else '',
-                                        'resource_name': resource_sp.display_name if resource_sp.display_name else 'Microsoft Graph',
-                                        'permission_type': 'Application',
-                                        'permission_id': str(app_role.id),
-                                        'consent_type': 'Admin'
-                                    })
-                                    break
-                    except Exception as e:
-                        # Skip if we can't fetch resource details
-                        continue
-                
-                if permissions:
-                    permissions_map[sp['identity_id']] = permissions
-                    if len(permissions_map) <= 5:  # Show first 5
-                        print(f"    ✓ {sp['display_name']}: {len(permissions)} permission(s)")
-            
-            except Exception as e:
-                # Skip this SPN if permission fetch fails
+            sp_object_id = sp.get('object_id')
+            sp_identity_id = sp.get('identity_id')
+            if not sp_object_id:
                 continue
-        
-        print(f"  ✓ Fetched permissions for {len(permissions_map)} service principals")
+
+            permissions: List[Dict] = []
+
+            # ── Application permissions (appRoleAssignments) ──
+            try:
+                assignments = await self.graph_client.service_principals.by_service_principal_id(
+                    sp_object_id
+                ).app_role_assignments.get()
+
+                if assignments and assignments.value:
+                    for assignment in assignments.value:
+                        resource_id = str(assignment.resource_id) if assignment.resource_id else ''
+                        app_role_id = str(assignment.app_role_id) if assignment.app_role_id else ''
+
+                        perm_name, resource_name = await self._resolve_app_role_name(resource_id, app_role_id)
+                        if perm_name:
+                            permissions.append({
+                                'name': perm_name,
+                                'description': f"{resource_name}: {perm_name}",
+                                'resource_name': resource_name,
+                                'permission_type': 'Application',
+                                'permission_id': app_role_id,
+                                'consent_type': 'Admin',
+                            })
+                            app_perm_total += 1
+            except Exception as e:
+                logger.warning("appRoleAssignments failed for %s (%s): %s",
+                               sp.get('display_name', '?'), sp_object_id, e)
+                error_count += 1
+
+            # ── Delegated permissions (oauth2PermissionGrants) ──
+            try:
+                from msgraph.generated.oauth2_permission_grants.oauth2_permission_grants_request_builder import Oauth2PermissionGrantsRequestBuilder
+                from kiota_abstractions.base_request_configuration import RequestConfiguration
+
+                query = Oauth2PermissionGrantsRequestBuilder.Oauth2PermissionGrantsRequestBuilderGetQueryParameters(
+                    filter=f"clientId eq '{sp_object_id}'",
+                )
+                config = RequestConfiguration(query_parameters=query)
+                grants = await self.graph_client.oauth2_permission_grants.get(request_configuration=config)
+
+                if grants and grants.value:
+                    for grant in grants.value:
+                        scope_str = grant.scope or ''
+                        for perm_name in scope_str.split():
+                            perm_name = perm_name.strip()
+                            if perm_name:
+                                permissions.append({
+                                    'name': perm_name,
+                                    'description': perm_name,
+                                    'resource_name': 'Microsoft Graph',
+                                    'permission_type': 'Delegated',
+                                    'consent_type': grant.consent_type or 'Unknown',
+                                })
+                                delegated_perm_total += 1
+            except Exception as e:
+                logger.warning("oauth2PermissionGrants failed for %s (%s): %s",
+                               sp.get('display_name', '?'), sp_object_id, e)
+                error_count += 1
+
+            if permissions:
+                permissions_map[sp_identity_id] = permissions
+                if len(permissions_map) <= 5:  # Show first 5
+                    logger.info("%s: %s permission(s)", sp['display_name'], len(permissions))
+
+        logger.info("Permissions: %s application + %s delegated across %s SPNs%s",
+                     app_perm_total, delegated_perm_total, len(permissions_map),
+                     " (%s errors)" % error_count if error_count else "")
         return permissions_map
 
     async def _discover_app_roles(self, service_principals: list) -> dict:
@@ -804,7 +894,7 @@ class AzureDiscoveryEngine:
         Returns:
             Dict mapping identity_id to list of app role assignments
         """
-        print("\n📱 Discovering Custom App Roles...")
+        logger.info("Discovering Custom App Roles...")
         app_roles_map = {}
         found_count = 0
         
@@ -837,16 +927,16 @@ class AzureDiscoveryEngine:
                 if custom_app_roles:
                     app_roles_map[identity_id] = custom_app_roles
                     found_count += 1
-                    print(f"    ✓ {sp.get('displayName', 'Unknown')}: {len(custom_app_roles)} app role(s)")
+                    logger.info("%s: %s app role(s)", sp.get('displayName', 'Unknown'), len(custom_app_roles))
                 
             except Exception as e:
                 # Silently skip if no permissions or access denied
                 continue
         
         if found_count > 0:
-            print(f"  ✓ Fetched app roles for {found_count} service principals")
+            logger.info("Fetched app roles for %s service principals", found_count)
         else:
-            print(f"  ℹ️  No custom app role assignments found")
+            logger.info("No custom app role assignments found")
         
         return app_roles_map
 
@@ -862,7 +952,7 @@ class AzureDiscoveryEngine:
         Returns:
             Dict mapping identity_id -> list of owner dicts
         """
-        print("\n👤 Discovering Application Owners...")
+        logger.info("Discovering Application Owners...")
         ownership_map = {}
         found_count = 0
         error_count = 0
@@ -919,20 +1009,20 @@ class AzureDiscoveryEngine:
                             found_count += 1
 
                             if found_count <= 5:
-                                print(f"    ✓ {sp.get('display_name', 'Unknown')}: {len(owners)} owner(s)")
+                                logger.info("%s: %s owner(s)", sp.get('display_name', 'Unknown'), len(owners))
 
             except Exception as e:
                 error_count += 1
                 if error_count <= 3:
-                    print(f"    ⚠️  Could not get owners for {sp.get('display_name', 'Unknown')}: {str(e)[:50]}")
+                    logger.warning("Could not get owners for %s: %s", sp.get('display_name', 'Unknown'), str(e)[:50])
 
         if found_count > 0:
-            print(f"  ✓ Found owners for {found_count} applications")
+            logger.info("Found owners for %s applications", found_count)
         else:
-            print(f"  ℹ️  No application owners found")
+            logger.info("No application owners found")
 
         if error_count > 3:
-            print(f"  ⚠️  {error_count} errors occurred (showing first 3)")
+            logger.warning("%s errors occurred (showing first 3)", error_count)
 
         return ownership_map
 
@@ -950,7 +1040,7 @@ class AzureDiscoveryEngine:
         Returns:
             Dict mapping object_id -> { 'eligible': [...], 'activations': [...] }
         """
-        print("\n🔒 Discovering PIM Assignments...")
+        logger.info("Discovering PIM Assignments...")
         pim_map = {}  # keyed by principal object_id
 
         # Cache role definitions to avoid redundant API calls
@@ -992,14 +1082,14 @@ class AzureDiscoveryEngine:
                     })
                     eligible_count += 1
 
-            print(f"  ✓ Found {eligible_count} PIM eligible assignments")
+            logger.info("Found %s PIM eligible assignments", eligible_count)
 
         except Exception as e:
             err_str = str(e)
             if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
-                print(f"  ℹ️  PIM eligible assignments: requires Azure AD P2 license (403)")
+                logger.info("PIM eligible assignments: requires Azure AD P2 license (403)")
             else:
-                print(f"  ⚠️  PIM eligible assignments error: {err_str[:80]}")
+                logger.warning("PIM eligible assignments error: %s", err_str[:80])
 
         # --- Active activations ---
         activation_count = 0
@@ -1029,14 +1119,14 @@ class AzureDiscoveryEngine:
                     })
                     activation_count += 1
 
-            print(f"  ✓ Found {activation_count} active PIM activations")
+            logger.info("Found %s active PIM activations", activation_count)
 
         except Exception as e:
             err_str = str(e)
             if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
-                print(f"  ℹ️  PIM activations: requires Azure AD P2 license (403)")
+                logger.info("PIM activations: requires Azure AD P2 license (403)")
             else:
-                print(f"  ⚠️  PIM activations error: {err_str[:80]}")
+                logger.warning("PIM activations error: %s", err_str[:80])
 
         # --- Activation history (requests with justification/ticket) ---
         try:
@@ -1070,12 +1160,12 @@ class AzureDiscoveryEngine:
         except Exception as e:
             err_str = str(e)
             if '403' not in err_str and 'Forbidden' not in err_str:
-                print(f"  ⚠️  PIM request history error: {err_str[:80]}")
+                logger.warning("PIM request history error: %s", err_str[:80])
 
         if pim_map:
-            print(f"  ✓ PIM data found for {len(pim_map)} principals")
+            logger.info("PIM data found for %s principals", len(pim_map))
         else:
-            print(f"  ℹ️  No PIM data found (Azure AD P2 required)")
+            logger.info("No PIM data found (Azure AD P2 required)")
 
         return pim_map
 
@@ -1089,7 +1179,7 @@ class AzureDiscoveryEngine:
         Returns:
             List of parsed CA policy dicts
         """
-        print("\n🛡️  Discovering Conditional Access Policies...")
+        logger.info("Discovering Conditional Access Policies...")
         policies = []
 
         try:
@@ -1164,17 +1254,17 @@ class AzureDiscoveryEngine:
                         'modified_datetime': modified.isoformat() if modified else None,
                     })
 
-            print(f"  ✓ Found {len(policies)} Conditional Access policies")
+            logger.info("Found %s Conditional Access policies", len(policies))
             enabled = sum(1 for p in policies if p['state'] == 'enabled')
             mfa = sum(1 for p in policies if p['requires_mfa'] and p['state'] == 'enabled')
-            print(f"    Enabled: {enabled}, MFA-enforcing: {mfa}")
+            logger.info("Enabled: %s, MFA-enforcing: %s", enabled, mfa)
 
         except Exception as e:
             err_str = str(e)
             if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
-                print(f"  ℹ️  Conditional Access: requires Policy.Read.All permission (403)")
+                logger.info("Conditional Access: requires Policy.Read.All permission (403)")
             else:
-                print(f"  ⚠️  Conditional Access error: {err_str[:80]}")
+                logger.warning("Conditional Access error: %s", err_str[:80])
 
         return policies
 
@@ -1257,7 +1347,7 @@ class AzureDiscoveryEngine:
             pass
             
         except Exception as e:
-            print(f"  Warning: Could not discover managed identities: {e}")
+            logger.warning("Could not discover managed identities: %s", e)
         
         return managed_identities
     
@@ -1281,10 +1371,10 @@ class AzureDiscoveryEngine:
                     query_parameters=query_params
                 )
                 users_response = await self.graph_client.users.get(request_configuration=request_config)
-                print("  ✓ Sign-in activity available (Premium license)")
+                logger.info("Sign-in activity available (Premium license)")
             except Exception as e:
                 if '403' in str(e) or 'premium' in str(e).lower():
-                    print("  ⚠️  Sign-in activity requires Premium license - using basic user data")
+                    logger.warning("Sign-in activity requires Premium license - using basic user data")
                     query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
                         select=select_fields
                     )
@@ -1328,7 +1418,7 @@ class AzureDiscoveryEngine:
                 if user.id not in principal_ids_with_roles:
                     continue
 
-                print(f"    ✓ {user.display_name} ({user.user_principal_name})")
+                logger.info("User: %s (%s)", user.display_name, user.user_principal_name)
 
                 created = None
                 if hasattr(user, 'created_date_time') and user.created_date_time:
@@ -1379,7 +1469,7 @@ class AzureDiscoveryEngine:
 
             return identities
         except Exception as e:
-            print(f"  ❌ Error discovering users: {e}")
+            logger.error("Error discovering users: %s", e)
             return []
     
     _ice_config_cache = None
@@ -1445,7 +1535,7 @@ class AzureDiscoveryEngine:
         for sub in self.subscriptions:
             sub_id = sub['id']
             sub_name = sub['name']
-            print(f"\n  📋 Subscription: {sub_name} ({sub_id[:8]}...)")
+            logger.info("Subscription: %s (%s...)", sub_name, sub_id[:8])
 
             try:
                 auth_client = AuthorizationManagementClient(self.credential, sub_id)
@@ -1487,10 +1577,10 @@ class AzureDiscoveryEngine:
                     resource_type, resource_name = self._parse_scope(scope)
 
                     if printed < 15:
-                        print(f"    ✓ {role_name} → {scope.split('/')[-1][:30] if scope else 'root'}")
+                        logger.info("%s -> %s", role_name, scope.split('/')[-1][:30] if scope else 'root')
                         printed += 1
                     elif printed == 15:
-                        print(f"    ... (listing remaining silently)")
+                        logger.info("... (listing remaining silently)")
                         printed += 1
 
                     role_assignments.append({
@@ -1514,10 +1604,10 @@ class AzureDiscoveryEngine:
                     })
 
             except Exception as e:
-                print(f"  ⚠️ Error discovering roles for subscription {sub_name}: {e}")
+                logger.warning("Error discovering roles for subscription %s: %s", sub_name, e)
                 continue
 
-        print(f"\n  Total: {len(role_assignments)} role assignments across {len(self.subscriptions)} subscription(s)")
+        logger.info("Total: %s role assignments across %s subscription(s)", len(role_assignments), len(self.subscriptions))
         return role_assignments
 
     def _calculate_role_risk(self, role_name: str, scope_type: str) -> tuple:
@@ -1674,7 +1764,7 @@ class AzureDiscoveryEngine:
     async def _discover_entra_roles(self) -> List[Dict[str, Any]]:
         """Discover Entra ID directory role assignments for given principals"""
         try:
-            print("🔑 Discovering Entra ID Directory Roles...")
+            logger.info("Discovering Entra ID Directory Roles...")
             
             # Get all directory role assignments
             role_assignments_response = await self.graph_client.role_management.directory.role_assignments.get()
@@ -1709,13 +1799,13 @@ class AzureDiscoveryEngine:
                         })
                         
                         if len(entra_roles) <= 10:
-                            print(f"    ✓ {role_name}")
+                            logger.info("Entra role: %s", role_name)
             
-            print(f"  Found {len(entra_roles)} Entra ID role assignments")
+            logger.info("Found %s Entra ID role assignments", len(entra_roles))
             return entra_roles
             
         except Exception as e:
-            print(f"  ❌ Error discovering Entra roles: {e}")
+            logger.error("Error discovering Entra roles: %s", e)
             return []
 
 
@@ -1864,7 +1954,7 @@ class AzureDiscoveryEngine:
                     sa_data['blast_radius_score'] = 0  # computed post-save via identity cross-link
                     storage_accounts.append(sa_data)
             except Exception as e:
-                print(f"    ⚠️  Storage discovery failed for {sub_name}: {e}")
+                logger.warning("Storage discovery failed for %s: %s", sub_name, e)
                 continue
         return storage_accounts
 
@@ -2039,7 +2129,7 @@ class AzureDiscoveryEngine:
                     kv_data['blast_radius_score'] = 0
                     key_vaults.append(kv_data)
             except Exception as e:
-                print(f"    ⚠️  Key Vault discovery failed for {sub_name}: {e}")
+                logger.warning("Key Vault discovery failed for %s: %s", sub_name, e)
                 continue
         return key_vaults
 
@@ -2134,7 +2224,7 @@ class AzureDiscoveryEngine:
             if findings:
                 self.db.save_resource_findings(run_id, rid, res.get('resource_type', ''), findings)
 
-        print(f"  ✓ Identity exposure enhanced + risk history saved for {len(all_resources)} resources")
+        logger.info("Identity exposure enhanced + risk history saved for %s resources", len(all_resources))
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
@@ -2161,17 +2251,22 @@ class AzureDiscoveryEngine:
         if sp_type == 'managedidentity':
             return False
 
-        # Microsoft's well-known tenant ID
-        MICROSOFT_TENANT_ID = 'f8cdef31-a31e-4b4a-93e4-5f571e91255a'
+        # All known Microsoft tenant IDs — SPNs owned by any of these are first-party
+        MICROSOFT_TENANT_IDS = {
+            'f8cdef31-a31e-4b4a-93e4-5f571e91255a',  # Microsoft Services
+            '72f988bf-86f1-41af-91ab-2d7cd011db47',  # Microsoft Corp
+            '33e01921-4d64-4f8c-a055-5bdaffd5e33d',  # Microsoft MSIT
+            '47df5bb7-e6bc-4256-afb0-dd8c8e3c1ce8',  # Microsoft Partner Network
+        }
 
         # Check 1: Microsoft-owned tenant (most reliable check)
         # NOTE: MS Graph SDK returns UUID objects, must convert to str for comparison
         app_owner_org = identity.get('app_owner_organization_id') or identity.get('appOwnerOrganizationId')
         app_owner_org_str = str(app_owner_org).lower() if app_owner_org else None
-        if app_owner_org_str == MICROSOFT_TENANT_ID:
+        if app_owner_org_str in MICROSOFT_TENANT_IDS:
             return True
         # If app_owner_organization_id is set and is NOT Microsoft, it's customer-owned
-        if app_owner_org_str and app_owner_org_str != MICROSOFT_TENANT_ID:
+        if app_owner_org_str and app_owner_org_str not in MICROSOFT_TENANT_IDS:
             return False
 
         # Check 2: Publisher name indicates Microsoft
@@ -2362,6 +2457,12 @@ class AzureDiscoveryEngine:
         entra_role_names = [r['role_name'].lower() for r in entra_roles]
         all_role_names = azure_role_names + entra_role_names
 
+        # Set last_used_at from identity sign-in (proxy for role usage)
+        for role in roles:
+            role['last_used_at'] = last_sign_in
+        for role in entra_roles:
+            role['last_used_at'] = last_sign_in
+
         # Update Azure RBAC roles
         for role in roles:
             role_name_lower = role['role_name'].lower()
@@ -2448,6 +2549,30 @@ class AzureDiscoveryEngine:
                     role['usage_status'] = 'assumed_active'
                 else:
                     role['usage_status'] = 'unknown'
+
+        # Normalize usage_status to standard values for UI display
+        _STATUS_MAP = {
+            'assumed_active': 'active',
+            'definitely_unused': 'never_used',
+            'likely_unused': 'dormant',
+            'possibly_overprivileged': 'stale',
+            'orphaned': 'dormant',
+        }
+        for role in roles + entra_roles:
+            old = role.get('usage_status', 'unknown')
+            if old in _STATUS_MAP:
+                role['usage_status'] = _STATUS_MAP[old]
+            elif old not in ('active', 'stale', 'dormant', 'never_used', 'unknown'):
+                # Compute from last_sign_in if still unknown
+                if days_since_signin is not None:
+                    if days_since_signin <= 30:
+                        role['usage_status'] = 'active'
+                    elif days_since_signin <= 90:
+                        role['usage_status'] = 'stale'
+                    else:
+                        role['usage_status'] = 'dormant'
+                elif never_signed_in:
+                    role['usage_status'] = 'never_used'
 
         return (roles, entra_roles)
 
@@ -2664,7 +2789,7 @@ class AzureDiscoveryEngine:
                         risk_reasons.extend(extra_reasons)
                         risk_level = score_to_level_v2(risk_score)
             except Exception as e:
-                logger.warning(f"Custom risk rules error: {e}")
+                logger.warning("Custom risk rules error: %s", e)
 
             # Calculate role usage status (inference-based)
             identity_roles, identity_entra_roles = self._calculate_role_usage_status(
@@ -2684,18 +2809,17 @@ class AzureDiscoveryEngine:
 
             # Print high-risk identities
             if risk_level in ['critical', 'high']:
-                emoji = '🚨' if risk_level == 'critical' else '🟠'
-                print(f"    {emoji} {identity['display_name']}: {risk_level.upper()} ({risk_score} pts)")
+                logger.info("%s: %s (%s pts)", identity['display_name'], risk_level.upper(), risk_score)
                 for factor in risk_factors[:3]:
-                    print(f"       • {factor['code']}: +{factor['points']} ({factor['severity']})")
+                    logger.info("  %s: +%s (%s)", factor['code'], factor['points'], factor['severity'])
 
         # Summary
         critical_count = sum(1 for i in identities if i.get('risk_level') == 'critical')
         high_count = sum(1 for i in identities if i.get('risk_level') == 'high')
 
-        print(f"\n  📊 Risk Summary (V2 scale):")
-        print(f"     Total: {len(identities)} customer-owned identities")
-        print(f"     🔴 Critical: {critical_count}  🟠 High: {high_count}")
+        logger.info("Risk Summary (V2 scale):")
+        logger.info("Total: %s customer-owned identities", len(identities))
+        logger.info("Critical: %s  High: %s", critical_count, high_count)
 
         return identities
 
@@ -2709,11 +2833,11 @@ class AzureDiscoveryEngine:
         return self._cached_custom_rules
 
     def _check_credentials(self, identities: List[Dict]) -> List[Dict]:
-        print(f"  Checking {len(identities)} identities...")
+        logger.info("Checking %s identities...", len(identities))
         for identity in identities:
             identity['credential_status'] = 'Valid'
             identity['credential_expiration'] = None
-        print(f"  ✓ All credentials are valid for 30+ days")
+        logger.info("All credentials are valid for 30+ days")
         return identities
     
     def _check_activity(self, identities: List[Dict]) -> List[Dict]:
@@ -2729,7 +2853,7 @@ class AzureDiscoveryEngine:
         """
         from datetime import datetime, timezone
 
-        print(f"  Checking {len(identities)} identities...")
+        logger.info("Checking %s identities...", len(identities))
 
         active_count = 0
         inactive_count = 0
@@ -2785,17 +2909,17 @@ class AzureDiscoveryEngine:
                     identity['activity_status'] = 'never_used'
                     never_used_count += 1
 
-        print(f"\n  Summary:")
+        logger.info("Activity Summary:")
         if active_count > 0:
-            print(f"    🟢 Active (30 days): {active_count}")
+            logger.info("Active (30 days): %s", active_count)
         if inactive_count > 0:
-            print(f"    🟡 Inactive (30-90 days): {inactive_count}")
+            logger.info("Inactive (30-90 days): %s", inactive_count)
         if stale_count > 0:
-            print(f"    🟠 Stale (90+ days): {stale_count}")
+            logger.info("Stale (90+ days): %s", stale_count)
         if never_used_count > 0:
-            print(f"    🔴 Never used: {never_used_count}")
+            logger.info("Never used: %s", never_used_count)
         if unknown_count > 0:
-            print(f"    ⚪ Unknown: {unknown_count}")
+            logger.info("Unknown: %s", unknown_count)
 
         return identities
     
@@ -2816,10 +2940,10 @@ class AzureDiscoveryEngine:
                     limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
                     max_ids = limits.get('max_identities')
                     if max_ids and len(identities) > max_ids:
-                        logger.warning(f"Organization {self.db_org_id} ({plan} plan): truncating {len(identities)} identities to {max_ids}")
+                        logger.warning("Organization %s (%s plan): truncating %s identities to %s", self.db_org_id, plan, len(identities), max_ids)
                         identities = identities[:max_ids]
             except Exception as e:
-                logger.error(f"Entitlement check failed, proceeding without limit: {e}")
+                logger.error("Entitlement check failed, proceeding without limit: %s", e)
 
         for identity in identities:
             
@@ -2938,7 +3062,7 @@ class AzureDiscoveryEngine:
         # Save CA policies and compute coverage after all identities are saved
         try:
             if ca_policies:
-                print(f"\n🛡️  Saving {len(ca_policies)} CA policies and computing coverage...")
+                logger.info("Saving %s CA policies and computing coverage...", len(ca_policies))
                 for policy in ca_policies:
                     self.db.save_ca_policy(run_id, policy)
 
@@ -2960,16 +3084,16 @@ class AzureDiscoveryEngine:
                             self.db.save_ca_identity_coverage(db_id, coverage)
 
                     covered = sum(1 for c in ca_coverage_map.values() if c['coverage_status'] == 'covered')
-                    print(f"  ✓ CA coverage computed: {covered}/{len(ca_coverage_map)} identities covered")
+                    logger.info("CA coverage computed: %s/%s identities covered", covered, len(ca_coverage_map))
         except Exception as e:
-            print(f"  ⚠️ CA policy save/coverage error: {e}")
+            logger.warning("CA policy save/coverage error: %s", e)
             self.db._rollback()
 
         # Post-discovery sweep: catch any Microsoft SPNs that slipped through detection
         try:
             self.db.sweep_microsoft_flag(run_id)
         except Exception as e:
-            print(f"  ⚠️ Microsoft flag sweep error: {e}")
+            logger.warning("Microsoft flag sweep error: %s", e)
             self.db._rollback()
 
         return saved_count
@@ -3091,7 +3215,7 @@ class AzureDiscoveryEngine:
             if result['scores']['total'] >= 80:
                 critical_count += 1
 
-        print(f"  ✓ Computed exposure for {scored} SPNs/MIs ({critical_count} critical)")
+        logger.info("Computed exposure for %s SPNs/MIs (%s critical)", scored, critical_count)
 
         # ── Part 2: App Registration scoring ─────────────────────────
         try:
@@ -3147,7 +3271,7 @@ class AzureDiscoveryEngine:
                 if result['scores']['total'] >= 80:
                     ar_critical += 1
 
-            print(f"  ✓ Computed exposure for {ar_scored} App Registrations ({ar_critical} critical)")
+            logger.info("Computed exposure for %s App Registrations (%s critical)", ar_scored, ar_critical)
 
         cursor.close()
 
@@ -3160,18 +3284,10 @@ class AzureDiscoveryEngine:
         high_count = sum(1 for i in identities if i['risk_level'] == 'high')
         medium_count = sum(1 for i in identities if i['risk_level'] == 'medium')
         
-        print("\n" + "="*60)
-        print("📊 Discovery Summary")
-        print("="*60)
-        print(f"Total Identities: {len(identities)}")
-        print(f"  Service Principals: {len(service_principals)}")
-        print(f"  Users (with Azure roles): {len(users)}")
-        print(f"  Managed Identities: {len(managed_identities)}")
-        print(f"\nRisk Assessment:")
-        print(f"  🔴 Critical: {critical_count}")
-        print(f"  🟠 High: {high_count}")
-        print(f"  🟡 Medium: {medium_count}")
-        print("="*60 + "\n")
+        logger.info("Discovery Summary: Total Identities: %s (Service Principals: %s, Users: %s, Managed Identities: %s)",
+                     len(identities), len(service_principals), len(users), len(managed_identities))
+        logger.info("Risk Assessment: Critical: %s, High: %s, Medium: %s",
+                     critical_count, high_count, medium_count)
         
         return DiscoveryResult(
             run_id=run_id,
@@ -3225,7 +3341,7 @@ class AzureDiscoveryEngine:
                 except Exception:
                     break
 
-            print(f"  ✓ Found {len(all_apps)} app registrations")
+            logger.info("Found %s app registrations", len(all_apps))
 
             now = datetime.utcnow()
 
@@ -3411,9 +3527,7 @@ class AzureDiscoveryEngine:
 
             return results
         except Exception as e:
-            print(f"  ✗ App registration discovery failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("App registration discovery failed: %s", e, exc_info=True)
             return []
 
     def _compute_app_registration_risk(self, owner_count, audience, app_perm_count,
@@ -3472,7 +3586,7 @@ class AzureDiscoveryEngine:
                 'high_risks': result.high_count,
                 'medium_risks': result.medium_count,
             }, f, indent=2, default=str)
-        print(f"✓ Results saved to: {filename}")
+        logger.info("Results saved to: %s", filename)
 
 
 if __name__ == "__main__":

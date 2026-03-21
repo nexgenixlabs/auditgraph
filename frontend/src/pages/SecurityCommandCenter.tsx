@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCopilot } from '../contexts/CopilotContext';
+import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -120,6 +122,8 @@ function timeAgo(dateStr: string): string {
 export default function SecurityCommandCenter() {
   const navigate = useNavigate();
   const { openCopilot } = useCopilot();
+  const { withConnection, selectedConnectionId } = useConnection();
+  const { activeOrgId } = useAuth();
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
   const [riskyIdentities, setRiskyIdentities] = useState<RiskyIdentity[]>([]);
   const [recommendations, setRecommendations] = useState<FixRecommendation[]>([]);
@@ -133,10 +137,10 @@ export default function SecurityCommandCenter() {
     try {
       // Single primary call + lazy-loaded lists in parallel
       const [overviewRes, riskyRes, recsRes, activityRes] = await Promise.all([
-        fetch('/api/security/overview'),
-        fetch('/api/identities?risk_level=critical&limit=10'),
-        fetch('/api/fix-recommendations?limit=10&status=open'),
-        fetch('/api/activity?limit=15'),
+        fetch(withConnection('/api/security/overview')),
+        fetch(withConnection('/api/identities?risk_level=critical&limit=10')),
+        fetch(withConnection('/api/fix-recommendations?limit=10&status=open')),
+        fetch(withConnection('/api/activity?limit=15')),
       ]);
 
       if (overviewRes.ok) setOverview(await overviewRes.json());
@@ -147,7 +151,7 @@ export default function SecurityCommandCenter() {
         // If fewer than 10 critical, backfill with high-risk
         if (identities.length < 10) {
           try {
-            const highRes = await fetch(`/api/identities?risk_level=high&limit=${10 - identities.length}`);
+            const highRes = await fetch(withConnection(`/api/identities?risk_level=high&limit=${10 - identities.length}`));
             if (highRes.ok) {
               const hd = await highRes.json();
               const existingIds = new Set(identities.map((i: RiskyIdentity) => i.identity_id));
@@ -161,7 +165,27 @@ export default function SecurityCommandCenter() {
 
       if (recsRes.ok) {
         const d = await recsRes.json();
-        setRecommendations(d.recommendations || []);
+        let recs = d.recommendations || [];
+        // If no fix-recommendations, fall back to generated remediations
+        if (recs.length === 0) {
+          try {
+            const genRes = await fetch(withConnection('/api/remediation/generated?limit=10'));
+            if (genRes.ok) {
+              const gd = await genRes.json();
+              const generated = (gd.actions || gd.items || []).slice(0, 10);
+              recs = generated.map((g: Record<string, unknown>) => ({
+                id: g.id,
+                title: g.title || g.action_title || 'Remediation Action',
+                description: g.description || '',
+                fix_category: g.condition_key || g.action_type || 'auto-generated',
+                entity_name: g.identity_name || g.identity_display_name || null,
+                effort: g.priority || g.severity || 'medium',
+                priority_score: g.risk_reduction || g.confidence || 0,
+              }));
+            }
+          } catch { /* ignore */ }
+        }
+        setRecommendations(recs);
       }
 
       if (activityRes.ok) {
@@ -173,7 +197,7 @@ export default function SecurityCommandCenter() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [withConnection, selectedConnectionId, activeOrgId]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -368,7 +392,10 @@ export default function SecurityCommandCenter() {
           </div>
           <div className="divide-y divide-slate-700/30">
             {recommendations.length === 0 ? (
-              <div className="px-4 py-6 text-center text-sm text-slate-500">No open recommendations</div>
+              <div className="px-4 py-6 text-center">
+                <div className="text-sm text-slate-500">No remediation actions generated yet.</div>
+                <button onClick={() => navigate('/remediation')} className="text-xs text-blue-400 hover:text-blue-300 mt-1">Generate plan from findings →</button>
+              </div>
             ) : recommendations.map((rec) => (
               <div key={rec.id} className="px-4 py-2.5 flex items-start gap-3">
                 <span className={`mt-0.5 px-2 py-0.5 text-[10px] font-medium rounded whitespace-nowrap ${SEVERITY_BADGE[rec.effort || 'medium'] || 'bg-slate-600 text-slate-300'}`}>

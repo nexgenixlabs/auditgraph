@@ -356,6 +356,12 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
 
     metadata = conn.get('metadata') or {}
 
+    # Decrypt any encrypted credential fields in metadata
+    from app.encryption import decrypt_field
+    for _cred_key in ('client_secret', 'secret_access_key'):
+        if _cred_key in metadata:
+            metadata[_cred_key] = decrypt_field(metadata[_cred_key])
+
     # Phase 3: Concurrency guard — skip if a job is already active for this connection
     job_id = None
     try:
@@ -511,7 +517,23 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
         pass
 
     try:
-        engine.run_discovery()
+        from app.resilience import resilient_call, CircuitBreakerOpenError
+        breaker_name = f'{cloud}_api'
+        try:
+            resilient_call(breaker_name, engine.run_discovery)
+        except CircuitBreakerOpenError:
+            logger.error(
+                "  DISCOVERY_BLOCKED connection_id=%d cloud=%s — circuit breaker OPEN",
+                conn_id, cloud,
+            )
+            if job_id:
+                try:
+                    fdb = Database()
+                    fdb.complete_snapshot_job(job_id, 'failed', f'{cloud} API circuit breaker open')
+                    fdb.close()
+                except Exception:
+                    pass
+            return
         elapsed = _time.monotonic() - start_time
         logger.info(
             "  DISCOVERY_COMPLETE connection_id=%d org_id=%d cloud=%s duration=%.1fs snapshot_job_id=%s",
@@ -919,6 +941,18 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         _track_job('nhi_security', db_org_id,
                    _run_nhi_analysis, db_org_id, db)
 
+        # AI Agent Governance: classify agent identities (gated by feature flag)
+        _track_job('agent_classification', db_org_id,
+                   _run_agent_classification, current_run_id, db_org_id, db)
+
+        # AI Agent Governance Phase 2 B2-5: enrich agent SP sign-in data
+        _track_job('agent_sp_signin_enrichment', db_org_id,
+                   _run_agent_sp_signin_enrichment, current_run_id, db_org_id, db)
+
+        # AI Agent Governance Phase 2: orphaned agent SPN detection
+        _track_job('agent_orphan_detection', db_org_id,
+                   _run_agent_orphan_detection, current_run_id, db_org_id, db)
+
         # Phase 11: Policy Recommendation Engine
         _track_job('policy_recommendations', db_org_id,
                    _run_policy_recommendations, db_org_id, db)
@@ -1010,8 +1044,17 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 51: Save compliance snapshot
         _save_compliance_snapshot(current_run_id, db)
 
-        # AGIRS: Compute and persist AGIRS scores
-        _compute_agirs_scores(current_run_id, db_org_id, db)
+        # Compute and persist canonical risk summary (includes AGIRS computation)
+        _compute_risk_summary(current_run_id, db_org_id, db)
+
+        # Clean up any stale remediation entries for Microsoft/system identities
+        try:
+            db.cleanup_microsoft_remediations()
+        except Exception as e:
+            logger.warning(f"Microsoft remediation cleanup failed (non-blocking): {e}")
+
+        # Validate snapshot completeness (non-blocking)
+        _validate_snapshot(current_run_id, db_org_id, db)
 
         # Phase 8: Evaluate tenant health + discovery integrity (non-blocking)
         _run_platform_health_check(current_run_id, db_org_id, db)
@@ -1063,24 +1106,87 @@ def _save_compliance_snapshot(run_id: int, db: Database):
         logger.error(f"Error saving compliance snapshot: {e}")
 
 
-def _compute_agirs_scores(run_id: int, organization_id: int, db: Database):
-    """Compute and persist AGIRS (AuditGraph Identity Risk Score) for the run."""
+def _compute_risk_summary(run_id: int, organization_id: int, db: Database):
+    """Compute and persist canonical risk summary (includes AGIRS computation)."""
     try:
-        from app.engines.risk.agirs_engine import AGIRSEngine
-        engine = AGIRSEngine(db)
-        result = engine.compute(organization_id, run_id)
-        if result.get('agirs_score') is not None:
-            logger.info(
-                f"AGIRS computed for run #{run_id}: "
-                f"{result['agirs_score']:.1f} "
-                f"(HIRI={result['hiri_score']:.1f}, "
-                f"NHIRI={result['nhiri_score']:.1f}, "
-                f"GEI={result['gei_score']:.1f})"
+        from app.engines.risk.risk_summary_engine import RiskSummaryEngine
+        from app.engines.discovery.pipeline_validator import log_stage
+
+        log_stage(db, run_id, organization_id, 'risk_engine', 6, 'running')
+
+        # Get all latest run IDs for this org
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (cloud_connection_id) id
+            FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+              AND cloud_connection_id IS NOT NULL
+            ORDER BY cloud_connection_id, id DESC
+        """, (organization_id,))
+        run_ids = [r[0] for r in cursor.fetchall()]
+        cursor.close()
+
+        if not run_ids:
+            run_ids = [run_id]
+
+        engine = RiskSummaryEngine(db, organization_id, run_ids)
+        summary = engine.compute()
+        engine.persist(summary)
+
+        log_stage(db, run_id, organization_id, 'risk_engine', 6, 'completed',
+                  count=summary.get('total_identities', 0))
+
+        # Step 5: Explicit AGIRS pipeline log
+        agirs = summary.get('agirs_score')
+        hiri = summary.get('hiri_score')
+        nhiri = summary.get('nhiri_score')
+        gei = summary.get('gei_score')
+        logger.info(
+            "Risk summary computed for run #%d: total=%d ghost=%d orphaned=%d over_priv=%d "
+            "AGIRS=%.2f (HIRI=%.2f NHIRI=%.2f GEI=%.2f tier=%s)",
+            run_id,
+            summary.get('total_identities', 0),
+            summary.get('ghost_accounts', 0),
+            summary.get('orphaned_spns', 0),
+            summary.get('over_privileged', 0),
+            agirs or 0, hiri or 0, nhiri or 0, gei or 0,
+            summary.get('agirs_tier', 'N/A'),
+        )
+        if agirs is None or agirs == 0:
+            logger.error(
+                "AGIRS STILL ZERO after risk summary for run #%d — "
+                "check AGIRSEngine logs above for root cause",
+                run_id,
             )
-        else:
-            logger.info(f"AGIRS: no data to compute for run #{run_id}")
     except Exception as e:
-        logger.error(f"Error computing AGIRS scores: {e}")
+        logger.error(f"Error computing risk summary: {e}")
+        try:
+            from app.engines.discovery.pipeline_validator import log_stage
+            log_stage(db, run_id, organization_id, 'risk_engine', 6, 'failed', error=str(e))
+        except Exception:
+            pass
+
+
+def _validate_snapshot(run_id: int, organization_id: int, db: Database):
+    """Validate snapshot completeness and log results (non-blocking)."""
+    try:
+        from app.engines.discovery.pipeline_validator import (
+            validate_snapshot_completeness, log_stage
+        )
+
+        log_stage(db, run_id, organization_id, 'snapshot_commit', 7, 'running')
+        result = validate_snapshot_completeness(db, run_id, organization_id)
+
+        if result['valid']:
+            log_stage(db, run_id, organization_id, 'snapshot_commit', 7, 'completed',
+                      count=sum(result['components'].values()))
+            logger.info("Snapshot validation passed for run #%d: %s", run_id, result['components'])
+        else:
+            log_stage(db, run_id, organization_id, 'snapshot_commit', 7, 'failed',
+                      error=f"Missing: {', '.join(result['missing'])}")
+            logger.warning("Snapshot validation failed for run #%d: missing %s", run_id, result['missing'])
+    except Exception as e:
+        logger.error(f"Error validating snapshot: {e}")
 
 
 def _fire_webhook_events(current_run_id: int, changes: dict, db: Database):
@@ -3329,6 +3435,272 @@ def run_trial_expiration():
 
 
 # For testing the scheduler in isolation
+def _run_agent_classification(current_run_id, db_org_id, db):
+    """AI Agent Governance: classify agent identities after discovery.
+
+    Gated by FEATURE_AI_AGENT_GOVERNANCE flag — no-op when disabled.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return
+
+    try:
+        from app.services.agent_classifier import classify_tenant
+        stats = classify_tenant(db, db_org_id, run_id=current_run_id)
+        logger.info(
+            "Agent classification for org %s: %d ai_agent, %d possible, %d unknown",
+            db_org_id, stats.get('ai_agent', 0),
+            stats.get('possible_ai_agent', 0), stats.get('unknown', 0),
+        )
+    except Exception as e:
+        logger.warning("Agent classification failed (non-blocking): %s", e)
+
+
+def _run_agent_sp_signin_enrichment(current_run_id, db_org_id, db):
+    """AI Agent Governance Phase 2 B2-5: enrich agent SPNs with SP sign-in data.
+
+    For each ai_agent identity, fetches the most recent servicePrincipalSignIn
+    from Microsoft Graph and stores it on agent_classifications. This runs
+    BEFORE orphan detection so the detector has accurate activity data.
+
+    Gated by FEATURE_AI_AGENT_GOVERNANCE flag. Non-blocking on failure.
+    """
+    import os
+    import time as _time
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return
+
+    batch_size = int(os.environ.get('AGENT_ENRICH_BATCH_SIZE', '50'))
+
+    try:
+        # Get Azure credential from org's cloud connection
+        admin_db = Database()
+        connections = admin_db.get_cloud_connections(db_org_id, include_secrets=True)
+        admin_db.close()
+
+        azure_conn = None
+        for conn in connections:
+            if conn.get('cloud', 'azure') == 'azure' and conn.get('status') == 'connected':
+                azure_conn = conn
+                break
+
+        if not azure_conn:
+            logger.info("SP sign-in enrichment: no Azure connection for org %s, skipping", db_org_id)
+            return
+
+        metadata = azure_conn.get('metadata') or {}
+        from app.encryption import decrypt_field
+        for _cred_key in ('client_secret',):
+            if _cred_key in metadata:
+                metadata[_cred_key] = decrypt_field(metadata[_cred_key])
+
+        azure_directory_id = azure_conn.get('azure_directory_id')
+        client_id = azure_conn.get('client_id')
+        client_secret = metadata.get('client_secret')
+
+        if not all([azure_directory_id, client_id, client_secret]):
+            logger.info("SP sign-in enrichment: incomplete Azure credentials for org %s, skipping", db_org_id)
+            return
+
+        from azure.identity import ClientSecretCredential
+        credential = ClientSecretCredential(
+            tenant_id=azure_directory_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+
+        from app.engines.discovery.activity_tracker import ActivityTracker
+        tracker = ActivityTracker(credential)
+
+        # Find ai_agent SPNs, prioritize those with oldest (or NULL) enrichment
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT ac.id, ac.identity_id, i.object_id, i.display_name,
+                   ac.last_service_principal_sign_in
+            FROM agent_classifications ac
+            JOIN identities i ON i.id = ac.identity_db_id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY ac.last_service_principal_sign_in ASC NULLS FIRST
+            LIMIT %s
+        """, (current_run_id, batch_size))
+        agents = cursor.fetchall()
+        cursor.close()
+
+        enriched = 0
+        skipped = 0
+        for ac_id, identity_id, object_id, display_name, existing_sp_sign_in in agents:
+            if not object_id:
+                skipped += 1
+                continue
+
+            try:
+                sp_last_sign_in = tracker.get_service_principal_last_sign_in(object_id)
+                if sp_last_sign_in is not None:
+                    update_cursor = db.conn.cursor()
+                    update_cursor.execute("""
+                        UPDATE agent_classifications
+                        SET last_service_principal_sign_in = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (sp_last_sign_in, ac_id))
+                    db.conn.commit()
+                    update_cursor.close()
+                    enriched += 1
+                    logger.debug(
+                        "Enriched %s: last SP sign-in = %s",
+                        display_name, sp_last_sign_in.isoformat(),
+                    )
+                else:
+                    skipped += 1
+            except Exception as e:
+                logger.warning(
+                    "SP sign-in enrichment failed for %s (%s): %s",
+                    display_name, identity_id, e,
+                )
+                skipped += 1
+
+            # Rate limit: 100ms between Graph API calls
+            _time.sleep(0.1)
+
+        logger.info(
+            "SP sign-in enrichment for org %s: %d enriched, %d skipped (of %d total)",
+            db_org_id, enriched, skipped, len(agents),
+        )
+
+    except Exception as e:
+        logger.warning("SP sign-in enrichment failed (non-blocking): %s", e)
+
+
+def _run_agent_orphan_detection(current_run_id, db_org_id, db):
+    """AI Agent Governance Phase 2: detect orphaned AI agent SPNs.
+
+    Runs auto-resolve BEFORE detection. Saves findings, fires alerts.
+    Gated by FEATURE_AI_AGENT_GOVERNANCE flag.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return
+
+    try:
+        from app.engines.agent_orphan_detector import AgentOrphanDetector
+
+        detector = AgentOrphanDetector(db)
+
+        # Auto-resolve first
+        resolved = detector.auto_resolve(current_run_id)
+        if resolved:
+            logger.info("Orphan auto-resolve for org %s: %d resolved", db_org_id, resolved)
+
+        # Detect new orphans
+        findings = detector.analyze(current_run_id)
+
+        if findings:
+            saved = db.save_security_findings(current_run_id, findings)
+            logger.info(
+                "Orphan detection for org %s: %d findings saved",
+                db_org_id, saved,
+            )
+
+            # In-app notifications
+            for f in findings:
+                try:
+                    db.create_notification(
+                        event_type='orphaned_agent_detected',
+                        category='ai_agent_governance',
+                        severity='critical',
+                        title=f['title'],
+                        description=f['description'],
+                        payload=f.get('metadata'),
+                        related_identity_id=f.get('entity_id'),
+                        related_identity_name=f.get('identity_name'),
+                        related_run_id=current_run_id,
+                        organization_id=db_org_id,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to create orphan notification: %s", e)
+
+            # Slack/Teams dispatch
+            _dispatch_notification('orphaned_agent_detected', {
+                'title': f'Orphaned AI Agent SPNs Detected ({len(findings)})',
+                'description': (
+                    f'{len(findings)} orphaned AI agent SPN(s) found with elevated '
+                    f'permissions. Immediate review recommended.'
+                ),
+                'severity': 'critical',
+            }, db_org_id=db_org_id)
+
+            # Email alert — dedup guard: only alert for findings not yet alerted
+            try:
+                from app.services.email_service import get_email_service
+
+                # Filter to findings that haven't been alerted yet
+                new_findings = []
+                cursor = db.conn.cursor()
+                for f in findings:
+                    fp = f.get('finding_fingerprint')
+                    if not fp:
+                        new_findings.append(f)
+                        continue
+                    cursor.execute("""
+                        SELECT alert_sent_at
+                        FROM security_findings
+                        WHERE finding_fingerprint = %s
+                          AND organization_id = %s
+                          AND status = 'open'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """, (fp, db_org_id))
+                    row = cursor.fetchone()
+                    if row is None or row[0] is None:
+                        # No finding row or alert_sent_at is NULL → needs alerting
+                        new_findings.append(f)
+                    else:
+                        display = f.get('metadata', {}).get('display_name', f.get('entity_id', '?'))
+                        logger.info(
+                            "Orphan alert already sent for %s at %s, skipping.",
+                            display, row[0],
+                        )
+                cursor.close()
+
+                if new_findings:
+                    email_svc = get_email_service()
+                    sent = email_svc.send_orphan_agent_alert(new_findings, current_run_id, db_org_id)
+
+                    # Stamp alert_sent_at on the findings we just alerted
+                    if sent:
+                        stamp_cursor = db.conn.cursor()
+                        for f in new_findings:
+                            fp = f.get('finding_fingerprint')
+                            if fp:
+                                stamp_cursor.execute("""
+                                    UPDATE security_findings
+                                    SET alert_sent_at = NOW()
+                                    WHERE finding_fingerprint = %s
+                                      AND organization_id = %s
+                                      AND status = 'open'
+                                """, (fp, db_org_id))
+                        db.conn.commit()
+                        stamp_cursor.close()
+                        logger.info(
+                            "Orphan alert sent for %d new finding(s), %d skipped (already alerted).",
+                            len(new_findings), len(findings) - len(new_findings),
+                        )
+                else:
+                    logger.info(
+                        "All %d orphan finding(s) already alerted — no email sent.",
+                        len(findings),
+                    )
+            except Exception as e:
+                logger.warning("Orphan email alert failed (non-blocking): %s", e)
+
+    except Exception as e:
+        logger.warning("Agent orphan detection failed (non-blocking): %s", e)
+
+
 if __name__ == "__main__":
     print("Testing scheduler...")
     print("Starting scheduler (will run every 6 hours)")

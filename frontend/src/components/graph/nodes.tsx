@@ -355,6 +355,51 @@ export function EntraDirectoryNode({ data }: NodeProps) {
   );
 }
 
+// AI Agent node — amber when active, gray when orphaned
+export function AgentNode({ data }: NodeProps) {
+  const isOrphaned = !!data.has_orphan_finding;
+  const borderColor = isOrphaned ? 'border-gray-400 bg-gray-50' : 'border-amber-400 bg-amber-50';
+  const iconColor = isOrphaned ? 'text-gray-500' : 'text-amber-600';
+  const handleColor = isOrphaned ? '!bg-gray-400' : '!bg-amber-400';
+  const statusLabel = isOrphaned ? 'ORPHANED' : 'ACTIVE';
+  const statusColor = isOrphaned ? 'text-red-600' : 'text-green-600';
+
+  const tooltip = [
+    data.label as string,
+    `Platform: ${data.detected_platform || 'Unknown'}`,
+    `AGIRS: ${data.agirs_score ?? 'N/A'}`,
+    data.days_inactive != null
+      ? `Inactive: ${data.days_inactive} days`
+      : 'Inactive: Never signed in',
+    `Status: ${statusLabel}`,
+  ].join('\n');
+
+  return (
+    <div
+      title={tooltip}
+      className={`px-5 py-3 rounded-xl border-2 shadow-lg ${borderColor} min-w-[180px] max-w-[240px]`}
+    >
+      <Handle type="target" position={Position.Left} className={handleColor} />
+      <div className="flex items-center gap-2 mb-1">
+        {/* Robot/agent icon */}
+        <svg className={`w-4 h-4 ${iconColor} flex-shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+        <span className="font-bold text-sm text-gray-900 truncate">{data.label as string}</span>
+      </div>
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold text-[9px]">AI Agent</span>
+        <span className={`font-bold uppercase ${statusColor}`}>{statusLabel}</span>
+        {data.agirs_score != null && (
+          <span className="text-gray-400">{data.agirs_score as number} pts</span>
+        )}
+      </div>
+      <Handle type="source" position={Position.Right} className={handleColor} />
+      <Handle type="source" position={Position.Bottom} id="bottom" className={handleColor} />
+    </div>
+  );
+}
+
 export const nodeTypes = {
   identity: IdentityNode,
   risk_summary: RiskSummaryNode,
@@ -369,4 +414,5 @@ export const nodeTypes = {
   resource_group: ResourceGroupNode,
   resource: ResourceNode,
   entra_directory: EntraDirectoryNode,
+  ai_agent: AgentNode,
 };

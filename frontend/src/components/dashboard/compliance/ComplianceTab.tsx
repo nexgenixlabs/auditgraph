@@ -93,6 +93,16 @@ export function ComplianceTab({ d }: ComplianceTabProps) {
       )}
 
       {/* Framework Groups */}
+      {d.compliance.frameworks.length === 0 && (
+        <CISOCard style={{ padding: 24, textAlign: 'center' as const }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+            No Compliance Data Available
+          </div>
+          <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 8, fontFamily: FONT.ui, opacity: 0.7 }}>
+            Run a discovery snapshot to evaluate compliance frameworks.
+          </div>
+        </CISOCard>
+      )}
       {Object.entries(grouped).map(([type, frameworks]) => (
         <div key={type}>
           <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, marginBottom: 10, fontFamily: FONT.ui }}>

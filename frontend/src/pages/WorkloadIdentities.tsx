@@ -34,6 +34,9 @@ interface WorkloadRow {
   last_sign_in?: string | null;
   sign_ins_30d?: number | null;
   anomaly_count?: number;
+  next_expiry?: string | null;
+  credential_count?: number;
+  has_expired_credentials?: boolean;
 }
 
 interface WorkloadStats {
@@ -95,6 +98,50 @@ function formatDateTime(d?: string | null): string {
   catch { return d; }
 }
 
+function formatSecretExpiry(expiryDate?: string | null, hasExpired?: boolean, credCount?: number): { label: string; colorClass: string } {
+  if (hasExpired) return { label: 'Expired', colorClass: 'text-red-500 dark:text-red-400 font-semibold' };
+  if (!expiryDate) {
+    if (!credCount) return { label: 'No secrets', colorClass: 'text-gray-400 dark:text-slate-500' };
+    return { label: 'No expiry', colorClass: 'text-gray-400 dark:text-slate-500' };
+  }
+  const daysUntil = Math.round((new Date(expiryDate).getTime() - Date.now()) / 86400000);
+  if (daysUntil < 0) return { label: `Expired ${Math.abs(daysUntil)}d ago`, colorClass: 'text-red-500 dark:text-red-400 font-semibold' };
+  if (daysUntil <= 30) return { label: `${daysUntil}d left`, colorClass: 'text-red-500 dark:text-red-400' };
+  if (daysUntil <= 90) return { label: `${daysUntil}d left`, colorClass: 'text-yellow-500 dark:text-yellow-400' };
+  return { label: formatDate(expiryDate), colorClass: 'text-green-500 dark:text-green-400' };
+}
+
+function formatLastActive(d?: string | null, createdAt?: string | null): { label: string; colorClass: string; tooltip?: string } {
+  if (!d) {
+    // No sign-in data — provide meaningful context from creation date
+    if (createdAt) {
+      const ageDays = Math.round((Date.now() - new Date(createdAt).getTime()) / 86400000);
+      if (ageDays <= 30) {
+        return { label: 'Recently created', colorClass: 'text-gray-400 dark:text-slate-500 italic', tooltip: `Created ${ageDays}d ago. No sign-in data yet.` };
+      }
+      return { label: 'No activity recorded', colorClass: 'text-gray-400 dark:text-slate-500 italic', tooltip: `Account is ${formatCreatedAge(createdAt)} old. Sign-in logs unavailable — enable P2 license to collect SPN activity.` };
+    }
+    return { label: 'No activity', colorClass: 'text-gray-400 dark:text-slate-500 italic' };
+  }
+  const daysAgo = Math.round((Date.now() - new Date(d).getTime()) / 86400000);
+  if (daysAgo < 0) return { label: 'Today', colorClass: 'text-green-500 dark:text-green-400' };
+  if (daysAgo === 0) return { label: 'Today', colorClass: 'text-green-500 dark:text-green-400' };
+  if (daysAgo <= 7) return { label: `${daysAgo}d ago`, colorClass: 'text-green-500 dark:text-green-400' };
+  if (daysAgo <= 30) return { label: `${daysAgo}d ago`, colorClass: 'text-green-500 dark:text-green-400' };
+  if (daysAgo <= 90) return { label: `${daysAgo}d ago`, colorClass: 'text-yellow-500 dark:text-yellow-400' };
+  return { label: `${daysAgo}d ago`, colorClass: 'text-red-500 dark:text-red-400' };
+}
+
+function formatCreatedAge(d?: string | null): string {
+  if (!d) return '—';
+  const days = Math.round((Date.now() - new Date(d).getTime()) / 86400000);
+  if (days < 30) return `${days}d`;
+  if (days < 365) return `${Math.floor(days / 30)}mo`;
+  const yrs = Math.floor(days / 365);
+  const mos = Math.floor((days % 365) / 30);
+  return mos > 0 ? `${yrs}y ${mos}mo` : `${yrs}y`;
+}
+
 function exposureColor(score: number): string {
   if (score >= 80) return 'text-red-600 dark:text-red-400';
   if (score >= 60) return 'text-orange-500 dark:text-orange-400';
@@ -154,6 +201,7 @@ const WorkloadIdentities: React.FC = () => {
   const [scopeFilter, setScopeFilter] = useState(searchParams.get('scope') || '');
   const [crossSub, setCrossSub] = useState(searchParams.get('cross_subscription') === 'true');
   const [riskLevel, setRiskLevel] = useState(searchParams.get('risk_level') || '');
+  const [credentialFilter, setCredentialFilter] = useState(searchParams.get('credential_filter') || '');
   const [hideMicrosoft, setHideMicrosoft] = useState(true);
   const [offset, setOffset] = useState(0);
   const limit = 50;
@@ -193,6 +241,7 @@ const WorkloadIdentities: React.FC = () => {
     if (scopeFilter) params.set('scope', scopeFilter);
     if (crossSub) params.set('cross_subscription', 'true');
     if (riskLevel) params.set('risk_level', riskLevel);
+    if (credentialFilter) params.set('credential_filter', credentialFilter);
     if (debouncedSearch) params.set('search', debouncedSearch);
     params.set('sort', sortCol);
     params.set('dir', sortDir);
@@ -205,10 +254,12 @@ const WorkloadIdentities: React.FC = () => {
       .then(d => { setItems(d.items || []); setTotal(d.total || 0); })
       .catch(() => { setItems([]); setTotal(0); })
       .finally(() => setLoading(false));
-  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, scopeFilter, crossSub, riskLevel, debouncedSearch, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
+  }, [activeType, exposureLevel, lifecycleFilter, ownerFilter, canEscalate, scopeFilter, crossSub, riskLevel, credentialFilter, debouncedSearch, sortCol, sortDir, offset, hideMicrosoft, selectedConnectionId]);
 
   const openDetail = (row: WorkloadRow) => {
-    navigate(`/workload-identities/${row.workload_id}?type=${row.identity_type}`);
+    // Normalize type: backend detail handler expects 'app_reg', not 'app_registration'
+    const typeParam = row.identity_type === 'app_registration' ? 'app_reg' : row.identity_type;
+    navigate(`/workload-identities/${row.workload_id}?type=${typeParam}`);
   };
 
   const handleSort = (col: string) => {
@@ -392,20 +443,26 @@ const WorkloadIdentities: React.FC = () => {
                 Effective Privilege <SortIcon col="privilege_score" />
               </th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-24">Sensitive Scope</th>
-              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-28" onClick={() => handleSort('last_sign_in')}>
-                Last Used <SortIcon col="last_sign_in" />
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-24" onClick={() => handleSort('next_expiry')}>
+                Secret Expiry <SortIcon col="next_expiry" />
+              </th>
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-20" onClick={() => handleSort('created_datetime')}>
+                Created <SortIcon col="created_datetime" />
+              </th>
+              <th className="text-left px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 cursor-pointer w-24" onClick={() => handleSort('last_sign_in')}>
+                Last Active <SortIcon col="last_sign_in" />
               </th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-28">Ownership Confidence</th>
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={7} className="text-center py-8">
+              <tr><td colSpan={9} className="text-center py-8">
                 <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
               </td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No non-human identities found</td></tr>
+              <tr><td colSpan={9} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No non-human identities found</td></tr>
             )}
             {!loading && items.map(row => {
               const owCfg = OWNER_STATUS_CONFIG[row.owner_status] || OWNER_STATUS_CONFIG.unknown;
@@ -444,13 +501,25 @@ const WorkloadIdentities: React.FC = () => {
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scCfg.badgeClass}`}>{scCfg.label}</span>
                   </td>
-                  {/* Last Used */}
+                  {/* Secret Expiry */}
                   <td className="px-2 py-2 whitespace-nowrap">
-                    {row.last_sign_in ? (
-                      <span className="text-xs text-gray-600 dark:text-slate-300">{formatDate(row.last_sign_in)}</span>
-                    ) : (
-                      <span className="text-[10px] text-gray-400 dark:text-slate-500 italic">Unknown</span>
-                    )}
+                    {(() => {
+                      const exp = formatSecretExpiry(row.next_expiry, row.has_expired_credentials, row.credential_count);
+                      return <span className={`text-xs ${exp.colorClass}`}>{exp.label}</span>;
+                    })()}
+                  </td>
+                  {/* Created */}
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <span className="text-xs text-gray-500 dark:text-slate-400" title={row.created_datetime ? formatDate(row.created_datetime) : undefined}>
+                      {formatCreatedAge(row.created_datetime)}
+                    </span>
+                  </td>
+                  {/* Last Active */}
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    {(() => {
+                      const la = formatLastActive(row.last_sign_in, row.created_datetime);
+                      return <span className={`text-xs ${la.colorClass}`} title={la.tooltip}>{la.label}</span>;
+                    })()}
                   </td>
                   {/* Ownership Confidence */}
                   <td className="text-center px-2 py-2">

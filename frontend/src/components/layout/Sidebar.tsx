@@ -147,6 +147,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Evidence',
         color: '#ca8a04',
         items: [
+          { to: '/compliance-posture', label: 'Compliance Posture', icon: complianceIcon },
           { to: '/compliance', label: 'Compliance Evidence', icon: complianceIcon },
           { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
           { to: '/reports', label: 'Snapshots', icon: reportsIcon },

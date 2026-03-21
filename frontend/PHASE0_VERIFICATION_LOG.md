@@ -62,7 +62,7 @@
 | /app-registrations | AppRegistrations | PASS |
 
 ## Smoke Test Results
-1. Search "Bhupathi" in Identity Inventory -> 2 results (critical + medium) **PASS**
+1. Search "Admin User" in Identity Inventory -> 2 results (critical + medium) **PASS**
 2. NHI page shows 46 total, 44 orphaned **PASS**
 3. Drift history shows 50 reports, 1446 total changes **PASS**
 4. Activity log shows entries with 11 distinct action types **PASS**
@@ -80,7 +80,7 @@
 | GET /api/stats | OK | latest_run + deleted/disabled/ghost/zombie counts |
 | GET /api/identity-summary | OK | categories, monitored_resources |
 | GET /api/identities | OK | 58 identities, 50 fields per record |
-| GET /api/identities?search=Bhupathi | OK | 2 results returned |
+| GET /api/identities?search=Admin User | OK | 2 results returned |
 | GET /api/identities?workload=true | OK | 56 workload identities |
 | GET /api/identities/:id | OK | Full detail with roles, permissions, evidence |
 | GET /api/identities/:id/graph-data | OK | technical/executive nodes+edges |

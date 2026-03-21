@@ -150,7 +150,20 @@ export function DN({ children, navigateTo, tooltip }: { children: React.ReactNod
       onClick={(e) => {
         e.stopPropagation();
         if (drawerCtx && navigateTo.startsWith('/identities')) {
-          drawerCtx.openDrawer(navigateTo);
+          // Direct identity link: /identities/123 → open detail view directly
+          const idMatch = navigateTo.match(/^\/identities\/([^?/]+)$/);
+          if (idMatch) {
+            const idVal = parseInt(idMatch[1], 10);
+            if (!isNaN(idVal)) {
+              drawerCtx.openIdentity(idVal);
+            } else {
+              // Non-numeric ID (e.g., UUID) — navigate to full page
+              navigate(navigateTo);
+            }
+          } else {
+            // Filtered list: /identities?filter=X → open list view
+            drawerCtx.openDrawer(navigateTo);
+          }
         } else {
           navigate(navigateTo);
         }

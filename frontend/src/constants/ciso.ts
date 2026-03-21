@@ -52,11 +52,12 @@ export const COLORS = {
 
 export function getTierColor(tier: string): string {
   switch (tier) {
-    case "CRITICAL":   return COLORS.danger;
-    case "ELEVATED":   return COLORS.elevated;
-    case "CONTROLLED": return COLORS.warning;
-    case "RESILIENT":  return COLORS.success;
-    default:           return COLORS.textMuted;
+    case "CRITICAL": case "F":            return COLORS.danger;
+    case "HIGH RISK": case "D":           return COLORS.elevated;
+    case "ELEVATED": case "C":            return COLORS.warning;
+    case "CONTROLLED": case "B":          return COLORS.success;
+    case "RESILIENT": case "A":           return COLORS.success;
+    default:                              return COLORS.textMuted;
   }
 }
 
@@ -75,17 +76,18 @@ export function getPillarColor(pillarScore: number): string {
 }
 
 export function getTier(score: number): string {
-  if (score >= 80) return "RESILIENT";
-  if (score >= 60) return "CONTROLLED";
-  if (score >= 40) return "ELEVATED";
+  if (score >= 92) return "RESILIENT";
+  if (score >= 80) return "CONTROLLED";
+  if (score >= 65) return "ELEVATED";
+  if (score >= 45) return "HIGH RISK";
   return "CRITICAL";
 }
 
 export function getGrade(score: number): string {
-  if (score >= 90) return "A";
-  if (score >= 75) return "B";
-  if (score >= 55) return "C";
-  if (score >= 35) return "D";
+  if (score >= 92) return "A";
+  if (score >= 80) return "B";
+  if (score >= 65) return "C";
+  if (score >= 45) return "D";
   return "F";
 }
 
@@ -103,6 +105,8 @@ export interface TenantMeta {
   cloud: string;
   subscriptions: number;
   identityCount: number;
+  customerCount: number;
+  microsoftCount: number;
   lastScan: string;
   scanDuration: number;
   scanCompleteness: number;
@@ -154,11 +158,13 @@ export interface IdentityBreakdownItem {
 
 export interface Pillar {
   name: string;
-  score: number;
-  weight: number;
+  score: number;       // risk_pct (proportion of affected identities)
+  weight: number;       // pillar weight in the formula
   detail: string;
-  identityCount: number;
+  identityCount: number;  // affected_count
   subMetrics: { name: string; value: number; max: number }[];
+  _scoreImpact?: number;  // backend-computed: -(risk_pct/100) × weight
+  _severity?: string;     // backend-computed: critical/high/medium/low
 }
 
 export interface BlastRadius {

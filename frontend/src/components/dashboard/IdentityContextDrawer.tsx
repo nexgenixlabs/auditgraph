@@ -18,6 +18,7 @@ import { FONT } from './ciso-shared';
 
 const FILTER_LABELS: Record<string, string> = {
   'pillar=effective-privilege': 'Effective Privilege Risk',
+  'pillar=credential-risk': 'Credential Exposure',
   'pillar=credential-hygiene': 'Credential Hygiene',
   'pillar=external-exposure': 'External Exposure',
   'pillar=dormant-risk': 'Dormant Risk',
@@ -28,11 +29,22 @@ const FILTER_LABELS: Record<string, string> = {
   'privilege_tier=0': 'T0 Administrators',
   'privilege_tier=0,1': 'T0/T1 Privileged',
   'activity_status=dormant': 'Dormant Identities',
-  'activity_status=stale': 'Stale Identities',
+  'activity_status=stale': 'Dormant Privileged Identities',
   'identity_category=guest': 'Guest Identities',
   'identity_category=service_principal': 'Service Principals',
   'identity_category=human_user': 'Human Users',
   'credential_status=expired': 'Expired Credentials',
+  'sort=blast_radius_score': 'High Blast Radius Identities',
+  'sort=risk_score': 'Highest Risk Identities',
+};
+
+// Maps filter query params to risk driver labels for drawer context header
+const DRIVER_LABELS: Record<string, string> = {
+  'activity_status=stale': 'Dormant Privileged',
+  'pillar=effective-privilege': 'Over-Privileged',
+  'pillar=credential-risk': 'Credential Exposure',
+  'sort=blast_radius_score': 'High Blast Radius',
+  'sort=risk_score': 'Identity Risk Score',
 };
 
 function deriveFilterLabel(filterUrl: string): string {
@@ -45,6 +57,14 @@ function deriveFilterLabel(filterUrl: string): string {
   const [k, v] = first.split('=');
   if (k && v) return `${k.replace(/_/g, ' ')} = ${v}`.replace(/\b\w/g, c => c.toUpperCase());
   return 'Filtered Identities';
+}
+
+function deriveDriverLabel(filterUrl: string): string | null {
+  const query = filterUrl.split('?')[1] || '';
+  for (const [key, label] of Object.entries(DRIVER_LABELS)) {
+    if (query.includes(key)) return label;
+  }
+  return null;
 }
 
 // ─── Risk level colors ───────────────────────────────────────────
@@ -268,6 +288,7 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
   onOpenFullPage: () => void;
 }) {
   const label = deriveFilterLabel(filterUrl);
+  const driver = deriveDriverLabel(filterUrl);
 
   return (
     <>
@@ -280,6 +301,7 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>{label}</div>
           <div style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui, marginTop: 2 }}>
+            {driver && <span style={{ color: COLORS.accent, fontWeight: 600 }}>Driver: {driver} &middot; </span>}
             {loading ? 'Loading...' : `${identities.length} identities`}
           </div>
         </div>

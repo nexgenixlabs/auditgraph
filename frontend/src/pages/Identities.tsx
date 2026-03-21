@@ -20,8 +20,9 @@ import {
   CATEGORY_FILTER_OPTIONS, RISK_FILTER_OPTIONS, RISK_ORDER, RISK_BADGE, RISK_SOLID, CLOUD_BADGE,
   THRESHOLDS, DORMANT_LABELS, DATA_EXPLANATIONS,
   PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, EFFECTIVE_SCOPE_ORDER, CREDENTIAL_HEALTH_CONFIG,
-  SCOPE_LABELS, CATEGORY_LABELS_MULTI,
+  SCOPE_LABELS, CATEGORY_LABELS_MULTI, IDENTITY_CATEGORIES,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
+  getCategoriesForClouds,
 } from '../constants/metrics';
 
 interface IdentityRow {
@@ -63,6 +64,11 @@ interface IdentityRow {
   effective_scope?: EffectiveScope;
   privileged_level?: PrivilegedLevel;
   credential_health?: CredentialHealth;
+  identity_age_days?: number | null;
+  // AI Agent Governance (additive only)
+  agent_identity_type?: string | null;
+  detected_platform?: string | null;
+  classification_confidence?: number | null;
 }
 
 interface SavedView {
@@ -105,6 +111,32 @@ function formatDate(d?: string | null): string {
   if (!d) return '—';
   try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
   catch { return d; }
+}
+
+function formatAge(days: number | null | undefined): string {
+  if (days == null) return '—';
+  if (days < 30) return `${days}d`;
+  if (days < 365) return `${Math.floor(days / 30)}mo`;
+  const yrs = Math.floor(days / 365);
+  const mos = Math.floor((days % 365) / 30);
+  return mos > 0 ? `${yrs}y ${mos}mo` : `${yrs}y`;
+}
+
+function formatLastSeen(dateStr?: string | null): { label: string; colorClass: string } {
+  if (!dateStr) return { label: 'Never', colorClass: 'text-gray-400 italic' };
+  try {
+    const days = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
+    if (days === 0) return { label: 'Today', colorClass: 'text-green-500' };
+    if (days <= 6) return { label: `${days}d ago`, colorClass: 'text-green-500' };
+    if (days <= 29) return { label: `${Math.floor(days / 7)}w ago`, colorClass: 'text-green-500' };
+    if (days <= 89) return { label: `${Math.floor(days / 30)}mo ago`, colorClass: 'text-yellow-500' };
+    return {
+      label: new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      colorClass: 'text-red-400',
+    };
+  } catch {
+    return { label: dateStr, colorClass: 'text-gray-500' };
+  }
 }
 
 function credentialCountdownText(iso?: string | null): { text: string; color: string } | null {
@@ -267,7 +299,7 @@ function TypeLabel({ type }: { type?: string }) {
 // ─── Main component ────────────────────────────────────────────────
 
 export default function IdentitiesPage() {
-  const { selectedConnectionId, connectionParam } = useConnection();
+  const { selectedConnectionId, connectionParam, withConnection } = useConnection();
   const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -291,6 +323,10 @@ export default function IdentitiesPage() {
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
+  // AI Agent Governance filter state (additive, gated by feature flag)
+  const [agentFilterEnabled, setAgentFilterEnabled] = useState(false); // feature flag
+  const [agentFilter, setAgentFilter] = useState(false);              // filter active
+  const [agentCount, setAgentCount] = useState(0);                    // badge count
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('display_name');
@@ -325,6 +361,9 @@ export default function IdentitiesPage() {
   const [drawerIdentityId, setDrawerIdentityId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'graph'>('table');
 
+  // Enabled cloud providers (drives category filter options)
+  const [enabledClouds, setEnabledClouds] = useState<string[]>([]);
+
   // Phase 7: Snapshot selector state
   const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
 
@@ -341,6 +380,15 @@ export default function IdentitiesPage() {
     if (cloud === 'gcp') return `Project ${suffix}`;
     return `Subscription ${suffix}`;
   }
+
+  // Build category filter options from enabled clouds only
+  const categoryOptions = useMemo(() => {
+    const cats = getCategoriesForClouds(enabledClouds);
+    return [
+      { value: 'all' as const, label: 'All Categories' },
+      ...cats.map(key => ({ value: key, label: IDENTITY_CATEGORIES[key].label })),
+    ];
+  }, [enabledClouds]);
 
   // URL param sync — supports both legacy param names and CISO Dashboard param names
   useEffect(() => {
@@ -492,6 +540,43 @@ export default function IdentitiesPage() {
     let cancelled = false;
     async function load() {
       try {
+        // When agent filter is active, fetch from agent-identities endpoint
+        if (agentFilter) {
+          const resp = await fetch('/api/agent-identities?per_page=500&sort_by=agirs_score&sort_dir=desc');
+          if (!resp.ok) throw new Error('Failed to fetch agent identities');
+          const data = await resp.json();
+          const rows: IdentityRow[] = (data.items || []).map((raw: any) => ({
+            identity_id: raw.identity_id || '',
+            display_name: raw.display_name || '',
+            identity_type: raw.identity_type,
+            identity_category: normalizeCategoryFromBackend(raw.identity_category),
+            cloud: raw.cloud || 'azure',
+            created_datetime: raw.created_datetime || null,
+            last_seen_auth: raw.last_sign_in || null,
+            last_sign_in: raw.last_sign_in || null,
+            credential_count: raw.credential_count ?? 0,
+            credential_status: raw.credential_risk || raw.credential_status || null,
+            owner_display_name: raw.owner_display_name || null,
+            owner_count: raw.owner_count ?? 0,
+            status: raw.enabled === false ? 'disabled' : 'active',
+            enabled: raw.enabled,
+            risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
+            risk_score: raw.risk_score ?? 0,
+            activity_status: raw.activity_status || 'unknown',
+            privilege_tier: raw.privilege_tier ?? undefined,
+            pim_eligible_count: raw.pim_eligible_count ?? 0,
+            ca_coverage_status: raw.ca_coverage_status || null,
+            primary_subscription_id: raw.primary_subscription_id || null,
+            additional_subscription_count: raw.additional_subscription_count ?? 0,
+            // AI Agent fields (additive)
+            agent_identity_type: raw.agent_identity_type || null,
+            detected_platform: raw.detected_platform || null,
+            classification_confidence: raw.classification_confidence ?? null,
+          }));
+          if (!cancelled) setIdentities(rows);
+          return;
+        }
+
         const params = new URLSearchParams();
         params.set('hide_microsoft', String(!showMicrosoft));
         if (contributingPillar) params.set('contributing_pillar', contributingPillar);
@@ -540,6 +625,7 @@ export default function IdentitiesPage() {
           effective_scope: raw.effective_scope || 'none',
           privileged_level: raw.privileged_level || 'standard',
           credential_health: raw.credential_health || 'none',
+          identity_age_days: raw.identity_age_days ?? null,
         }));
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
@@ -550,7 +636,7 @@ export default function IdentitiesPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, [showMicrosoft, selectedConnectionId, contributingPillar, agirsFactor, showDeleted]);
+  }, [showMicrosoft, selectedConnectionId, contributingPillar, agirsFactor, showDeleted, activeOrgId, agentFilter]);
 
   // ─── Batch risk histories for sparkline column ─────────────────
   useEffect(() => {
@@ -586,29 +672,65 @@ export default function IdentitiesPage() {
 
   useEffect(() => { loadViews(); }, [loadViews]);
 
-  // Load distinct subscriptions for filter
+  // Load distinct subscriptions for filter (refetch on org/connection switch)
   useEffect(() => {
-    fetch('/api/subscriptions/distinct')
+    setSubscriptionFilter('all');
+    fetch(withConnection('/api/subscriptions/distinct'))
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => setAllSubscriptions(d.subscriptions || []))
-      .catch(() => {});
-  }, []);
+      .catch(() => setAllSubscriptions([]));
+  }, [activeOrgId, selectedConnectionId, withConnection]);
 
-  // Load groups for filter
+  // Load enabled cloud providers for category filter
   useEffect(() => {
-    fetch('/api/groups')
+    fetch('/api/tenant/config')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => setAllGroups(d.groups || []))
-      .catch(() => {});
-  }, []);
+      .then(cfg => {
+        const clouds = ['azure', 'aws', 'gcp'].filter(k => cfg?.cloud_providers?.[k]?.enabled);
+        setEnabledClouds(clouds);
+        // AI Agent Governance feature flag
+        const agentGovEnabled = !!cfg?.feature_flags?.ai_agent_governance;
+        setAgentFilterEnabled(agentGovEnabled);
+        if (agentGovEnabled) {
+          fetch('/api/agent-identities/count')
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data) setAgentCount(data.ai_agent || 0); })
+            .catch(() => {});
+        }
+      })
+      .catch(() => setEnabledClouds([]));
+  }, [activeOrgId]);
 
-  // Phase 7: Load snapshots for selector
+  // Load groups for filter (refetch on org/connection switch, deduplicate by name)
+  useEffect(() => {
+    setGroupFilter('all');
+    fetch(withConnection('/api/groups'))
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {
+        const raw = d.groups || [];
+        // Deduplicate by group name — combine counts across subscriptions
+        const byName = new Map<string, { id: number; name: string; color: string; group_type: string; member_count: number }>();
+        for (const g of raw) {
+          const key = (g.name || g.display_name || '').toLowerCase();
+          if (byName.has(key)) {
+            const existing = byName.get(key)!;
+            existing.member_count = Math.max(existing.member_count, g.member_count || 0);
+          } else {
+            byName.set(key, { id: g.id, name: g.name || g.display_name, color: g.color || '', group_type: g.group_type || '', member_count: g.member_count || 0 });
+          }
+        }
+        setAllGroups(Array.from(byName.values()));
+      })
+      .catch(() => setAllGroups([]));
+  }, [activeOrgId, selectedConnectionId, withConnection]);
+
+  // Phase 7: Load snapshots for selector (refetch on org switch)
   useEffect(() => {
     fetch('/api/runs')
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => setSnapshots((d.runs || []).filter((r: any) => r.status === 'completed').slice(0, 10)))
-      .catch(() => {});
-  }, []);
+      .catch(() => setSnapshots([]));
+  }, [activeOrgId]);
 
   // When group filter changes, fetch members
   useEffect(() => {
@@ -691,6 +813,7 @@ export default function IdentitiesPage() {
           effective_scope: raw.effective_scope || 'none',
           privileged_level: raw.privileged_level || 'standard',
           credential_health: raw.credential_health || 'none',
+          identity_age_days: raw.identity_age_days ?? null,
         }));
         setQueryResults(rows);
         setQueryTotal(data.total ?? rows.length);
@@ -1138,7 +1261,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 10; // checkbox + 9 primary columns (Phase 4 inventory)
+  const colSpan = 9; // checkbox + 8 primary columns (Age column removed)
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1490,7 +1613,7 @@ export default function IdentitiesPage() {
             {RISK_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <select value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
-            {CATEGORY_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {categoryOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <select value={subscriptionFilter} onChange={e => { setSubscriptionFilter(e.target.value); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
             <option value="all">All {accountLabel('Name')}s</option>
@@ -1521,7 +1644,7 @@ export default function IdentitiesPage() {
           />
         )}
         {/* Active filter chips from recommendations (simple mode only) */}
-        {queryMode === 'simple' && (subscriptionFilter !== 'all' || ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all') && (
+        {queryMode === 'simple' && (subscriptionFilter !== 'all' || ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all' || agentFilter) && (
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <span className="text-[10px] text-gray-500 uppercase font-semibold">Active filters:</span>
             {subscriptionFilter !== 'all' && (
@@ -1558,6 +1681,12 @@ export default function IdentitiesPage() {
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
                 CA: {caFilter === 'covered' ? 'Covered' : 'Not Covered'}
                 <button onClick={() => { setCaFilter('all'); }} className="hover:text-blue-600">&times;</button>
+              </span>
+            )}
+            {agentFilter && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
+                AI Agents
+                <button onClick={() => { setAgentFilter(false); }} className="hover:text-violet-600">&times;</button>
               </span>
             )}
           </div>
@@ -1613,6 +1742,33 @@ export default function IdentitiesPage() {
           >
             NHI (All Non-Human)
           </button>
+          {/* AI Agent Governance: filter pill (only when feature flag enabled) */}
+          {agentFilterEnabled && (
+            <button
+              onClick={() => {
+                setAgentFilter(!agentFilter);
+                if (!agentFilter) {
+                  setWorkloadFilter(false);
+                  setCategoryFilter('all');
+                  clearActiveView();
+                }
+              }}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
+                agentFilter
+                  ? 'bg-violet-600 text-white shadow-sm'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              AI Agents
+              {agentCount > 0 && (
+                <span className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${
+                  agentFilter ? 'bg-white/20 text-white' : 'bg-violet-100 text-violet-700'
+                }`}>
+                  {agentCount}
+                </span>
+              )}
+            </button>
+          )}
         </div>
       )}
 
@@ -1671,7 +1827,12 @@ export default function IdentitiesPage() {
                       <div className="flex items-center gap-1.5">
                         <TypeLabel type={i.identity_type} />
                         <div className="min-w-0">
-                          <div className="font-medium text-gray-900 truncate" title={i.display_name}>{i.display_name}</div>
+                          <div className="font-medium text-gray-900 truncate flex items-center gap-1" title={i.display_name}>
+                            {i.display_name}
+                            {!!i.agent_identity_type && i.agent_identity_type === 'ai_agent' && (
+                              <span className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-violet-100 text-violet-700 flex-shrink-0" title={`AI Agent (${i.detected_platform || 'detected'})`}>AI</span>
+                            )}
+                          </div>
                           <div className="text-[10px] text-gray-400 font-mono truncate">{i.identity_id.substring(0, 12)}…</div>
                         </div>
                       </div>
@@ -1707,11 +1868,14 @@ export default function IdentitiesPage() {
 
                     {/* Last Seen */}
                     <td className="px-2 py-2 whitespace-nowrap">
-                      {i.last_seen_auth ? (
-                        <span className="text-gray-600">{formatDate(i.last_seen_auth)}</span>
-                      ) : (
-                        <span className="text-[10px] text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>Unknown</span>
-                      )}
+                      {(() => {
+                        const ls = formatLastSeen(i.last_seen_auth);
+                        return ls.label === 'Never' ? (
+                          <span className="text-[10px] text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>{ls.label}</span>
+                        ) : (
+                          <span className={`text-xs ${ls.colorClass}`} title={i.last_seen_auth || undefined}>{ls.label}</span>
+                        );
+                      })()}
                     </td>
 
                     {/* First Seen */}
@@ -1722,6 +1886,7 @@ export default function IdentitiesPage() {
                         <span className="text-[10px] text-gray-400 italic">—</span>
                       )}
                     </td>
+
                   </tr>
                 ))}
             </tbody>

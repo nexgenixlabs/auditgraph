@@ -36,6 +36,10 @@ interface RemediationAction {
   playbook_name?: string;
   created_at?: string;
   source?: string;
+  action_type?: string;
+  role_name?: string;
+  scope?: string;
+  roles?: string[];
 }
 
 interface RemediationStats {
@@ -55,18 +59,269 @@ interface PlaybookRef {
 const STATUS_OPTIONS = ['all', 'new', 'planned', 'in_progress', 'verified', 'closed'];
 const PRIORITY_OPTIONS = ['all', 'critical', 'high', 'medium', 'low'];
 
+// ── Script generation (PowerShell + Azure CLI) ──
+function generateScript(a: RemediationAction, format: 'powershell' | 'azure_cli' | 'terraform_note'): string {
+  const name = a.identity_name || '(unknown)';
+  const objId = a.identity_id || '';
+  const roleRaw = a.role_name || '';
+  const scope = a.scope || '';
+  const auditId = String(a.id).slice(0, 8);
+
+  // Split comma-separated roles into individual entries
+  const roles = roleRaw.split(',').map(r => r.trim()).filter(Boolean);
+
+  // For actions that require role/scope, fail with helpful error if missing
+  const roleRequired = ['reduce_privilege', 'remove_rbac_role', 'privilege_drift_reduce_privilege', 'access_review'];
+  if (a.action_type && roleRequired.includes(a.action_type) && (roles.length === 0 || !scope)) {
+    if (format === 'terraform_note') return '# Role data unavailable — run a new discovery scan.';
+    if (format === 'powershell') return (
+      `# ERROR: Role/scope data not available in AuditGraph.\n` +
+      `# Run a new discovery scan to populate role data, then regenerate.\n` +
+      `# Identity: ${name}\n` +
+      `#\n` +
+      `# To manually find roles for this identity:\n` +
+      `Get-AzRoleAssignment -ObjectId "${objId}" | Format-Table RoleDefinitionName, Scope`
+    );
+    return (
+      `# ERROR: Role/scope data not available.\n` +
+      `# az role assignment list --assignee "${objId}" -o table`
+    );
+  }
+
+  const roleDisplay = roles.join(', ');
+
+  if (format === 'terraform_note') {
+    if (a.action_type === 'reduce_privilege') {
+      const tfLines = roles.map(r => `#   role_definition_name = "${r}"`).join('\n');
+      return `# Terraform: Remove azurerm_role_assignment block(s):\n${tfLines}\n#   principal_id = "${objId}"\n#   scope = "${scope}"\n# Then: terraform plan && terraform apply`;
+    }
+    if (a.action_type === 'disable_identity') return '# Terraform: Set account_enabled = false on the azuread_user resource.';
+    if (a.action_type === 'remove_identity') return '# Terraform: Remove the azuread_service_principal and azuread_application resources.';
+    if (a.action_type === 'rotate_credential') return '# Terraform: Update the azuread_application_password resource end_date.';
+    return `# No Terraform guidance for action: ${a.action_type}`;
+  }
+
+  const ps = format === 'powershell';
+
+  if (a.action_type === 'reduce_privilege') {
+    if (ps) {
+      const psBlocks = roles.map((r, i) =>
+`# --- Role ${i + 1}/${roles.length}: ${r} ---
+$existing${i} = Get-AzRoleAssignment \`
+  -ObjectId "${objId}" \`
+  -RoleDefinitionName "${r}" \`
+  -Scope "${scope}" \`
+  -ErrorAction SilentlyContinue
+
+if ($existing${i}) {
+  Write-Host "Removing ${r} from ${name}..." -ForegroundColor Cyan
+  Remove-AzRoleAssignment \`
+    -ObjectId "${objId}" \`
+    -RoleDefinitionName "${r}" \`
+    -Scope "${scope}"
+  Write-Host "Removed ${r}" -ForegroundColor Green
+} else {
+  Write-Host "${r} not found — may already be removed" -ForegroundColor Yellow
+}`).join('\n\n');
+
+      return `# ============================================
+# AuditGraph Trust AI — Remove RBAC Role(s)
+# Identity:  ${name}
+# Roles:     ${roleDisplay}  (${roles.length} role(s))
+# Scope:     ${scope}
+# Audit ID:  ${auditId}
+# ============================================
+
+Connect-AzAccount
+
+${psBlocks}
+
+# Verify all removals
+Write-Host "\`nRemaining assignments at this scope:" -ForegroundColor Cyan
+Get-AzRoleAssignment -ObjectId "${objId}" |
+  Where-Object {$_.Scope -eq "${scope}"} |
+  Select-Object RoleDefinitionName, Scope`;
+    }
+
+    // Azure CLI
+    const cliBlocks = roles.map(r =>
+`# Remove ${r}
+ASSIGN_ID=$(az role assignment list \\
+  --assignee "${objId}" --role "${r}" \\
+  --scope "${scope}" --query "[0].id" -o tsv)
+[ -n "$ASSIGN_ID" ] && az role assignment delete --ids "$ASSIGN_ID" \\
+  && echo "Removed ${r}" || echo "${r} not found"`).join('\n\n');
+
+    return `# AuditGraph — Remove RBAC Role(s) (Azure CLI)
+# Identity: ${name} | Roles: ${roleDisplay}
+
+${cliBlocks}
+
+# Verify:
+az role assignment list --assignee "${objId}" \\
+  --scope "${scope}" -o table`;
+  }
+
+  if (a.action_type === 'rotate_credential') {
+    return ps
+? `# AuditGraph Trust AI — Rotate Credential
+# Identity: ${name} (${objId}) | Audit ID: ${auditId}
+
+Connect-MgGraph -Scopes "Application.ReadWrite.All"
+
+$app = Get-MgApplication -Filter "appId eq '${objId}'"
+
+# Remove expired credentials
+$app.PasswordCredentials | Where-Object { $_.EndDateTime -lt (Get-Date) } | ForEach-Object {
+  Remove-MgApplicationPassword -ApplicationId $app.Id -KeyId $_.KeyId
+  Write-Host "Removed expired: $($_.DisplayName)" -ForegroundColor Yellow
+}
+
+# Add new credential (90-day expiry)
+$newCred = Add-MgApplicationPassword -ApplicationId $app.Id \`
+  -PasswordCredential @{
+    DisplayName = "AuditGraph-Rotated-$(Get-Date -Format yyyyMMdd)"
+    EndDateTime = (Get-Date).AddDays(90)
+  }
+
+Write-Host "New secret: $($newCred.SecretText)" -ForegroundColor Red`
+: `# AuditGraph — Rotate Credentials (Azure CLI)
+APP_ID=$(az ad sp show --id "${objId}" --query appId -o tsv)
+az ad app credential list --id "$APP_ID" -o table
+az ad app credential reset --id "$APP_ID" --years 1`;
+  }
+
+  if (a.action_type === 'remove_identity') {
+    return ps
+? `# AuditGraph Trust AI — Remove Orphaned SPN
+# Identity: ${name} (${objId}) | Audit ID: ${auditId}
+
+Connect-AzAccount
+
+$spn = Get-AzADServicePrincipal -DisplayName "${name}"
+
+# Remove all role assignments first
+Get-AzRoleAssignment -ObjectId $spn.Id | ForEach-Object {
+  Write-Host "Removing: $($_.RoleDefinitionName) at $($_.Scope)"
+  Remove-AzRoleAssignment -ObjectId $spn.Id \`
+    -RoleDefinitionName $_.RoleDefinitionName -Scope $_.Scope
+}
+
+# Remove the service principal
+Remove-AzADServicePrincipal -ObjectId $spn.Id -Confirm
+Write-Host "SPN removed. Audit ID: ${auditId}" -ForegroundColor Green`
+: `# AuditGraph — Remove Orphaned SPN (Azure CLI)
+az role assignment list --assignee "${objId}" --query "[].id" -o tsv | \\
+  xargs -I {} az role assignment delete --ids {}
+az ad sp delete --id "${objId}"`;
+  }
+
+  if (a.action_type === 'access_review') {
+    return ps
+? `# AuditGraph Trust AI — Access Review
+# Identity: ${name} (${objId}) | Roles: ${roleDisplay} | Audit ID: ${auditId}
+
+Connect-MgGraph -Scopes "AccessReview.ReadWrite.All"
+
+# List all role assignments for review
+Get-AzRoleAssignment -ObjectId "${objId}" | Format-Table RoleDefinitionName, Scope
+
+# Check Entra directory roles
+Get-MgDirectoryRole | ForEach-Object {
+  $members = Get-MgDirectoryRoleMember -DirectoryRoleId $_.Id
+  if ($members.Id -contains "${objId}") {
+    Write-Host "Entra role: $($_.DisplayName)" -ForegroundColor Yellow
+  }
+}
+
+Write-Host "ACTION: Verify business justification for all privileged roles" -ForegroundColor Red`
+: `# AuditGraph — Access Review (Azure CLI)
+az role assignment list --assignee "${objId}" -o table
+# Remove as needed:
+# az role assignment delete --assignee "${objId}" --role "<RoleName>" --scope "<Scope>"`;
+  }
+
+  if (a.action_type === 'break_attack_path') {
+    return ps
+? `# AuditGraph Trust AI — Break Attack Path
+# Identity: ${name} (${objId}) | Audit ID: ${auditId}
+
+Connect-AzAccount
+
+$escalation = Get-AzRoleAssignment -ObjectId "${objId}" | Where-Object {
+  $_.RoleDefinitionName -in @(
+    "Owner", "User Access Administrator", "Contributor",
+    "Privileged Role Administrator", "Global Administrator"
+  )
+}
+$escalation | Format-Table RoleDefinitionName, Scope
+
+# Remove broadest-scope privileged role (weakest link)
+$weakest = $escalation | Sort-Object { $_.Scope.Length } | Select-Object -First 1
+if ($weakest) {
+  Write-Host "Removing: $($weakest.RoleDefinitionName) at $($weakest.Scope)" -ForegroundColor Yellow
+  Remove-AzRoleAssignment \`
+    -ObjectId "${objId}" \`
+    -RoleDefinitionName $weakest.RoleDefinitionName \`
+    -Scope $weakest.Scope
+  Write-Host "Attack path broken." -ForegroundColor Green
+}`
+: `# AuditGraph — Break Attack Path (Azure CLI)
+az role assignment list --assignee "${objId}" \\
+  --query "[?roleDefinitionName=='Owner' || roleDefinitionName=='Contributor']" -o table
+# Remove the broadest-scope assignment:
+# az role assignment delete --assignee "${objId}" --role "<RoleName>" --scope "<Scope>"`;
+  }
+
+  if (a.action_type === 'disable_identity') {
+    return ps
+? `# AuditGraph Trust AI — Disable Stale Identity
+# Identity: ${name} (${objId}) | Audit ID: ${auditId}
+
+Connect-MgGraph -Scopes "User.ReadWrite.All"
+
+# Disable the account
+Update-MgUser -UserId "${objId}" -AccountEnabled:$false
+
+# Remove all privileged role assignments
+Get-AzRoleAssignment -ObjectId "${objId}" | ForEach-Object {
+  Remove-AzRoleAssignment -ObjectId "${objId}" \`
+    -RoleDefinitionName $_.RoleDefinitionName -Scope $_.Scope
+}
+
+$user = Get-MgUser -UserId "${objId}" -Property AccountEnabled
+Write-Host "Account enabled: $($user.AccountEnabled)"`
+: `# AuditGraph — Disable Identity (Azure CLI)
+az ad user update --id "${objId}" --account-enabled false
+az role assignment list --assignee "${objId}" --query "[].id" -o tsv | \\
+  xargs -I {} az role assignment delete --ids {}`;
+  }
+
+  // Fallback
+  return ps
+    ? `# AuditGraph — ${a.action_type || 'Remediation'}\n# Identity: ${name}\n# No automated script for this action type.\n# Review AuditGraph recommendations and apply manually.`
+    : `# No Azure CLI script for action: ${a.action_type}`;
+}
+
 export default function RemediationCenter() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { withConnection } = useConnection();
+  const { withConnection, selectedConnectionId } = useConnection();
+
+  const [showTicketModal, setShowTicketModal] = useState(false);
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [scriptTab, setScriptTab] = useState<'powershell' | 'azure_cli' | 'terraform_note'>('powershell');
+  const [scriptCopied, setScriptCopied] = useState(false);
 
   const [stats, setStats] = useState<RemediationStats>({ open: 0, critical: 0, in_progress: 0, completed_this_week: 0 });
   const [actions, setActions] = useState<RemediationAction[]>([]);
   const [playbooks, setPlaybooks] = useState<PlaybookRef[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || 'all');
   const [priorityFilter, setPriorityFilter] = useState(searchParams.get('priority') || 'all');
   const [selectedAction, setSelectedAction] = useState<RemediationAction | null>(null);
+  const [msExcludedCount, setMsExcludedCount] = useState(0);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -78,13 +333,14 @@ export default function RemediationCenter() {
 
       // Primary source: auto-generated remediations from risk tables
       const genData = generatedRes.ok ? await generatedRes.json() : { actions: [], stats: {} };
+      setMsExcludedCount(genData.microsoft_excluded_count || 0);
 
       setPlaybooks((playbookRes.ok ? (await playbookRes.json()).playbooks || [] : []).map((p: any) => ({
         id: p.id, name: p.name, trigger_type: p.trigger_type, enabled: p.enabled,
       })));
 
-      // Map generated actions directly (backend returns correct shape)
-      const generatedActions: RemediationAction[] = (genData.actions || []).map((a: any) => ({
+      // Single source of truth: generated_remediations table only
+      const remediations: RemediationAction[] = (genData.actions || []).map((a: any) => ({
         id: a.id,
         title: a.title || 'Remediation Action',
         description: a.description || '',
@@ -100,51 +356,73 @@ export default function RemediationCenter() {
         playbook_id: a.playbook_id,
         playbook_name: a.playbook_name,
         created_at: a.created_at,
+        action_type: a.action_type,
+        role_name: a.role_name,
+        scope: a.scope,
+        roles: a.roles,
       }));
 
-      // Also fetch SOAR actions to merge completed/in-progress items
-      try {
-        const soarRes = await fetch(withConnection('/api/soar/actions?limit=100'));
-        if (soarRes.ok) {
-          const ad = await soarRes.json();
-          const soarActions: RemediationAction[] = (ad.actions || []).map((a: any, idx: number) => ({
-            id: 10000 + (a.id || idx),
-            title: a.action_type || 'SOAR Action',
-            description: a.details || '',
-            risk_reduction: a.risk_reduction || 0,
-            affected_count: a.affected_count || 1,
-            blast_radius: a.blast_radius || 'unknown',
-            automation_ready: a.automation_ready ?? false,
-            confidence: a.confidence || 0,
-            status: a.status === 'success' ? 'verified' : a.status === 'failed' ? 'new' : a.status || 'in_progress',
-            priority: a.priority || 'medium',
-            identity_id: a.identity_id,
-            identity_name: a.identity_name,
-            playbook_id: a.playbook_id,
-            playbook_name: a.playbook_name,
-            created_at: a.created_at,
-          }));
-          generatedActions.push(...soarActions);
-        }
-      } catch { /* SOAR fallback — generated items are primary */ }
+      // Auto-generate if empty
+      if (remediations.length === 0 && !isGenerating) {
+        triggerGeneration();
+        return;
+      }
 
-      setActions(generatedActions);
+      setActions(remediations);
 
-      // Use generated stats as primary, augment with SOAR completed count
-      const gStats = genData.stats || {};
-      const completedFromSoar = generatedActions.filter(a => a.status === 'verified').length;
-      const inProgress = generatedActions.filter(a => a.status === 'in_progress').length;
+      // Use backend-computed stats (authoritative, from generated_remediations table)
       setStats({
-        open: gStats.open || generatedActions.filter(a => a.status === 'new').length,
-        critical: gStats.critical || generatedActions.filter(a => a.priority === 'critical').length,
-        in_progress: inProgress,
-        completed_this_week: completedFromSoar,
+        open: genData.stats?.open ?? remediations.filter(a => ['new', 'planned', 'in_progress'].includes(a.status)).length,
+        critical: genData.stats?.critical ?? remediations.filter(a => a.priority === 'critical').length,
+        in_progress: genData.stats?.in_progress ?? remediations.filter(a => a.status === 'in_progress').length,
+        completed_this_week: genData.stats?.completed_this_week ?? 0,
       });
     } catch {
       // silent
     } finally {
       setLoading(false);
     }
+  }, [withConnection, selectedConnectionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const triggerGeneration = useCallback(async () => {
+    setIsGenerating(true);
+    try {
+      await fetch(withConnection('/api/remediation/generate'), { method: 'POST' });
+      // Re-fetch after generation
+      const res = await fetch(withConnection('/api/remediation/generated'));
+      if (res.ok) {
+        const data = await res.json();
+        const generated = (data.actions || []).map((a: any) => ({
+          id: a.id, title: a.title || 'Remediation Action', description: a.description || '',
+          risk_reduction: a.risk_reduction || 0, affected_count: a.affected_count || 1,
+          blast_radius: a.blast_radius || 'unknown', automation_ready: a.automation_ready ?? false,
+          confidence: a.confidence || 0, status: a.status || 'new', priority: a.priority || 'medium',
+          identity_id: a.identity_id, identity_name: a.identity_name,
+          playbook_id: a.playbook_id, playbook_name: a.playbook_name, created_at: a.created_at,
+          action_type: a.action_type, role_name: a.role_name, scope: a.scope, roles: a.roles,
+        }));
+        setActions(generated);
+        setStats({
+          open: generated.filter((a: RemediationAction) => ['new', 'planned', 'in_progress'].includes(a.status)).length,
+          critical: generated.filter((a: RemediationAction) => a.priority === 'critical').length,
+          in_progress: generated.filter((a: RemediationAction) => a.status === 'in_progress').length,
+          completed_this_week: 0,
+        });
+      }
+    } catch { /* silent */ }
+    finally { setIsGenerating(false); }
+  }, [withConnection]);
+
+  const updateStatus = useCallback(async (actionId: number, newStatus: string) => {
+    // Optimistic update
+    setActions(prev => prev.map(a => a.id === actionId ? { ...a, status: newStatus } : a));
+    try {
+      await fetch(withConnection(`/api/remediation/generated/${actionId}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+    } catch { /* revert on error would go here */ }
   }, [withConnection]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -200,6 +478,27 @@ export default function RemediationCenter() {
         ))}
       </div>
 
+      {/* Microsoft exclusion banner */}
+      {msExcludedCount > 0 && (
+        <div
+          className="flex items-center gap-3 rounded-lg border px-4 py-3"
+          style={{
+            backgroundColor: 'rgba(59, 130, 246, 0.06)',
+            borderColor: 'rgba(59, 130, 246, 0.2)',
+          }}
+        >
+          <svg className="w-4 h-4 flex-shrink-0" style={{ color: '#60A5FA' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+          </svg>
+          <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+            <span className="font-semibold" style={{ color: '#60A5FA' }}>
+              {msExcludedCount} Microsoft/system {msExcludedCount === 1 ? 'identity' : 'identities'}
+            </span>{' '}
+            automatically excluded to prevent unsafe remediation actions.
+          </p>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1.5">
@@ -252,21 +551,26 @@ export default function RemediationCenter() {
               <thead>
                 <tr className="border-b" style={{ borderColor: R.surfaceBorder }}>
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Action</th>
+                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Priority</th>
                   <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Risk Reduction</th>
                   <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Affected</th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Blast Radius</th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Automation</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Confidence</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider relative group" style={{ color: R.textMuted }}>
+                    AI Confidence
+                    <span className="ml-1 cursor-help" title="AI-generated confidence score: ≥85% High (green), 65-84% Medium (amber), <65% Low (orange)">&#9432;</span>
+                  </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {loading ? (
-                  <tr><td colSpan={7} className="px-4 py-12 text-center" style={{ color: R.textMuted }}>
+                {loading || isGenerating ? (
+                  <tr><td colSpan={8} className="px-4 py-12 text-center" style={{ color: R.textMuted }}>
                     <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
+                    {isGenerating && <p className="mt-2 text-xs">Generating remediation actions...</p>}
                   </td></tr>
                 ) : filtered.length === 0 ? (
-                  <tr><td colSpan={7} className="px-4 py-12 text-center" style={{ color: R.textMuted }}>No remediation actions found</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-12 text-center" style={{ color: R.textMuted }}>No remediation actions found</td></tr>
                 ) : filtered.map(a => (
                   <tr
                     key={a.id}
@@ -284,8 +588,28 @@ export default function RemediationCenter() {
                         )}
                       </div>
                       {a.identity_name && (
-                        <div className="text-xs mt-0.5" style={{ color: R.textMuted }}>{a.identity_name}</div>
+                        <div className="text-xs mt-0.5">
+                          {a.identity_id ? (
+                            <span
+                              onClick={(e) => { e.stopPropagation(); navigate(`/identities/${a.identity_id}`); }}
+                              style={{ color: '#60A5FA', cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}
+                              title="View identity details"
+                            >
+                              {a.identity_name}
+                            </span>
+                          ) : (
+                            <span style={{ color: R.textMuted }}>{a.identity_name}</span>
+                          )}
+                        </div>
                       )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{
+                        backgroundColor: `${R.priority[a.priority] || '#64748B'}18`,
+                        color: R.priority[a.priority] || '#64748B',
+                      }}>
+                        {a.priority.charAt(0).toUpperCase() + a.priority.slice(1)}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-right font-mono font-bold" style={{ color: '#4ADE80' }}>
                       +{a.risk_reduction} pts
@@ -308,16 +632,26 @@ export default function RemediationCenter() {
                         <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 dark:bg-slate-700 dark:text-slate-400">Manual</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono" style={{ color: a.confidence === 0 ? 'var(--text-muted)' : a.confidence >= 80 ? '#4ADE80' : a.confidence >= 60 ? '#FFB300' : '#FF6D00' }}>
+                    <td className="px-4 py-3 text-right font-mono" style={{ color: a.confidence === 0 ? 'var(--text-muted)' : a.confidence >= 85 ? '#4ADE80' : a.confidence >= 65 ? '#FFB300' : '#FF6D00' }}>
                       {a.confidence}%
                     </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{
-                        backgroundColor: `${R.status[a.status] || '#64748B'}20`,
-                        color: R.status[a.status] || '#64748B',
-                      }}>
-                        {a.status.replace('_', ' ')}
-                      </span>
+                    <td className="px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
+                      <select
+                        value={a.status}
+                        onChange={e => updateStatus(a.id, e.target.value)}
+                        className="text-xs font-medium rounded px-2 py-1 cursor-pointer border"
+                        style={{
+                          background: 'transparent',
+                          borderColor: R.status[a.status] || '#64748B',
+                          color: R.status[a.status] || '#64748B',
+                        }}
+                      >
+                        <option value="new">New</option>
+                        <option value="planned">Planned</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="verified">Verified</option>
+                        <option value="closed">Closed</option>
+                      </select>
                     </td>
                   </tr>
                 ))}
@@ -347,6 +681,19 @@ export default function RemediationCenter() {
                 </button>
               </div>
 
+              {/* Identity name link */}
+              {selectedAction.identity_name && selectedAction.identity_id && (
+                <p className="text-sm" style={{ color: R.textSecondary }}>
+                  Identity:{' '}
+                  <span
+                    onClick={() => navigate(`/identities/${selectedAction.identity_id}`)}
+                    style={{ color: R.accent, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' as const, textUnderlineOffset: 3 }}
+                  >
+                    {selectedAction.identity_name}
+                  </span>
+                </p>
+              )}
+
               {/* Description */}
               {selectedAction.description && (
                 <p className="text-sm" style={{ color: R.textSecondary }}>{selectedAction.description}</p>
@@ -359,8 +706,8 @@ export default function RemediationCenter() {
                   <p className="text-xl font-bold" style={{ color: '#4ADE80' }}>+{selectedAction.risk_reduction} pts</p>
                 </div>
                 <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
-                  <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Confidence</p>
-                  <p className="text-xl font-bold" style={{ color: selectedAction.confidence >= 80 ? '#4ADE80' : '#FFB300' }}>{selectedAction.confidence}%</p>
+                  <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>AI Confidence</p>
+                  <p className="text-xl font-bold" style={{ color: selectedAction.confidence >= 85 ? '#4ADE80' : selectedAction.confidence >= 65 ? '#FFB300' : '#FF6D00' }}>{selectedAction.confidence}%</p>
                 </div>
                 <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
                   <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Affected</p>
@@ -388,16 +735,18 @@ export default function RemediationCenter() {
               {/* Action buttons */}
               <div className="flex gap-2">
                 <button
-                  className="flex-1 px-4 py-2 rounded-lg text-xs font-medium text-white transition"
+                  onClick={() => setShowTicketModal(true)}
+                  className="flex-1 px-4 py-2 rounded-lg text-xs font-medium text-white transition hover:opacity-90"
                   style={{ backgroundColor: R.accent }}
                 >
                   Create Ticket
                 </button>
                 <button
+                  onClick={() => { setScriptTab('powershell'); setScriptCopied(false); setShowPreviewModal(true); }}
                   className="flex-1 px-4 py-2 rounded-lg text-xs font-medium border transition hover:bg-gray-50 dark:hover:bg-slate-800"
                   style={{ borderColor: R.surfaceBorder, color: R.text }}
                 >
-                  Preview Changes
+                  Preview Script
                 </button>
               </div>
             </div>
@@ -426,6 +775,129 @@ export default function RemediationCenter() {
           </div>
         </div>
       )}
+
+      {/* ── Create Ticket Modal ── */}
+      {showTicketModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backdropFilter: 'blur(4px)' }}>
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowTicketModal(false)} />
+          <div className="relative w-full max-w-md rounded-xl border shadow-2xl p-6" style={{ backgroundColor: R.surface, borderColor: R.surfaceBorder }}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold" style={{ color: R.text }}>Connect Ticketing System</h3>
+              <button onClick={() => setShowTicketModal(false)} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-slate-800">
+                <svg className="w-5 h-5" style={{ color: R.textMuted }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className="text-sm mb-5" style={{ color: R.textSecondary }}>
+              Connect your ticketing system to automatically create remediation tickets from AuditGraph findings.
+            </p>
+            <div className="space-y-3">
+              {[
+                { name: 'ServiceNow', icon: '🔧', desc: 'ITSM & incident management' },
+                { name: 'Jira', icon: '📋', desc: 'Issue tracking & project management' },
+                { name: 'Azure DevOps', icon: '⚡', desc: 'Boards & work items' },
+                { name: 'PagerDuty', icon: '🔔', desc: 'Incident response & alerting' },
+              ].map(t => (
+                <button
+                  key={t.name}
+                  className="w-full flex items-center gap-3 p-3 rounded-lg border text-left transition hover:shadow-sm hover:border-purple-300 dark:hover:border-purple-600"
+                  style={{ borderColor: R.surfaceBorder }}
+                  onClick={() => {
+                    setShowTicketModal(false);
+                    navigate('/settings#integrations');
+                  }}
+                >
+                  <span className="text-2xl">{t.icon}</span>
+                  <div>
+                    <p className="text-sm font-semibold" style={{ color: R.text }}>{t.name}</p>
+                    <p className="text-xs" style={{ color: R.textMuted }}>{t.desc}</p>
+                  </div>
+                  <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-slate-700" style={{ color: R.textMuted }}>
+                    Configure
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-xs mt-4" style={{ color: R.textMuted }}>
+              Configure integrations in Settings to enable one-click ticket creation.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Preview Script Modal (tabbed: PowerShell / Azure CLI / Terraform Notes) ── */}
+      {showPreviewModal && selectedAction && (() => {
+        const currentScript = generateScript(selectedAction, scriptTab);
+        return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backdropFilter: 'blur(4px)' }}>
+          <div className="absolute inset-0 bg-black/50" onClick={() => { setShowPreviewModal(false); setScriptTab('powershell'); }} />
+          <div className="relative w-full max-w-[720px] rounded-xl shadow-2xl flex flex-col" style={{ backgroundColor: '#1E293B', border: '1px solid rgba(255,255,255,0.1)', maxHeight: '80vh' }}>
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: 'rgba(255,255,255,0.08)' }}>
+              <div>
+                <h3 className="text-[15px] font-semibold" style={{ color: '#F1F5F9' }}>Preview Remediation Script</h3>
+                <p className="text-xs mt-0.5" style={{ color: '#64748B' }}>
+                  {selectedAction.identity_name} — {(selectedAction.action_type || '').replace(/_/g, ' ')}
+                  {selectedAction.role_name && <span> — {selectedAction.role_name}</span>}
+                </p>
+              </div>
+              <button onClick={() => { setShowPreviewModal(false); setScriptTab('powershell'); }} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', fontSize: 20, lineHeight: 1 }}>✕</button>
+            </div>
+            {/* Warning banner */}
+            <div className="mx-5 mt-3 px-3.5 py-2 rounded-md text-xs" style={{ backgroundColor: 'rgba(217,119,6,0.1)', border: '1px solid rgba(217,119,6,0.3)', color: '#FDE68A' }}>
+              Review carefully before executing. This script will modify Azure IAM configuration.
+            </div>
+            {/* Tabs */}
+            <div className="flex gap-1 px-5 pt-3 pb-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+              {([
+                { key: 'powershell' as const, label: 'PowerShell' },
+                { key: 'azure_cli' as const, label: 'Azure CLI' },
+                { key: 'terraform_note' as const, label: 'Terraform Notes' },
+              ]).map(t => (
+                <button key={t.key} onClick={() => setScriptTab(t.key)} className="text-[13px] px-3.5 py-1.5 rounded-t-md" style={{
+                  background: scriptTab === t.key ? '#0F172A' : 'transparent',
+                  border: scriptTab === t.key ? '1px solid rgba(255,255,255,0.1)' : '1px solid transparent',
+                  borderBottom: 'none',
+                  color: scriptTab === t.key ? '#F1F5F9' : '#94A3B8',
+                  cursor: 'pointer', fontWeight: scriptTab === t.key ? 500 : 400,
+                }}>{t.label}</button>
+              ))}
+            </div>
+            {/* Code area */}
+            <pre className="flex-1 overflow-auto m-0 px-5 py-4 text-xs leading-relaxed" style={{ backgroundColor: '#0F172A', color: '#7DD3FC', fontFamily: 'Courier New, monospace', whiteSpace: 'pre', minHeight: 280 }}>
+              {currentScript}
+            </pre>
+            {/* Footer */}
+            <div className="flex justify-end gap-2 p-3" style={{ borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+              <button
+                onClick={() => { navigator.clipboard.writeText(currentScript); setScriptCopied(true); setTimeout(() => setScriptCopied(false), 2000); }}
+                className="px-4 py-2 rounded-md text-[13px] font-medium"
+                style={{ background: scriptCopied ? 'rgba(22,163,74,0.2)' : 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: scriptCopied ? '#86EFAC' : '#E2E8F0', cursor: 'pointer' }}
+              >
+                {scriptCopied ? '✓ Copied!' : 'Copy to Clipboard'}
+              </button>
+              {scriptTab !== 'terraform_note' && (
+                <button
+                  onClick={() => {
+                    const ext = scriptTab === 'powershell' ? 'ps1' : 'sh';
+                    const blob = new Blob([currentScript], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = `auditgraph-remediation-${selectedAction.id}.${ext}`;
+                    a.click(); URL.revokeObjectURL(url);
+                  }}
+                  className="px-4 py-2 rounded-md text-[13px] font-medium"
+                  style={{ background: 'rgba(37,99,235,0.2)', border: '1px solid rgba(37,99,235,0.4)', color: '#93C5FD', cursor: 'pointer' }}
+                >
+                  Download .{scriptTab === 'powershell' ? 'ps1' : 'sh'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 }

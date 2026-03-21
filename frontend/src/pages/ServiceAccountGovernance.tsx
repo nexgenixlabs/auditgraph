@@ -784,12 +784,12 @@ export default function ServiceAccountGovernance() {
                     <div style={{ background: G.surface, border: `1px solid ${G.surfaceBorder}` }}
                          className="rounded-lg p-3">
                       <div style={{ color: G.textMuted }} className="text-[10px] uppercase tracking-wider mb-2">
-                        Credentials ({detail.credentials.length})
+                        Credentials ({(detail.credentials ?? []).length})
                       </div>
-                      {detail.credentials.length === 0 ? (
+                      {(detail.credentials ?? []).length === 0 ? (
                         <div style={{ color: G.textMuted }} className="text-[10px]">No credentials</div>
-                      ) : detail.credentials.map((c, i) => (
-                        <div key={i} className="py-1.5" style={{ borderBottom: i < detail.credentials.length - 1 ? `1px solid ${G.surfaceBorder}` : 'none' }}>
+                      ) : (detail.credentials ?? []).map((c, i) => (
+                        <div key={i} className="py-1.5" style={{ borderBottom: i < (detail.credentials ?? []).length - 1 ? `1px solid ${G.surfaceBorder}` : 'none' }}>
                           <div className="flex items-center justify-between">
                             <span style={{ color: G.textSecondary }} className="text-[10px]">{c.credential_type}</span>
                             <span style={{ color: G.textMuted }} className="text-[9px]">

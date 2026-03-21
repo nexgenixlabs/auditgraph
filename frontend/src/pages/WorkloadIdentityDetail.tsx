@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { AccessGraphTab } from '../components/graph';
 import {
   WORKLOAD_TYPE_CONFIG,
   LIFECYCLE_STATE_CONFIG,
@@ -224,8 +225,11 @@ function daysUntil(dateStr?: string | null): number | null {
 const TABS = [
   { key: 'roles', label: 'Roles & Permissions' },
   { key: 'credentials', label: 'Credentials' },
+  { key: 'access_graph', label: 'Access Graph' },
+  { key: 'anomalies', label: 'Anomalies' },
   { key: 'activity', label: 'Activity' },
   { key: 'findings', label: 'Findings' },
+  { key: 'owners', label: 'Ownership' },
   { key: 'properties', label: 'Properties' },
 ] as const;
 
@@ -750,6 +754,74 @@ function PropertiesTab({ data }: { data: WorkloadDetailData }) {
   );
 }
 
+// ── Tab: Anomalies (inline) ──────────────────────────────────────────
+
+function AnomaliesInlineTab({ anomalies }: { anomalies: Anomaly[] }) {
+  if (anomalies.length === 0) {
+    return <p className="text-xs text-gray-400 dark:text-slate-500 italic py-4">No anomalies detected</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {anomalies.map(a => (
+        <div key={a.id} className="flex items-start gap-3 p-3 rounded-lg border border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/30">
+          <span className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${
+            a.severity === 'critical' ? 'bg-red-500' :
+            a.severity === 'high' ? 'bg-orange-500' :
+            a.severity === 'medium' ? 'bg-yellow-500' : 'bg-blue-400'
+          }`} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-gray-800 dark:text-slate-200">{a.title}</span>
+              <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${SEV_BADGE[a.severity] || ''}`}>
+                {a.severity.toUpperCase()}
+              </span>
+              {a.resolved && (
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">RESOLVED</span>
+              )}
+            </div>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">
+              {a.anomaly_type.replace(/_/g, ' ')} — {formatDate(a.created_at)}
+            </p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Tab: Ownership (inline) ─────────────────────────────────────────
+
+function OwnersInlineTab({ owners }: { owners: Array<{ owner_display_name?: string; owner_upn?: string; owner_object_id?: string }> }) {
+  if (owners.length === 0) {
+    return (
+      <div className="text-center py-6">
+        <p className="text-xs text-gray-400 dark:text-slate-500 italic">No owners assigned</p>
+        <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1">This identity has no assigned owner — governance gap</p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {owners.map((o, i) => (
+        <div key={i} className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/30">
+          <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 text-xs font-bold flex-shrink-0">
+            {(o.owner_display_name || '?')[0].toUpperCase()}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-gray-800 dark:text-slate-200 truncate">{o.owner_display_name || 'Unknown'}</p>
+            {o.owner_upn && <p className="text-[10px] text-gray-400 dark:text-slate-500 truncate">{o.owner_upn}</p>}
+          </div>
+          {o.owner_object_id && (
+            <code className="text-[9px] text-gray-400 dark:text-slate-600 font-mono truncate max-w-[120px]" title={o.owner_object_id}>
+              {o.owner_object_id.slice(0, 8)}...
+            </code>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Main Page Component ──────────────────────────────────────────────
 
 const WorkloadIdentityDetail: React.FC = () => {
@@ -908,16 +980,36 @@ const WorkloadIdentityDetail: React.FC = () => {
                   {data.findings.length}
                 </span>
               )}
+              {tab.key === 'anomalies' && (data.anomalies?.length || 0) > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400">
+                  {data.anomalies!.length}
+                </span>
+              )}
+              {tab.key === 'owners' && (data.owners?.length || 0) > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
+                  {data.owners!.length}
+                </span>
+              )}
+              {tab.key === 'roles' && ((data.roles?.length || 0) + (data.entra_roles?.length || 0)) > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400">
+                  {(data.roles?.length || 0) + (data.entra_roles?.length || 0)}
+                </span>
+              )}
             </button>
           ))}
         </div>
 
         {/* Tab Content */}
-        <div className="p-5">
+        <div className={activeTab === 'access_graph' ? '' : 'p-5'}>
           {activeTab === 'roles' && <RolesTab data={data} />}
           {activeTab === 'credentials' && <CredentialsTab data={data} />}
+          {activeTab === 'access_graph' && (
+            <AccessGraphTab identityId={data.detail?.identity_id || data.detail?.app_object_id || data.detail?.app_id || data.detail?.object_id || id || ''} />
+          )}
+          {activeTab === 'anomalies' && <AnomaliesInlineTab anomalies={data.anomalies || []} />}
           {activeTab === 'activity' && <ActivityTab data={data} />}
           {activeTab === 'findings' && <FindingsTab data={data} />}
+          {activeTab === 'owners' && <OwnersInlineTab owners={data.owners || []} />}
           {activeTab === 'properties' && <PropertiesTab data={data} />}
         </div>
       </div>

@@ -6,6 +6,7 @@ import { useCopilot } from '../contexts/CopilotContext';
 import { RISK_BADGE, safeLower } from '../constants/metrics';
 import { downloadCSV, exportFilename, RESOURCE_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSelectFilter';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -33,6 +34,12 @@ interface ResourceRow {
   cloud?: string;
 }
 
+interface SubscriptionActivation {
+  active_count: number;
+  inactive_count: number;
+  total_count: number;
+}
+
 interface ResourceStats {
   total: number;
   storage_accounts: number;
@@ -46,6 +53,7 @@ interface ResourceStats {
     keys: { total: number; expired: number; expiring_soon: number };
     certs: { total: number; expired: number; expiring_soon: number };
   };
+  subscription_activation?: SubscriptionActivation;
 }
 
 type SortField = 'name' | 'resource_type' | 'location' | 'resource_group' | 'subscription_name' | 'risk_level' | 'risk_score';
@@ -178,6 +186,8 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
   const [search, setSearch] = useState('');
   const [sortField, setSortField] = useState<SortField>('risk_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [subscriptionOptions, setSubscriptionOptions] = useState<SelectOption[]>([]);
+  const [selectedSubscriptions, setSelectedSubscriptions] = useState<string[]>([]);
 
   // Sync state from URL params on mount and on URL changes (e.g. client-side link clicks)
   useEffect(() => {
@@ -204,6 +214,23 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
       .catch(() => {});
   }, [withConnection]);
 
+  // Fetch subscription options for MultiSelectFilter
+  useEffect(() => {
+    fetch(withConnection('/api/subscriptions/distinct'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const subs = data?.subscriptions || data || [];
+        if (Array.isArray(subs)) {
+          setSubscriptionOptions(subs.map((s: { subscription_id: string; subscription_name: string; monitored?: boolean }) => ({
+            value: s.subscription_id,
+            label: s.subscription_name || s.subscription_id,
+            active: s.monitored ?? true,
+          })));
+        }
+      })
+      .catch(() => {});
+  }, [withConnection, selectedConnectionId, activeOrgId]);
+
   // Fetch stats (re-fetch when type filter changes for type-specific trending)
   useEffect(() => {
     if (!initialized) return;
@@ -211,12 +238,13 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
     const abort = new AbortController();
     const params = new URLSearchParams();
     if (typeFilter) params.set('resource_type', typeFilter);
+    if (selectedSubscriptions.length > 0) params.set('subscription_ids', selectedSubscriptions.join(','));
     fetch(withConnection(`/api/resources/stats?${params}`), { signal: abort.signal })
       .then(r => r.json())
       .then(setStats)
       .catch(() => {});
     return () => abort.abort();
-  }, [typeFilter, initialized, selectedConnectionId]);
+  }, [typeFilter, initialized, selectedConnectionId, activeOrgId, selectedSubscriptions]);
 
   // Fetch resources
   useEffect(() => {
@@ -228,6 +256,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
     if (typeFilter) params.set('resource_type', typeFilter);
     if (riskFilter) params.set('risk_level', riskFilter);
     if (search) params.set('search', search);
+    if (selectedSubscriptions.length > 0) params.set('subscription_ids', selectedSubscriptions.join(','));
 
     fetch(withConnection(`/api/resources?${params}`), { signal: abort.signal })
       .then(r => r.json())
@@ -237,7 +266,7 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [typeFilter, riskFilter, search, initialized, selectedConnectionId]);
+  }, [typeFilter, riskFilter, search, initialized, selectedConnectionId, activeOrgId, selectedSubscriptions]);
 
   // Client-side sort
   const sorted = useMemo(() => {
@@ -310,6 +339,20 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
           <span>Snapshot: <span className="font-mono font-semibold text-gray-700">#{latestSnapshotId}</span></span>
           <span>Organization: <span className="font-mono font-semibold text-gray-700">{activeOrgId ?? user?.organization_id ?? 'N/A'}</span></span>
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
+        </div>
+      )}
+
+      {/* Subscription Activation Banner */}
+      {stats?.subscription_activation && stats.subscription_activation.inactive_count > 0 && (
+        <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg border border-amber-300/50 bg-amber-50 text-amber-800">
+          <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs">
+            Showing resources from <strong>{stats.subscription_activation.active_count}</strong> activated subscription{stats.subscription_activation.active_count !== 1 ? 's' : ''}.{' '}
+            <strong>{stats.subscription_activation.inactive_count}</strong> discovered subscription{stats.subscription_activation.inactive_count !== 1 ? 's are' : ' is'} not yet activated.{' '}
+            <button onClick={() => navigate('/settings')} className="text-amber-700 underline hover:text-amber-900 font-medium">Activate subscriptions</button>
+          </span>
         </div>
       )}
 
@@ -442,6 +485,17 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
               </button>
             ))}
           </div>
+        )}
+
+        {/* Subscription filter */}
+        {subscriptionOptions.length > 1 && (
+          <MultiSelectFilter
+            options={subscriptionOptions}
+            selected={selectedSubscriptions}
+            onChange={setSelectedSubscriptions}
+            label="Subscriptions"
+            placeholder="Search subscriptions..."
+          />
         )}
 
         {/* Risk filter */}

@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -116,6 +117,7 @@ function extractTarget(path: AttackPath): string {
 // ─── Main Component ──────────────────────────────────────────────
 
 export default function GraphFindings() {
+  const { withConnection, selectedConnectionId } = useConnection();
   const [paths, setPaths] = useState<AttackPath[]>([]);
   const [stats, setStats] = useState<AttackPathStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -132,7 +134,7 @@ export default function GraphFindings() {
       if (severityFilter) params.set('severity', severityFilter);
       if (typeFilter) params.set('type', typeFilter);
       params.set('limit', '100');
-      const res = await fetch(`/api/attack-paths?${params.toString()}`);
+      const res = await fetch(withConnection(`/api/attack-paths?${params.toString()}`));
       if (res.ok) {
         const data = await res.json();
         setPaths(data.paths || []);
@@ -143,7 +145,7 @@ export default function GraphFindings() {
     } finally {
       setLoading(false);
     }
-  }, [severityFilter, typeFilter]);
+  }, [severityFilter, typeFilter, withConnection, selectedConnectionId]);
 
   useEffect(() => { fetchPaths(); }, [fetchPaths]);
 
@@ -151,7 +153,7 @@ export default function GraphFindings() {
     setAnalyzing(true);
     setAnalyzeResult(null);
     try {
-      const res = await fetch('/api/attack-paths/analyze', { method: 'POST' });
+      const res = await fetch(withConnection('/api/attack-paths/analyze'), { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setAnalyzeResult(data.message || 'Analysis complete');

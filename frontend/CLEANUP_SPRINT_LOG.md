@@ -81,7 +81,7 @@
 | 28 | Settings | org_name=NexgenixLabs — PASS |
 | 32 | Anomalies | 28 total, 28 unresolved — PASS |
 | 33 | SOAR | 40 total actions — PASS |
-| 34 | Identity Detail + Effective Access | Bhupathi: 7 roles, 26 perms, 6 Admin, 1 Write — PASS |
+| 34 | Identity Detail + Effective Access | Admin User: 7 roles, 26 perms, 6 Admin, 1 Write — PASS |
 
 ---
 

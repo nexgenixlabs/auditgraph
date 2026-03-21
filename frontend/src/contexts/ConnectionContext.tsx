@@ -23,6 +23,8 @@ interface ConnectionContextType {
   setSelectedConnectionId: (id: number | null) => void;
   connectionParam: string; // ready-to-append query param string
   loading: boolean;
+  refreshConnections: () => void;
+  onConnectionDeleted: (deletedId: number) => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextType>({
@@ -31,6 +33,8 @@ const ConnectionContext = createContext<ConnectionContextType>({
   setSelectedConnectionId: () => {},
   connectionParam: '',
   loading: true,
+  refreshConnections: () => {},
+  onConnectionDeleted: () => {},
 });
 
 export function ConnectionProvider({ children }: { children: React.ReactNode }) {
@@ -39,13 +43,12 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const [selectedConnectionId, setSelectedConnectionId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const fetchConnections = useCallback(() => {
     if (!user) {
       setConnections([]);
       setLoading(false);
       return;
     }
-    // Skip connection fetch on admin portal — connections are client-scoped
     const isAdmin = window.location.pathname.startsWith('/admin')
       || isAdminHost();
     if (isAdmin) {
@@ -53,6 +56,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       setLoading(false);
       return;
     }
+    setLoading(true);
     api.get<{ connections: CloudConnection[] }>('/client/connections')
       .then(data => {
         setConnections(
@@ -63,13 +67,28 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       .finally(() => setLoading(false));
   }, [user]);
 
+  useEffect(() => {
+    fetchConnections();
+  }, [fetchConnections]);
+
+  const onConnectionDeleted = useCallback((deletedId: number) => {
+    // Reset selection if the deleted connection was selected
+    if (selectedConnectionId === deletedId) {
+      setSelectedConnectionId(null);
+    }
+    // Refresh the list to remove it
+    fetchConnections();
+  }, [selectedConnectionId, fetchConnections]);
+
   const connectionParam = selectedConnectionId
     ? `connection_id=${selectedConnectionId}`
     : '';
 
   return (
     <ConnectionContext.Provider value={{
-      connections, selectedConnectionId, setSelectedConnectionId, connectionParam, loading,
+      connections, selectedConnectionId, setSelectedConnectionId,
+      connectionParam, loading, refreshConnections: fetchConnections,
+      onConnectionDeleted,
     }}>
       {children}
     </ConnectionContext.Provider>

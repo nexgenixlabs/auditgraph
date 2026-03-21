@@ -85,29 +85,6 @@ export const CLOUD_BRAND = {
   gcp: '#34A853',
 } as const;
 
-// ── Dashboard Tab Definitions ──────────────────────────────────────
-
-export type DashboardTab = 'exposure' | 'credential' | 'trust' | 'usage' | 'governance' | 'platform';
-
-export const DASHBOARD_TABS: { id: DashboardTab; label: string; description: string }[] = [
-  { id: 'exposure',   label: 'Exposure & Risk',           description: 'Risk trends, anomalies, and heat maps' },
-  { id: 'credential', label: 'Credential Intelligence',   description: 'Secret age, auth methods, rotation compliance' },
-  { id: 'trust',      label: 'Trust & Access',            description: 'Trust relationships and effective access' },
-  { id: 'usage',      label: 'Usage & Optimization',      description: 'Role usage, dormancy, and quick actions' },
-  { id: 'governance', label: 'Governance & Compliance',    description: 'Compliance frameworks, remediation, conditional access' },
-  { id: 'platform',   label: 'Platform & Snapshots',       description: 'Cloud coverage, SOAR, platform health' },
-];
-
-// Widget-to-tab mapping
-export const TAB_WIDGETS: Record<DashboardTab, string[]> = {
-  exposure:   ['risk_trend_chart', 'risk_velocity_chart', 'risk_heat_map', 'risk_donut_chart', 'recent_changes', 'anomaly_alerts'],
-  credential: ['credential_health', 'expiry_tracker'],
-  trust:      [],
-  usage:      ['role_usage_chart', 'quick_actions'],
-  governance: ['compliance_scorecard', 'remediation_progress', 'sa_governance', 'conditional_access'],
-  platform:   ['cloud_context_banner', 'soar_activity', 'platform_health', 'resource_overview'],
-};
-
 // ── Sidebar Section Colors ────────────────────────────────────────
 
 export const SECTION_COLORS = {

@@ -387,7 +387,7 @@ python -c "from app.database import Database; db=Database(); print(db.get_latest
 - [Lessons Learned](LESSONS-LEARNED.md)
 
 **GitHub:**
-- [Repository](https://github.com/bhupathireddys/auditgraph)
+- [Repository](https://github.com/AuditGraph/auditgraph)
 
 ---
 

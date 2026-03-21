@@ -182,7 +182,7 @@ curl http://localhost:5001/api/drift/:run_id
 
 ### Users (3)
 ```
-1. Bhupathi Reddy Sangabattula   (CRITICAL - 32 roles)
+1. Admin User   (CRITICAL - 32 roles)
    - Entra: Global Admin, Priv Role Admin, +28 more
    - Azure: Owner, User Access Admin
 

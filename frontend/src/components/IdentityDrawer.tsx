@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
 import {
   type RiskLevel, type PrivilegedLevel, type EffectiveScope, type CredentialHealth, type DormantStatus,
   RISK_BADGE, RISK_ORDER, PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, CREDENTIAL_HEALTH_CONFIG,
@@ -45,6 +46,24 @@ interface RoleEdge {
   scope_type: string;
   risk_level: string;
   usage_status?: string;
+  last_used_display?: string;
+  is_removable?: boolean;
+}
+
+interface EnrichedRole {
+  role_name: string;
+  role_type?: string;
+  scope?: string;
+  scope_type?: string;
+  risk_level?: string;
+  usage_status?: string;
+  last_used_display?: string;
+  last_used_at?: string;
+  is_removable?: boolean;
+  days_since_used?: number;
+  days_since_assigned?: number;
+  redundant_with?: string;
+  why_critical?: string;
 }
 
 interface CredentialItem {
@@ -139,6 +158,7 @@ const TABS: { id: TabId; label: string }[] = [
 // ─── Component ────────────────────────────────────────────────────
 
 export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerProps) {
+  const { withConnection } = useConnection();
   const [tab, setTab] = useState<TabId>('overview');
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<IdentityDetail | null>(null);
@@ -147,7 +167,13 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
   const [scopeHierarchy, setScopeHierarchy] = useState<ScopeItem[]>([]);
   const [graphPermissions, setGraphPermissions] = useState<GraphPermission[]>([]);
   const [owners, setOwners] = useState<OwnerInfo[]>([]);
-  const [entraScopes, setEntraScopes] = useState<{ role_name: string; directory_scope: string; risk_level: string }[]>([]);
+  const [entraScopes, setEntraScopes] = useState<{ role_name: string; directory_scope: string; risk_level: string; usage_status?: string; last_used_display?: string; is_removable?: boolean }[]>([]);
+  const [enrichedRoles, setEnrichedRoles] = useState<EnrichedRole[]>([]);
+  const [agentInfo, setAgentInfo] = useState<{
+    detected_platform?: string; classification_confidence?: number;
+    days_inactive?: number | null; agirs_score?: number;
+    has_orphan_finding?: boolean;
+  } | null>(null);
 
   // Fetch identity detail + graph data
   useEffect(() => {
@@ -156,20 +182,22 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
     setTab('overview');
 
     Promise.all([
-      fetch(`/api/identities/${encodeURIComponent(identityId)}`).then(r => r.ok ? r.json() : null),
-      fetch(`/api/identities/${encodeURIComponent(identityId)}/graph-data`).then(r => r.ok ? r.json() : null),
+      fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}`)).then(r => r.ok ? r.json() : null),
+      fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/graph-data`)).then(r => r.ok ? r.json() : null),
     ]).then(([detailData, graphData]) => {
       if (cancelled) return;
       if (detailData) {
         setDetail(detailData.identity || detailData);
         setGraphPermissions(detailData.graph_permissions || []);
         setOwners(detailData.owners || []);
+        setEnrichedRoles(detailData.roles || []);
       }
       if (graphData) {
         setRoles(graphData.trust_relationships?.role_edges || []);
         setCredentials(graphData.secret_exposure || []);
         setScopeHierarchy(graphData.effective_scope?.scope_hierarchy || []);
         setEntraScopes(graphData.effective_scope?.entra_scopes || []);
+        setAgentInfo(graphData.agent_info || null);
       }
       setLoading(false);
     }).catch(() => {
@@ -242,9 +270,9 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
         ) : !detail ? (
           <p className="text-sm text-gray-400 text-center py-8">Failed to load identity details.</p>
         ) : tab === 'overview' ? (
-          <OverviewTab detail={detail} dormantStatus={dormantStatus} owners={owners} />
+          <OverviewTab detail={detail} dormantStatus={dormantStatus} owners={owners} agentInfo={agentInfo} />
         ) : tab === 'access' ? (
-          <AccessTab roles={roles} scopeHierarchy={scopeHierarchy} entraScopes={entraScopes} />
+          <AccessTab roles={roles} scopeHierarchy={scopeHierarchy} entraScopes={entraScopes} enrichedRoles={enrichedRoles} detail={detail} />
         ) : tab === 'api' ? (
           <ApiPermsTab permissions={graphPermissions} />
         ) : tab === 'credentials' ? (
@@ -261,7 +289,10 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
 
 // ─── Tab 1: Overview ──────────────────────────────────────────────
 
-function OverviewTab({ detail, dormantStatus, owners }: { detail: IdentityDetail; dormantStatus: DormantStatus; owners: OwnerInfo[] }) {
+function OverviewTab({ detail, dormantStatus, owners, agentInfo }: {
+  detail: IdentityDetail; dormantStatus: DormantStatus; owners: OwnerInfo[];
+  agentInfo?: { detected_platform?: string; classification_confidence?: number; days_inactive?: number | null; agirs_score?: number; has_orphan_finding?: boolean } | null;
+}) {
   const rows: [string, React.ReactNode][] = [
     ['Category', <span className="font-medium">{getCategoryLabel(detail.identity_category)}</span>],
     ['Cloud', <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${CLOUD_BADGE[safeLower(detail.cloud)] || CLOUD_BADGE.azure}`}>{safeLower(detail.cloud) || 'azure'}</span>],
@@ -319,26 +350,332 @@ function OverviewTab({ detail, dormantStatus, owners }: { detail: IdentityDetail
           No owners assigned — this identity is ownerless.
         </div>
       )}
+
+      {/* Phase 3: AI Agent Risk section — only shown for classified agents */}
+      {agentInfo && <AgentRiskSection agentInfo={agentInfo} identityId={detail.identity_id} />}
+    </div>
+  );
+}
+
+function AgentRiskSection({ agentInfo, identityId }: {
+  agentInfo: { detected_platform?: string; classification_confidence?: number; days_inactive?: number | null; agirs_score?: number; has_orphan_finding?: boolean };
+  identityId: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [blastRadius, setBlastRadius] = useState<{
+    reachable_subscription_count?: number; reachable_resource_group_count?: number;
+    reachable_resource_count?: number; sensitive_resource_count?: number;
+    resource_breakdown?: Record<string, number>;
+    delegations?: { target_display_name: string }[];
+  } | null>(null);
+  const [blastLoading, setBlastLoading] = useState(true);
+  const [blastError, setBlastError] = useState(false);
+  const { withConnection } = useConnection();
+
+  const fetchBlastRadius = () => {
+    setBlastLoading(true);
+    setBlastError(false);
+    fetch(withConnection(`/api/agent-identities/${encodeURIComponent(identityId)}/blast-radius`))
+      .then(r => { if (!r.ok) throw new Error('API error'); return r.json(); })
+      .then(data => { setBlastRadius(data); setBlastLoading(false); })
+      .catch(() => { setBlastError(true); setBlastLoading(false); });
+  };
+
+  useEffect(() => { fetchBlastRadius(); }, [identityId]);
+
+  const isOrphaned = agentInfo.has_orphan_finding;
+  const daysLabel = agentInfo.days_inactive != null ? `${agentInfo.days_inactive} days` : 'Never signed in';
+
+  // Blast radius resolved with zero resources — valid empty state
+  const isEmptyBlastRadius = !blastLoading && !blastError && blastRadius != null
+    && (blastRadius.reachable_resource_count == null || blastRadius.reachable_resource_count === 0);
+
+  return (
+    <div className="mt-3" data-testid="agent-risk-section">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 w-full text-left"
+      >
+        <svg className={`w-3 h-3 text-gray-400 transition-transform ${expanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        <span className="text-[10px] text-gray-500 uppercase font-semibold tracking-wider">AI Agent Risk</span>
+        {isOrphaned && (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-100 text-red-700 border border-red-200 ml-1">
+            ORPHANED
+          </span>
+        )}
+      </button>
+
+      {expanded && (
+        <div className={`mt-2 rounded-lg border p-3 space-y-2 ${isOrphaned ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'}`}>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span className="text-gray-500">Platform</span>
+              <div className="font-medium text-gray-900">{agentInfo.detected_platform || 'Unknown'}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">Days Inactive</span>
+              <div className={`font-medium ${isOrphaned ? 'text-red-700' : 'text-gray-900'}`}>{daysLabel}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">AGIRS Score</span>
+              <div className="font-medium text-gray-900">{agentInfo.agirs_score ?? 'N/A'}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">Confidence</span>
+              <div className="font-medium text-gray-900">
+                {agentInfo.classification_confidence != null
+                  ? `${(agentInfo.classification_confidence * 100).toFixed(0)}%`
+                  : 'N/A'}
+              </div>
+            </div>
+          </div>
+
+          {isOrphaned && (
+            <div className="flex items-center gap-1.5 text-[10px] text-red-700 bg-red-100 rounded px-2 py-1.5 border border-red-200">
+              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <span className="font-semibold">IASM-AG-001: Orphaned AI Agent SPN — CRITICAL</span>
+            </div>
+          )}
+
+          {/* H3: Loading skeleton for blast radius */}
+          {blastLoading && (
+            <div className="animate-pulse space-y-2" data-testid="blast-radius-skeleton">
+              <div className="h-3 bg-gray-200 rounded w-[40%]" />
+              <div className="h-3 bg-gray-200 rounded w-[60%]" />
+              <div className="h-3 bg-gray-200 rounded w-[50%]" />
+              <div className="h-4 bg-gray-200 rounded w-[80%]" />
+            </div>
+          )}
+
+          {/* H3: Error state for blast radius */}
+          {blastError && (
+            <div className="text-xs space-y-1.5" data-testid="blast-radius-error">
+              <p className="text-gray-500">Blast radius unavailable — data will refresh on next scan</p>
+              <button
+                onClick={fetchBlastRadius}
+                className="text-xs text-gray-500 hover:text-gray-700 underline"
+                data-testid="blast-radius-retry"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* H3: Empty state — agent has zero resources in scope */}
+          {isEmptyBlastRadius && (
+            <p className="text-xs text-gray-500" data-testid="blast-radius-empty">
+              No resources in scope — this agent has no active role assignments
+            </p>
+          )}
+
+          {/* Blast radius data — only when loaded successfully with resources */}
+          {!blastLoading && !blastError && blastRadius && blastRadius.reachable_resource_count != null && blastRadius.reachable_resource_count > 0 && (
+            <div className="text-xs" data-testid="blast-radius-data">
+              <div className="text-gray-500 font-medium mb-1">If compromised, attacker gains access to:</div>
+              <div className="grid grid-cols-2 gap-1 text-gray-700">
+                {(blastRadius.reachable_subscription_count ?? 0) > 0 && (
+                  <div className="flex items-center gap-1">
+                    <span className="font-semibold">{blastRadius.reachable_subscription_count}</span> subscription{(blastRadius.reachable_subscription_count ?? 0) !== 1 ? 's' : ''}
+                  </div>
+                )}
+                {(blastRadius.reachable_resource_group_count ?? 0) > 0 && (
+                  <div className="flex items-center gap-1">
+                    <span className="font-semibold">{blastRadius.reachable_resource_group_count}</span> resource group{(blastRadius.reachable_resource_group_count ?? 0) !== 1 ? 's' : ''}
+                  </div>
+                )}
+                {blastRadius.resource_breakdown && Object.entries(blastRadius.resource_breakdown).map(([type, count]) => (
+                  <div key={type} className="flex items-center gap-1">
+                    <span className="font-semibold">{count as number}</span> {(type as string).replace(/_/g, ' ')}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {blastRadius?.delegations && blastRadius.delegations.length > 0 && (
+            <div className="text-xs text-gray-700">
+              <span className="text-gray-500">Delegates to: </span>
+              {blastRadius.delegations.map((d, i) => (
+                <span key={i} className="font-medium text-amber-700">
+                  {d.target_display_name}{i < blastRadius.delegations!.length - 1 ? ', ' : ''}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <Link
+            to={`/identities/${encodeURIComponent(identityId)}`}
+            className="inline-flex items-center gap-1 text-[10px] text-blue-600 hover:text-blue-800 font-medium"
+          >
+            View full blast radius
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </Link>
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── Tab 2: Effective Access ──────────────────────────────────────
 
-function AccessTab({ roles, scopeHierarchy, entraScopes }: { roles: RoleEdge[]; scopeHierarchy: ScopeItem[]; entraScopes: { role_name: string; directory_scope: string; risk_level: string }[] }) {
+function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }: {
+  roles: RoleEdge[]; scopeHierarchy: ScopeItem[];
+  entraScopes: { role_name: string; directory_scope: string; risk_level: string; usage_status?: string; last_used_display?: string; is_removable?: boolean }[];
+  enrichedRoles: EnrichedRole[];
+  detail: IdentityDetail;
+}) {
+  const [scriptCopied, setScriptCopied] = useState(false);
+
+  // Build lookup from enriched roles using composite key (role_name::scope)
+  const enrichedLookup: Record<string, EnrichedRole> = {};
+  for (const er of enrichedRoles) {
+    const compositeKey = `${er.role_name}::${er.scope || ''}`;
+    enrichedLookup[compositeKey] = er;
+    const nameKey = `name:${er.role_name}`;
+    if (!enrichedLookup[nameKey]) enrichedLookup[nameKey] = er;
+  }
+  const findEnriched = (roleName: string, scope?: string): EnrichedRole | undefined => {
+    return enrichedLookup[`${roleName}::${scope || ''}`] || enrichedLookup[`name:${roleName}`];
+  };
+
+  const removableRoles = enrichedRoles.filter(r => r.is_removable);
+  const removableCount = removableRoles.length;
+
+  const USAGE_BADGE: Record<string, { label: string; color: string; ts: string }> = {
+    active: { label: 'Active', color: 'bg-green-100 text-green-700', ts: 'text-green-600' },
+    stale: { label: 'Stale', color: 'bg-yellow-100 text-yellow-700', ts: 'text-yellow-600' },
+    dormant: { label: 'Dormant', color: 'bg-orange-100 text-orange-700', ts: 'text-orange-600' },
+    never_used: { label: 'Never Used', color: 'bg-red-100 text-red-700', ts: 'text-red-500' },
+    definitely_unused: { label: 'Never Used', color: 'bg-red-100 text-red-700', ts: 'text-red-500' },
+  };
+
+  // Generate cleanup script for all removable roles
+  const handleCopyCleanup = () => {
+    const objId = detail.principal_id || detail.identity_id;
+    const lines = [
+      `# AuditGraph Least-Privilege Cleanup`,
+      `# Identity: ${detail.display_name}`,
+      `# Removable roles: ${removableRoles.length}`,
+      `# Generated: ${new Date().toISOString()}`,
+      ``,
+      `Connect-AzAccount`,
+      ``,
+    ];
+    removableRoles.forEach((role, i) => {
+      lines.push(`# --- Role ${i + 1}: ${role.role_name} (${role.usage_status || 'unused'}) ---`);
+      if (role.scope) {
+        lines.push(`Remove-AzRoleAssignment \``);
+        lines.push(`  -ObjectId "${objId}" \``);
+        lines.push(`  -RoleDefinitionName "${role.role_name}" \``);
+        lines.push(`  -Scope "${role.scope}"`);
+      } else {
+        lines.push(`# Scope not available — find manually:`);
+        lines.push(`# Get-AzRoleAssignment -ObjectId "${objId}"`);
+      }
+      lines.push(``);
+    });
+    navigator.clipboard.writeText(lines.join('\n'));
+    setScriptCopied(true);
+    setTimeout(() => setScriptCopied(false), 2000);
+  };
+
+  // Generate single-role PS1 script and copy to clipboard
+  const handleCopyRoleScript = (er: EnrichedRole) => {
+    const objId = detail.principal_id || detail.identity_id;
+    const script = er.scope
+      ? [
+          `# Remove ${er.role_name} from ${detail.display_name}`,
+          `# Scope: ${er.scope}`,
+          `# Status: ${er.usage_status || 'unknown'}${er.last_used_display ? ' · ' + er.last_used_display : ''}`,
+          ``,
+          `Connect-AzAccount`,
+          `Remove-AzRoleAssignment \``,
+          `  -ObjectId "${objId}" \``,
+          `  -RoleDefinitionName "${er.role_name}" \``,
+          `  -Scope "${er.scope}"`,
+        ].join('\n')
+      : `# Scope not available — find manually:\n# Get-AzRoleAssignment -ObjectId "${objId}"`;
+    navigator.clipboard.writeText(script);
+  };
+
+  // Render usage badge + timestamp inline
+  const usageBadge = (usage: string | undefined, lastUsed: string | undefined) => {
+    const ub = usage ? USAGE_BADGE[usage] : null;
+    if (!ub) return null;
+    return (
+      <span className="flex items-center gap-1">
+        <span className={`px-1 py-0.5 rounded text-[9px] font-semibold ${ub.color}`}>{ub.label}</span>
+        {lastUsed && lastUsed !== 'No data' && (
+          <span className={`text-[10px] ${ub.ts}`}>· {lastUsed}</span>
+        )}
+      </span>
+    );
+  };
+
   return (
     <div className="space-y-4">
+      {/* Element 2: Removable roles banner with Copy Cleanup Script */}
+      {removableCount > 0 && (
+        <div className="flex items-center justify-between bg-orange-50 border border-orange-200 rounded-lg px-3 py-2.5">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <svg className="w-4 h-4 text-orange-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              <span className="text-xs font-semibold text-orange-800">
+                {removableCount} unused role assignment{removableCount > 1 ? 's' : ''} detected
+              </span>
+            </div>
+            <div className="text-[10px] text-orange-600 mt-0.5 ml-5.5">
+              Based on last sign-in activity
+            </div>
+          </div>
+          <button
+            onClick={handleCopyCleanup}
+            className="flex-shrink-0 ml-3 px-2.5 py-1.5 text-[10px] font-medium rounded-md bg-orange-100 text-orange-800 hover:bg-orange-200 transition border border-orange-200"
+          >
+            {scriptCopied ? 'Copied!' : 'Copy cleanup script'}
+          </button>
+        </div>
+      )}
+
       {/* Entra Directory Roles */}
       {entraScopes.length > 0 && (
         <div>
           <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">Entra Directory Roles ({entraScopes.length})</h4>
           <div className="space-y-1">
-            {entraScopes.map((r, idx) => (
-              <div key={idx} className="flex items-center justify-between bg-purple-50 rounded-lg px-2.5 py-1.5">
-                <span className="text-xs font-medium text-purple-900">{r.role_name}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(r.risk_level)] || 'bg-gray-100 text-gray-500'}`}>{r.risk_level}</span>
-              </div>
-            ))}
+            {entraScopes.map((r, idx) => {
+              const er = findEnriched(r.role_name, r.directory_scope);
+              const usage = r.usage_status || er?.usage_status;
+              const lastUsed = r.last_used_display || er?.last_used_display;
+              const removable = r.is_removable || er?.is_removable;
+              return (
+                <div key={idx} className={`rounded-lg px-2.5 py-1.5 ${removable ? 'bg-orange-50 border border-orange-200' : 'bg-purple-50'}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-purple-900">{r.role_name}</span>
+                    <div className="flex items-center gap-1">
+                      {usageBadge(usage, lastUsed)}
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(r.risk_level)] || 'bg-gray-100 text-gray-500'}`}>{r.risk_level}</span>
+                      {removable && er && (
+                        <button
+                          onClick={() => er && handleCopyRoleScript(er)}
+                          className="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-orange-100 text-orange-700 hover:bg-orange-200 transition border border-orange-200"
+                          title={`Copy PowerShell to remove ${r.role_name}`}
+                        >
+                          PS1
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -386,20 +723,44 @@ function AccessTab({ roles, scopeHierarchy, entraScopes }: { roles: RoleEdge[]; 
       {/* All roles list */}
       {roles.length > 0 && (
         <div>
-          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">All Role Assignments ({roles.length})</h4>
+          <div className="flex items-center gap-2 mb-2">
+            <h4 className="text-[10px] text-gray-500 uppercase font-semibold">All Role Assignments ({roles.length})</h4>
+            {removableCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-orange-100 text-orange-700">
+                {removableCount} removable
+              </span>
+            )}
+          </div>
           <div className="space-y-1 max-h-[300px] overflow-y-auto">
-            {roles.map((r, idx) => (
-              <div key={idx} className="flex items-center justify-between text-xs bg-gray-50 rounded px-2.5 py-1.5">
-                <div className="min-w-0 flex-1">
-                  <span className="font-medium text-gray-900">{r.role_name}</span>
-                  <span className="text-[10px] text-gray-400 ml-1">{r.role_type}</span>
+            {roles.map((r, idx) => {
+              const er = findEnriched(r.role_name, r.scope);
+              const usage = r.usage_status || er?.usage_status;
+              const lastUsed = r.last_used_display || er?.last_used_display;
+              const isRemovable = r.is_removable || er?.is_removable || ['stale', 'dormant', 'never_used'].includes(usage || '');
+              return (
+                <div key={idx} className={`text-xs rounded px-2.5 py-1.5 ${isRemovable ? 'bg-orange-50 border border-orange-200' : 'bg-gray-50'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="min-w-0 flex-1">
+                      <span className="font-medium text-gray-900">{r.role_name}</span>
+                      <span className="text-[10px] text-gray-400 ml-1">{r.role_type}</span>
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {usageBadge(usage, lastUsed)}
+                      <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(r.risk_level)] || 'bg-gray-100 text-gray-500'}`}>{r.risk_level}</span>
+                      {isRemovable && er && (
+                        <button
+                          onClick={() => handleCopyRoleScript(er)}
+                          className="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-orange-100 text-orange-700 hover:bg-orange-200 transition border border-orange-200"
+                          title={`Copy PowerShell to remove ${r.role_name}`}
+                        >
+                          PS1
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-gray-400 truncate max-w-[120px]" title={r.scope}>{r.scope_type}</span>
-                  <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(r.risk_level)] || 'bg-gray-100 text-gray-500'}`}>{r.risk_level}</span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -540,12 +901,13 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
 // ─── Tab 5: Usage Intelligence ────────────────────────────────────
 
 function UsageTab({ detail, dormantStatus, roles }: { detail: IdentityDetail; dormantStatus: DormantStatus; roles: RoleEdge[] }) {
+  const { withConnection } = useConnection();
   const [usageData, setUsageData] = useState<any>(null);
   const [usageLoading, setUsageLoading] = useState(true);
 
   useEffect(() => {
     setUsageLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(detail.identity_id)}/usage`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(detail.identity_id)}/usage`))
       .then(r => r.ok ? r.json() : null)
       .then(data => { setUsageData(data); setUsageLoading(false); })
       .catch(() => setUsageLoading(false));

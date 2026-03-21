@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { ReactFlow, Controls, Background, MiniMap } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { nodeTypes } from './nodes';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 import AttackPathView from './AttackPathView';
 
@@ -12,8 +13,8 @@ interface GraphDataResponse {
   display_name: string;
   risk_level: string;
   risk_score: number;
-  trust_relationships: {
-    federated_trusts: Array<{
+  trust_relationships?: {
+    federated_trusts?: Array<{
       credential_id: number;
       issuer: string;
       subject: string;
@@ -21,14 +22,14 @@ interface GraphDataResponse {
       trust_risk: string;
       trust_reason: string;
     }>;
-    ownership_edges: Array<{
+    ownership_edges?: Array<{
       owner_object_id: string;
       owner_display_name: string;
       owner_upn?: string;
       owner_type: string;
       is_primary_owner: boolean;
     }>;
-    role_edges: Array<{
+    role_edges?: Array<{
       role_name: string;
       role_type: string;
       scope: string;
@@ -37,7 +38,7 @@ interface GraphDataResponse {
       usage_status: string;
     }>;
   };
-  effective_scope: {
+  effective_scope?: {
     subscription_count: number;
     resource_group_count: number;
     resource_count: number;
@@ -58,7 +59,7 @@ interface GraphDataResponse {
     }>;
     blast_radius_label: string;
   };
-  secret_exposure: Array<{
+  secret_exposure?: Array<{
     credential_id: number;
     credential_type: string;
     display_name?: string;
@@ -114,8 +115,8 @@ function CollapsiblePanel({ title, count, defaultOpen, children }: { title: stri
 
 // ── Trust Relationships Panel ─────────────────────────────────
 function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }) {
-  const hasFed = data.federated_trusts.length > 0;
-  const hasOwners = data.ownership_edges.length > 0;
+  const hasFed = (data?.federated_trusts?.length ?? 0) > 0;
+  const hasOwners = (data?.ownership_edges?.length ?? 0) > 0;
 
   if (!hasFed && !hasOwners) {
     return <div className="text-sm text-gray-500">No federated trusts or ownership data found.</div>;
@@ -135,7 +136,7 @@ function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }
                 <th className="pb-1.5">Reason</th>
               </tr></thead>
               <tbody>
-                {data.federated_trusts.map((ft, i) => (
+                {(data?.federated_trusts ?? []).map((ft, i) => (
                   <tr key={i} className="border-b border-gray-100">
                     <td className="py-2 pr-4 font-medium text-gray-900">{ft.issuer_label}</td>
                     <td className="py-2 pr-4 text-gray-600 max-w-[200px] truncate" title={ft.subject}>{ft.subject}</td>
@@ -152,7 +153,7 @@ function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }
         <div>
           <h4 className="text-xs font-semibold text-gray-700 uppercase mb-2">Ownership</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {data.ownership_edges.map((o, i) => (
+            {(data?.ownership_edges ?? []).map((o, i) => (
               <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-50 border border-green-200">
                 <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -172,6 +173,9 @@ function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }
 
 // ── Effective Scope Panel ─────────────────────────────────────
 function ScopePanel({ data }: { data: GraphDataResponse['effective_scope'] }) {
+  if (!data) {
+    return <div className="text-sm text-gray-500">No scope data available.</div>;
+  }
   return (
     <div className="space-y-4">
       {/* Blast radius summary bar */}
@@ -276,7 +280,7 @@ function ScopePanel({ data }: { data: GraphDataResponse['effective_scope'] }) {
 
 // ── Secret Exposure Panel ─────────────────────────────────────
 function ExposurePanel({ data }: { data: GraphDataResponse['secret_exposure'] }) {
-  if (data.length === 0) {
+  if (!data || data.length === 0) {
     return <div className="text-sm text-gray-500">No credentials found for this identity.</div>;
   }
 
@@ -337,6 +341,7 @@ function ExposurePanel({ data }: { data: GraphDataResponse['secret_exposure'] })
 
 // ── Main Access Graph Tab ─────────────────────────────────────
 export default function AccessGraphTab({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
   const [data, setData] = useState<GraphDataResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -348,7 +353,7 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
     let cancelled = false;
     setLoading(true);
     setError('');
-    fetch(`/api/identities/${encodeURIComponent(identityId)}/graph-data`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/graph-data`))
       .then(res => {
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         return res.json();
@@ -357,12 +362,12 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
       .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load graph data'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [identityId]);
+  }, [identityId, withConnection]);
 
   useEffect(() => {
     if (viewMode !== 'attack_paths' || attackPaths) return;
     setAttackPathsLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(identityId)}/attack-paths`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/attack-paths`))
       .then(r => r.ok ? r.json() : { paths: [], summary: { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' } })
       .then(d => setAttackPaths(d))
       .catch(() => setAttackPaths({ paths: [], summary: { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' } }))
@@ -379,9 +384,9 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
     return viewMode === 'executive' ? data.graph.executive_edges : data.graph.technical_edges;
   }, [data, viewMode]);
 
-  const trustCount = (data?.trust_relationships.federated_trusts.length ?? 0) +
-                     (data?.trust_relationships.ownership_edges.length ?? 0);
-  const exposureCount = data?.secret_exposure.filter(s => s.exposure_flags.length > 0).length ?? 0;
+  const trustCount = (data?.trust_relationships?.federated_trusts?.length ?? 0) +
+                     (data?.trust_relationships?.ownership_edges?.length ?? 0);
+  const exposureCount = data?.secret_exposure?.filter(s => (s.exposure_flags?.length ?? 0) > 0).length ?? 0;
 
   if (loading) {
     return (
@@ -477,15 +482,15 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
 
       {/* Detail Panels */}
       <CollapsiblePanel title="Trust Relationships" count={trustCount} defaultOpen={trustCount > 0}>
-        <TrustPanel data={data.trust_relationships} />
+        <TrustPanel data={data?.trust_relationships} />
       </CollapsiblePanel>
 
-      <CollapsiblePanel title="Effective Scope" count={data.effective_scope.subscription_count + data.effective_scope.entra_scopes.length}>
-        <ScopePanel data={data.effective_scope} />
+      <CollapsiblePanel title="Effective Scope" count={(data?.effective_scope?.subscription_count ?? 0) + (data?.effective_scope?.entra_scopes?.length ?? 0)}>
+        <ScopePanel data={data?.effective_scope} />
       </CollapsiblePanel>
 
       <CollapsiblePanel title="Secret Exposure Intelligence" count={exposureCount} defaultOpen={exposureCount > 0}>
-        <ExposurePanel data={data.secret_exposure} />
+        <ExposurePanel data={data?.secret_exposure} />
       </CollapsiblePanel>
     </div>
   );

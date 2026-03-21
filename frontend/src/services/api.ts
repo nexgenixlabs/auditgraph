@@ -36,12 +36,28 @@ const API_BASE =
 
 /**
  * Axios instance configured for AuditGraph API requests.
+ * Includes auth + tenant isolation interceptors matching the global fetch interceptor.
  */
 const api = axios.create({
   baseURL: API_BASE,
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+// Attach Authorization + X-Organization-Id on every request (mirrors AuthContext fetch interceptor)
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('access_token');
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  const orgId = localStorage.getItem('active_org_id');
+  if (orgId) {
+    config.headers = config.headers || {};
+    config.headers['X-Organization-Id'] = orgId;
+  }
+  return config;
 });
 
 export const getStats = async () => {

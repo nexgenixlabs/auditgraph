@@ -37,7 +37,7 @@ param adminImageTag string = 'dev'
 // ── Database Parameters ─────────────────────────────────────────────────────
 
 @description('PostgreSQL Flexible Server FQDN (public hostname — resolves to private IP via VNet DNS)')
-param dbHost string = 'eus2-ag-nonprod-pg.postgres.database.azure.com'
+param dbHost string = 'cus-ag-nonprod-pg.postgres.database.azure.com'
 
 @description('Database name')
 param dbName string = 'auditgraph_dev_eastus2'

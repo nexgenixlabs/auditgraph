@@ -153,4 +153,4 @@ All 3 graph endpoints verified:
 - `tfsabackenddev12345` (storage) → PCI
 - `aglab-kv-10-gpzm27wy` (key vault) → PII
 
-15 identities discovered with sensitive data access, highest exposure: Bhupathi Reddy Sangabattula (4 resources, Admin access).
+15 identities discovered with sensitive data access, highest exposure: Admin User (4 resources, Admin access).

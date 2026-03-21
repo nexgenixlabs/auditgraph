@@ -352,7 +352,7 @@ az ad sp delete --id <object-id>
 
 ---
 
-**Prepared by:** Bhupathi  
+**Prepared by:** AuditGraph Team  
 **Date:** February 1, 2026  
 **Review Date:** Week 10 Completion
 MARKDOWN

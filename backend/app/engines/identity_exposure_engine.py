@@ -308,6 +308,7 @@ class IdentityExposureEngine:
               AND i.identity_category = 'service_principal'
               AND i.activity_status IN ('stale', 'inactive', 'never_used')
               AND i.enabled IS NOT false
+              AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
         """, (run_id,))
 
         results = []

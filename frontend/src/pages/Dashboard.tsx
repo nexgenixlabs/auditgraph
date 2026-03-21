@@ -1,30 +1,40 @@
+/**
+ * AuditGraph — Risk Monitoring Dashboard
+ *
+ * Single scrollable page with 7 sections:
+ *   1. Header (Risk Monitoring + SOC badge + Capture Snapshot + View Alerts)
+ *   2. Active Identity Alerts (AnomalyAlerts)
+ *   3. Risk Trend + Velocity (side-by-side)
+ *   4. Identity Risk Heat Map + Distribution (side-by-side)
+ *   5. Snapshot Drift Analysis (RecentChanges)
+ *   6. Machine Identity Exposure (inline)
+ *   7. Credential Intelligence (CredentialHealth + ExpiryTracker + CredentialIntelligence)
+ *
+ * No tabs. No metric overlap with / (Executive Posture).
+ * All data from 8 API calls — no compliance, governance, or AGIRS data.
+ */
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { CATEGORY_DISPLAY_ORDER, EXPOSURE_LEVEL_CONFIG, getCategoriesForClouds } from '../constants/metrics';
-import { DASHBOARD_TABS, type DashboardTab, COLORS } from '../constants/design';
+import { useNavigate, Link } from 'react-router-dom';
+import { EXPOSURE_LEVEL_CONFIG, getCategoriesForClouds } from '../constants/metrics';
+import { COLORS } from '../constants/design';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 import { formatDate } from '../utils/displayHelpers';
+import { DiscoveryProgressModal } from '../components/settings/DiscoveryProgressModal';
 
-import StatsCard from '../components/StatsCard';
-import ViewAllButton from '../components/ViewAllButton';
-import RiskMethodology from '../components/RiskMethodology';
 import {
-  RiskHeatMap, QuickActions, RiskDonutChart, CredentialHealth,
-  ComplianceScorecard, ConditionalAccessCard, CloudContextBanner,
-  RecentChanges, RemediationProgress, RiskTrendChart, RoleUsageChart,
-  AnomalyAlerts, RiskVelocityChart, SOARActivity, ServiceAccountGovernance,
-  PlatformHealth, CustomizePanel, IdentityCorrelationWidget,
+  RiskHeatMap, RiskDonutChart, CredentialHealth,
+  RecentChanges, RiskTrendChart,
+  AnomalyAlerts, RiskVelocityChart,
 } from '../components/dashboard';
+import { COLORS as CISO_COLORS, getScoreColor, getTierColor } from '../constants/ciso';
+import { FONT, Sparkline, CISOBadge } from '../components/dashboard/ciso-shared';
 import ExpiryTracker from '../components/dashboard/ExpiryTracker';
-import ResourceOverview from '../components/dashboard/ResourceOverview';
 import CredentialIntelligence from '../components/dashboard/CredentialIntelligence';
-import TrustAccessPanel from '../components/dashboard/TrustAccessPanel';
-import Sparkline from '../components/Sparkline';
 import StaleDataBanner from '../components/StaleDataBanner';
 import AudienceBadge from '../components/AudienceBadge';
 import { useToast } from '../components/ToastProvider';
-import DrillableNumber from '../components/DrillableNumber';
-import { useDashboardPreferences } from '../hooks/useDashboardPreferences';
+
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -48,18 +58,15 @@ interface StatsResponse {
   ghost_count?: number;
   disabled_count?: number;
   deleted_count?: number;
+  customer_count?: number;
+  microsoft_count?: number;
+  total_including_microsoft?: number;
   workload_exposure?: {
     total: number; critical: number; orphaned: number;
     can_escalate: number; anomalies_unresolved: number;
     exposure_distribution?: { critical: number; high: number; medium: number; low: number };
     blind_count?: number; avg_exposure_score?: number;
   };
-}
-
-interface MonitoredResources {
-  azure: { subscriptions: number; subscription_ids: string[] };
-  aws: { accounts: number; account_ids: string[] };
-  gcp: { projects: number; project_ids: string[] };
 }
 
 interface IdentitySummaryResponse {
@@ -69,7 +76,11 @@ interface IdentitySummaryResponse {
     string,
     { total: number; critical: number; high: number; medium: number; low: number; info: number; unknown: number }
   >;
-  monitored_resources?: MonitoredResources;
+  monitored_resources?: {
+    azure: { subscriptions: number; subscription_ids: string[] };
+    aws: { accounts: number; account_ids: string[] };
+    gcp: { projects: number; project_ids: string[] };
+  };
 }
 
 interface PostureResponse {
@@ -106,33 +117,24 @@ interface PostureResponse {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const { addToast } = useToast();
-  const { withConnection, selectedConnectionId } = useConnection();
+  const { connections, withConnection, selectedConnectionId } = useConnection();
+  const { activeOrgId } = useAuth();
 
-  // Tab state from URL
-  const activeTab = (searchParams.get('tab') as DashboardTab) || 'exposure';
-  const setActiveTab = useCallback((tab: DashboardTab) => {
-    setSearchParams({ tab }, { replace: true });
-  }, [setSearchParams]);
+  // Connection scope label for header
+  const scopeLabel = selectedConnectionId
+    ? connections.find(c => c.id === selectedConnectionId)?.label || `Connection ${selectedConnectionId}`
+    : connections.length > 1 ? 'All Connections' : connections[0]?.label || '';
 
   // Data state
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<IdentitySummaryResponse | null>(null);
   const [posture, setPosture] = useState<PostureResponse | null>(null);
-  const [compliance, setCompliance] = useState<any>(null);
-  const [caData, setCaData] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [snapshotRunning, setDiscoveryRunning] = useState(false);
-  const [schedulerInfo, setSchedulerInfo] = useState<{ scheduler: string; next_run: string | null; interval_hours: number } | null>(null);
-  const [showRuns, setShowRuns] = useState(false);
-  const [runs, setRuns] = useState<any[]>([]);
+  const [anomalyData, setAnomalyData] = useState<{ anomalies: any[]; unresolved_count: number } | null>(null);
   const [driftData, setDriftData] = useState<any>(null);
   const [trends, setTrends] = useState<Array<{ run_id: number; date: string | null; total: number; critical: number; high: number; medium: number; low: number; dormant: number }>>([]);
-  const [remediationSummary, setRemediationSummary] = useState<{ open: number; acknowledged: number; completed: number; skipped: number; total: number; completion_pct: number } | null>(null);
-  const [roleUsage, setRoleUsage] = useState<{ statuses: Record<string, number>; by_risk: Record<string, number>; total: number } | null>(null);
-  const [anomalyData, setAnomalyData] = useState<{ anomalies: any[]; unresolved_count: number } | null>(null);
   const [velocityData, setVelocityData] = useState<{
     transitions: Array<{
       run_id: number; date: string | null; prev_run_id: number;
@@ -140,14 +142,12 @@ export default function Dashboard() {
     }>;
     retention: Record<string, { retained: number; total: number; rate: number }>;
   } | null>(null);
-  const [discoveryStatus, setDiscoveryStatus] = useState<{ has_snapshot: boolean; total_completed: number; latest_run: any } | null>(null);
   const [enabledClouds, setEnabledClouds] = useState<string[]>([]);
+  const [snapshotRunning, setSnapshotRunning] = useState(false);
+  const [agirsSummary, setAgirsSummary] = useState<{ score: number; tier: string } | null>(null);
+  const [agirsTrend, setAgirsTrend] = useState<number[]>([]);
 
-  // Dashboard customization (Phase 44)
-  const [customizeOpen, setCustomizeOpen] = useState(false);
-  const { widgets: widgetPrefs, saving: prefsSaving, dirty: prefsDirty, toggleWidget, moveWidget, save: savePrefs, reset: resetPrefs } = useDashboardPreferences();
-
-  // ── Data Fetching ──────────────────────────────────────────────
+  // ── Data Fetching (8 API calls) ─────────────────────────────────
 
   useEffect(() => {
     let cancelled = false;
@@ -156,12 +156,10 @@ export default function Dashboard() {
       setLoading(true);
       setError(null);
       try {
-        const [statsRes, summaryRes, postureRes, complianceRes, caRes] = await Promise.all([
+        const [statsRes, summaryRes, postureRes] = await Promise.all([
           fetch(withConnection('/api/stats')),
           fetch(withConnection('/api/identity-summary')),
           fetch(withConnection('/api/dashboard/posture')),
-          fetch(withConnection('/api/dashboard/compliance')),
-          fetch(withConnection('/api/dashboard/conditional-access')),
         ]);
 
         if (!statsRes.ok) throw new Error(`Stats API error: ${statsRes.status}`);
@@ -175,11 +173,8 @@ export default function Dashboard() {
         let postureJson: PostureResponse | null = null;
         if (postureRes.ok) postureJson = await postureRes.json().catch(() => null);
 
-        const complianceJson = complianceRes.ok ? await complianceRes.json().catch(() => null) : null;
-        const caJson = caRes.ok ? await caRes.json().catch(() => null) : null;
-
-        let schedJson = null;
-        try { const r = await fetch(withConnection('/api/scheduler')); if (r.ok) schedJson = await r.json(); } catch {}
+        let anomalyJson = null;
+        try { const r = await fetch(withConnection('/api/dashboard/anomalies')); if (r.ok) anomalyJson = await r.json(); } catch {}
 
         let driftJson = null;
         try { const r = await fetch(withConnection('/api/drift/latest')); if (r.ok) driftJson = await r.json(); } catch {}
@@ -187,20 +182,8 @@ export default function Dashboard() {
         let trendsJson: typeof trends = [];
         try { const r = await fetch(withConnection('/api/trends')); if (r.ok) { const d = await r.json(); trendsJson = d.runs || []; } } catch {}
 
-        let remSummaryJson = null;
-        try { const r = await fetch(withConnection('/api/remediation-summary')); if (r.ok) remSummaryJson = await r.json(); } catch {}
-
-        let roleUsageJson = null;
-        try { const r = await fetch(withConnection('/api/dashboard/role-usage')); if (r.ok) roleUsageJson = await r.json(); } catch {}
-
-        let anomalyJson = null;
-        try { const r = await fetch(withConnection('/api/dashboard/anomalies')); if (r.ok) anomalyJson = await r.json(); } catch {}
-
         let velocityJson = null;
         try { const r = await fetch(withConnection('/api/trends/velocity')); if (r.ok) velocityJson = await r.json(); } catch {}
-
-        let discStatusJson = null;
-        try { const r = await fetch('/api/discovery/status'); if (r.ok) discStatusJson = await r.json(); } catch {}
 
         let cloudCfg: string[] = [];
         try {
@@ -211,21 +194,29 @@ export default function Dashboard() {
           }
         } catch {}
 
+        // AGIRS summary for compact widget
+        let agirsData: { score: number; tier: string } | null = null;
+        try {
+          const r = await fetch(withConnection('/api/identity-risk-summary'));
+          if (r.ok) {
+            const d = await r.json();
+            if (d?.agirs) {
+              agirsData = { score: d.agirs.score ?? 0, tier: d.agirs.tier ?? 'Unknown' };
+            }
+          }
+        } catch {}
+
         if (!cancelled) {
-          setEnabledClouds(cloudCfg);
           setStats(statsJson);
           setSummary(summaryJson);
           setPosture(postureJson);
-          setCompliance(complianceJson);
-          setCaData(caJson);
-          setSchedulerInfo(schedJson);
+          setAnomalyData(anomalyJson);
           setDriftData(driftJson);
           setTrends(trendsJson);
-          setRemediationSummary(remSummaryJson);
-          setRoleUsage(roleUsageJson);
-          setAnomalyData(anomalyJson);
           setVelocityData(velocityJson);
-          setDiscoveryStatus(discStatusJson);
+          setEnabledClouds(cloudCfg);
+          setAgirsSummary(agirsData);
+          setAgirsTrend(trendsJson.map((r: any) => r.posture_score ?? r.total ?? 0).filter((v: number) => v > 0));
         }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load dashboard');
@@ -236,31 +227,11 @@ export default function Dashboard() {
 
     load();
     return () => { cancelled = true; };
-  }, [selectedConnectionId]);
-
-  useEffect(() => {
-    if (!showRuns) return;
-    fetch('/api/runs')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.runs) setRuns(data.runs); })
-      .catch(() => {});
-  }, [showRuns]);
+  }, [selectedConnectionId, activeOrgId]);
 
   // ── Derived Data ───────────────────────────────────────────────
 
   const latest = stats?.latest_run;
-  const prev = stats?.previous_run;
-
-  function trendDir(current: number, previous: number | undefined): 'up' | 'down' | 'neutral' | undefined {
-    if (previous == null) return undefined;
-    if (current > previous) return 'up';
-    if (current < previous) return 'down';
-    return 'neutral';
-  }
-
-  function trendSeries(key: 'total' | 'critical' | 'high' | 'medium' | 'low' | 'dormant'): number[] {
-    return trends.map(t => t[key] ?? 0);
-  }
 
   const categoryCards = useMemo(() => {
     const categories = summary?.categories || {};
@@ -289,89 +260,72 @@ export default function Dashboard() {
     navigate(`/identities?risk_level=${level}`);
   };
 
-  // ── Snapshot Trigger ──────────────────────────────────────
+  // ── Snapshot Trigger + Progress Modal ──────────────────────
+
+  const [showProgressModal, setShowProgressModal] = useState(false);
 
   const triggerSnapshot = useCallback(async () => {
-    setDiscoveryRunning(true);
+    if (snapshotRunning) {
+      // Already running — just re-open modal
+      setShowProgressModal(true);
+      return;
+    }
+    setSnapshotRunning(true);
     try {
-      const res = await fetch('/api/runs/trigger', { method: 'POST' });
-      if (!res.ok) throw new Error('Trigger failed');
-      addToast('Snapshot capture started', 'success');
-      const poll = setInterval(async () => {
-        const runsRes = await fetch('/api/runs');
-        if (runsRes.ok) {
-          const runsJson = await runsRes.json();
-          const latest = runsJson?.runs?.[0];
-          if (latest?.status === 'completed') {
-            clearInterval(poll);
-            setDiscoveryRunning(false);
-            addToast('Snapshot complete! Refreshing...', 'success');
-            window.location.reload();
-          }
-        }
-      }, 5000);
-      setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Snapshot timed out. Check snapshot history for status.', 'error'); }, 600000);
+      const connId = selectedConnectionId || undefined;
+      const body = connId ? JSON.stringify({ connection_id: connId }) : undefined;
+      const res = await fetch('/api/runs/trigger', {
+        method: 'POST',
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body,
+      });
+      if (!res.ok && res.status !== 409) throw new Error('Trigger failed');
     } catch (e: any) {
       addToast(e?.message || 'Failed to trigger snapshot', 'error');
-      setDiscoveryRunning(false);
+      setSnapshotRunning(false);
+      return;
     }
-  }, [addToast]);
-
-  const runFirstDiscovery = useCallback(async () => {
-    setDiscoveryRunning(true);
-    try {
-      const res = await fetch('/api/discovery/run', { method: 'POST' });
-      if (!res.ok) throw new Error('Trigger failed');
-      addToast('First discovery started — this may take a few minutes', 'success');
-      const poll = setInterval(async () => {
-        try {
-          const r = await fetch('/api/discovery/status');
-          if (r.ok) {
-            const d = await r.json();
-            if (d.has_snapshot) {
-              clearInterval(poll);
-              setDiscoveryRunning(false);
-              setDiscoveryStatus(d);
-              addToast('Discovery complete! Refreshing...', 'success');
-              window.location.reload();
-            }
-          }
-        } catch {}
-      }, 5000);
-      setTimeout(() => { clearInterval(poll); setDiscoveryRunning(false); addToast('Discovery timed out. Check snapshot history for status.', 'error'); }, 600000);
-    } catch (e: any) {
-      addToast(e?.message || 'Failed to start discovery', 'error');
-      setDiscoveryRunning(false);
-    }
-  }, [addToast]);
+    // Always open modal
+    setShowProgressModal(true);
+  }, [addToast, snapshotRunning, selectedConnectionId]);
 
   // ── Render ─────────────────────────────────────────────────────
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6" style={{ fontFamily: "'Inter', sans-serif" }}>
-      {/* Page Header */}
+      {/* Section 1: Header */}
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>
           <div className="flex items-center gap-3">
             <h2 className="text-[22px] font-extrabold tracking-tight" style={{ color: COLORS.textPrimary }}>Risk Monitoring</h2>
             <AudienceBadge label="SOC / IAM OPS" variant="blue" />
+            {scopeLabel && (
+              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{
+                background: selectedConnectionId ? `${COLORS.accentPrimary}18` : `${COLORS.textMuted}15`,
+                color: selectedConnectionId ? COLORS.accentPrimary : COLORS.textMuted,
+                border: `1px solid ${selectedConnectionId ? COLORS.accentPrimary : COLORS.textMuted}30`,
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>{scopeLabel}</span>
+            )}
           </div>
           <p className="text-sm" style={{ color: COLORS.textSecondary }}>
             Operational identity risk monitoring — What happened?
           </p>
           {latest?.completed_at && (
-            <div className="flex items-center gap-2 mt-0.5">
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <p className="text-xs" style={{ color: COLORS.textMuted }}>
                 Data as of {formatDate(latest.completed_at, 'No data')} · Snapshot #{stats?.latest_run?.id}
               </p>
-              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-semibold uppercase tracking-wide" title="Snapshot data is immutable — it reflects the state at capture time">
+              {stats?.customer_count != null && (
+                <span className="text-[10px]" style={{ color: COLORS.textMuted }}>
+                  {stats.latest_run?.total_identities} total &middot; {stats.customer_count} customer &middot; {stats.microsoft_count} Microsoft
+                </span>
+              )}
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-semibold uppercase tracking-wide" title="Snapshot data is immutable">
                 <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
                 Immutable
               </span>
-              <button
-                onClick={() => navigate('/drift')}
-                className="text-[10px] text-blue-500 hover:text-blue-700 font-medium"
-              >
+              <button onClick={() => navigate('/drift')} className="text-[10px] text-blue-500 hover:text-blue-700 font-medium">
                 Compare Snapshots →
               </button>
             </div>
@@ -379,11 +333,10 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-3">
           <button
-            disabled={snapshotRunning}
             onClick={triggerSnapshot}
             className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border transition ${
               snapshotRunning
-                ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200'
+                ? 'bg-blue-50 text-blue-600 cursor-pointer border-blue-200 hover:bg-blue-100'
                 : 'text-white hover:opacity-90 border-transparent'
             }`}
             style={snapshotRunning ? {} : { backgroundColor: COLORS.brand }}
@@ -391,7 +344,7 @@ export default function Dashboard() {
             {snapshotRunning ? (
               <>
                 <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
-                Running...
+                Running... (view)
               </>
             ) : (
               <>
@@ -401,7 +354,7 @@ export default function Dashboard() {
             )}
           </button>
           <button
-            onClick={() => { setActiveTab('exposure'); setTimeout(() => document.getElementById('anomaly-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100); }}
+            onClick={() => document.getElementById('anomaly-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border transition"
             style={{ borderColor: '#f59e0b', color: '#f59e0b' }}
             onMouseEnter={e => { (e.currentTarget as any).style.backgroundColor = 'rgba(245,158,11,0.08)'; }}
@@ -415,346 +368,147 @@ export default function Dashboard() {
             )}
             <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
           </button>
-          {schedulerInfo && (
-            <span className="text-xs" style={{ color: COLORS.textMuted }} title={`Interval: every ${schedulerInfo.interval_hours}h`}>
-              Next: {formatDate(schedulerInfo.next_run, 'N/A')}
-            </span>
-          )}
-          <ViewAllButton />
-          <button
-            onClick={() => setCustomizeOpen(true)}
-            className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
-            title="Customize dashboard"
-          >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </button>
         </div>
       </div>
 
       <StaleDataBanner completedAt={latest?.completed_at} />
-      <RiskMethodology />
-
-      {/* Run First Discovery CTA — shown when no snapshots exist */}
-      {!loading && discoveryStatus && !discoveryStatus.has_snapshot && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-6 text-center">
-          <svg className="mx-auto h-10 w-10 text-blue-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <h3 className="text-lg font-semibold text-blue-900 mb-1">No Snapshots Yet</h3>
-          <p className="text-sm text-blue-700 mb-4">
-            Run your first discovery to scan identities, roles, and permissions across your activated subscriptions.
-          </p>
-          <button
-            onClick={runFirstDiscovery}
-            disabled={snapshotRunning}
-            className={`inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg transition ${
-              snapshotRunning
-                ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                : 'bg-blue-600 text-white hover:bg-blue-700'
-            }`}
-          >
-            {snapshotRunning ? (
-              <>
-                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
-                Running Discovery...
-              </>
-            ) : (
-              <>
-                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                Run First Discovery
-              </>
-            )}
-          </button>
-        </div>
-      )}
 
       {loading ? (
         <div className="animate-pulse space-y-4">
-          <div className="grid grid-cols-4 gap-4">
-            {[1, 2, 3, 4].map(i => <div key={i} className="h-24 rounded-xl" style={{ backgroundColor: COLORS.borderLight }} />)}
-          </div>
-          <div className="h-10 rounded-lg mt-4" style={{ backgroundColor: COLORS.borderLight }} />
-          <div className="grid grid-cols-3 gap-4 mt-4">
+          <div className="grid grid-cols-3 gap-4">
             {[1, 2, 3].map(i => <div key={i} className="h-48 rounded-xl" style={{ backgroundColor: COLORS.borderLight }} />)}
           </div>
         </div>
       ) : error ? (
         <div className="bg-white rounded-xl p-6 text-red-600" style={{ border: `1px solid ${COLORS.border}` }}>{error}</div>
       ) : (
-        <>
-          {/* ── Persistent Summary Cards ─────────────────────────── */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <div>
-              <StatsCard title="Total Identities" value={latest?.total_identities ?? 0} icon="🧩" color="blue"
-                trend={trendDir(latest?.total_identities ?? 0, prev?.total_identities)}
-                trendDelta={prev ? (latest?.total_identities ?? 0) - prev.total_identities : undefined}
-                trendNeutral onClick={() => navigate('/identities')} />
-              {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('total')} color="#3b82f6" width={200} height={28} /></div>}
-            </div>
-            <div>
-              <StatsCard title="Critical" value={latest?.critical_count ?? 0} icon="🔴" color="red"
-                trend={trendDir(latest?.critical_count ?? 0, prev?.critical_count)}
-                trendDelta={prev ? (latest?.critical_count ?? 0) - prev.critical_count : undefined}
-                onClick={() => navigate('/identities?risk_level=critical')} />
-              {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('critical')} color="#ef4444" width={200} height={28} /></div>}
-            </div>
-            <div>
-              <StatsCard title="High" value={latest?.high_count ?? 0} icon="🟠" color="yellow"
-                trend={trendDir(latest?.high_count ?? 0, prev?.high_count)}
-                trendDelta={prev ? (latest?.high_count ?? 0) - prev.high_count : undefined}
-                onClick={() => navigate('/identities?risk_level=high')} />
-              {trends.length >= 2 && <div className="mt-1 px-3"><Sparkline data={trendSeries('high')} color="#f97316" width={200} height={28} /></div>}
-            </div>
-            <div>
-              <StatsCard title="Snapshots" value={stats?.total_discovery_runs ?? 0} icon="🔄" color="gray"
-                onClick={() => setShowRuns(!showRuns)} />
-              {trends.length >= 2 && (
-                <div className="mt-1 px-3">
-                  <Sparkline data={trendSeries('dormant')} color="#6b7280" width={200} height={28} />
-                  <div className="text-[10px] mt-0.5" style={{ color: COLORS.textMuted }}>Dormant trend</div>
-                </div>
-              )}
-            </div>
+        <div className="space-y-6">
+          {/* Section 2: Active Identity Alerts */}
+          <div id="anomaly-alerts">
+            <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
           </div>
 
-          {/* ── Tab Navigation ───────────────────────────────────── */}
-          <div className="flex items-center gap-0 border-b mb-6" style={{ borderColor: COLORS.border }}>
-            {DASHBOARD_TABS.map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className="relative px-4 py-2.5 text-[13px] font-semibold transition-colors whitespace-nowrap"
-                style={{
-                  color: activeTab === tab.id ? COLORS.brand : COLORS.textSecondary,
-                }}
-              >
-                {tab.label}
-                {activeTab === tab.id && (
-                  <span
-                    className="absolute bottom-0 left-0 right-0 h-[2px] rounded-t"
-                    style={{ backgroundColor: COLORS.brand }}
-                  />
-                )}
-              </button>
-            ))}
+          {/* Section 3: Risk Trend + Velocity */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {trends.length >= 2 && <RiskTrendChart data={trends} />}
+            {velocityData && velocityData.transitions.length > 0 && (
+              <RiskVelocityChart transitions={velocityData.transitions} retention={velocityData.retention} />
+            )}
           </div>
 
-          {/* ── Tab Content ──────────────────────────────────────── */}
+          {/* Section 4: Identity Risk Heat Map + Distribution */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <RiskHeatMap categories={categoryCards} />
+            <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick}
+              cloudSources={summary?.monitored_resources ? Object.entries(summary.monitored_resources).filter(([, v]) => (v as any)?.subscriptions > 0 || (v as any)?.accounts > 0 || (v as any)?.projects > 0).map(([k]) => k) : undefined} />
+          </div>
 
-          {/* Tab 1: Exposure & Risk */}
-          {activeTab === 'exposure' && (
-            <div className="space-y-4">
-              {/* Row 1: Anomaly Alerts (full width — promoted to top) */}
-              <div id="anomaly-alerts">
-                <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
+          {/* Section 5: Snapshot Drift Analysis */}
+          <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
+            newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
+            permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
+            credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
+
+          {/* Section 6: Machine Identity Exposure */}
+          {stats?.workload_exposure && stats.workload_exposure.total > 0 && (
+            <div className="bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>
+                  Machine Identity Exposure
+                </h3>
+                <Link to="/workload-identities" className="text-xs font-medium hover:underline"
+                  style={{ color: COLORS.brand }}>View All →</Link>
               </div>
-              {/* Row 2: Trend + Escalation Tracker (2 col) */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {trends.length >= 2 && <RiskTrendChart data={trends} />}
-                {velocityData && velocityData.transitions.length > 0 && (
-                  <RiskVelocityChart transitions={velocityData.transitions} retention={velocityData.retention} />
-                )}
-              </div>
-              {/* Workload Exposure Summary */}
-              {stats?.workload_exposure && stats.workload_exposure.total > 0 && (
-                <div className="bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>
-                      Workload Identity Exposure
-                    </h3>
-                    <Link to="/workload-identities" className="text-xs font-medium hover:underline"
-                      style={{ color: COLORS.brand }}>View All →</Link>
-                  </div>
-                  {stats.workload_exposure.exposure_distribution && (
-                    <ExposureDistributionBar distribution={stats.workload_exposure.exposure_distribution} total={stats.workload_exposure.total}
-                      onSegmentClick={k => navigate(`/workload-identities?exposure=${k}`)} />
-                  )}
-                  <div className="grid grid-cols-4 gap-3 mt-3">
-                    <MiniStat label="Total" value={stats.workload_exposure.total}
-                      onClick={() => navigate('/workload-identities')} title="View all workload identities" />
-                    <MiniStat label="Avg Score" value={stats.workload_exposure.avg_exposure_score ?? '—'} warn={(stats.workload_exposure.avg_exposure_score ?? 0) >= 50}
-                      onClick={() => navigate('/workload-identities')} title="View workload identities" />
-                    <MiniStat label="Orphaned" value={stats.workload_exposure.orphaned} warn={stats.workload_exposure.orphaned > 0}
-                      onClick={() => navigate('/workload-identities?owner=orphaned')} title="View orphaned identities" />
-                    <MiniStat label="Can Escalate" value={stats.workload_exposure.can_escalate} warn={stats.workload_exposure.can_escalate > 0}
-                      onClick={() => navigate('/workload-identities?escalate=true')} title="View identities that can escalate" />
-                  </div>
-                </div>
+              {stats.workload_exposure.exposure_distribution && (
+                <ExposureDistributionBar distribution={stats.workload_exposure.exposure_distribution} total={stats.workload_exposure.total}
+                  onSegmentClick={k => navigate(`/workload-identities?exposure=${k}`)} />
               )}
-              {/* Row 3: Heat Map + Donut (2 col) */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <RiskHeatMap categories={categoryCards} />
-                <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick}
-                  cloudSources={summary?.monitored_resources ? Object.entries(summary.monitored_resources).filter(([, v]) => (v as any)?.subscriptions > 0 || (v as any)?.accounts > 0 || (v as any)?.projects > 0).map(([k]) => k) : undefined} />
+              <div className="grid grid-cols-4 gap-3 mt-3">
+                <MiniStat label="Total" value={stats.workload_exposure.total}
+                  onClick={() => navigate('/workload-identities')} title="View all workload identities" />
+                <MiniStat label="Avg Score" value={stats.workload_exposure.avg_exposure_score ?? '\u2014'} warn={(stats.workload_exposure.avg_exposure_score ?? 0) >= 50}
+                  onClick={() => navigate('/workload-identities')} title="View workload identities" />
+                <MiniStat label="Orphaned" value={stats.workload_exposure.orphaned} warn={stats.workload_exposure.orphaned > 0}
+                  onClick={() => navigate('/workload-identities?owner=orphaned')} title="View orphaned identities" />
+                <MiniStat label="Can Escalate" value={stats.workload_exposure.can_escalate} warn={stats.workload_exposure.can_escalate > 0}
+                  onClick={() => navigate('/workload-identities?escalate=true')} title="View identities that can escalate" />
               </div>
-              {/* Row 4: Recent Changes (full width) */}
-              <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
-                newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
-                permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
-                credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
             </div>
           )}
 
-          {/* Tab 2: Credential Intelligence */}
-          {activeTab === 'credential' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {posture && (
-                  <CredentialHealth expired={posture.credential_health.expired} expiringSoon={posture.credential_health.expiring_soon}
-                    healthy={posture.credential_health.healthy} noCredentials={posture.credential_health.no_credentials} />
-                )}
-                <ExpiryTracker />
-              </div>
-              <CredentialIntelligence />
-            </div>
-          )}
-
-          {/* Tab 3: Trust & Access */}
-          {activeTab === 'trust' && (
-            <div>
-              <TrustAccessPanel />
-              {!loading && !stats?.latest_run && (
-                <div className="bg-white rounded-xl p-8 text-center" style={{ border: `1px solid ${COLORS.border}` }}>
-                  <div className="text-sm font-medium mb-2" style={{ color: COLORS.textSecondary }}>No trust & access data available</div>
-                  <p className="text-xs mb-4" style={{ color: COLORS.textMuted }}>Capture a snapshot to populate trust and access relationships.</p>
-                  <button onClick={triggerSnapshot} disabled={snapshotRunning}
-                    className="px-4 py-2 text-sm font-medium text-white rounded-lg transition hover:opacity-90"
-                    style={{ backgroundColor: COLORS.brand }}>
-                    Capture Snapshot
-                  </button>
-                </div>
+          {/* Section 7: Credential Intelligence */}
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {posture && (
+                <CredentialHealth expired={posture.credential_health.expired} expiringSoon={posture.credential_health.expiring_soon}
+                  healthy={posture.credential_health.healthy} noCredentials={posture.credential_health.no_credentials} />
               )}
+              <ExpiryTracker />
             </div>
-          )}
+            <CredentialIntelligence />
+          </div>
 
-          {/* Tab 4: Usage & Optimization */}
-          {activeTab === 'usage' && (
-            <div className="space-y-4">
-              {/* Usage summary cards */}
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
-                  onClick={() => navigate('/workload-identities?lifecycle=likely_dormant')} title="View dormant identities">
-                  <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Dormant Identities</div>
-                  <div className="text-2xl font-extrabold"><DrillableNumber value={posture?.dormant_count ?? 0} to="/workload-identities?lifecycle=likely_dormant" color={(posture?.dormant_count ?? 0) > 0 ? '#F97316' : '#22C55E'} className="text-2xl font-extrabold" /></div>
-                  <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Stale &gt;90 days</div>
-                </div>
-                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-orange-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
-                  onClick={() => navigate('/workload-identities?owner=orphaned')} title="View unowned SPNs">
-                  <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Unowned SPNs</div>
-                  <div className="text-2xl font-extrabold"><DrillableNumber value={posture?.no_owner_count ?? 0} to="/workload-identities?owner=orphaned" color={(posture?.no_owner_count ?? 0) > 0 ? '#F97316' : '#22C55E'} className="text-2xl font-extrabold" /></div>
-                  <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>No assigned owner</div>
-                </div>
-                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-red-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
-                  onClick={() => navigate('/workload-identities?exposure=critical')} title="View expiring credentials">
-                  <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Expiring Credentials</div>
-                  <div className="text-2xl font-extrabold"><DrillableNumber value={posture?.expiring_credentials_count ?? 0} to="/workload-identities?exposure=critical" color={(posture?.expiring_credentials_count ?? 0) > 0 ? '#EF4444' : '#22C55E'} className="text-2xl font-extrabold" /></div>
-                  <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Within 30 days</div>
-                </div>
-                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
-                  onClick={() => navigate('/identities')} title="View active identities">
-                  <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Active Identities</div>
-                  <div className="text-2xl font-extrabold"><DrillableNumber value={Math.max((latest?.total_identities ?? 0) - (posture?.dormant_count ?? 0), 0)} to="/identities" color={COLORS.brandLight} className="text-2xl font-extrabold" /></div>
-                  <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Used within 90 days</div>
-                </div>
-                <div className="bg-white rounded-xl p-4 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-shadow" style={{ border: `1px solid ${COLORS.border}` }}
-                  onClick={() => navigate('/workload-identities')} title="View workload identities">
-                  <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textMuted }}>Avg Exposure</div>
-                  <div className="text-2xl font-extrabold">
-                    <DrillableNumber value={stats?.workload_exposure?.avg_exposure_score ?? '—'} to="/workload-identities" color={(stats?.workload_exposure?.avg_exposure_score ?? 0) >= 50 ? '#EF4444' : '#22C55E'} className="text-2xl font-extrabold" format={false} />
-                  </div>
-                  <div className="text-[10px]" style={{ color: COLORS.textSecondary }}>Workload identities</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <RoleUsageChart statuses={roleUsage?.statuses || {}} byRisk={roleUsage?.by_risk || {}} total={roleUsage?.total || 0} />
-                <QuickActions criticalCount={latest?.critical_count ?? 0} expiringCount={posture?.expiring_credentials_count ?? 0} dormantCount={posture?.dormant_count ?? 0} ghostCount={stats?.ghost_count ?? 0} />
-              </div>
-            </div>
-          )}
-
-          {/* Tab 5: Governance & Compliance */}
-          {activeTab === 'governance' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <ComplianceScorecard data={compliance} loading={loading} />
-                <ConditionalAccessCard data={caData} loading={loading} />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {remediationSummary && <RemediationProgress {...remediationSummary} />}
-                <ServiceAccountGovernance />
-              </div>
-            </div>
-          )}
-
-          {/* Tab 6: Platform & Discovery */}
-          {activeTab === 'platform' && (
-            <div className="space-y-4">
-              {summary?.monitored_resources && (
-                <CloudContextBanner monitoredResources={summary.monitored_resources} />
-              )}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <SOARActivity />
-                <PlatformHealth />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <IdentityCorrelationWidget />
-              </div>
-              <ResourceOverview />
-            </div>
-          )}
-
-          {/* Snapshot History Panel (toggled, not part of tab system) */}
-          {showRuns && (
-            <div className="bg-white rounded-xl overflow-hidden mt-6" style={{ border: `1px solid ${COLORS.border}` }}>
-              <div className="px-5 py-3 border-b flex items-center justify-between" style={{ backgroundColor: COLORS.borderLight, borderColor: COLORS.border }}>
-                <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>Snapshot History</h3>
-                <button onClick={() => setShowRuns(false)} className="text-xs hover:opacity-70 transition" style={{ color: COLORS.textMuted }}>Close</button>
-              </div>
-              {runs.length === 0 ? (
-                <div className="p-6 text-sm text-center" style={{ color: COLORS.textMuted }}>No snapshots found</div>
-              ) : (
-                <div className="divide-y max-h-64 overflow-y-auto">
-                  {runs.slice(0, 10).map((run: any, idx: number) => (
-                    <div key={run.id || idx} className="px-5 py-3 flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-3">
-                        <span className={`w-2 h-2 rounded-full ${run.status === 'completed' ? 'bg-green-500' : run.status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
-                        <span className="font-medium" style={{ color: COLORS.textPrimary }}>Snapshot #{run.id}</span>
-                        <span className="text-xs" style={{ color: COLORS.textSecondary }}>
-                          {formatDate(run.completed_at, '') || formatDate(run.started_at, '') || '—'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-4 text-xs">
-                        <span style={{ color: COLORS.textSecondary }}>{run.total_identities ?? '—'} identities</span>
-                        {(run.critical_count ?? 0) > 0 && <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold">{run.critical_count} critical</span>}
-                        {(run.high_count ?? 0) > 0 && <span className="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 font-semibold">{run.high_count} high</span>}
-                        <span className={`px-1.5 py-0.5 rounded font-medium ${run.status === 'completed' ? 'bg-green-100 text-green-700' : run.status === 'running' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'}`}>
-                          {run.status || 'unknown'}
-                        </span>
-                      </div>
+          {/* AGIRS Trend (compact) */}
+          {agirsSummary && (
+            <div className="bg-white rounded-xl p-4" style={{ border: `1px solid ${COLORS.border}` }}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: COLORS.textMuted }}>AGIRS Score</div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-2xl font-bold" style={{ fontFamily: FONT.mono, color: getScoreColor(agirsSummary.score) }}>{agirsSummary.score.toFixed(1)}</span>
+                      <CISOBadge label={agirsSummary.tier} color={getTierColor(agirsSummary.tier)} />
                     </div>
-                  ))}
+                  </div>
+                  {agirsTrend.length >= 2 && (
+                    <Sparkline data={agirsTrend} width={200} height={50} color={getScoreColor(agirsSummary.score)} />
+                  )}
                 </div>
-              )}
+                <Link to="/" className="text-xs font-medium hover:underline" style={{ color: COLORS.brand }}>
+                  Executive Posture {'\u2192'}
+                </Link>
+              </div>
             </div>
           )}
-        </>
+
+          {/* Data Integrity Footer */}
+          <div className="flex items-center justify-between px-4 py-3 rounded-lg" style={{ backgroundColor: '#F8FAFC', border: `1px solid ${COLORS.border}` }}>
+            <div className="flex items-center gap-2">
+              <svg className="w-3.5 h-3.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              <span className="text-[10px]" style={{ color: COLORS.textSecondary }}>
+                Snapshot-only data {'\u2022'} Tenant-isolated {'\u2022'} No cross-org visibility
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px]" style={{ color: COLORS.textMuted }}>
+                Snapshot: <span className="font-semibold" style={{ color: COLORS.textPrimary }}>#{stats?.latest_run?.id || '\u2014'}</span>
+              </span>
+              <span className="text-[10px]" style={{ color: COLORS.textMuted }}>
+                Identities: <span className="font-semibold" style={{ color: COLORS.textPrimary }}>{riskCounts.total}</span>
+              </span>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Customize Panel */}
-      <CustomizePanel
-        open={customizeOpen}
-        onClose={() => setCustomizeOpen(false)}
-        widgets={widgetPrefs}
-        toggleWidget={toggleWidget}
-        moveWidget={moveWidget}
-        save={savePrefs}
-        reset={resetPrefs}
-        saving={prefsSaving}
-        dirty={prefsDirty}
-      />
+      {/* Discovery Progress Modal */}
+      {showProgressModal && (
+        <DiscoveryProgressModal
+          connectionId={selectedConnectionId || undefined}
+          connectionLabel={selectedConnectionId
+            ? connections.find(c => c.id === selectedConnectionId)?.label || 'Connection'
+            : 'All Connections'}
+          connectionCloud="azure"
+          onClose={() => setShowProgressModal(false)}
+          onComplete={() => {
+            setShowProgressModal(false);
+            setSnapshotRunning(false);
+            window.location.reload();
+          }}
+        />
+      )}
     </div>
   );
 }

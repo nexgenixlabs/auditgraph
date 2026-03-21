@@ -322,7 +322,7 @@ if azure_risk_reason:
 - ✅ Privileged Role Administrator detected (CRITICAL)
 - ✅ Combined risk reasons: ["Entra ID Global Administrator", "Azure Owner on subscription"]
 
-**Example: Bhupathi's Complete Role Profile:**
+**Example: the admin's Complete Role Profile:**
 - **Entra ID Roles:** 30 (including Global Admin, Privileged Role Admin, Application Admin, etc.)
 - **Azure RBAC Roles:** 2 (Owner, User Access Administrator)
 - **Total Roles:** 32
@@ -366,7 +366,7 @@ if azure_risk_reason:
 13. spn-user-access-admin (CRITICAL - User Access Administrator)
 
 **Users (3):**
-1. Bhupathi Reddy Sangabattula (CRITICAL)
+1. Admin User (CRITICAL)
    - Entra: Global Administrator, Privileged Role Administrator, + 28 more
    - Azure: Owner, User Access Administrator
    - Total: 32 roles

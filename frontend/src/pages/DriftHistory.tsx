@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 import { SEVERITY_COLORS, DRIFT_EVENT_LABELS } from '../constants/metrics';
 
 // ── Types ──────────────────────────────────────────────────────
@@ -123,6 +124,7 @@ function categoryLabel(cat: string) {
 
 export default function DriftHistory() {
   const { addToast } = useToast();
+  const { activeOrgId } = useAuth();
   const { withConnection, selectedConnectionId } = useConnection();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -168,7 +170,7 @@ export default function DriftHistory() {
       }
     }
     load();
-  }, [selectedConnectionId]);
+  }, [selectedConnectionId, activeOrgId]);
 
   async function toggleSnapshot(snapshotId: number) {
     if (expandedSnapshotId === snapshotId) {

@@ -442,7 +442,7 @@ export default function AppRegistrations() {
       .then(r => r.ok ? r.json() : null)
       .then(d => d && setStats(d))
       .catch(() => {});
-  }, [initialized, selectedConnectionId]);
+  }, [initialized, selectedConnectionId, activeOrgId]);
 
   // Fetch list
   useEffect(() => {
@@ -467,7 +467,7 @@ export default function AppRegistrations() {
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [initialized, riskFilter, credFilter, audienceFilter, debouncedSearch, sortField, sortDir, selectedConnectionId]);
+  }, [initialized, riskFilter, credFilter, audienceFilter, debouncedSearch, sortField, sortDir, selectedConnectionId, activeOrgId]);
 
   // Fetch detail when selected
   useEffect(() => {

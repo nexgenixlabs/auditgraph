@@ -70,6 +70,7 @@ import IdentityGraph from './pages/IdentityGraph';
 import IdentityExposures from './pages/IdentityExposures';
 import PrivilegeDrift from './pages/PrivilegeDrift';
 import AttackSimulator from './pages/AttackSimulator';
+import ComplianceDashboard from './pages/ComplianceDashboard';
 import AcceptInvitation from './pages/AcceptInvitation';
 import OrganizationUsers from './pages/OrganizationUsers';
 import PrivacyPolicy from './pages/PrivacyPolicy';
@@ -306,6 +307,7 @@ function AppContent() {
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
+                  <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />
                   <Route path="/drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftHistory /></ErrorBoundary>} />
                   <Route path="/exports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Exports /></ErrorBoundary>} />
                   <Route path="/access-reviews" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AccessReviews /></ErrorBoundary>} />

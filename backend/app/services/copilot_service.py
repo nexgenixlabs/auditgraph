@@ -167,9 +167,16 @@ When providing answers:
                 self.client = anthropic.Anthropic(
                     api_key=self.api_key,
                     timeout=30.0,
+                    max_retries=2,  # Built-in SDK retry with backoff
                 )
             except ImportError:
                 raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
+
+        # Circuit breaker check — block if LLM API is repeatedly failing
+        from app.resilience import get_circuit_breaker, CircuitBreakerOpenError
+        cb = get_circuit_breaker('llm_api')
+        if not cb.allow_request():
+            raise CircuitBreakerOpenError("LLM API circuit breaker is OPEN")
         return self.client
 
     def gather_context(self, db) -> str:
@@ -325,14 +332,20 @@ When providing answers:
 
         system = f"{self.SYSTEM_PROMPT}\n\n--- Current AuditGraph Data ---\n{context}"
 
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            system=system,
-            messages=messages,
-        )
-
-        return response.content[0].text
+        from app.resilience import get_circuit_breaker
+        cb = get_circuit_breaker('llm_api')
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                system=system,
+                messages=messages,
+            )
+            cb.record_success()
+            return response.content[0].text
+        except Exception:
+            cb.record_failure()
+            raise
 
     # ── Phase 12: Context-aware copilot methods ──────────────────────
 

@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 
 /** Shape returned by GET /api/security/overview */
 interface SecurityOverview {
@@ -66,6 +68,8 @@ const CLOUD_BG: Record<string, string> = {
 
 const SecurityDashboard: React.FC = () => {
   const navigate = useNavigate();
+  const { withConnection, selectedConnectionId } = useConnection();
+  const { activeOrgId } = useAuth();
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [copilotQuery, setCopilotQuery] = useState('');
@@ -75,7 +79,7 @@ const SecurityDashboard: React.FC = () => {
   useEffect(() => {
     const fetchOverview = async () => {
       try {
-        const res = await fetch('/api/security/overview');
+        const res = await fetch(withConnection('/api/security/overview'));
         if (res.ok) {
           const data = await res.json();
           setOverview(data);
@@ -89,14 +93,14 @@ const SecurityDashboard: React.FC = () => {
       }
     };
     fetchOverview();
-  }, []);
+  }, [selectedConnectionId, activeOrgId, withConnection]);
 
   const handleCopilotSubmit = async (queryText?: string) => {
     const q = queryText || copilotQuery;
     if (!q.trim()) return;
     setCopilotLoading(true);
     try {
-      const res = await fetch('/api/security/copilot-query', {
+      const res = await fetch(withConnection('/api/security/copilot-query'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: q }),

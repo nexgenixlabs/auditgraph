@@ -6,7 +6,10 @@ from P2 sign-in telemetry for workload identities.
 """
 
 import json
+import logging
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 class BehavioralAnomalyEngine:
@@ -26,7 +29,7 @@ class BehavioralAnomalyEngine:
         total += self._detect_risky_sign_in(run_id, organization_id)
         total += self._detect_ca_bypass_attempt(run_id, organization_id)
         total += self._detect_volume_anomaly(run_id, organization_id)
-        print(f"  ✓ Behavioral anomaly detection: {total} anomalies found")
+        logger.info("Behavioral anomaly detection: %s anomalies found", total)
         return total
 
     def _insert_anomaly(self, organization_id, identity_db_id, identity_id, anomaly_type,
@@ -50,7 +53,7 @@ class BehavioralAnomalyEngine:
             return 1
         except Exception as e:
             self.db._rollback()
-            print(f"  ⚠️ Failed to insert anomaly: {e}")
+            logger.warning("Failed to insert anomaly: %s", e)
             return 0
         finally:
             cursor.close()
@@ -87,7 +90,7 @@ class BehavioralAnomalyEngine:
                     {}, {}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ Impossible travel detection error: {e}")
+            logger.error("Impossible travel detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -117,7 +120,7 @@ class BehavioralAnomalyEngine:
                     {'actual_sign_ins': row[2]}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ Dormant reactivation detection error: {e}")
+            logger.error("Dormant reactivation detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -145,7 +148,7 @@ class BehavioralAnomalyEngine:
                     {'actual_off_hours_pct': float(row[2])}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ Off-hours spike detection error: {e}")
+            logger.error("Off-hours spike detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -182,7 +185,7 @@ class BehavioralAnomalyEngine:
                     {}, {'new_resources': row[2]}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ New resource access detection error: {e}")
+            logger.error("New resource access detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -219,7 +222,7 @@ class BehavioralAnomalyEngine:
                     {'actual_failures': row[2]}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ Auth failure burst detection error: {e}")
+            logger.error("Auth failure burst detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -248,7 +251,7 @@ class BehavioralAnomalyEngine:
                     {}, {'risk_level': row[2]}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ Risky sign-in detection error: {e}")
+            logger.error("Risky sign-in detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -276,7 +279,7 @@ class BehavioralAnomalyEngine:
                     {'ca_not_applied_count': row[2]}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ CA bypass detection error: {e}")
+            logger.error("CA bypass detection error: %s", e)
         finally:
             cursor.close()
         return count
@@ -319,7 +322,7 @@ class BehavioralAnomalyEngine:
                     {'current_avg_daily': float(row[2])}, run_id,
                 )
         except Exception as e:
-            print(f"  ⚠️ Volume anomaly detection error: {e}")
+            logger.error("Volume anomaly detection error: %s", e)
         finally:
             cursor.close()
         return count

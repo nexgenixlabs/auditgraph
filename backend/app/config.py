@@ -19,11 +19,14 @@ Secret Injection (prod/stg):
     full integration design.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote, quote_plus
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 1. Determine environment tier
@@ -51,7 +54,7 @@ if _env_file:
         # file fills in anything not already set.
         load_dotenv(_env_path, override=False)
     else:
-        print(f"⚠ config.py: {_env_file} not found at {_env_path}", file=sys.stderr)
+        logger.warning("config.py: %s not found at %s", _env_file, _env_path)
 
 # ---------------------------------------------------------------------------
 # 3. Export database constants (DATABASE_URL takes precedence, individual
@@ -87,9 +90,9 @@ DB_ADMIN_PASSWORD = os.getenv("DB_ADMIN_PASSWORD", os.getenv("DB_PASSWORD", ""))
 # Azure SSL enforcement — if host is Azure Flex Server, force sslmode=require
 _is_azure_pg = "postgres.database.azure.com" in (DB_HOST or "").lower()
 if _is_azure_pg and DB_SSLMODE != "require":
-    print(
-        f"⚠ config.py: Azure PostgreSQL detected but sslmode={DB_SSLMODE}; "
-        "forcing sslmode=require", file=sys.stderr
+    logger.warning(
+        "config.py: Azure PostgreSQL detected but sslmode=%s; forcing sslmode=require",
+        DB_SSLMODE,
     )
     DB_SSLMODE = "require"
 
@@ -142,7 +145,18 @@ DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "20"))
 DB_SLOW_QUERY_MS = int(os.getenv("DB_SLOW_QUERY_MS", "100"))
 
 # ---------------------------------------------------------------------------
-# 5c. Enterprise isolation guards
+# 5c. AI Agent Governance feature flag
+# ---------------------------------------------------------------------------
+# FEATURE_AI_AGENT_GOVERNANCE: Global kill switch for the AI Agent Identity
+# Governance module. When False, all agent governance UI elements, API routes,
+# and background jobs are completely invisible / inactive.
+# Default: True in local/dev (for development), False in prod/stg/qa.
+FEATURE_AI_AGENT_GOVERNANCE = os.getenv(
+    "FEATURE_AI_AGENT_GOVERNANCE", str(IS_DEV)
+).lower() in ("true", "1", "yes")
+
+# ---------------------------------------------------------------------------
+# 5d. Enterprise isolation guards
 # ---------------------------------------------------------------------------
 # ENFORCE_ADMIN_GUARD: When True, Database() calls inside Flask request
 # context without _admin_reason raise RuntimeError (hard block).
@@ -161,37 +175,38 @@ else:
 # 7. Startup banner
 # ---------------------------------------------------------------------------
 def log_startup_banner():
-    """Print environment diagnostics at server boot."""
+    """Log environment diagnostics at server boot."""
     _on_off = lambda flag: "ENABLED" if flag else "DISABLED"
-    _env_file_loaded = _ENV_FILE_MAP.get(APP_ENV, "(none — container runtime)")
+    _env_file_loaded = _ENV_FILE_MAP.get(APP_ENV, "(none -- container runtime)")
     # Mask DATABASE_URL: show scheme + host only
     if DATABASE_URL:
         _p = urlparse(DATABASE_URL)
         _masked_url = f"{_p.scheme}://***@{_p.hostname}:{_p.port or 5432}/{_p.path.lstrip('/')}"
     else:
-        _masked_url = "(not set — using individual DB_* vars)"
-    print("=" * 60)
-    print("  AuditGraph — Environment Configuration")
-    print("=" * 60)
-    print(f"  APP_ENV:           {APP_ENV}")
-    print(f"  ENV_FILE:          {_env_file_loaded}")
-    print(f"  DATABASE_URL:      {_masked_url}")
-    print(f"  DB_HOST:           {DB_HOST}")
-    print(f"  DB_PORT:           {DB_PORT}")
-    print(f"  DB_NAME:           {DB_NAME}")
-    print(f"  DB_USER:           {DB_USER}")
-    print(f"  DB_ADMIN_USER:     {DB_ADMIN_USER}")
-    print(f"  DB_SSLMODE:        {DB_SSLMODE}")
-    print(f"  CONNECT_TIMEOUT:   {DB_CONNECT_TIMEOUT}s")
-    print(f"  AZURE_DISCOVERY:   {_on_off(AZURE_DISCOVERY_ENABLED)}")
-    print(f"  AWS_DISCOVERY:     {_on_off(AWS_DISCOVERY_ENABLED)}")
-    print(f"  GCP_DISCOVERY:     {_on_off(GCP_DISCOVERY_ENABLED)}")
-    print(f"  ADMIN_GUARD:       {'ENFORCE (RuntimeError)' if ENFORCE_ADMIN_GUARD else 'WARN (log only)'}")
-    print(f"  CONN_POOL:         {'ON (min={DB_POOL_MIN}, max={DB_POOL_MAX})' if DB_POOL_ENABLED else 'OFF (1 conn/request)'}")
-    print(f"  SLOW_QUERY_MS:     {DB_SLOW_QUERY_MS}")
-    print(f"  FLASK_ENV:         {os.getenv('FLASK_ENV')}")
-    print(f"  SECRET_SOURCE:     {'env vars (container runtime)' if IS_PRODUCTION else '.env file'}")
-    print("=" * 60)
+        _masked_url = "(not set -- using individual DB_* vars)"
+    logger.info("=" * 60)
+    logger.info("  AuditGraph -- Environment Configuration")
+    logger.info("=" * 60)
+    logger.info("  APP_ENV:           %s", APP_ENV)
+    logger.info("  ENV_FILE:          %s", _env_file_loaded)
+    logger.info("  DATABASE_URL:      %s", _masked_url)
+    logger.info("  DB_HOST:           %s", DB_HOST)
+    logger.info("  DB_PORT:           %s", DB_PORT)
+    logger.info("  DB_NAME:           %s", DB_NAME)
+    logger.info("  DB_USER:           %s", DB_USER)
+    logger.info("  DB_ADMIN_USER:     %s", DB_ADMIN_USER)
+    logger.info("  DB_SSLMODE:        %s", DB_SSLMODE)
+    logger.info("  CONNECT_TIMEOUT:   %ss", DB_CONNECT_TIMEOUT)
+    logger.info("  AZURE_DISCOVERY:   %s", _on_off(AZURE_DISCOVERY_ENABLED))
+    logger.info("  AWS_DISCOVERY:     %s", _on_off(AWS_DISCOVERY_ENABLED))
+    logger.info("  GCP_DISCOVERY:     %s", _on_off(GCP_DISCOVERY_ENABLED))
+    logger.info("  ADMIN_GUARD:       %s", "ENFORCE (RuntimeError)" if ENFORCE_ADMIN_GUARD else "WARN (log only)")
+    logger.info("  CONN_POOL:         %s", f"ON (min={DB_POOL_MIN}, max={DB_POOL_MAX})" if DB_POOL_ENABLED else "OFF (1 conn/request)")
+    logger.info("  SLOW_QUERY_MS:     %s", DB_SLOW_QUERY_MS)
+    logger.info("  FLASK_ENV:         %s", os.getenv("FLASK_ENV"))
+    logger.info("  AI_AGENT_GOV:      %s", _on_off(FEATURE_AI_AGENT_GOVERNANCE))
+    logger.info("  SECRET_SOURCE:     %s", "env vars (container runtime)" if IS_PRODUCTION else ".env file")
+    logger.info("=" * 60)
 
 
 # ==========================================================================

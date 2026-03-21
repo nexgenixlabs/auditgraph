@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { maskCredential } from '../../utils/maskCredential';
+import { DiscoveryProgressModal } from './DiscoveryProgressModal';
 import type {
   SettingsData,
   StatusData,
@@ -48,7 +49,9 @@ export interface ConnectionsTabProps {
   handleWizardSave: () => void;
   resetWizard: () => void;
   handleDeleteConnection: (connId: number) => void;
+  removingConnId: number | null;
   handleRunScan: (connId: number) => void;
+  fetchConnections: () => void;
   handleUpdateDiscoverySettings: (connId: number, enabled: boolean, intervalMinutes: number) => void;
   handleTestConnection: () => void;
   handleSaveAndUnlock: () => void;
@@ -98,7 +101,9 @@ export function ConnectionsTab({
   handleWizardSave,
   resetWizard,
   handleDeleteConnection,
+  removingConnId,
   handleRunScan,
+  fetchConnections,
   handleUpdateDiscoverySettings,
   handleTestConnection,
   handleSaveAndUnlock,
@@ -108,12 +113,26 @@ export function ConnectionsTab({
   cloudSectionRef,
 }: ConnectionsTabProps) {
   const STAGE_LABELS: Record<string, string> = {
+    initializing: 'Initializing...',
     discovering_subscriptions: 'Discovering subscriptions...',
+    discovering_roles: 'Discovering roles...',
     discovering_identities: 'Discovering identities...',
+    analyzing_risk: 'Analyzing risk...',
+    saving_identities: 'Saving identities...',
     discovering_rbac: 'Discovering RBAC roles...',
     discovering_resources: 'Discovering resources...',
+    discovering_apps: 'Discovering app registrations...',
     finalizing: 'Finalizing snapshot...',
   };
+
+  // Modal state: which connection ID is showing the progress modal
+  const [modalConnId, setModalConnId] = useState<number | null>(null);
+  const modalConn = modalConnId ? cloudConnections.find(c => c.id === modalConnId) : null;
+
+  function handleScanWithModal(connId: number) {
+    handleRunScan(connId);
+    setModalConnId(connId);
+  }
 
   return (
     <>
@@ -232,7 +251,7 @@ export function ConnectionsTab({
                       </span>
                       {isAdmin && conn.status === 'connected' && (
                         <button
-                          onClick={() => handleRunScan(conn.id)}
+                          onClick={() => handleScanWithModal(conn.id)}
                           disabled={scanningConnId === conn.id || !!activeJobs[conn.id]}
                           className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
                         >
@@ -243,16 +262,17 @@ export function ConnectionsTab({
                       {isAdmin && (
                         <button
                           onClick={() => handleDeleteConnection(conn.id)}
-                          className="text-[10px] text-red-400 hover:text-red-600 font-medium"
+                          disabled={removingConnId === conn.id}
+                          className="text-[10px] text-red-400 hover:text-red-600 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Remove
+                          {removingConnId === conn.id ? 'Removing...' : 'Remove'}
                         </button>
                       )}
                     </div>
                   </div>
                   {/* Phase 3+4: Snapshot job progress bar with retry info */}
                   {activeJobs[conn.id] && ['queued', 'running'].includes(activeJobs[conn.id].status) && (
-                    <div className="mt-2">
+                    <div className="mt-2 cursor-pointer" onClick={() => setModalConnId(conn.id)} title="Click for details">
                       <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
                         <span>
                           {STAGE_LABELS[activeJobs[conn.id].stage] || 'Queued...'}
@@ -646,7 +666,8 @@ export function ConnectionsTab({
               </div>
             )}
 
-            {!isAdmin ? (
+            {/* Legacy credential form — only show when no cloud connections exist */}
+            {cloudConnections.length === 0 && (!isAdmin ? (
               <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-600">
                 Contact your organization administrator to configure cloud credentials.
               </div>
@@ -937,7 +958,7 @@ export function ConnectionsTab({
                   </div>
                 ) : null}
               </div>
-            )}
+            ))}
           </div>
 
           {/* Section 3: Snapshot Schedule */}
@@ -1005,6 +1026,16 @@ export function ConnectionsTab({
               </p>
             </div>
           </div>
+      {/* Discovery Progress Modal */}
+      {modalConnId && modalConn && (
+        <DiscoveryProgressModal
+          connectionId={modalConnId}
+          connectionLabel={modalConn.label || modalConn.cloud || 'Connection'}
+          connectionCloud={modalConn.cloud || 'azure'}
+          onClose={() => setModalConnId(null)}
+          onComplete={() => { setModalConnId(null); fetchConnections(); }}
+        />
+      )}
     </>
   );
 }

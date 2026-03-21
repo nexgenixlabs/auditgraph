@@ -31,19 +31,23 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime
 from typing import Optional
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 
 class ActivityTracker:
     """Track service principal last activity"""
-    
+
     def __init__(self, credential):
         """
         Initialize with Azure credential
-        
+
         Args:
             credential: Azure ClientSecretCredential object
         """
@@ -110,8 +114,101 @@ class ActivityTracker:
             # Just return None and we'll handle it in the summary
             return None
     
+    def get_service_principal_last_sign_in(
+        self, spn_object_id: str
+    ) -> Optional[datetime]:
+        """Get the most recent service principal (client credential) sign-in.
+
+        Queries the auditLogs/signIns endpoint filtered to servicePrincipal
+        sign-in events. This captures client credential auth flows that do NOT
+        appear in lastSignInDateTime.
+
+        Args:
+            spn_object_id: The object ID of the service principal.
+
+        Returns:
+            Datetime of most recent SP sign-in, or None if no results / error.
+
+        Required permission: AuditLog.Read.All
+        Graceful degradation: returns None on any error (403, 404, network).
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                token = self.credential.get_token(
+                    "https://graph.microsoft.com/.default"
+                )
+                headers = {
+                    'Authorization': f'Bearer {token.token}',
+                    'Content-Type': 'application/json',
+                }
+
+                url = "https://graph.microsoft.com/v1.0/auditLogs/signIns"
+                params = {
+                    '$filter': (
+                        f"servicePrincipalId eq '{spn_object_id}' "
+                        "and signInEventTypes/any(t: t eq 'servicePrincipal')"
+                    ),
+                    '$orderby': 'createdDateTime desc',
+                    '$top': 1,
+                    '$select': 'createdDateTime,servicePrincipalId,status',
+                }
+
+                response = self._session.get(
+                    url, headers=headers, params=params, timeout=15
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    sign_ins = data.get('value', [])
+                    if sign_ins:
+                        created_dt = sign_ins[0].get('createdDateTime')
+                        if created_dt:
+                            return self._parse_datetime(created_dt)
+                    return None
+
+                elif response.status_code == 403:
+                    logger.warning(
+                        "SP sign-in query returned 403 for %s — "
+                        "AuditLog.Read.All may not be granted",
+                        spn_object_id,
+                    )
+                    return None
+
+                elif response.status_code == 429:
+                    # Rate limited — retry with exponential backoff
+                    retry_after = int(
+                        response.headers.get('Retry-After', 2 ** (attempt + 1))
+                    )
+                    logger.warning(
+                        "SP sign-in query rate limited (429) for %s, "
+                        "retrying in %ds (attempt %d/%d)",
+                        spn_object_id, retry_after, attempt + 1, max_retries,
+                    )
+                    time.sleep(retry_after)
+                    continue
+
+                else:
+                    logger.warning(
+                        "SP sign-in query returned %d for %s",
+                        response.status_code, spn_object_id,
+                    )
+                    return None
+
+            except Exception as e:
+                logger.warning(
+                    "SP sign-in query failed for %s: %s", spn_object_id, e
+                )
+                return None
+
+        # Exhausted retries (only reachable from 429 path)
+        logger.warning(
+            "SP sign-in query exhausted retries for %s", spn_object_id
+        )
+        return None
+
     def get_activity_status(
-        self, 
+        self,
         last_sign_in: Optional[datetime],
         created_date: Optional[datetime]
     ) -> str:

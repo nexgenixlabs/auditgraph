@@ -13,6 +13,7 @@ FEATURES = {
     'sso':                {'plans': ['trial', 'pro']},
     'oidc':               {'plans': ['trial', 'pro']},
     'scim':               {'plans': ['pro']},
+    'ai_agent_governance': {'plans': ['trial', 'pro']},
 }
 
 # Backward-compat aliases: old feature_name → canonical feature_key

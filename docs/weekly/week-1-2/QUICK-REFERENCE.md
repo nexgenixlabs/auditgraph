@@ -15,7 +15,7 @@
 
 ```bash
 # 1. Navigate to backend
-cd /Users/sangabattula/projects/auditgraph/backend
+cd ./backend
 
 # 2. Activate virtual environment
 source venv/bin/activate

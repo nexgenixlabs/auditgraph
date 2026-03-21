@@ -163,15 +163,22 @@ class GraphBuilder:
                     )
                     edge_count += 1
 
+        # Add Graph API permission nodes for SPNs
+        perm_nodes, perm_edges = self._add_graph_api_permission_nodes(
+            run_id, connection_id, org_id, node_map
+        )
+        edge_count += perm_edges
+
         # Count nodes by type for validation
-        identity_nodes = sum(1 for k in node_map if not k.startswith('role:') and not k.startswith('/'))
+        identity_nodes = sum(1 for k in node_map if not k.startswith('role:') and not k.startswith('/') and not k.startswith('perm:'))
         role_nodes = sum(1 for k in node_map if k.startswith('role:'))
         scope_nodes = sum(1 for k in node_map if k.startswith('/'))
         node_count = len(node_map)
 
         logger.info(f"IAM graph built for connection {connection_id}: "
                      f"{node_count} nodes ({identity_nodes} identity, {role_nodes} role, "
-                     f"{len(subscriptions)} subscription, {scope_nodes} scope), {edge_count} edges")
+                     f"{perm_nodes} permission, {len(subscriptions)} subscription, "
+                     f"{scope_nodes} scope), {edge_count} edges")
 
         return {'node_count': node_count, 'edge_count': edge_count}
 
@@ -215,6 +222,76 @@ class GraphBuilder:
         rows = cursor.fetchall()
         cursor.close()
         return [dict(r) for r in rows]
+
+    def _add_graph_api_permission_nodes(self, run_id, connection_id, org_id, node_map):
+        """Add Graph API permission nodes and has_permission edges.
+
+        Creates permission nodes for each unique Graph API permission found
+        in graph_api_permissions, and edges from identity → permission.
+        Uses ON CONFLICT DO NOTHING via create_graph_node/create_graph_edge.
+
+        Returns (perm_node_count, perm_edge_count).
+        """
+        from psycopg2.extras import RealDictCursor
+        cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT gp.permission_name, gp.permission_description, gp.risk_level,
+                   i.identity_id, i.id AS identity_db_id
+            FROM graph_api_permissions gp
+            JOIN identities i ON i.id = gp.identity_db_id
+            WHERE i.discovery_run_id = %s
+        """, (run_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+
+        if not rows:
+            return 0, 0
+
+        perm_node_count = 0
+        perm_edge_count = 0
+
+        for row in rows:
+            perm_name = row['permission_name']
+            identity_id = row['identity_id']
+            perm_key = f"perm:{perm_name}"
+
+            # Create permission node (deduplicated by perm_key in node_map)
+            if perm_key not in node_map:
+                node_id = self.db.create_graph_node(
+                    org_id=org_id,
+                    connection_id=connection_id,
+                    node_type='permission',
+                    external_id=perm_key,
+                    display_name=perm_name,
+                    metadata={
+                        'permission_description': row.get('permission_description'),
+                        'risk_level': row.get('risk_level'),
+                    },
+                )
+                if node_id:
+                    node_map[perm_key] = node_id
+                    perm_node_count += 1
+
+            # Create edge: Identity → Permission (has_permission)
+            src = node_map.get(identity_id)
+            tgt = node_map.get(perm_key)
+            if src and tgt:
+                self.db.create_graph_edge(
+                    org_id=org_id,
+                    connection_id=connection_id,
+                    source_node_id=src,
+                    target_node_id=tgt,
+                    edge_type='has_permission',
+                    metadata={
+                        'risk_level': row.get('risk_level'),
+                    },
+                )
+                perm_edge_count += 1
+
+        logger.info(f"Graph API permissions for connection {connection_id}: "
+                    f"{perm_node_count} permission nodes, {perm_edge_count} edges")
+
+        return perm_node_count, perm_edge_count
 
     def _extract_subscriptions(self, role_assignments):
         """Extract unique subscription IDs and names from role assignments."""

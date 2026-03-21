@@ -342,9 +342,10 @@ class GraphAttackEngine:
 
         # 2. Role assignments → Role nodes + ASSIGNED_ROLE edges
         cursor.execute("""
-            SELECT ra.identity_id, ra.role_name, ra.scope, ra.scope_type, ra.risk_level
+            SELECT ra.identity_db_id, ra.role_name, ra.scope, ra.scope_type, ra.risk_level
             FROM role_assignments ra
-            WHERE ra.discovery_run_id = %s
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
         """, (run_id,))
         seen_roles = set()
         for row in cursor.fetchall():
@@ -381,12 +382,13 @@ class GraphAttackEngine:
 
         # 3. Entra role assignments
         cursor.execute("""
-            SELECT era.identity_id, era.role_name, era.scope_label, era.risk_level
+            SELECT era.identity_db_id, era.role_name, era.directory_scope, era.risk_level
             FROM entra_role_assignments era
-            WHERE era.discovery_run_id = %s
+            JOIN identities i ON i.id = era.identity_db_id
+            WHERE i.discovery_run_id = %s
         """, (run_id,))
         for row in cursor.fetchall():
-            iid, role_name, scope_label, risk_lvl = row
+            iid, role_name, directory_scope, risk_lvl = row
             role_key = f'role:{role_name}'
             if role_key not in seen_roles:
                 priv_score = PRIVILEGED_ROLES.get(role_name, 10)
@@ -399,7 +401,7 @@ class GraphAttackEngine:
             self.graph.add_edge(GraphEdge(
                 f'identity:{iid}', role_key, EDGE_ASSIGNED_ROLE,
                 label=role_name,
-                metadata={'entra': True, 'scope_label': scope_label, 'risk_level': risk_lvl},
+                metadata={'entra': True, 'scope_label': directory_scope, 'risk_level': risk_lvl},
             ))
 
         # 4. Key Vaults → KEYVAULT nodes + CAN_ACCESS edges from identities with KV roles
@@ -427,7 +429,7 @@ class GraphAttackEngine:
                             label=f'{kv_role} → {name}',
                         ))
         except Exception:
-            pass  # azure_key_vaults may not exist
+            self.db.conn.rollback()  # reset transaction state
 
         # 5. Identity ownership (identity owns SPN) → CAN_ASSUME edges
         try:
@@ -451,7 +453,7 @@ class GraphAttackEngine:
                     label=f'Owns SPN: {owned_name}',
                 ))
         except Exception:
-            pass  # app_registrations or owner_ids may not exist
+            self.db.conn.rollback()  # reset transaction state
 
         # 6. Credential exposure → HAS_SECRET edges
         try:
@@ -476,7 +478,7 @@ class GraphAttackEngine:
                     label=f'{cred_count} credentials' + (f' ({expired_count} expired)' if expired_count else ''),
                 ))
         except Exception:
-            pass
+            self.db.conn.rollback()  # reset transaction state
 
         # 7. AWS cross-account trust → CAN_ASSUME edges
         #    AWS roles with cross-account or wildcard trust allow external assumption
@@ -863,7 +865,7 @@ class GraphAttackEngine:
             identity_scores[identity_id] = {
                 'identity_id': identity_id,
                 'identity_name': node.name,
-                'identity_type': node.node_type,
+                'identity_type': (node.node_type or 'service_principal').lower().strip(),
                 'organization_id': org_id,
                 'discovery_run_id': run_id,
                 'risk_score': int(score),

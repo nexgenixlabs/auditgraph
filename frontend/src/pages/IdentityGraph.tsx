@@ -1,4 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -216,6 +218,8 @@ function pointToSegmentDist(
 /* ─── Component ─────────────────────────────────────────────────────── */
 
 const IdentityGraph: React.FC = () => {
+  const { withConnection, selectedConnectionId } = useConnection();
+  const { activeOrgId } = useAuth();
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -245,12 +249,14 @@ const IdentityGraph: React.FC = () => {
 
   // Attack path highlight state
   const [activeAttackPath, setActiveAttackPath] = useState<AttackPath | null>(null);
+  const [showPathPanel, setShowPathPanel] = useState(false);
+  const [pathFilter, setPathFilter] = useState<'All' | 'Critical' | 'High'>('All');
 
   // Fetch connections
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/client/connections');
+        const res = await fetch(withConnection('/api/client/connections'));
         if (res.ok) {
           const data = await res.json();
           const conns: CloudConnection[] = (data.connections || []).filter(
@@ -299,7 +305,7 @@ const IdentityGraph: React.FC = () => {
     setLoading(true);
     setActiveAttackPath(null);
     try {
-      const res = await fetch(`/api/graph/visualization?connection_id=${connectionId}`);
+      const res = await fetch(withConnection(`/api/graph/visualization?connection_id=${connectionId}`));
       if (res.ok) {
         const raw = await res.json();
         const mapped = mapApiResponse(raw);
@@ -317,7 +323,7 @@ const IdentityGraph: React.FC = () => {
     if (!identityId) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/graph/identity/${encodeURIComponent(identityId)}`);
+      const res = await fetch(withConnection(`/api/graph/identity/${encodeURIComponent(identityId)}`));
       if (res.ok) {
         const raw = await res.json();
         const mapped = mapApiResponse(raw);
@@ -335,7 +341,7 @@ const IdentityGraph: React.FC = () => {
     if (!simulationId) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/graph/attack-path/${simulationId}`);
+      const res = await fetch(withConnection(`/api/graph/attack-path/${simulationId}`));
       if (res.ok) {
         const raw = await res.json();
         const mapped = mapApiResponse(raw);
@@ -354,7 +360,7 @@ const IdentityGraph: React.FC = () => {
     setPanelOpen(true);
     setSelectedDetail(null);
     try {
-      const res = await fetch(`/api/identities/${encodeURIComponent(nodeId)}`);
+      const res = await fetch(withConnection(`/api/identities/${encodeURIComponent(nodeId)}`));
       if (res.ok) {
         const data = await res.json();
         setSelectedDetail({
@@ -814,23 +820,37 @@ const IdentityGraph: React.FC = () => {
 
       {/* Attack Path Alert Banner */}
       {!!graphData && graphData.attackPathCount > 0 && (
-        <div className="flex items-center gap-3 bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2.5">
-          <span className="text-red-400 font-medium text-sm">Attack Path Detected</span>
-          <span className="text-red-300 text-xs">{graphData.attackPathCount} escalation path{graphData.attackPathCount > 1 ? 's' : ''} found</span>
-          <div className="ml-auto flex items-center gap-2 text-xs">
-            {graphData.attackPaths.map((ap, i) => (
+        <div
+          className="rounded-lg border flex items-center justify-between"
+          style={{ background: 'rgba(127,29,29,0.8)', borderColor: '#DC2626', padding: '10px 16px' }}
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-lg">&#9888;&#65039;</span>
+            <div>
+              <div className="text-red-200 font-bold text-sm">
+                CRITICAL: {graphData.attackPathCount.toLocaleString()} Lateral Movement Path{graphData.attackPathCount > 1 ? 's' : ''} Detected
+              </div>
+              <div className="text-red-300/80 text-xs mt-0.5">
+                An attacker with access to any identity below could escalate to privileged access across connected resources.
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-2 flex-shrink-0">
+            <button
+              onClick={() => setShowPathPanel(true)}
+              className="px-3 py-1.5 rounded text-xs font-medium text-white"
+              style={{ backgroundColor: '#DC2626' }}
+            >
+              View Top Paths
+            </button>
+            {activeAttackPath && (
               <button
-                key={i}
-                onClick={() => { setActiveAttackPath(ap); setHighlightedNode(ap.identity); setViewMode('attack'); }}
-                className={`px-2 py-1 rounded border ${
-                  activeAttackPath?.identity === ap.identity
-                    ? 'bg-red-500/20 border-red-500/50 text-red-300'
-                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-red-400'
-                }`}
+                onClick={() => { setActiveAttackPath(null); setHighlightedNode(null); }}
+                className="px-3 py-1.5 rounded text-xs font-medium bg-slate-700 text-slate-300 hover:bg-slate-600"
               >
-                {ap.identity_label} &rarr; {ap.role}
+                Reset View
               </button>
-            ))}
+            )}
           </div>
         </div>
       )}
@@ -968,8 +988,8 @@ const IdentityGraph: React.FC = () => {
       <div className="flex gap-4 relative">
         {/* Canvas */}
         <div
-          className="bg-slate-900/50 border border-slate-700/50 rounded-lg overflow-hidden flex-1 relative"
-          style={{ height: '600px' }}
+          className="bg-slate-900/50 border border-slate-700/50 rounded-lg overflow-hidden relative"
+          style={{ height: '600px', flex: showPathPanel ? '1 1 0' : '1 1 0', minWidth: 0 }}
         >
           {loading ? (
             <div className="flex items-center justify-center h-full text-slate-400">Loading graph...</div>
@@ -992,13 +1012,101 @@ const IdentityGraph: React.FC = () => {
             />
           )}
 
-          {/* Truncation warning */}
+          {/* Truncation info */}
           {graphData?.truncated && (
-            <div className="absolute top-2 left-2 bg-yellow-500/20 border border-yellow-500/30 rounded px-2 py-1 text-xs text-yellow-400">
-              Graph truncated to 120 nodes / 200 edges
+            <div
+              className="absolute top-2 left-2 rounded-md border px-3 py-1.5 text-xs"
+              style={{ background: 'rgba(30,41,59,0.9)', borderColor: '#334155', color: '#94A3B8' }}
+            >
+              Showing highest-risk subgraph ({graphData.nodes.length} of {graphData.nodes.length + 50}+ identities).
+              Search by Identity ID above to explore specific identities.
             </div>
           )}
         </div>
+
+        {/* Attack Path Sidebar Panel */}
+        {showPathPanel && graphData && graphData.attackPaths.length > 0 && (
+          <div
+            className="w-80 flex-shrink-0 rounded-lg border overflow-y-auto"
+            style={{ height: '600px', background: '#1E293B', borderColor: 'rgba(255,255,255,0.08)' }}
+          >
+            <div className="p-3">
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-semibold text-sm text-white">
+                  Attack Paths ({graphData.attackPathCount.toLocaleString()})
+                </span>
+                <button
+                  onClick={() => setShowPathPanel(false)}
+                  className="text-slate-400 hover:text-white text-sm"
+                >
+                  &#10005;
+                </button>
+              </div>
+
+              {/* Filter tabs */}
+              <div className="flex gap-1.5 mb-3">
+                {(['All', 'Critical', 'High'] as const).map(level => (
+                  <button
+                    key={level}
+                    onClick={() => setPathFilter(level)}
+                    className="px-2.5 py-1 rounded-full text-xs border cursor-pointer"
+                    style={{
+                      background: pathFilter === level ? '#DC2626' : 'transparent',
+                      borderColor: pathFilter === level ? '#DC2626' : '#334155',
+                      color: 'white',
+                    }}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+
+              {/* Path list */}
+              <div className="space-y-1.5">
+                {graphData.attackPaths
+                  .filter(ap => {
+                    if (pathFilter === 'All') return true;
+                    // Filter by target type as proxy for severity
+                    if (pathFilter === 'Critical') return ap.target_type === 'subscription';
+                    return true;
+                  })
+                  .slice(0, 50)
+                  .map((path, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setActiveAttackPath(path);
+                        setHighlightedNode(path.identity);
+                        setViewMode('attack');
+                      }}
+                      className="w-full text-left rounded-md p-2.5 border transition-colors"
+                      style={{
+                        background: activeAttackPath?.identity === path.identity
+                          ? 'rgba(220,38,38,0.15)' : 'rgba(255,255,255,0.04)',
+                        borderColor: activeAttackPath?.identity === path.identity
+                          ? '#DC2626' : 'transparent',
+                      }}
+                    >
+                      <div className="text-xs font-medium text-slate-100">
+                        {path.identity_label}
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-1">
+                        &rarr; {path.role} &rarr; {path.target_label}
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5">
+                        {path.target_type?.replace(/_/g, ' ')}
+                      </div>
+                    </button>
+                  ))}
+                {graphData.attackPaths.length > 50 && (
+                  <div className="text-center text-slate-500 text-xs py-2">
+                    Showing 50 of {graphData.attackPaths.length.toLocaleString()} paths
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Floating Tooltip */}
         {(tooltipNode || tooltipEdge) && (

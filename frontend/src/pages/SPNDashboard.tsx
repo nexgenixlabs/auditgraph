@@ -510,7 +510,7 @@ export default function SPNDashboard() {
       .then(r => r.json())
       .then(setStats)
       .catch(() => {});
-  }, [initialized, selectedConnectionId]);
+  }, [initialized, selectedConnectionId, activeOrgId]);
 
   // Fetch SPN list
   useEffect(() => {
@@ -536,7 +536,7 @@ export default function SPNDashboard() {
       })
       .catch(() => setLoading(false));
     return () => abort.abort();
-  }, [initialized, exposureFilter, lifecycleFilter, ownerFilter, canEscalateFilter, search, hideMicrosoft, sortField, sortDir, selectedConnectionId]);
+  }, [initialized, exposureFilter, lifecycleFilter, ownerFilter, canEscalateFilter, search, hideMicrosoft, sortField, sortDir, selectedConnectionId, activeOrgId]);
 
   // Fetch detail when selected
   useEffect(() => {

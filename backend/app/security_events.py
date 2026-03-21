@@ -178,3 +178,102 @@ class SecurityEventLogger:
             'STARTUP_VALIDATION', severity,
             {'check': check_name, 'passed': passed, 'detail': detail},
         )
+
+    # ----- Resource Lifecycle Events -----
+
+    @staticmethod
+    def connector_created(org_id, connection_id, cloud, label, user_id=None):
+        """Cloud connector created."""
+        return SecurityEventLogger._emit(
+            'CONNECTOR_CREATED', 'info',
+            {'connection_id': connection_id, 'cloud': cloud, 'label': label,
+             'user_id': user_id},
+            tenant_id=org_id,
+        )
+
+    @staticmethod
+    def connector_deleted(org_id, connection_id, label, user_id=None):
+        """Cloud connector deleted."""
+        return SecurityEventLogger._emit(
+            'CONNECTOR_DELETED', 'medium',
+            {'connection_id': connection_id, 'label': label, 'user_id': user_id},
+            tenant_id=org_id,
+        )
+
+    @staticmethod
+    def credential_rotated(org_id, connection_id, label, user_id=None):
+        """Connector credential rotated."""
+        return SecurityEventLogger._emit(
+            'CREDENTIAL_ROTATED', 'info',
+            {'connection_id': connection_id, 'label': label, 'user_id': user_id},
+            tenant_id=org_id,
+        )
+
+    @staticmethod
+    def role_changed(org_id, target_user_id, old_role, new_role, changed_by=None):
+        """User role changed."""
+        severity = 'medium' if new_role in ('admin', 'security_admin') else 'info'
+        return SecurityEventLogger._emit(
+            'ROLE_CHANGED', severity,
+            {'target_user_id': target_user_id, 'old_role': old_role,
+             'new_role': new_role, 'changed_by': changed_by},
+            tenant_id=org_id,
+        )
+
+    @staticmethod
+    def login_success(org_id, user_id, username, ip_address=None):
+        """Successful login (alias for auth_success with org context)."""
+        return SecurityEventLogger._emit(
+            'LOGIN_SUCCESS', 'info',
+            {'user_id': user_id, 'username': username, 'ip': ip_address},
+            tenant_id=org_id,
+        )
+
+    @staticmethod
+    def login_failed(username, ip_address=None, reason=None):
+        """Failed login attempt."""
+        return SecurityEventLogger._emit(
+            'LOGIN_FAILED', 'medium',
+            {'username': username, 'ip': ip_address, 'reason': reason},
+        )
+
+    # ----- DB Persistence -----
+
+    @staticmethod
+    def persist(event, db=None):
+        """Persist a security event to the security_events table.
+
+        Args:
+            event: Dict returned by _emit() or any of the event methods.
+            db: Optional Database instance. If None, creates a new admin connection.
+        """
+        if not event or not isinstance(event, dict):
+            return
+        try:
+            import json
+            close_db = False
+            if db is None:
+                from app.database import Database
+                db = Database(_admin_reason='security_event: persist')
+                close_db = True
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    INSERT INTO security_events
+                        (organization_id, event_type, severity, title, description, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    event.get('tenant_id') or 0,
+                    event.get('event_type', 'UNKNOWN'),
+                    event.get('severity', 'info'),
+                    event.get('event_type', 'Security Event'),
+                    json.dumps(event.get('details', {})),
+                    json.dumps(event),
+                ))
+                db.conn.commit()
+                cursor.close()
+            finally:
+                if close_db:
+                    db.close()
+        except Exception as e:
+            _security_logger.warning("Failed to persist security event: %s", e)

@@ -18,6 +18,13 @@ from app.config import IS_DEV, IS_LOCAL, log_startup_banner
 from app.logging_config import configure_logging
 from app.metrics import MetricsCollector
 from app.security import rate_limit, add_security_headers
+from app.idempotency import idempotent
+from app.api.validation import (
+    validate_json, LOGIN_SCHEMA, REFRESH_SCHEMA, CREATE_CONNECTION_SCHEMA,
+    TRIGGER_RUN_SCHEMA, COPILOT_CHAT_SCHEMA, CREATE_USER_SCHEMA,
+    CREATE_WEBHOOK_SCHEMA, SAVE_SETTINGS_SCHEMA, CHANGE_PASSWORD_SCHEMA,
+    ROTATE_CREDENTIALS_SCHEMA,
+)
 
 from app.api.auth import auth_middleware, require_role, require_superadmin, require_portal_access, require_portal_role, require_feature
 from app.api.handlers import (
@@ -59,6 +66,9 @@ from app.api.handlers import (
     post_remediation_action,
     get_remediation_dashboard_summary,
     get_generated_remediations_handler,
+    update_generated_remediation_handler,
+    trigger_remediation_generation_handler,
+    get_remediation_script_handler,
     post_bulk_remediation,
     get_role_usage_stats,
     get_role_mining,
@@ -261,6 +271,9 @@ from app.api.handlers import (
     create_client_connection,
     update_client_connection,
     delete_client_connection,
+    cleanup_inactive_connections_handler,
+    rotate_connector_credentials,
+    check_connector_credential_expiry_handler,
     test_client_connection,
     discover_client_connection,
     get_rbac_hygiene_combined,
@@ -290,6 +303,10 @@ from app.api.handlers import (
     get_dashboard_identity_correlation,
     get_correlation_accounts,
     get_identity_risk_summary,
+    get_risk_summary,
+    get_risk_summary_full,
+    get_exposure_summary,
+    get_attack_path_count,
     get_dangerous_identities,
     # Phase 91: Sensitive Data Intelligence
     get_resource_classifications,
@@ -299,6 +316,9 @@ from app.api.handlers import (
     get_sensitive_access_for_identity,
     get_resource_access_map,
     get_blast_radius_summary,
+    platform_integrity_check_handler,
+    data_source_map_handler,
+    metric_integrity_debug_handler,
     # Phase 5: Launch Readiness
     validate_launch_readiness,
     # Phase 6: Scan Schedules, Stripe, Pilot, Password Policy
@@ -444,6 +464,16 @@ from app.api.handlers import (
     admin_reset_tenant_discovery,
     admin_flush_cache,
     admin_rebuild_all_graphs,
+    agent_patterns_reload,
+    get_agent_identities,
+    get_agent_identity_count,
+    agent_identities_reclassify,
+    scan_orphan_agents,
+    get_agent_blast_radius,
+    get_agent_delegations,
+    manage_agent_delegation,
+    delete_agent_delegation,
+    get_agent_risk_summary,
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -533,7 +563,7 @@ def _run_core_schema(db_init):
     import pathlib
     sql_path = pathlib.Path(__file__).parent.parent / 'migrations' / '001_create_identity_roles.sql'
     if not sql_path.exists():
-        print(f"  ⚠️ Core schema SQL not found at {sql_path}")
+        logger.warning("Core schema SQL not found at %s", sql_path)
         return
     sql = sql_path.read_text()
     cursor = db_init.conn.cursor()
@@ -557,14 +587,14 @@ def _run_full_schema(db_init):
     import pathlib
     sql_path = pathlib.Path(__file__).parent.parent / 'migrations' / '100_full_schema.sql'
     if not sql_path.exists():
-        print(f"  ⚠️ Full schema SQL not found at {sql_path}")
+        logger.warning("Full schema SQL not found at %s", sql_path)
         return
     sql = sql_path.read_text()
     cursor = db_init.conn.cursor()
     cursor.execute(sql)
     db_init._commit()
     cursor.close()
-    print("  ✓ Full schema: all tables ensured (CREATE TABLE IF NOT EXISTS)")
+    logger.info("Full schema: all tables ensured (CREATE TABLE IF NOT EXISTS)")
 
 
 def _run_derived_tables(db_init):
@@ -580,7 +610,7 @@ def _run_derived_tables(db_init):
             cursor.execute(sql_path.read_text())
             db_init._commit()
             cursor.close()
-    print("  ✓ Derived tables: identity_graph_edges + identity_security_posture ensured")
+    logger.info("Derived tables: identity_graph_edges + identity_security_posture ensured")
 
 
 def _run_schema_sync(conn):
@@ -593,7 +623,7 @@ def _run_schema_sync(conn):
     import pathlib
     script_path = pathlib.Path(__file__).parent.parent / 'scripts' / 'sync_schema.py'
     if not script_path.exists():
-        print("  ⚠️ sync_schema.py not found — skipping schema sync")
+        logger.warning("sync_schema.py not found -- skipping schema sync")
         return
 
     # Import the sync module
@@ -611,17 +641,18 @@ def _run_schema_sync(conn):
     n_missing_cols = len(changes["missing_columns"])
 
     if n_missing_tables == 0 and n_missing_cols == 0:
-        print(f"  ✓ Schema sync: all {len(sync_mod.EXPECTED_COLUMNS)} tables, "
-              f"{sum(len(c) for c in sync_mod.EXPECTED_COLUMNS.values())} columns in sync")
+        logger.info("Schema sync: all %s tables, %s columns in sync",
+                    len(sync_mod.EXPECTED_COLUMNS),
+                    sum(len(c) for c in sync_mod.EXPECTED_COLUMNS.values()))
         return
 
     if n_missing_tables:
-        print(f"  ⚠️ Schema sync: {n_missing_tables} missing tables (will be created by _ensure_* methods)")
+        logger.warning("Schema sync: %s missing tables (will be created by _ensure_* methods)", n_missing_tables)
 
     if n_missing_cols:
-        print(f"  📦 Schema sync: adding {n_missing_cols} missing columns...")
+        logger.info("Schema sync: adding %s missing columns...", n_missing_cols)
         sync_mod.apply_changes(conn, changes, dry_run=False)
-        print(f"  ✓ Schema sync: {n_missing_cols} columns added")
+        logger.info("Schema sync: %s columns added", n_missing_cols)
 
 
 def create_app():
@@ -640,12 +671,14 @@ def create_app():
     logger.info("Copilot model: %s", os.getenv("LLM_MODEL", "(default)"))
 
     app = Flask(__name__)
+    app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB request size limit
+
     cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
     CORS(app, resources={r"/*": {
         "origins": [o.strip() for o in cors_origins],
         "allow_headers": ["Content-Type", "Authorization", "X-Portal-Context",
-                          "X-Organization-Id", "X-API-Key"],
-        "expose_headers": ["Content-Type"],
+                          "X-Organization-Id", "X-API-Key", "Idempotency-Key"],
+        "expose_headers": ["Content-Type", "X-Idempotency-Key", "X-Idempotent-Replayed"],
     }})
 
     # Authentication middleware (Phase 31)
@@ -765,6 +798,14 @@ def create_app():
             'request_id': getattr(g, 'request_id', None),
         }), 405
 
+    @app.errorhandler(413)
+    def _payload_too_large(e):
+        return jsonify({
+            'error': 'Request payload too large (max 5 MB)',
+            'error_code': 'PAYLOAD_TOO_LARGE',
+            'request_id': getattr(g, 'request_id', None),
+        }), 413
+
     @app.errorhandler(429)
     def _too_many_requests(e):
         return jsonify({
@@ -799,7 +840,7 @@ def create_app():
     try:
         _db_init = _DbInit()
     except Exception as e:
-        print(f"  ⚠️ Startup DB connection failed: {e}")
+        logger.warning("Startup DB connection failed: %s", e)
         _DbInit._migration_in_progress = False
         _db_init = None
 
@@ -831,6 +872,7 @@ def create_app():
         _startup_ops += [
             ('identity_subscription_access', lambda: _db_init._ensure_identity_subscription_access_table()),
             ('backfill_microsoft_flag', lambda: _db_init.backfill_microsoft_flag()),
+            ('cleanup_microsoft_remediations', lambda: _db_init.cleanup_microsoft_remediations()),
             ('permission_plane_column', lambda: _db_init.ensure_permission_plane_column()),
             ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
             ('spn_exposure', lambda: _db_init._ensure_spn_exposure()),
@@ -865,13 +907,14 @@ def create_app():
             ('azure_storage_accounts', lambda: _db_init._ensure_azure_storage_accounts_table()),
             ('azure_key_vaults', lambda: _db_init._ensure_azure_key_vaults_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
+            ('agent_classifications', lambda: _db_init._ensure_agent_classifications_table()),
         ]
 
         for label, op in _startup_ops:
             try:
                 op()
             except Exception as e:
-                print(f"  ⚠️ Startup DDL skipped ({label}): {e}")
+                logger.warning("Startup DDL skipped (%s): %s", label, e)
                 try:
                     _db_init._rollback()
                 except Exception:
@@ -886,7 +929,7 @@ def create_app():
             try:
                 fn()
             except Exception as e:
-                print(f"  ⚠️ Startup DDL skipped ({label}): {e}")
+                logger.warning("Startup DDL skipped (%s): %s", label, e)
                 try:
                     _db_init._rollback()
                 except Exception:
@@ -896,7 +939,23 @@ def create_app():
         try:
             _run_schema_sync(_db_init.conn)
         except Exception as e:
-            print(f"  ⚠️ Schema sync error (non-fatal): {e}")
+            logger.warning("Schema sync error (non-fatal): %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Role usage columns (last_used_at for per-role activity tracking)
+        try:
+            _rc = _db_init.conn.cursor()
+            _rc.execute("ALTER TABLE role_assignments ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ")
+            _rc.execute("ALTER TABLE role_assignments ADD COLUMN IF NOT EXISTS last_used_operation TEXT")
+            _rc.execute("ALTER TABLE entra_role_assignments ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ")
+            _rc.execute("ALTER TABLE entra_role_assignments ADD COLUMN IF NOT EXISTS last_used_operation TEXT")
+            _db_init.conn.commit()
+            _rc.close()
+        except Exception as e:
+            logger.warning("Role usage columns DDL skipped: %s", e)
             try:
                 _db_init._rollback()
             except Exception:
@@ -924,6 +983,19 @@ def create_app():
         except Exception:
             pass
         _perf_cursor.close()
+
+        # Backfill NULL role_name/scope in generated_remediations
+        try:
+            _bf_count = _db_init.backfill_generated_remediations_roles()
+            if _bf_count > 0:
+                logger.info("Backfilled role_name/scope on %s generated_remediations rows", _bf_count)
+        except Exception as e:
+            logger.warning("Remediation role backfill skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
         _db_init.close()
         _DbInit._migration_in_progress = False
 
@@ -946,6 +1018,7 @@ def create_app():
         return health_check()
 
     @app.get("/api/metrics")
+    @require_role('admin')
     def metrics():
         return prometheus_metrics()
 
@@ -974,6 +1047,7 @@ def create_app():
     # -----------------------
     @app.post("/api/auth/login")
     @rate_limit(max_requests=5, window_seconds=60)   # 5 attempts/min per IP
+    @validate_json(LOGIN_SCHEMA)
     def login():
         return auth_login()
 
@@ -992,6 +1066,7 @@ def create_app():
 
     @app.post("/api/auth/refresh")
     @rate_limit(max_requests=10, window_seconds=60)   # 10 refreshes/min per IP
+    @validate_json(REFRESH_SCHEMA)
     def refresh():
         return auth_refresh()
 
@@ -1004,6 +1079,7 @@ def create_app():
         return auth_me()
 
     @app.put("/api/auth/password")
+    @validate_json(CHANGE_PASSWORD_SCHEMA)
     def password_change():
         return change_password()
 
@@ -1032,6 +1108,7 @@ def create_app():
 
     @app.post("/api/users")
     @require_role('admin')
+    @validate_json(CREATE_USER_SCHEMA)
     def users_create():
         return create_user_handler()
 
@@ -1321,6 +1398,52 @@ def create_app():
     @require_portal_role('superadmin')
     def admin_platform_rebuild_graphs():
         return admin_rebuild_all_graphs()
+
+    @app.post("/api/admin/agent-patterns/reload")
+    @require_portal_role('superadmin')
+    def admin_agent_patterns_reload():
+        return agent_patterns_reload()
+
+    # ── AI Agent Governance endpoints (Phase 1) ──
+    @app.get("/api/agent-identities")
+    def agent_identities_list():
+        return get_agent_identities()
+
+    @app.get("/api/agent-identities/count")
+    def agent_identities_count():
+        return get_agent_identity_count()
+
+    @app.post("/api/agent-identities/reclassify")
+    @require_role('admin')
+    def agent_identities_reclassify_route():
+        return agent_identities_reclassify()
+
+    @app.get("/api/dashboard/agent-risk-summary")
+    def agent_risk_summary_route():
+        return get_agent_risk_summary()
+
+    @app.get("/api/agent-identities/<identity_id>/blast-radius")
+    def agent_blast_radius_route(identity_id):
+        return get_agent_blast_radius(identity_id)
+
+    @app.get("/api/agent-identities/delegations")
+    def agent_delegations_list_route():
+        return get_agent_delegations()
+
+    @app.post("/api/agent-identities/delegations")
+    @require_role('admin')
+    def agent_delegations_create_route():
+        return manage_agent_delegation()
+
+    @app.delete("/api/agent-identities/delegations")
+    @require_role('admin')
+    def agent_delegations_delete_route():
+        return delete_agent_delegation()
+
+    @app.post("/api/agent-identities/scan-orphans")
+    @require_role('admin')
+    def agent_identities_scan_orphans_route():
+        return scan_orphan_agents()
 
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')
@@ -1864,6 +1987,25 @@ def create_app():
         return get_attack_surface_score()
 
     # -----------------------
+    # Canonical risk/exposure/attack-path summaries
+    # -----------------------
+    @app.get("/api/risk/summary")
+    def risk_summary():
+        return get_risk_summary()
+
+    @app.get("/api/risk/summary/full")
+    def risk_summary_full():
+        return get_risk_summary_full()
+
+    @app.get("/api/exposure/summary")
+    def exposure_summary():
+        return get_exposure_summary()
+
+    @app.get("/api/attack-paths/count")
+    def attack_paths_count():
+        return get_attack_path_count()
+
+    # -----------------------
     # Risks (Dashboard needs it)
     # -----------------------
     @app.get("/api/risks")
@@ -1982,6 +2124,9 @@ def create_app():
 
     @app.post("/api/runs/trigger")
     @require_role('admin', 'security_admin')
+    @rate_limit(max_requests=5, window_seconds=60)   # 5 triggers/min per IP
+    @validate_json(TRIGGER_RUN_SCHEMA)
+    @idempotent
     def runs_trigger():
         return trigger_discovery()
 
@@ -2072,6 +2217,18 @@ def create_app():
     def remediation_generated():
         return get_generated_remediations_handler()
 
+    @app.patch("/api/remediation/generated/<remediation_id>")
+    def remediation_generated_update(remediation_id):
+        return update_generated_remediation_handler(remediation_id)
+
+    @app.post("/api/remediation/generate")
+    def remediation_generate_trigger():
+        return trigger_remediation_generation_handler()
+
+    @app.get("/api/remediation/<remediation_id>/script")
+    def remediation_script(remediation_id):
+        return get_remediation_script_handler(remediation_id)
+
     # -----------------------
     # Bulk Operations (Phase 25)
     # -----------------------
@@ -2138,6 +2295,7 @@ def create_app():
 
     @app.post("/api/settings")
     @require_role('admin')
+    @validate_json(SAVE_SETTINGS_SCHEMA)
     def app_settings_save():
         return save_app_settings()
 
@@ -2160,18 +2318,28 @@ def create_app():
 
     @app.post("/api/client/connections")
     @require_role('admin', 'security_admin')
+    @rate_limit(max_requests=20, window_seconds=60)
+    @validate_json(CREATE_CONNECTION_SCHEMA)
+    @idempotent
     def client_connections_create():
         return create_client_connection()
 
     @app.put("/api/client/connections/<int:connection_id>")
     @require_role('admin', 'security_admin')
+    @rate_limit(max_requests=20, window_seconds=60)
     def client_connections_update(connection_id):
         return update_client_connection(connection_id)
 
     @app.delete("/api/client/connections/<int:connection_id>")
     @require_role('admin')
+    @rate_limit(max_requests=20, window_seconds=60)
     def client_connections_delete(connection_id):
         return delete_client_connection(connection_id)
+
+    @app.post("/api/admin/cleanup-inactive-connections")
+    @require_role('admin')
+    def admin_cleanup_inactive():
+        return cleanup_inactive_connections_handler()
 
     @app.post("/api/client/connections/test")
     @require_role('admin', 'security_admin')
@@ -2183,6 +2351,18 @@ def create_app():
     def client_connections_discover(connection_id):
         return discover_client_connection(connection_id)
 
+    @app.post("/api/connectors/<int:connection_id>/rotate-credentials")
+    @require_role('admin', 'security_admin')
+    @rate_limit(max_requests=20, window_seconds=60)
+    @validate_json(ROTATE_CREDENTIALS_SCHEMA)
+    def connector_rotate_credentials(connection_id):
+        return rotate_connector_credentials(connection_id)
+
+    @app.get("/api/connectors/expiring-credentials")
+    @require_role('admin', 'security_admin')
+    def connector_expiring_credentials():
+        return check_connector_credential_expiry_handler()
+
     # -----------------------
     # Webhooks (Phase 28 - Admin only for writes)
     # -----------------------
@@ -2192,6 +2372,7 @@ def create_app():
 
     @app.post("/api/webhooks")
     @require_role('admin')
+    @validate_json(CREATE_WEBHOOK_SCHEMA)
     def webhooks_create():
         return create_webhook()
 
@@ -2568,6 +2749,21 @@ def create_app():
     def system_tenant_isolation():
         return validate_org_isolation()
 
+    @app.get("/api/system/integrity-check")
+    @require_role('admin')
+    def system_integrity_check():
+        return platform_integrity_check_handler()
+
+    @app.get("/api/system/data-source-map")
+    @require_role('admin')
+    def system_data_source_map():
+        return data_source_map_handler()
+
+    @app.get("/api/system/metric-integrity-debug")
+    @require_role('admin')
+    def system_metric_integrity_debug():
+        return metric_integrity_debug_handler()
+
     @app.get("/api/system/launch-readiness")
     @require_portal_access()
     def system_launch_readiness():
@@ -2632,6 +2828,8 @@ def create_app():
     # -----------------------
     @app.post("/api/copilot/chat")
     @require_feature('ai_copilot')
+    @rate_limit(max_requests=20, window_seconds=60)
+    @validate_json(COPILOT_CHAT_SCHEMA)
     def copilot_chat_route():
         return copilot_chat()
 
@@ -2646,6 +2844,7 @@ def create_app():
     # Phase 12: Context-aware copilot
     @app.post("/api/copilot/query")
     @require_feature('ai_copilot')
+    @rate_limit(max_requests=20, window_seconds=60)
     def copilot_query_route():
         return copilot_query_handler()
 
@@ -2657,11 +2856,13 @@ def create_app():
     # AI Copilot Investigation Enhancement
     @app.post("/api/copilot/investigate")
     @require_feature('ai_copilot')
+    @rate_limit(max_requests=20, window_seconds=60)
     def copilot_investigate_route():
         return copilot_investigate_handler()
 
     @app.post("/api/copilot/graph-query")
     @require_feature('ai_copilot')
+    @rate_limit(max_requests=20, window_seconds=60)
     def copilot_graph_query_route():
         return copilot_graph_query_handler()
 
@@ -3659,9 +3860,54 @@ def create_app():
     # RuntimeError (ENFORCE_ADMIN_GUARD=True) or log a warning (False).
     Database._startup_complete = True
 
+    # ── API Versioning: mirror /api/* routes at /api/v1/* ──
+    # Existing /api/ routes remain unchanged (backward compatible).
+    # New /api/v1/ prefix allows future version evolution.
+    _register_v1_routes(app)
+
     return app
+
+
+def _register_v1_routes(app):
+    """Register /api/v1/ aliases for every existing /api/ route.
+
+    This iterates over all registered URL rules and creates matching
+    /api/v1/ rules pointing to the same view functions. Existing
+    /api/ routes remain untouched — both prefixes work identically.
+    """
+    v1_count = 0
+    for rule in list(app.url_map.iter_rules()):
+        if not rule.rule.startswith('/api/'):
+            continue
+        if rule.rule.startswith('/api/v1/'):
+            continue
+        # Skip static/health endpoints that don't need versioning
+        if rule.endpoint == 'static':
+            continue
+
+        v1_path = '/api/v1/' + rule.rule[5:]   # /api/foo → /api/v1/foo
+        v1_endpoint = f"v1_{rule.endpoint}"
+
+        # Extract actual HTTP methods (exclude OPTIONS/HEAD — Flask adds those)
+        methods = rule.methods - {'OPTIONS', 'HEAD'}
+        if not methods:
+            continue
+
+        view_func = app.view_functions.get(rule.endpoint)
+        if not view_func:
+            continue
+
+        try:
+            app.add_url_rule(v1_path, endpoint=v1_endpoint,
+                             view_func=view_func, methods=sorted(methods))
+            v1_count += 1
+        except Exception:
+            pass  # Skip duplicates or conflicts silently
+
+    logger = logging.getLogger(__name__)
+    logger.info("API v1 routes registered: %d routes mirrored at /api/v1/", v1_count)
 
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=os.getenv("FLASK_ENV") == "development")

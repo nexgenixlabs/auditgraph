@@ -61,3 +61,5 @@ asdasd
 folderstructure.txt
 diagnostics.sh
 backend/=*
+test-results/
+backend/test-results/

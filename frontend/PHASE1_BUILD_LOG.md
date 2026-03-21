@@ -44,7 +44,7 @@
 | `IdentityDetail.tsx` | Lazy-loads data when tab is selected |
 
 **Test results:**
-- Bhupathi (human, critical): 7 roles, 26 perms, 6 Admin scopes, 1 Write
+- Admin User (human, critical): 7 roles, 26 perms, 6 Admin scopes, 1 Write
 - github-terraform-sp (SPN): 1 role, 3 perms, 1 Write scope (Contributor)
 - uamtest1 (managed identity): 1 role, 3 perms, 1 Write scope
 
@@ -88,7 +88,7 @@
 | 1 | Risk Posture | Score + Grade | Score=46.8, Grade=C, Severity=high — PASS |
 | 7 | Identity Inventory | 50+ identities | 56 identities — PASS |
 | 9 | Filter Workload | NHIs only | 56 workload — PASS |
-| 10 | Search "Bhupathi" | 2 results | 2 results — PASS |
+| 10 | Search "Admin User" | 2 results | 2 results — PASS |
 | 11 | Click identity row | Detail loads | github-terraform-sp detail — PASS |
 | 12 | Show roles/risk factors | Roles visible | 1 role, 1 risk factor — PASS |
 | 13 | Effective Access tab | Permissions shown | 1 role, 3 perms — PASS |

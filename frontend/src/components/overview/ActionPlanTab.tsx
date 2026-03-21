@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from 'react';
+import { useConnection } from '../../contexts/ConnectionContext';
 import {
   TenantData, Nav,
   F, P,
@@ -10,14 +11,20 @@ import {
 export function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
   const identityRemediations = d.remediations.filter(r => r.type === 'identity-remediation' && r.gain > 0);
   const [scanTriggered, setScanTriggered] = useState(false);
+  const { withConnection, selectedConnectionId } = useConnection();
 
   const triggerScan = useCallback(() => {
     if (scanTriggered) return;
     setScanTriggered(true);
-    fetch('/api/runs/trigger', { method: 'POST' })
+    const body = selectedConnectionId ? JSON.stringify({ connection_id: selectedConnectionId }) : undefined;
+    fetch(withConnection('/api/runs/trigger'), {
+      method: 'POST',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body,
+    })
       .then(r => { if (!r.ok) throw new Error('Failed'); })
       .catch(() => setScanTriggered(false));
-  }, [scanTriggered]);
+  }, [scanTriggered, withConnection, selectedConnectionId]);
 
   return (
     <div>

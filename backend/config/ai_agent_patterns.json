@@ -1,0 +1,27 @@
+{
+  "display_name_patterns": [
+    { "pattern": "(?i)(copilot|copilot-studio|copliot)", "confidence": 0.9, "platform": "copilot_studio" },
+    { "pattern": "(?i)(openai|gpt|azure-ai|azureai)", "confidence": 0.85, "platform": "azure_openai" },
+    { "pattern": "(?i)(langchain|langsmith)", "confidence": 0.8, "platform": "langchain" },
+    { "pattern": "(?i)(power.?automate|pa-ai|flow-ai)", "confidence": 0.8, "platform": "power_automate" },
+    { "pattern": "(?i)(bot|chatbot|agent|assistant)(?!.*human)", "confidence": 0.6, "platform": "generic_bot" },
+    { "pattern": "(?i)(semantic.?kernel|sk-)", "confidence": 0.85, "platform": "semantic_kernel" },
+    { "pattern": "(?i)(autogen|auto-gen)", "confidence": 0.85, "platform": "autogen" }
+  ],
+  "known_app_ids": [
+    { "app_id": "00000009-0000-0000-c000-000000000000", "platform": "power_bi_service" },
+    { "app_id": "00000003-0000-0ff1-ce00-000000000000", "platform": "sharepoint_online" }
+  ],
+  "api_permission_signals": [
+    { "permission": "AiService.ReadWrite.All", "confidence": 0.95, "platform": "azure_ai" },
+    { "permission": "CognitiveServices", "confidence": 0.9, "platform": "azure_cognitive" },
+    { "permission": "Bot.ReadWrite.All", "confidence": 0.95, "platform": "bot_framework" }
+  ],
+  "exclusion_patterns": [
+    "(?i)human",
+    "(?i)employee",
+    "(?i)user-account"
+  ],
+  "version": "1.0.0",
+  "last_updated": "2026-03-19"
+}

@@ -96,6 +96,7 @@ export interface IdentityDetailsResponse {
     deleted_at?: string | null;
     ca_coverage_status?: string | null;
     ca_mfa_enforced?: boolean;
+    removable_role_count?: number;
   };
   roles: any[];
   graph_permissions: any[];
@@ -268,8 +269,9 @@ export function usageStatusBadge(status?: string, redundantWith?: string) {
   const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
 
   if (v === 'orphaned') return <span className={`${base} bg-red-100 text-red-700`}>Orphaned</span>;
-  if (v === 'definitely_unused') return <span className={`${base} bg-red-100 text-red-700`}>Unused</span>;
-  if (v === 'likely_unused') return <span className={`${base} bg-orange-100 text-orange-700`}>Likely Unused</span>;
+  if (v === 'never_used' || v === 'definitely_unused') return <span className={`${base} bg-red-100 text-red-700`}>Never Used</span>;
+  if (v === 'dormant' || v === 'likely_unused') return <span className={`${base} bg-orange-100 text-orange-700`}>Dormant</span>;
+  if (v === 'stale') return <span className={`${base} bg-yellow-100 text-yellow-700`}>Stale</span>;
   if (v === 'possibly_overprivileged') {
     return (
       <span className={`${base} bg-yellow-100 text-yellow-700`} title={redundantWith ? `Redundant with: ${redundantWith}` : ''}>
@@ -277,8 +279,34 @@ export function usageStatusBadge(status?: string, redundantWith?: string) {
       </span>
     );
   }
-  if (v === 'assumed_active') return <span className={`${base} bg-green-100 text-green-700`}>Active</span>;
+  if (v === 'active' || v === 'assumed_active') return <span className={`${base} bg-green-100 text-green-700`}>Active</span>;
   return <span className={`${base} bg-gray-100 text-gray-500`}>Unknown</span>;
+}
+
+export function lastUsedBadge(lastUsedDisplay?: string, usageStatus?: string) {
+  if (!lastUsedDisplay) return null;
+  const v = safeLower(usageStatus);
+  let color = 'text-gray-500';
+  let dotColor = 'bg-gray-400';
+  if (v === 'active' || v === 'assumed_active') {
+    color = 'text-green-700';
+    dotColor = 'bg-green-500';
+  } else if (v === 'stale') {
+    color = 'text-yellow-700';
+    dotColor = 'bg-yellow-500';
+  } else if (v === 'dormant' || v === 'likely_unused') {
+    color = 'text-orange-700';
+    dotColor = 'bg-orange-500';
+  } else if (v === 'never_used' || v === 'definitely_unused') {
+    color = 'text-red-700';
+    dotColor = 'bg-red-500';
+  }
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs ${color}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+      {lastUsedDisplay}
+    </span>
+  );
 }
 
 export function categoryLabel(catRaw?: any, typeRaw?: any) {

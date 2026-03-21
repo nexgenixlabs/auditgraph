@@ -6,7 +6,10 @@ Requires: AuditLog.Read.All permission on the registered app.
 """
 
 import json
+import logging
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 class P2TelemetryService:
@@ -59,11 +62,11 @@ class P2TelemetryService:
             try:
                 resp = session.get(url, timeout=120)
                 if resp.status_code != 200:
-                    print(f"  ⚠️ Graph sign-in API error: {resp.status_code} — {resp.text[:200]}")
+                    logger.warning("Graph sign-in API error: %s -- %s", resp.status_code, resp.text[:200])
                     break
                 data = resp.json()
             except Exception as e:
-                print(f"  ⚠️ Graph sign-in request failed: {e}")
+                logger.error("Graph sign-in request failed: %s", e)
                 break
 
             events = data.get('value', [])
@@ -136,7 +139,7 @@ class P2TelemetryService:
 
             url = data.get('@odata.nextLink')
 
-        print(f"  ✓ Ingested {total_ingested} P2 sign-in events")
+        logger.info("Ingested %s P2 sign-in events", total_ingested)
         return total_ingested
 
     def compute_activity_stats(self, run_id, organization_id, lookback_days=30):
@@ -200,11 +203,11 @@ class P2TelemetryService:
                   datetime.combine(period_start, datetime.min.time())))
             stats_count = cursor.rowcount
             self.db._commit()
-            print(f"  ✓ Computed activity stats for {stats_count} identities")
+            logger.info("Computed activity stats for %s identities", stats_count)
             return stats_count
         except Exception as e:
             self.db._rollback()
-            print(f"  ⚠️ Activity stats computation error: {e}")
+            logger.error("Activity stats computation error: %s", e)
             return 0
         finally:
             cursor.close()
@@ -229,11 +232,11 @@ class P2TelemetryService:
             updated = cursor.rowcount
             self.db._commit()
             if updated:
-                print(f"  ✓ Backfilled last_sign_in for {updated} identities from P2 telemetry")
+                logger.info("Backfilled last_sign_in for %s identities from P2 telemetry", updated)
             return updated
         except Exception as e:
             self.db._rollback()
-            print(f"  ⚠️ last_sign_in backfill error: {e}")
+            logger.error("last_sign_in backfill error: %s", e)
             return 0
         finally:
             cursor.close()

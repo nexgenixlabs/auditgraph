@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useConnection } from '../contexts/ConnectionContext';
 import { GeneralTab } from '../components/settings/GeneralTab';
 import { ConnectionsTab } from '../components/settings/ConnectionsTab';
 import { NotificationsTab } from '../components/settings/NotificationsTab';
@@ -323,6 +324,7 @@ type SettingsTab = typeof SETTINGS_TABS[number]['key'];
 
 export default function Settings() {
   const { isSuperAdmin, user } = useAuth();
+  const { onConnectionDeleted } = useConnection();
   const location = useLocation();
   const navigate = useNavigate();
   const { tab: urlTab } = useParams<{ tab?: string }>();
@@ -345,6 +347,7 @@ export default function Settings() {
 
   // Cloud connections (multi-directory)
   const [cloudConnections, setCloudConnections] = useState<CloudConnection[]>([]);
+  const [removingConnId, setRemovingConnId] = useState<number | null>(null);
   const [showAddWizard, setShowAddWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState(0);
   const [wizardCloud, setWizardCloud] = useState('azure');
@@ -498,11 +501,43 @@ export default function Settings() {
   }
 
   async function handleDeleteConnection(connId: number) {
-    if (!window.confirm('Delete this connection?')) return;
+    const conn = cloudConnections.find(c => c.id === connId);
+    const label = conn?.label || conn?.azure_directory_id || `Connection #${connId}`;
+    const confirmed = window.confirm(
+      `Remove "${label}"?\n\nThis will permanently delete:\n` +
+      `• All discovery runs and snapshots\n` +
+      `• All identities, roles, and permissions\n` +
+      `• All risk scores, drift reports, and anomalies\n` +
+      `• All resources (storage accounts, key vaults)\n` +
+      `• All app registrations and attack simulations\n\n` +
+      `This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setRemovingConnId(connId);
+    setError(null);
     try {
-      await fetch(`/api/client/connections/${connId}`, { method: 'DELETE' });
-      fetchConnections();
-    } catch { /* ignore */ }
+      const res = await fetch(`/api/client/connections/${connId}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        const totalDeleted = data?.data_removed?.total_deleted ?? 0;
+        setSuccess(
+          `"${label}" removed successfully` +
+          (totalDeleted > 0 ? ` — ${totalDeleted.toLocaleString()} rows cleaned up` : '') +
+          ` (+ cascaded child rows).`
+        );
+        setTimeout(() => setSuccess(null), 8000);
+        // Reset selectedConnectionId if this was the active one, refresh list
+        onConnectionDeleted(connId);
+        fetchConnections();
+      } else {
+        setError(data?.error || 'Failed to remove connection');
+      }
+    } catch {
+      setError('Failed to remove connection — network error');
+    } finally {
+      setRemovingConnId(null);
+    }
   }
 
   async function handleRunScan(connId: number) {
@@ -1911,7 +1946,9 @@ export default function Settings() {
               handleWizardSave={handleWizardSave}
               resetWizard={resetWizard}
               handleDeleteConnection={handleDeleteConnection}
+              removingConnId={removingConnId}
               handleRunScan={handleRunScan}
+              fetchConnections={fetchConnections}
               handleUpdateDiscoverySettings={handleUpdateDiscoverySettings}
               handleTestConnection={handleTestConnection}
               handleSaveAndUnlock={handleSaveAndUnlock}
