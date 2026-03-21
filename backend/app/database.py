@@ -6108,6 +6108,9 @@ class Database:
                 UNIQUE(framework_id, control_id)
             )
         """)
+        # Ensure UNIQUE constraints exist (may be missing from partial startup)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_compliance_frameworks_key ON compliance_frameworks(key)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_compliance_controls_fw_ctrl ON compliance_controls(framework_id, control_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_compliance_controls_framework ON compliance_controls(framework_id)")
         # V2 columns
         cursor.execute("ALTER TABLE compliance_controls ADD COLUMN IF NOT EXISTS severity VARCHAR(20) DEFAULT 'medium'")
