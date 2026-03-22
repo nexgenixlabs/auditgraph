@@ -10,6 +10,7 @@ import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
+import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSelectFilter';
 import { maskCredential } from '../utils/maskCredential';
 import { STATUS_BADGE, type IdentityStatus } from '../utils/resolveStatus';
 import IdentityDrawer from '../components/IdentityDrawer';
@@ -308,15 +309,19 @@ export default function IdentitiesPage() {
   const [riskFilter, setRiskFilter] = useState<RiskLevel | 'all'>('all');
   const [multiRiskFilter, setMultiRiskFilter] = useState<string[]>([]);
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
+  const [multiCategoryFilter, setMultiCategoryFilter] = useState<string[]>([]);
   const [ownerFilter, setOwnerFilter] = useState<'all' | 'unowned'>('all');
   const [activityFilter, setActivityFilter] = useState<'all' | 'dormant' | 'dormant_strict'>('all');
   const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
   const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
   const [caFilter, setCaFilter] = useState<'all' | 'covered' | 'not_covered'>('all');
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
+  const [multiSubscriptionFilter, setMultiSubscriptionFilter] = useState<string[]>([]);
   const [allSubscriptions, setAllSubscriptions] = useState<{subscription_id: string; subscription_name: string}[]>([]);
   const [groupFilter, setGroupFilter] = useState<number | 'all'>('all');
+  const [multiGroupFilter, setMultiGroupFilter] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [multiStatusFilter, setMultiStatusFilter] = useState<string[]>([]);
   const [hasRolesFilter, setHasRolesFilter] = useState(false);
   const [workloadFilter, setWorkloadFilter] = useState(false);
   const [contextBanner, setContextBanner] = useState<string | null>(null);
@@ -409,7 +414,13 @@ export default function IdentitiesPage() {
       'ManagedIdentity': 'managed_identity_system', 'Guest': 'guest',
     };
     const mappedCat = catParam ? (CISO_CAT_MAP[catParam] || catParam) : null;
-    setCategoryFilter(mappedCat && CATEGORY_FILTER_OPTIONS.find(o => o.value === mappedCat) ? mappedCat as IdentityCategory : 'all');
+    if (mappedCat && CATEGORY_FILTER_OPTIONS.find(o => o.value === mappedCat)) {
+      setCategoryFilter(mappedCat as IdentityCategory);
+      setMultiCategoryFilter([]);
+    } else {
+      setCategoryFilter('all');
+      // Don't clear multiCategoryFilter from URL — it's set via dropdown only
+    }
 
     // Risk: risk_level, risk (supports comma-separated: risk=critical,high)
     const riskParam = params.get('risk_level') || params.get('risk');
@@ -467,7 +478,12 @@ export default function IdentitiesPage() {
 
     // Status (e.g., ?status=Disabled)
     const statusParam = params.get('status');
-    setStatusFilter(statusParam ? statusParam.toLowerCase() : 'all');
+    if (statusParam) {
+      setStatusFilter(statusParam.toLowerCase());
+      setMultiStatusFilter([]);
+    } else {
+      setStatusFilter('all');
+    }
 
     // hasRoles (e.g., ?hasRoles=true)
     setHasRolesFilter(params.get('hasRoles') === 'true');
@@ -704,6 +720,7 @@ export default function IdentitiesPage() {
   // Load groups for filter (refetch on org/connection switch, deduplicate by name)
   useEffect(() => {
     setGroupFilter('all');
+    setMultiGroupFilter([]);
     fetch(withConnection('/api/groups'))
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => {
@@ -732,17 +749,20 @@ export default function IdentitiesPage() {
       .catch(() => setSnapshots([]));
   }, [activeOrgId]);
 
-  // When group filter changes, fetch members
+  // When group filter changes, fetch members (supports multi-group)
   useEffect(() => {
-    if (groupFilter === 'all') { setGroupMemberIds(null); return; }
-    fetch(`/api/groups/${groupFilter}`)
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => {
-        const ids = new Set<string>((d.members || []).map((m: any) => m.identity_id));
-        setGroupMemberIds(ids);
-      })
-      .catch(() => setGroupMemberIds(new Set()));
-  }, [groupFilter]);
+    const activeGroups = multiGroupFilter.length > 0 ? multiGroupFilter : (groupFilter !== 'all' ? [String(groupFilter)] : []);
+    if (activeGroups.length === 0) { setGroupMemberIds(null); return; }
+    Promise.all(activeGroups.map(gid =>
+      fetch(`/api/groups/${gid}`)
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(d => (d.members || []).map((m: any) => m.identity_id as string))
+        .catch(() => [] as string[])
+    )).then(results => {
+      const ids = new Set<string>(results.flat());
+      setGroupMemberIds(ids);
+    });
+  }, [groupFilter, multiGroupFilter]);
 
   // Fetch query field definitions for advanced mode
   useEffect(() => {
@@ -851,11 +871,16 @@ export default function IdentitiesPage() {
         },
       };
     }
-    const f: Record<string, string> = {};
+    const f: Record<string, any> = {};
     if (search) f.search = search;
-    if (riskFilter !== 'all') f.risk_level = riskFilter;
-    if (categoryFilter !== 'all') f.category = categoryFilter;
-    if (subscriptionFilter !== 'all') f.subscription_id = subscriptionFilter;
+    if (multiRiskFilter.length > 0) f.risk_levels = multiRiskFilter;
+    else if (riskFilter !== 'all') f.risk_level = riskFilter;
+    if (multiCategoryFilter.length > 0) f.categories = multiCategoryFilter;
+    else if (categoryFilter !== 'all') f.category = categoryFilter;
+    if (multiSubscriptionFilter.length > 0) f.subscription_ids = multiSubscriptionFilter;
+    else if (subscriptionFilter !== 'all') f.subscription_id = subscriptionFilter;
+    if (multiGroupFilter.length > 0) f.group_ids = multiGroupFilter;
+    if (multiStatusFilter.length > 0) f.statuses = multiStatusFilter;
     if (ownerFilter !== 'all') f.owner_status = ownerFilter;
     if (activityFilter !== 'all') f.activity_status = activityFilter;
     if (tierFilter !== 'all') f.privilege_tier = tierFilter.join(',');
@@ -885,13 +910,41 @@ export default function IdentitiesPage() {
     }
     setQueryMode('simple');
     setSearch(f.search || '');
-    setRiskFilter((f.risk_level as RiskLevel) || 'all');
-    setCategoryFilter((f.category as IdentityCategory) || 'all');
-    setSubscriptionFilter(f.subscription_id || 'all');
+    // Restore multi-select risk
+    if (Array.isArray(f.risk_levels) && f.risk_levels.length > 0) {
+      setMultiRiskFilter(f.risk_levels);
+      setRiskFilter('all');
+    } else {
+      setMultiRiskFilter([]);
+      setRiskFilter((f.risk_level as RiskLevel) || 'all');
+    }
+    // Restore multi-select category
+    if (Array.isArray(f.categories) && f.categories.length > 0) {
+      setMultiCategoryFilter(f.categories);
+      setCategoryFilter('all');
+    } else {
+      setMultiCategoryFilter([]);
+      setCategoryFilter((f.category as IdentityCategory) || 'all');
+    }
+    // Restore multi-select subscriptions
+    if (Array.isArray(f.subscription_ids) && f.subscription_ids.length > 0) {
+      setMultiSubscriptionFilter(f.subscription_ids);
+      setSubscriptionFilter('all');
+    } else {
+      setMultiSubscriptionFilter([]);
+      setSubscriptionFilter(f.subscription_id || 'all');
+    }
+    // Restore multi-select groups
+    setMultiGroupFilter(Array.isArray(f.group_ids) ? f.group_ids : []);
+    setGroupFilter('all');
+    // Restore multi-select statuses
+    setMultiStatusFilter(Array.isArray(f.statuses) ? f.statuses : []);
+    setStatusFilter('all');
     setOwnerFilter(f.owner_status === 'unowned' ? 'unowned' : 'all');
     setActivityFilter(f.activity_status === 'dormant' ? 'dormant' : 'all');
     if (f.privilege_tier) {
-      const tiers = f.privilege_tier.split(',').map(Number).filter((t: number) => [0, 1, 2, 3].includes(t));
+      const tierStr = typeof f.privilege_tier === 'string' ? f.privilege_tier : '';
+      const tiers = tierStr.split(',').map(Number).filter((t: number) => [0, 1, 2, 3].includes(t));
       setTierFilter(tiers.length > 0 ? tiers : 'all');
     } else {
       setTierFilter('all');
@@ -1041,9 +1094,17 @@ export default function IdentitiesPage() {
     } else if (riskFilter !== 'all') {
       result = result.filter(i => safeLower(i.risk_level) === safeLower(riskFilter));
     }
-    if (categoryFilter !== 'all') result = result.filter(i => i.identity_category === categoryFilter);
+    if (multiCategoryFilter.length > 0) {
+      result = result.filter(i => multiCategoryFilter.includes(i.identity_category || ''));
+    } else if (categoryFilter !== 'all') {
+      result = result.filter(i => i.identity_category === categoryFilter);
+    }
     if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
-    if (subscriptionFilter !== 'all') result = result.filter(i => i.subscription_id === subscriptionFilter);
+    if (multiSubscriptionFilter.length > 0) {
+      result = result.filter(i => multiSubscriptionFilter.includes(i.subscription_id || '') || multiSubscriptionFilter.includes(i.primary_subscription_id || ''));
+    } else if (subscriptionFilter !== 'all') {
+      result = result.filter(i => i.subscription_id === subscriptionFilter);
+    }
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (activityFilter === 'dormant_strict') {
       // Strict dormant: matches backend attack-surface-score logic (stale + never_used only)
@@ -1073,10 +1134,12 @@ export default function IdentitiesPage() {
         return true;
       });
     }
-    if (groupFilter !== 'all' && groupMemberIds) {
+    if ((groupFilter !== 'all' || multiGroupFilter.length > 0) && groupMemberIds) {
       result = result.filter(i => groupMemberIds.has(i.identity_id));
     }
-    if (statusFilter !== 'all') {
+    if (multiStatusFilter.length > 0) {
+      result = result.filter(i => multiStatusFilter.includes(safeLower(i.status)) || (multiStatusFilter.includes('disabled') && i.enabled === false));
+    } else if (statusFilter !== 'all') {
       result = result.filter(i => safeLower(i.status) === statusFilter || (statusFilter === 'disabled' && i.enabled === false));
     }
     if (hasRolesFilter) {
@@ -1133,7 +1196,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, riskFilter, multiRiskFilter, categoryFilter, workloadFilter, subscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, groupMemberIds, statusFilter, hasRolesFilter, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -1606,27 +1669,63 @@ export default function IdentitiesPage() {
         </div>
 
         {queryMode === 'simple' ? (
-        <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
           <input value={search} onChange={e => { setSearch(e.target.value); clearActiveView(); }} placeholder="Search name, ID, owner…"
-            className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500" />
-          <select value={riskFilter} onChange={e => { setRiskFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
-            {RISK_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-          <select value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value as any); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
-            {categoryOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-          <select value={subscriptionFilter} onChange={e => { setSubscriptionFilter(e.target.value); clearActiveView(); }} className="border rounded-lg px-3 py-1.5 text-sm">
-            <option value="all">All {accountLabel('Name')}s</option>
-            {allSubscriptions.map(s => <option key={s.subscription_id} value={s.subscription_id}>{s.subscription_name || s.subscription_id}</option>)}
-          </select>
-          <select value={groupFilter === 'all' ? 'all' : String(groupFilter)} onChange={e => setGroupFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} className="border rounded-lg px-3 py-1.5 text-sm">
-            <option value="all">All Groups</option>
-            {allGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.member_count})</option>)}
-          </select>
-          <button onClick={() => { setSearch(''); setRiskFilter('all'); setCategoryFilter('all'); setWorkloadFilter(false); setSubscriptionFilter('all'); setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all'); setCaFilter('all'); setGroupFilter('all'); setStatusFilter('all'); setHasRolesFilter(false); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true }); }}
-            className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
-            Clear
-          </button>
+            className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 md:col-span-2" />
+          <MultiSelectFilter
+            options={RISK_FILTER_OPTIONS.filter(o => o.value !== 'all').map(o => ({ value: o.value, label: o.label }))}
+            selected={multiRiskFilter}
+            onChange={(vals) => { setMultiRiskFilter(vals); setRiskFilter('all'); clearActiveView(); }}
+            label="Level"
+            placeholder="Search levels…"
+            searchable={false}
+          />
+          <MultiSelectFilter
+            options={categoryOptions.filter(o => o.value !== 'all').map(o => ({ value: o.value, label: o.label }))}
+            selected={multiCategoryFilter}
+            onChange={(vals) => { setMultiCategoryFilter(vals); setCategoryFilter('all'); clearActiveView(); }}
+            label="Category"
+            placeholder="Search categories…"
+          />
+          <MultiSelectFilter
+            options={allSubscriptions.map(s => ({ value: s.subscription_id, label: s.subscription_name || s.subscription_id }))}
+            selected={multiSubscriptionFilter}
+            onChange={(vals) => { setMultiSubscriptionFilter(vals); setSubscriptionFilter('all'); clearActiveView(); }}
+            label={accountLabel('Name')}
+            placeholder={`Search ${accountLabel('Name').toLowerCase()}s…`}
+          />
+          <MultiSelectFilter
+            options={allGroups.map(g => ({ value: String(g.id), label: `${g.name} (${g.member_count})` }))}
+            selected={multiGroupFilter}
+            onChange={(vals) => { setMultiGroupFilter(vals); setGroupFilter('all'); clearActiveView(); }}
+            label="Group"
+            placeholder="Search groups…"
+          />
+          <div className="flex items-center gap-2">
+            <MultiSelectFilter
+              options={[
+                { value: 'active', label: 'Active' },
+                { value: 'disabled', label: 'Disabled' },
+                { value: 'deleted', label: 'Deleted' },
+                { value: 'unknown', label: 'Unknown' },
+              ]}
+              selected={multiStatusFilter}
+              onChange={(vals) => { setMultiStatusFilter(vals); setStatusFilter('all'); clearActiveView(); }}
+              label="Status"
+              placeholder="Search status…"
+              searchable={false}
+            />
+            <button onClick={() => {
+              setSearch(''); setRiskFilter('all'); setMultiRiskFilter([]); setCategoryFilter('all'); setMultiCategoryFilter([]);
+              setWorkloadFilter(false); setSubscriptionFilter('all'); setMultiSubscriptionFilter([]);
+              setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all');
+              setCaFilter('all'); setGroupFilter('all'); setMultiGroupFilter([]); setStatusFilter('all'); setMultiStatusFilter([]);
+              setHasRolesFilter(false); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true });
+            }}
+              className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 whitespace-nowrap">
+              Clear
+            </button>
+          </div>
           <label className="flex items-center gap-1.5 text-sm text-gray-600 dark:text-slate-400 cursor-pointer whitespace-nowrap">
             <input type="checkbox" checked={showMicrosoft} onChange={e => setShowMicrosoft(e.target.checked)}
               className="rounded border-gray-300" />
@@ -1643,16 +1742,52 @@ export default function IdentitiesPage() {
             loading={queryLoading}
           />
         )}
-        {/* Active filter chips from recommendations (simple mode only) */}
-        {queryMode === 'simple' && (subscriptionFilter !== 'all' || ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all' || agentFilter) && (
-          <div className="flex items-center gap-2 mt-2 flex-wrap">
+        {/* Active filter chips (simple mode only) */}
+        {queryMode === 'simple' && (multiRiskFilter.length > 0 || multiCategoryFilter.length > 0 || multiSubscriptionFilter.length > 0 || multiGroupFilter.length > 0 || multiStatusFilter.length > 0 || subscriptionFilter !== 'all' || ownerFilter !== 'all' || activityFilter !== 'all' || tierFilter !== 'all' || credentialFilter !== 'all' || caFilter !== 'all' || agentFilter) && (
+          <div className="flex items-center gap-1.5 mt-2 flex-wrap">
             <span className="text-[10px] text-gray-500 uppercase font-semibold">Active filters:</span>
-            {subscriptionFilter !== 'all' && (
+            {/* Multi-select risk chips */}
+            {multiRiskFilter.map(r => (
+              <span key={`risk-${r}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                {RISK_FILTER_OPTIONS.find(o => o.value === r)?.label || r}
+                <button onClick={() => setMultiRiskFilter(prev => prev.filter(v => v !== r))} className="hover:text-red-600">&times;</button>
+              </span>
+            ))}
+            {/* Multi-select category chips */}
+            {multiCategoryFilter.map(c => (
+              <span key={`cat-${c}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                {getCategoryLabel(c)}
+                <button onClick={() => setMultiCategoryFilter(prev => prev.filter(v => v !== c))} className="hover:text-purple-600">&times;</button>
+              </span>
+            ))}
+            {/* Multi-select subscription chips */}
+            {multiSubscriptionFilter.map(s => (
+              <span key={`sub-${s}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                {allSubscriptions.find(sub => sub.subscription_id === s)?.subscription_name || s}
+                <button onClick={() => setMultiSubscriptionFilter(prev => prev.filter(v => v !== s))} className="hover:text-indigo-600">&times;</button>
+              </span>
+            ))}
+            {/* Legacy single subscription chip */}
+            {subscriptionFilter !== 'all' && multiSubscriptionFilter.length === 0 && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
                 {accountLabel('Name')}: {allSubscriptions.find(s => s.subscription_id === subscriptionFilter)?.subscription_name || subscriptionFilter}
                 <button onClick={() => { setSubscriptionFilter('all'); }} className="hover:text-indigo-600">&times;</button>
               </span>
             )}
+            {/* Multi-select group chips */}
+            {multiGroupFilter.map(g => (
+              <span key={`grp-${g}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800">
+                {allGroups.find(grp => String(grp.id) === g)?.name || `Group ${g}`}
+                <button onClick={() => setMultiGroupFilter(prev => prev.filter(v => v !== g))} className="hover:text-teal-600">&times;</button>
+              </span>
+            ))}
+            {/* Multi-select status chips */}
+            {multiStatusFilter.map(s => (
+              <span key={`st-${s}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-800">
+                {s.charAt(0).toUpperCase() + s.slice(1)}
+                <button onClick={() => setMultiStatusFilter(prev => prev.filter(v => v !== s))} className="hover:text-gray-600">&times;</button>
+              </span>
+            ))}
             {ownerFilter === 'unowned' && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
                 No Owner
@@ -1703,12 +1838,13 @@ export default function IdentitiesPage() {
             { key: 'managed_identity_system' as const, label: 'Managed IDs' },
             { key: 'guest' as const, label: 'Guest' },
           ].map(tab => {
-            const isActive = !workloadFilter && categoryFilter === tab.key;
+            const isActive = !workloadFilter && multiCategoryFilter.length === 0 && categoryFilter === tab.key;
             return (
               <button
                 key={tab.key}
                 onClick={() => {
                   setWorkloadFilter(false);
+                  setMultiCategoryFilter([]);
                   setCategoryFilter(tab.key as any);
                   clearActiveView();
                   if (tab.key === 'all') {
@@ -1731,6 +1867,7 @@ export default function IdentitiesPage() {
             onClick={() => {
               setWorkloadFilter(true);
               setCategoryFilter('all');
+              setMultiCategoryFilter([]);
               clearActiveView();
               navigate('/identities?workload=true', { replace: true });
             }}
@@ -1750,6 +1887,7 @@ export default function IdentitiesPage() {
                 if (!agentFilter) {
                   setWorkloadFilter(false);
                   setCategoryFilter('all');
+                  setMultiCategoryFilter([]);
                   clearActiveView();
                 }
               }}

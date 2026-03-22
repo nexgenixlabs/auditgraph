@@ -149,6 +149,7 @@ from app.api.handlers import (
     create_organization_handler,
     update_organization_handler,
     delete_organization_handler,
+    bulk_delete_organizations_handler,
     get_current_organization_handler,
     get_cross_org_analytics,
     get_cross_org_trends,
@@ -1277,6 +1278,11 @@ def create_app():
     @require_superadmin()
     def clients_delete(organization_id):
         return delete_organization_handler(organization_id)
+
+    @app.post("/api/admin/organizations/bulk-delete")
+    @require_superadmin()
+    def admin_bulk_delete_organizations():
+        return bulk_delete_organizations_handler()
 
     # -----------------------
     # Admin Billing API (organization routes + backward compat tenant routes)

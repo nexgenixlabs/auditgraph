@@ -12323,7 +12323,11 @@ def delete_organization_handler(organization_id):
             db.delete_organization(organization_id)
         except Exception as e:
             logger.error(f"Failed to delete organization {organization_id}: {e}", exc_info=True)
-            return jsonify({'error': 'Failed to delete organization'}), 500
+            detail = str(e)
+            # Surface the actual constraint name for debugging
+            if 'foreign key' in detail.lower() or 'violates' in detail.lower():
+                return jsonify({'error': f'Failed to delete organization: {detail}'}), 500
+            return jsonify({'error': f'Failed to delete organization: {detail}'}), 500
 
         try:
             _log(db,'org_deleted',
@@ -12332,6 +12336,103 @@ def delete_organization_handler(organization_id):
         except Exception:
             pass
         return jsonify({'message': f'Tenant "{existing["name"]}" deleted'})
+    finally:
+        db.close()
+
+
+def bulk_delete_organizations_handler():
+    """POST /api/admin/organizations/bulk-delete — delete orgs matching a name pattern.
+
+    Request body:
+      {
+        "pattern":    "Benchmark%",   (required) SQL LIKE pattern
+        "dry_run":    true,           (default true) preview only, no DB changes
+        "confirm":    false,          (default false) must be true to execute
+        "max_delete": 10              (default 10) safety cap, 400 if exceeded
+      }
+
+    Response:
+      {
+        "dry_run": true/false,
+        "pattern": "...",
+        "matched_count": 4,
+        "deleted_count": 0/4,
+        "matched": [...],             (always present — orgs that match)
+        "deleted": [...],             (only when dry_run=false)
+        "skipped": [...],             (orgs skipped due to errors)
+        "errors":  [...]              (error details per org)
+      }
+    """
+    data = request.get_json(silent=True) or {}
+    pattern = data.get('pattern', '').strip()
+    if not pattern:
+        return jsonify({'error': 'pattern is required (e.g. "Benchmark%")'}), 400
+
+    dry_run = data.get('dry_run', True)
+    confirm = data.get('confirm', False)
+    max_delete = data.get('max_delete', 10)
+
+    db = Database(_admin_reason='admin_portal_bulk_delete')
+    try:
+        # Always find matching orgs first
+        matched = db.find_organizations_by_pattern(pattern)
+        matched_count = len(matched)
+
+        # Dry-run: return preview only
+        if dry_run:
+            return jsonify({
+                'dry_run': True,
+                'pattern': pattern,
+                'matched_count': matched_count,
+                'deleted_count': 0,
+                'matched': matched,
+                'deleted': [],
+                'skipped': [],
+                'errors': [],
+            })
+
+        # Safety: require explicit confirm=true for destructive operation
+        if not confirm:
+            return jsonify({
+                'error': 'confirm must be true to execute deletion',
+                'matched_count': matched_count,
+                'matched': matched,
+            }), 400
+
+        # Safety: cap on number of deletions
+        if matched_count > max_delete:
+            return jsonify({
+                'error': (f'Matched {matched_count} organizations, exceeds '
+                          f'max_delete={max_delete}. Increase max_delete or '
+                          f'narrow the pattern.'),
+                'matched_count': matched_count,
+                'matched': matched,
+            }), 400
+
+        # Execute deletion
+        deleted, errors = db.delete_organizations_by_pattern(pattern)
+        skipped = [e for e in errors]
+        deleted_names = [o['name'] for o in deleted]
+        logger.info("Bulk deleted %d organizations matching '%s': %s",
+                     len(deleted), pattern, deleted_names)
+        if errors:
+            logger.warning("Bulk delete errors for pattern '%s': %s",
+                            pattern, errors)
+
+        return jsonify({
+            'dry_run': False,
+            'pattern': pattern,
+            'matched_count': matched_count,
+            'deleted_count': len(deleted),
+            'matched': matched,
+            'deleted': deleted,
+            'skipped': skipped,
+            'errors': errors,
+        })
+    except Exception as e:
+        logger.error(f"Bulk delete failed for pattern '{pattern}': {e}",
+                     exc_info=True)
+        return jsonify({'error': f'Bulk delete failed: {str(e)}'}), 500
     finally:
         db.close()
 

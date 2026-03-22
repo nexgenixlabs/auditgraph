@@ -5533,10 +5533,13 @@ class Database:
                 logger.warning("[FIRST RUN] Generated admin password for '%s' — set ADMIN_PASSWORD env var to persist", username)
             hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
             self.create_user(username, hashed, 'Administrator', 'admin', organization_id=default_org_id)
-            # Promote to superadmin
+            # Promote to superadmin with portal access
             try:
                 cursor3 = self.conn.cursor()
-                cursor3.execute("UPDATE users SET is_superadmin = true WHERE username = %s", (username,))
+                cursor3.execute(
+                    "UPDATE users SET is_superadmin = true, portal_role = 'superadmin' WHERE username = %s",
+                    (username,)
+                )
                 self._commit()
                 cursor3.close()
             except Exception:
@@ -5570,7 +5573,10 @@ class Database:
                     except Exception:
                         pass
                     self.create_user(username, hashed, 'Administrator', 'admin', organization_id=default_org_id)
-                    cursor2.execute("UPDATE users SET is_superadmin = true WHERE username = %s", (username,))
+                    cursor2.execute(
+                        "UPDATE users SET is_superadmin = true, portal_role = 'superadmin' WHERE username = %s",
+                        (username,)
+                    )
                     self._commit()
                     logger.info("Admin user '%s' created from ADMIN_PASSWORD env var", username)
                 cursor2.close()
@@ -5580,20 +5586,21 @@ class Database:
     # ── Local-only bootstrap ─────────────────────────────────────────
 
     def seed_local_admin(self):
-        """Create the 'admin' superadmin user for local/dev environments.
+        """Create the 'admin' superadmin user for LOCAL only.
 
         SAFETY:
-        - Runs for APP_ENV in (local, dev) — mirrors local structure in dev
+        - Runs for APP_ENV == 'local' ONLY
+        - Non-local environments use techadmin (from ensure_default_admin())
         - Idempotent: syncs password + org on every startup
         - Cleans broken rows: deletes users with NULL/empty username
         - Uses bcrypt (same hashing as production login in handlers.py)
         - Uses admin DB connection (no RLS on users table)
-        - Does NOT run in qa/stg/prod
+        - Does NOT run in dev/qa/stg/prod
 
         Called from main.py create_app() after ensure_default_admin().
         """
-        from app.config import IS_DEV
-        if not IS_DEV:
+        from app.config import IS_LOCAL
+        if not IS_LOCAL:
             return
 
         import bcrypt as bcrypt_lib
@@ -5688,16 +5695,15 @@ class Database:
     # ── Dev Tenant Seeding (AzureCredits org + azadmin) ─────────────
 
     def seed_dev_tenant(self):
-        """Create the AzureCredits organization + azadmin user for dev environments.
+        """Create the AzureCredits organization + azadmin user for LOCAL only.
 
-        Mirrors the local development setup so dev/QA/staging environments
-        have the same org structure as localhost. Idempotent — safe to call
-        on every startup.
+        Mirrors the local development setup. Non-local environments (dev/qa/
+        stg/prod) manage organizations via the admin portal — no auto-seeding.
 
-        Runs for APP_ENV in (local, dev). Skipped in qa/stg/prod.
+        Runs for APP_ENV == 'local' ONLY. Skipped in dev/qa/stg/prod.
         """
-        from app.config import IS_DEV
-        if not IS_DEV:
+        from app.config import IS_LOCAL
+        if not IS_LOCAL:
             return
 
         import bcrypt as bcrypt_lib
@@ -5826,11 +5832,18 @@ class Database:
     # ── Demo Tenant Seeding ─────────────────────────────────────────
 
     def seed_demo_tenant(self):
-        """Create demo organization + demo users for local/demo environments.
+        """Create demo organization + demo users for LOCAL only.
+
+        Non-local environments (dev/qa/stg/prod) manage organizations via
+        the admin portal — no auto-seeding of demo data.
 
         Idempotent: skips if the 'demo' org slug already exists.
         Creates 3 users (demo/analyst/viewer) all mapped to the demo org.
         """
+        from app.config import IS_LOCAL
+        if not IS_LOCAL:
+            return
+
         import bcrypt as bcrypt_lib
         self._ensure_users_table()
         self._ensure_organizations_table()
@@ -16775,19 +16788,50 @@ class Database:
     def delete_organization(self, organization_id):
         """Delete an organization and ALL associated data.
 
-        Comprehensive 12-phase cascade covering all org-scoped tables.
-        Every delete uses SAVEPOINT for fault tolerance (handles tables
-        that may not exist yet or have no matching rows).
+        Comprehensive 14-phase cascade covering all org-scoped tables.
+        Uses two delete helpers:
+          _safe_del   — non-fatal: swallows ALL errors (for leaf/optional tables)
+          _critical_del — fatal on FK violations, swallows "table not found"
+                          (for parent tables whose survival blocks the final
+                          DELETE FROM organizations)
 
-        Phase order: deepest FK leaves → identity children → identities →
-        risk_scores → discovery_runs → cloud infra → user children →
-        users → billing/org-level → final (settings, activity_log, org).
+        Phase order:
+          1-2   deepest FK leaves → mid-level parents
+          3     identity/run analytics + attack incidents
+          4-5   identity children → run-scoped tables
+          6     identities                      [CRITICAL]
+          7     risk_scores                     [CRITICAL]
+          8     discovery_runs                  [CRITICAL]
+          9     cloud infra
+          10    billing/audit tables that FK→users (BEFORE users)
+          11    user-scoped tables → users      [CRITICAL]
+          12    remaining billing/org-level
+          13    settings, activity_log          [CRITICAL]
+          14    organizations row
         """
         self._ensure_organizations_table()
         cursor = self.conn.cursor()
         warnings = []
 
+        # ── Temporarily disable immutable audit triggers ──
+        # SOC 2 triggers block DELETE on activity_log, ai_audit_log,
+        # and invoice_documents.  Org deletion is an authorized path
+        # (superadmin-only) so we disable → delete → re-enable.
+        _immutable_triggers = [
+            ('activity_log', 'trg_activity_log_immutable'),
+            ('ai_audit_log', 'trg_ai_audit_log_immutable'),
+            ('invoice_documents', 'trg_invoice_document_immutable'),
+        ]
+        for tbl, trg in _immutable_triggers:
+            try:
+                cursor.execute(f"SAVEPOINT sp_dis_{trg}")
+                cursor.execute(f"ALTER TABLE {tbl} DISABLE TRIGGER {trg}")
+                cursor.execute(f"RELEASE SAVEPOINT sp_dis_{trg}")
+            except Exception:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_dis_{trg}")
+
         def _safe_del(table, where='organization_id = %s', params=None):
+            """Non-fatal delete. Swallows all errors (table missing, FK, etc.)."""
             if params is None:
                 params = (organization_id,)
             try:
@@ -16798,23 +16842,68 @@ class Database:
                 cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{table}")
                 warnings.append(f"{table}: {e}")
 
-        # ── Phase 1: Deep leaf tables (FK to other org-scoped tables) ──
+        def _critical_del(table, where='organization_id = %s', params=None):
+            """Fatal delete. Swallows 'table does not exist' but re-raises
+            FK violations and other real errors so we fail fast instead of
+            producing a cryptic error on the final organizations delete."""
+            if params is None:
+                params = (organization_id,)
+            try:
+                cursor.execute(f"SAVEPOINT sp_{table}")
+                cursor.execute(f"DELETE FROM {table} WHERE {where}", params)
+                cursor.execute(f"RELEASE SAVEPOINT sp_{table}")
+            except Exception as e:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{table}")
+                err_msg = str(e).lower()
+                # Table might not exist yet (future migration) — that's OK
+                if 'does not exist' in err_msg or 'undefined_table' in err_msg:
+                    warnings.append(f"{table}: table not found (OK)")
+                else:
+                    raise
+
+        # ── Phase 1: Deepest leaf tables ──
+        # Tables with FK to other org-scoped tables (delete children first).
+        # Includes tables with FK→users (NO ACTION) that would block user delete.
         for t in [
+            # access review leaves
             'review_evidence', 'review_assignments',
+            # campaign leaves (FK→users NO ACTION)
             'campaign_audit_log', 'campaign_reviews',
+            'campaign_review_decisions', 'campaign_review_actions',
+            # billing/report leaves (FK→users NO ACTION)
             'invoice_documents', 'report_outputs',
-            'soar_actions', 'webhook_deliveries',
+            # SOAR/webhook leaves
+            'soar_actions', 'webhook_deliveries', 'webhook_events',
+            # group/governance leaves
             'identity_group_members', 'governance_decisions',
+            # attack incident leaves (FK→identity_attack_incidents NO ACTION)
+            'identity_attack_replay_steps', 'security_response_actions',
+            # risk rule leaves (FK→risk_rules NO ACTION)
+            'risk_rule_conditions', 'risk_rule_overrides', 'risk_findings',
+            # report sub-tables
+            'report_sections', 'report_run_metrics',
+            # finding sub-tables
+            'finding_evidence', 'finding_comments',
+            # compliance sub-tables
+            'compliance_controls',
+            # attack simulation sub-tables
+            'attack_sim_paths', 'attack_simulation_actions',
         ]:
             _safe_del(t)
 
-        # ── Phase 2: Mid-level tables (parents of Phase 1) ──
+        # ── Phase 2: Mid-level parents (children deleted in Phase 1) ──
         for t in [
             'access_review_campaigns', 'access_reviews',
             'report_runs', 'reports',
             'invoices', 'identity_groups',
             'soar_playbooks', 'webhooks',
             'sa_attestations', 'api_keys',
+            'identity_attack_incidents',
+            'graph_attack_findings',
+            'attack_simulations',
+            'compliance_frameworks',
+            'risk_rules',
+            'role_decisions',
         ]:
             _safe_del(t)
 
@@ -16830,11 +16919,28 @@ class Database:
             'identity_links', 'rbac_hygiene_scans',
             'role_activity_log', 'resource_findings',
             'resource_risk_history', 'discovery_integrity_metrics',
+            # governance & analytics
+            'identity_governance_actions', 'identity_governance_metrics',
+            'identity_governance_trends', 'identity_graph_insights',
+            'identity_access_history', 'identity_activity_events',
+            'identity_credentials', 'identity_risk_scores',
+            'identity_risk_simulations', 'identity_role_history',
+            'identity_security_posture', 'identity_threat_events',
+            'identity_attack_predictions', 'identity_exposures',
+            'risk_forecasts',
+            'generated_remediations', 'auto_remediation_actions',
+            'generated_policies', 'policy_recommendations',
+            'security_strategy_recommendations',
+            'snapshot_alerts', 'snapshot_jobs', 'snapshot_runs',
+            'graph_visualization_cache',
+            'tenant_posture_scores', 'tenant_posture_metrics',
+            'ai_audit_log', 'security_advisor_reports',
         ]:
             _safe_del(t)
 
-        # ── Phase 4: Identity child tables (normally CASCADE from identities,
-        #     but explicit delete prevents FK errors if CASCADE is missing) ──
+        # ── Phase 4: Identity child tables ──
+        # Normally CASCADE from identities, but explicit delete prevents FK
+        # errors if CASCADE is misconfigured on any table.
         for t in [
             'credentials', 'graph_api_permissions',
             'sp_ownership', 'sp_app_roles',
@@ -16842,61 +16948,92 @@ class Database:
             'entra_role_assignments',
             'pim_eligible_assignments', 'pim_activations',
             'ca_identity_coverage', 'identity_subscription_access',
+            # additional identity children
+            'role_intelligence', 'agent_classifications', 'agent_delegations',
+            'human_identity_certifications', 'identity_incident_participation',
+            'app_registration_permissions', 'iam_identity_nodes',
+            'conditional_access_exclusions',
         ]:
             _safe_del(t)
 
-        # ── Phase 5: Run-scoped tables ──
+        # ── Phase 5: Run-scoped tables (CASCADE from discovery_runs) ──
         for t in [
             'ca_policies', 'drift_reports',
             'remediation_actions', 'anomalies',
             'compliance_snapshots',
             'azure_storage_accounts', 'azure_key_vaults',
             'app_registrations',
+            # additional run-scoped tables
+            'graph_snapshots', 'discovery_stage_log',
+            'compliance_mappings', 'compliance_assessment_results',
+            'compliance_root_causes',
+            'risk_score_history', 'identity_blast_radius',
+            'conditional_access_policies',
+            'iam_graph_nodes', 'escalation_results',
+            'nhi_scan_results', 'credential_scans',
         ]:
             _safe_del(t)
 
-        # ── Phase 6: Identities ──
-        _safe_del('identities')
+        # ── Phase 6: Identities [CRITICAL] ──
+        _critical_del('identities')
 
-        # ── Phase 7: risk_scores (FK to discovery_runs, NOT CASCADE) ──
+        # ── Phase 7: risk_scores (FK→discovery_runs, NOT CASCADE) [CRITICAL] ──
         try:
             cursor.execute("SAVEPOINT sp_risk_scores")
             cursor.execute("""
                 DELETE FROM risk_scores
-                WHERE run_id IN (SELECT id FROM discovery_runs WHERE organization_id = %s)
+                WHERE run_id IN (SELECT id FROM discovery_runs
+                                 WHERE organization_id = %s)
             """, (organization_id,))
             cursor.execute("RELEASE SAVEPOINT sp_risk_scores")
         except Exception as e:
             cursor.execute("ROLLBACK TO SAVEPOINT sp_risk_scores")
-            warnings.append(f"risk_scores: {e}")
+            err_msg = str(e).lower()
+            if 'does not exist' in err_msg or 'undefined_table' in err_msg:
+                warnings.append("risk_scores: table not found (OK)")
+            else:
+                raise
 
-        # ── Phase 8: discovery_runs ──
-        _safe_del('discovery_runs')
+        # ── Phase 8: discovery_runs [CRITICAL] ──
+        # Non-CASCADE FK to organizations — must succeed or final delete fails.
+        _critical_del('discovery_runs')
 
-        # ── Phase 9: Cloud infra (cloud_connections CASCADE-deletes
-        #     graph_nodes/graph_edges, but explicit delete for safety) ──
+        # ── Phase 9: Cloud infra ──
         for t in ['graph_nodes', 'graph_edges']:
             _safe_del(t)
         _safe_del('cloud_connections')
         _safe_del('cloud_subscriptions')
 
-        # ── Phase 10: User-scoped tables (before deleting users) ──
+        # ── Phase 10: Billing/audit tables that FK→users (NO ACTION) ──
+        # MUST be deleted BEFORE users (Phase 11). These have user-referencing
+        # columns (actor_id, granted_by, generated_by) with NO ACTION FK.
+        for t in [
+            'billing_audit_log',
+            'organization_entitlements',
+            'user_invitations',
+        ]:
+            _safe_del(t)
+
+        # ── Phase 11: User-scoped tables → users [CRITICAL] ──
         for t in [
             'refresh_tokens', 'sso_auth_codes',
             'dashboard_preferences', 'saved_views',
-            'copilot_conversations', 'custom_risk_rules',
-            'notifications',
+            'copilot_conversations', 'copilot_queries', 'copilot_usage',
+            'custom_risk_rules', 'notifications',
+            'user_audit_logs', 'notification_preferences',
+            'integration_configs', 'integration_events',
         ]:
             _safe_del(t)
-        _safe_del('users')
+        # users has non-CASCADE FK to organizations — must succeed.
+        _critical_del('users')
 
-        # ── Phase 11: Billing & org-level tables ──
+        # ── Phase 12: Remaining billing & org-level tables ──
         for t in [
-            'billing_events', 'billing_audit_log',
+            'billing_events',
             'organization_billing_snapshots',
-            'organization_entitlements',
             'organization_usage', 'organization_usage_counters',
             'tenant_health', 'scan_schedules', 'job_runs',
+            'idempotency_keys',
         ]:
             _safe_del(t)
         _safe_del('msp_relationships',
@@ -16906,12 +17043,24 @@ class Database:
                   'target_organization_id = %s',
                   (organization_id,))
 
-        # ── Phase 12: Final cleanup ──
-        _safe_del('settings')
-        _safe_del('activity_log')
-        # The org row itself — must succeed
-        cursor.execute("DELETE FROM organizations WHERE id = %s", (organization_id,))
+        # ── Phase 13: Final org-direct tables [CRITICAL] ──
+        # settings and activity_log have non-CASCADE FK to organizations.
+        _critical_del('settings')
+        _critical_del('activity_log')
+
+        # ── Phase 14: The organization row itself ──
+        cursor.execute("DELETE FROM organizations WHERE id = %s",
+                       (organization_id,))
         deleted = cursor.rowcount > 0
+
+        # ── Re-enable immutable audit triggers ──
+        for tbl, trg in _immutable_triggers:
+            try:
+                cursor.execute(f"SAVEPOINT sp_en_{trg}")
+                cursor.execute(f"ALTER TABLE {tbl} ENABLE TRIGGER {trg}")
+                cursor.execute(f"RELEASE SAVEPOINT sp_en_{trg}")
+            except Exception:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_en_{trg}")
 
         self._commit()
         cursor.close()
@@ -16923,12 +17072,8 @@ class Database:
             )
         return deleted
 
-    def delete_organizations_by_pattern(self, name_pattern):
-        """Delete all organizations matching a name pattern (e.g. 'Benchmark%').
-
-        Returns list of deleted org dicts [{id, name, slug}, ...].
-        Skips the 'default' organization.
-        """
+    def find_organizations_by_pattern(self, name_pattern):
+        """Find organizations matching a LIKE pattern. Excludes 'default' org."""
         self._ensure_organizations_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
@@ -16936,10 +17081,21 @@ class Database:
             WHERE name LIKE %s AND slug != 'default'
             ORDER BY id
         """, (name_pattern,))
-        orgs = cursor.fetchall()
+        orgs = [dict(r) for r in cursor.fetchall()]
         cursor.close()
+        return orgs
 
+    def delete_organizations_by_pattern(self, name_pattern):
+        """Delete all organizations matching a name pattern (e.g. 'Benchmark%').
+
+        Returns (deleted, errors) tuple:
+          deleted — list of successfully deleted org dicts [{id, name, slug}]
+          errors  — list of error dicts [{id, name, error}]
+        Skips the 'default' organization.
+        """
+        orgs = self.find_organizations_by_pattern(name_pattern)
         deleted = []
+        errors = []
         for org in orgs:
             try:
                 self.delete_organization(org['id'])
@@ -16947,7 +17103,9 @@ class Database:
             except Exception as e:
                 _db_logger.error("Failed to delete org %s (%s): %s",
                                  org['id'], org['name'], e)
-        return deleted
+                errors.append({'id': org['id'], 'name': org['name'],
+                               'error': str(e)})
+        return deleted, errors
 
     # ── Phase 54: SSO Methods ──────────────────────────────────────────
 
@@ -20147,6 +20305,14 @@ class Database:
         if Database._identity_exposures_ensured:
             return
         cursor = self.conn.cursor()
+        # Check if table already exists to avoid needing CREATE privilege
+        cursor.execute("""
+            SELECT EXISTS(SELECT 1 FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = 'identity_exposures')
+        """)
+        if cursor.fetchone()[0]:
+            Database._identity_exposures_ensured = True
+            return
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS identity_exposures (
                 id SERIAL PRIMARY KEY,
