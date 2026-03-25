@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-
 const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch', 'Scanning'];
 
 interface TestResult {
@@ -23,7 +21,6 @@ const CLOUD_OPTIONS = [
 ];
 
 export default function OnboardingWizard() {
-  const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [orgName, setOrgName] = useState('');
   const [selectedCloud, setSelectedCloud] = useState('azure');
@@ -136,7 +133,7 @@ export default function OnboardingWizard() {
               if (statusData.snapshot_completed) {
                 clearInterval(poll);
                 setScanProgress(prev => [...prev, 'Running attack path analysis...', 'Computing posture score...', 'First scan complete!']);
-                setTimeout(() => navigate('/'), 2000);
+                setTimeout(() => { window.location.href = '/'; }, 2000);
                 return;
               }
             }
@@ -144,12 +141,12 @@ export default function OnboardingWizard() {
           if (attempts >= maxAttempts) {
             clearInterval(poll);
             setScanProgress(prev => [...prev, 'Scan is running in the background. You can view results when ready.']);
-            setTimeout(() => navigate('/'), 3000);
+            setTimeout(() => { window.location.href = '/'; }, 3000);
           }
         }, 5000);
       } else {
         setScanProgress(prev => [...prev, 'Scan triggered — results will appear on the dashboard.']);
-        setTimeout(() => navigate('/'), 3000);
+        setTimeout(() => { window.location.href = '/'; }, 3000);
       }
     } catch (e: any) {
       setError(e?.message || 'Setup failed');
@@ -190,13 +187,13 @@ export default function OnboardingWizard() {
 
           <div className="mt-6 flex gap-3">
             <button
-              onClick={() => navigate('/')}
+              onClick={() => { window.location.href = '/'; }}
               className="flex-1 py-2.5 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 transition"
             >
               Go to Dashboard
             </button>
             <button
-              onClick={() => navigate('/settings')}
+              onClick={() => { window.location.href = '/settings'; }}
               className="px-4 py-2.5 rounded-lg text-sm font-medium text-gray-300 border border-gray-600 hover:bg-gray-800 transition"
             >
               Settings
@@ -582,7 +579,7 @@ export default function OnboardingWizard() {
             </div>
 
             <button
-              onClick={() => navigate('/')}
+              onClick={() => { window.location.href = '/'; }}
               className="w-full py-2.5 rounded-lg text-sm font-medium text-gray-300 border border-gray-600 hover:bg-gray-800 transition"
             >
               Go to Dashboard
@@ -616,7 +613,7 @@ export default function OnboardingWizard() {
 
       {/* Skip link */}
       <button
-        onClick={() => navigate('/')}
+        onClick={() => { window.location.href = '/'; }}
         className="mt-4 text-xs text-gray-500 hover:text-gray-300 transition"
       >
         Skip setup for now

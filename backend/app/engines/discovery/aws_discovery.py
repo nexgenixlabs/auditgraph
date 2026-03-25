@@ -5,6 +5,9 @@ Discovers IAM users, roles, policies, and trust relationships from AWS.
 Calculates risk scores using the V2 risk catalog and stores results in
 the same identities table used by Azure discovery.
 
+Also discovers AWS resources (S3, KMS, Lambda), Organizations accounts,
+and CloudTrail events when feature flags are enabled.
+
 Required IAM permissions:
     - iam:ListUsers, iam:GetUser, iam:ListAccessKeys, iam:GetAccessKeyLastUsed
     - iam:ListMFADevices, iam:GetLoginProfile
@@ -13,10 +16,17 @@ Required IAM permissions:
     - iam:ListRoles, iam:GetRole
     - iam:ListAttachedRolePolicies, iam:ListRolePolicies, iam:GetRolePolicy
     - sts:GetCallerIdentity
+    Optional (feature-flagged):
+    - s3:ListBuckets, s3:GetBucket*, s3:GetEncryptionConfiguration
+    - kms:ListKeys, kms:DescribeKey, kms:GetKeyRotationStatus, kms:GetKeyPolicy, kms:ListGrants
+    - lambda:ListFunctions, lambda:GetPolicy
+    - organizations:DescribeOrganization, organizations:ListAccounts
+    - cloudtrail:LookupEvents
 """
 
 import json
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 
 import boto3
@@ -25,6 +35,7 @@ from botocore.exceptions import ClientError
 
 from app.database import Database
 from app.engines.risk_catalog import RISK_FACTOR_CATALOG, make_factor, score_to_level_v2
+from app.engines.discovery.aws_data_security import score_s3_bucket, score_kms_key, score_lambda_function
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +77,14 @@ class AWSDiscoveryEngine:
         self.db_org_id = db_org_id
         self.cloud_connection_id = cloud_connection_id
 
-        retry_config = Config(retries={'max_attempts': 5, 'mode': 'adaptive'})
-        session = boto3.Session(
+        self._retry_config = Config(retries={'max_attempts': 5, 'mode': 'adaptive'})
+        self._session = boto3.Session(
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name=region,
         )
-        self.iam = session.client('iam', config=retry_config)
-        self.sts = session.client('sts', config=retry_config)
+        self.iam = self._session.client('iam', config=self._retry_config)
+        self.sts = self._session.client('sts', config=self._retry_config)
 
         # Resolve account ID
         caller = self.sts.get_caller_identity()
@@ -137,6 +148,27 @@ class AWSDiscoveryEngine:
             )
 
             self._sync_aws_account()
+
+            # Feature-flagged: AWS resource scanning (S3/KMS/Lambda)
+            try:
+                if self.db.get_setting('aws_resource_scanning_enabled', 'false', self.db_org_id) == 'true':
+                    self._discover_and_save_resources(run_id)
+            except Exception as e:
+                logger.warning(f"  AWS resource scanning failed (non-fatal): {e}")
+
+            # Feature-flagged: AWS Organizations enumeration
+            try:
+                if self.db.get_setting('aws_organizations_enabled', 'false', self.db_org_id) == 'true':
+                    self._discover_organizations()
+            except Exception as e:
+                logger.warning(f"  AWS Organizations discovery failed (non-fatal): {e}")
+
+            # Feature-flagged: CloudTrail event ingestion
+            try:
+                if self.db.get_setting('aws_cloudtrail_enabled', 'false', self.db_org_id) == 'true':
+                    self._ingest_cloudtrail(run_id)
+            except Exception as e:
+                logger.warning(f"  CloudTrail ingestion failed (non-fatal): {e}")
 
             logger.info(f"  AWS Discovery completed: {counts['total']} identities "
                         f"(C:{counts['critical']} H:{counts['high']} M:{counts['medium']} L:{counts['low']})")
@@ -674,3 +706,424 @@ class AWSDiscoveryEngine:
             )
         except Exception as e:
             logger.warning(f"  Failed to sync AWS account to cloud_subscriptions: {e}")
+
+    # ── Lazy boto3 Clients ────────────────────────────────────────
+
+    _extra_clients = {}
+
+    def _get_client(self, service_name):
+        """Create boto3 client on demand. Returns None on permission error."""
+        if service_name in self._extra_clients:
+            return self._extra_clients[service_name]
+        try:
+            client = self._session.client(service_name, config=self._retry_config)
+            self._extra_clients[service_name] = client
+            return client
+        except Exception as e:
+            logger.warning(f"  Cannot create {service_name} client: {e}")
+            return None
+
+    def _stamp_isolation(self, data):
+        """Inject isolation keys into every resource/event dict before save."""
+        data['aws_account_id'] = self.aws_account_id
+        data['organization_id'] = self.db_org_id
+        data['cloud_connection_id'] = self.cloud_connection_id
+        return data
+
+    # ── S3 Bucket Discovery ──────────────────────────────────────
+
+    SECRET_PATTERNS = re.compile(
+        r'(password|secret|key|token|api.?key|access.?key|credential)',
+        re.IGNORECASE
+    )
+
+    def _discover_s3_buckets(self, run_id):
+        """Discover all S3 buckets with security configuration."""
+        s3 = self._get_client('s3')
+        if not s3:
+            return 0
+        count = 0
+        try:
+            resp = s3.list_buckets()
+        except ClientError as e:
+            logger.warning(f"  s3:ListBuckets failed: {e}")
+            return 0
+
+        for bucket in resp.get('Buckets', []):
+            name = bucket['BucketName']
+            try:
+                data = {
+                    'resource_id': f'arn:aws:s3:::{name}',
+                    'name': name,
+                    'region': self._get_bucket_region(s3, name),
+                }
+
+                # Public access block
+                try:
+                    pab = s3.get_public_access_block(Bucket=name)
+                    conf = pab.get('PublicAccessBlockConfiguration', {})
+                    data['block_public_acls'] = conf.get('BlockPublicAcls', False)
+                    data['block_public_policy'] = conf.get('BlockPublicPolicy', False)
+                    data['public_access_block_enabled'] = (
+                        conf.get('BlockPublicAcls', False) and
+                        conf.get('BlockPublicPolicy', False) and
+                        conf.get('IgnorePublicAcls', False) and
+                        conf.get('RestrictPublicBuckets', False)
+                    )
+                except ClientError:
+                    data['public_access_block_enabled'] = False
+
+                # Encryption
+                try:
+                    enc = s3.get_bucket_encryption(Bucket=name)
+                    rules = enc.get('ServerSideEncryptionConfiguration', {}).get('Rules', [])
+                    if rules:
+                        sse = rules[0].get('ApplyServerSideEncryptionByDefault', {})
+                        data['encryption_enabled'] = True
+                        data['encryption_algorithm'] = sse.get('SSEAlgorithm', '')
+                        data['kms_key_id'] = sse.get('KMSMasterKeyID')
+                        data['bucket_key_enabled'] = rules[0].get('BucketKeyEnabled', False)
+                    else:
+                        data['encryption_enabled'] = False
+                except ClientError:
+                    data['encryption_enabled'] = False
+
+                # Versioning
+                try:
+                    ver = s3.get_bucket_versioning(Bucket=name)
+                    data['versioning_enabled'] = ver.get('Status') == 'Enabled'
+                    data['mfa_delete'] = ver.get('MFADelete') == 'Enabled'
+                except ClientError:
+                    pass
+
+                # Logging
+                try:
+                    log = s3.get_bucket_logging(Bucket=name)
+                    le = log.get('LoggingEnabled')
+                    data['logging_enabled'] = le is not None
+                    data['logging_target_bucket'] = le.get('TargetBucket') if le else None
+                except ClientError:
+                    pass
+
+                # Policy status (public check)
+                try:
+                    ps = s3.get_bucket_policy_status(Bucket=name)
+                    data['policy_status_is_public'] = ps.get('PolicyStatus', {}).get('IsPublic', False)
+                except ClientError:
+                    data['policy_status_is_public'] = False
+
+                # ACL (public check)
+                try:
+                    acl = s3.get_bucket_acl(Bucket=name)
+                    grants = acl.get('Grants', [])
+                    data['acl_grants_public'] = any(
+                        g.get('Grantee', {}).get('URI', '') in (
+                            'http://acs.amazonaws.com/groups/global/AllUsers',
+                            'http://acs.amazonaws.com/groups/global/AuthenticatedUsers',
+                        )
+                        for g in grants
+                    )
+                except ClientError:
+                    data['acl_grants_public'] = False
+
+                # Lifecycle
+                try:
+                    lc = s3.get_bucket_lifecycle_configuration(Bucket=name)
+                    data['lifecycle_rules_count'] = len(lc.get('Rules', []))
+                except ClientError:
+                    data['lifecycle_rules_count'] = 0
+
+                # Stamp isolation keys
+                self._stamp_isolation(data)
+
+                # Score
+                total, level, components, overrides, reasons = score_s3_bucket(data)
+                data['risk_score'] = total
+                data['risk_level'] = level
+                data['risk_components'] = components
+                data['critical_overrides'] = overrides
+                data['risk_reasons'] = reasons
+
+                # Validate isolation before save
+                assert data['aws_account_id'] == self.aws_account_id, \
+                    f"Account mismatch: {data['aws_account_id']} != {self.aws_account_id}"
+
+                self.db.save_s3_bucket(run_id, data)
+                count += 1
+            except Exception as e:
+                logger.warning(f"  Error processing S3 bucket {name}: {e}")
+
+        logger.info(f"  Discovered {count} S3 buckets")
+        return count
+
+    def _get_bucket_region(self, s3, bucket_name):
+        """Get the region for a bucket."""
+        try:
+            loc = s3.get_bucket_location(Bucket=bucket_name)
+            region = loc.get('LocationConstraint')
+            return region or 'us-east-1'  # None means us-east-1
+        except ClientError:
+            return self.region
+
+    # ── KMS Key Discovery ────────────────────────────────────────
+
+    def _discover_kms_keys(self, run_id):
+        """Discover all KMS customer-managed keys with security configuration."""
+        kms = self._get_client('kms')
+        if not kms:
+            return 0
+        count = 0
+
+        try:
+            paginator = kms.get_paginator('list_keys')
+        except ClientError as e:
+            logger.warning(f"  kms:ListKeys failed: {e}")
+            return 0
+
+        for page in paginator.paginate():
+            for key_entry in page.get('Keys', []):
+                key_id = key_entry['KeyId']
+                key_arn = key_entry['KeyArn']
+                try:
+                    # Describe key
+                    desc = kms.describe_key(KeyId=key_id)
+                    meta = desc.get('KeyMetadata', {})
+
+                    data = {
+                        'resource_id': key_arn,
+                        'name': meta.get('Description') or key_id,
+                        'key_id': key_id,
+                        'region': self.region,
+                        'key_state': meta.get('KeyState'),
+                        'key_usage': meta.get('KeyUsage'),
+                        'key_spec': meta.get('KeySpec') or meta.get('CustomerMasterKeySpec'),
+                        'key_manager': meta.get('KeyManager'),
+                        'origin': meta.get('Origin'),
+                        'multi_region': meta.get('MultiRegion', False),
+                        'multi_region_config': meta.get('MultiRegionConfiguration', {}),
+                    }
+
+                    # Rotation status (only for customer-managed symmetric keys)
+                    try:
+                        rot = kms.get_key_rotation_status(KeyId=key_id)
+                        data['rotation_enabled'] = rot.get('KeyRotationEnabled', False)
+                    except ClientError:
+                        data['rotation_enabled'] = False
+
+                    # Key policy
+                    try:
+                        pol = kms.get_key_policy(KeyId=key_id, PolicyName='default')
+                        policy_str = pol.get('Policy', '{}')
+                        data['key_policy'] = json.loads(policy_str) if isinstance(policy_str, str) else policy_str
+                    except (ClientError, json.JSONDecodeError):
+                        data['key_policy'] = {}
+
+                    # Grants count
+                    try:
+                        grants = kms.list_grants(KeyId=key_id)
+                        data['grants_count'] = len(grants.get('Grants', []))
+                    except ClientError:
+                        data['grants_count'] = 0
+
+                    # Tags
+                    try:
+                        tags_resp = kms.list_resource_tags(KeyId=key_id)
+                        data['tags'] = {t['TagKey']: t['TagValue'] for t in tags_resp.get('Tags', [])}
+                    except ClientError:
+                        data['tags'] = {}
+
+                    # Stamp isolation keys
+                    self._stamp_isolation(data)
+
+                    # Score
+                    total, level, components, overrides, reasons = score_kms_key(data)
+                    data['risk_score'] = total
+                    data['risk_level'] = level
+                    data['risk_components'] = components
+                    data['critical_overrides'] = overrides
+                    data['risk_reasons'] = reasons
+
+                    # Validate isolation before save
+                    assert data['aws_account_id'] == self.aws_account_id
+
+                    self.db.save_kms_key(run_id, data)
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"  Error processing KMS key {key_id}: {e}")
+
+        logger.info(f"  Discovered {count} KMS keys")
+        return count
+
+    # ── Lambda Function Discovery ────────────────────────────────
+
+    def _discover_lambda_functions(self, run_id):
+        """Discover all Lambda functions with security configuration."""
+        lam = self._get_client('lambda')
+        if not lam:
+            return 0
+        count = 0
+
+        try:
+            paginator = lam.get_paginator('list_functions')
+        except ClientError as e:
+            logger.warning(f"  lambda:ListFunctions failed: {e}")
+            return 0
+
+        for page in paginator.paginate():
+            for func in page.get('Functions', []):
+                name = func['FunctionName']
+                arn = func['FunctionArn']
+                try:
+                    role_arn = func.get('Role', '')
+                    role_name = role_arn.split('/')[-1] if '/' in role_arn else role_arn
+
+                    vpc_config = func.get('VpcConfig', {})
+                    env_vars = func.get('Environment', {}).get('Variables', {})
+                    env_count = len(env_vars)
+
+                    # Check for secrets in environment variables
+                    has_secrets = any(
+                        self.SECRET_PATTERNS.search(k)
+                        for k in env_vars.keys()
+                    )
+
+                    data = {
+                        'resource_id': arn,
+                        'name': name,
+                        'region': self.region,
+                        'runtime': func.get('Runtime'),
+                        'handler': func.get('Handler'),
+                        'timeout': func.get('Timeout', 3),
+                        'memory_size': func.get('MemorySize', 128),
+                        'code_size': func.get('CodeSize', 0),
+                        'last_modified': func.get('LastModified'),
+                        'execution_role_arn': role_arn,
+                        'execution_role_name': role_name,
+                        'vpc_id': vpc_config.get('VpcId'),
+                        'subnet_ids': vpc_config.get('SubnetIds', []),
+                        'security_group_ids': vpc_config.get('SecurityGroupIds', []),
+                        'environment_variables_count': env_count,
+                        'has_secrets_in_env': has_secrets,
+                        'kms_key_arn': func.get('KMSKeyArn'),
+                        'dead_letter_config': func.get('DeadLetterConfig'),
+                    }
+
+                    # Resource policy (public invocation check)
+                    try:
+                        pol = lam.get_policy(FunctionName=name)
+                        policy_doc = json.loads(pol.get('Policy', '{}'))
+                        data['resource_policy'] = policy_doc
+                        # Check for public invoke
+                        data['resource_policy_is_public'] = any(
+                            stmt.get('Principal') == '*' or
+                            (isinstance(stmt.get('Principal'), dict) and
+                             stmt['Principal'].get('AWS') == '*')
+                            for stmt in policy_doc.get('Statement', [])
+                            if stmt.get('Effect') == 'Allow'
+                        )
+                    except ClientError:
+                        data['resource_policy'] = {}
+                        data['resource_policy_is_public'] = False
+
+                    # Tags
+                    try:
+                        data['tags'] = func.get('Tags', {}) or {}
+                    except Exception:
+                        data['tags'] = {}
+
+                    # Stamp isolation keys
+                    self._stamp_isolation(data)
+
+                    # Score
+                    total, level, components, overrides, reasons = score_lambda_function(data)
+                    data['risk_score'] = total
+                    data['risk_level'] = level
+                    data['risk_components'] = components
+                    data['critical_overrides'] = overrides
+                    data['risk_reasons'] = reasons
+
+                    # Validate isolation before save
+                    assert data['aws_account_id'] == self.aws_account_id
+
+                    self.db.save_lambda_function(run_id, data)
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"  Error processing Lambda function {name}: {e}")
+
+        logger.info(f"  Discovered {count} Lambda functions")
+        return count
+
+    # ── Resource Discovery Orchestrator ──────────────────────────
+
+    def _discover_and_save_resources(self, run_id):
+        """Discover S3, KMS, and Lambda resources — called from run_discovery."""
+        logger.info("  Starting AWS resource discovery...")
+        s3_count = self._discover_s3_buckets(run_id)
+        kms_count = self._discover_kms_keys(run_id)
+        lambda_count = self._discover_lambda_functions(run_id)
+        logger.info(f"  AWS resources: {s3_count} S3, {kms_count} KMS, {lambda_count} Lambda")
+
+    # ── Organizations Discovery ──────────────────────────────────
+
+    def _discover_organizations(self):
+        """Discover AWS Organization member accounts and save as cloud_subscriptions."""
+        org_client = self._get_client('organizations')
+        if not org_client:
+            return
+
+        try:
+            org_client.describe_organization()
+        except ClientError as e:
+            code = e.response['Error']['Code']
+            if code == 'AWSOrganizationsNotInUseException':
+                logger.info("  AWS Organizations not in use — skipping")
+                return
+            logger.warning(f"  organizations:DescribeOrganization failed: {e}")
+            return
+
+        accounts = []
+        try:
+            paginator = org_client.get_paginator('list_accounts')
+            for page in paginator.paginate():
+                for acct in page.get('Accounts', []):
+                    if acct.get('Status') == 'ACTIVE':
+                        accounts.append({
+                            'id': acct['Id'],
+                            'name': acct.get('Name', f"AWS Account {acct['Id']}"),
+                        })
+        except ClientError as e:
+            logger.warning(f"  organizations:ListAccounts failed: {e}")
+            return
+
+        if accounts:
+            inserted = self.db.insert_discovered_subscriptions(
+                organization_id=self.db_org_id,
+                cloud='aws',
+                connection_id=self.cloud_connection_id,
+                subs_list=accounts,
+            )
+            logger.info(f"  Discovered {len(accounts)} org accounts, inserted/updated {inserted}")
+
+    # ── CloudTrail Ingestion ─────────────────────────────────────
+
+    def _ingest_cloudtrail(self, run_id):
+        """Ingest CloudTrail events using AWSCloudTrailService."""
+        from app.engines.telemetry.aws_cloudtrail import AWSCloudTrailService
+
+        lookback = int(self.db.get_setting(
+            'aws_cloudtrail_lookback_days', '7', self.db_org_id))
+
+        svc = AWSCloudTrailService(
+            session=self._session,
+            db=self.db,
+            aws_account_id=self.aws_account_id,
+        )
+        count = svc.ingest_events(
+            run_id=run_id,
+            organization_id=self.db_org_id,
+            cloud_connection_id=self.cloud_connection_id,
+            lookback_days=lookback,
+        )
+        if count > 0:
+            svc.backfill_last_activity(run_id)
+        logger.info(f"  CloudTrail: ingested {count} events")

@@ -134,18 +134,21 @@ function AppContent() {
   }, []);
 
   // Phase 48: Check if onboarding is needed (client portal admin only, not superadmins, not demo)
+  // Re-check on path changes so navigating away from /onboarding picks up completion
   useEffect(() => {
     if (!user || loading || user.role !== 'admin' || user.is_superadmin || user.is_demo) return;
-    if (window.location.pathname.startsWith('/admin')) return;
+    if (location.pathname.startsWith('/admin') || location.pathname === '/onboarding') return;
     fetch('/api/onboarding/status')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data && !data.onboarding_completed && !data.azure_configured) {
           setNeedsOnboarding(true);
+        } else {
+          setNeedsOnboarding(false);
         }
       })
       .catch(() => {});
-  }, [user, loading]);
+  }, [user, loading, location.pathname]);
 
   // Phase 85: Fetch organization onboarding stage (client portal only, non-superadmin)
   // Re-fetch on route change so navigating away from Settings picks up stage updates

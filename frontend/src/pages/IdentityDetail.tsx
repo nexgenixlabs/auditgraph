@@ -596,7 +596,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setEffectiveAccessData({ identity_id: id, display_name: '', effective_access: [], summary: { admin_scopes: 0, write_scopes: 0, read_scopes: 0, total_roles: 0, total_permissions: 0, categories: [] } }); })
       .finally(() => { if (!cancelled) setEffectiveAccessLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, effectiveAccessData, effectiveAccessLoading]);
+  }, [activeTab, id, effectiveAccessData]); // effectiveAccessLoading intentionally excluded — including it causes a dep-change re-run that cancels the in-flight fetch before .finally() can clear loading
 
   // Fetch sensitive access data for effective_access and sensitive_access tabs
   useEffect(() => {

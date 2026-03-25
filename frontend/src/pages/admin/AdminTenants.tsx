@@ -140,6 +140,10 @@ export default function AdminTenants() {
   const [opsReason, setOpsReason] = useState('');
   const [opsConfirm, setOpsConfirm] = useState('');
   const [opsLoading, setOpsLoading] = useState(false);
+  const [resetRootModal, setResetRootModal] = useState<{ orgId: number; orgName: string; currentUsername: string } | null>(null);
+  const [resetRootUsername, setResetRootUsername] = useState('');
+  const [resetRootLoading, setResetRootLoading] = useState(false);
+  const [showRootTempPassword, setShowRootTempPassword] = useState<string | null>(null);
 
   const fetchTenants = useCallback(() => {
     api.get('/clients')
@@ -228,6 +232,38 @@ export default function AdminTenants() {
       setError(err instanceof Error ? err.message : `Failed: ${opsModal.label}`);
     } finally {
       setOpsLoading(false);
+    }
+  }
+
+  async function openResetRootModal(t: Tenant) {
+    setOpsDropdown(null);
+    setError(null);
+    try {
+      const data = await api.get(`/users?organization_id=${t.id}`);
+      const users = data.users || [];
+      const root = users.find((u: any) => u.role === 'admin');
+      setResetRootModal({ orgId: t.id, orgName: t.name, currentUsername: root?.username || '(none)' });
+      setResetRootUsername('');
+    } catch {
+      setError('Failed to fetch root user for this tenant');
+    }
+  }
+
+  async function executeResetRoot() {
+    if (!resetRootModal) return;
+    setResetRootLoading(true);
+    setError(null);
+    try {
+      const body: Record<string, string> = {};
+      if (resetRootUsername.trim()) body.new_username = resetRootUsername.trim();
+      const data = await api.post(`/admin/clients/${resetRootModal.orgId}/reset-root-user`, body);
+      setResetRootModal(null);
+      setShowRootTempPassword(data.temp_password);
+      setSuccess(data.message || 'Root user credentials reset');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to reset root user');
+    } finally {
+      setResetRootLoading(false);
     }
   }
 
@@ -510,6 +546,78 @@ export default function AdminTenants() {
                 className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200"
               >
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Root User modal */}
+      {resetRootModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-md p-6">
+            <h3 className="text-sm font-bold text-gray-900 mb-2">Reset Root User Credentials</h3>
+            <p className="text-xs text-gray-600 mb-4">Reset the root admin credentials for <span className="font-semibold">{resetRootModal.orgName}</span>. A temporary password will be generated.</p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Current username</label>
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 font-mono">{resetRootModal.currentUsername}</div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">New username (optional)</label>
+                <input
+                  value={resetRootUsername}
+                  onChange={e => setResetRootUsername(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="Leave blank to keep current username"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={executeResetRoot}
+                disabled={resetRootLoading || (resetRootUsername.trim().length > 0 && resetRootUsername.trim().length < 3)}
+                className="px-4 py-2 text-white text-sm rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {resetRootLoading ? 'Resetting...' : 'Reset Credentials'}
+              </button>
+              <button
+                onClick={() => { setResetRootModal(null); setResetRootUsername(''); }}
+                className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Root user temp password display */}
+      {showRootTempPassword && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowRootTempPassword(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 mb-2">Temporary Password</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              This password is shown only once. The user will be required to change it on next login.
+            </p>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-sm break-all select-all">
+              {showRootTempPassword}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(showRootTempPassword);
+                  setSuccess('Password copied to clipboard');
+                }}
+                className="flex-1 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
+              >
+                Copy to Clipboard
+              </button>
+              <button
+                onClick={() => setShowRootTempPassword(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                Close
               </button>
             </div>
           </div>
@@ -1186,6 +1294,7 @@ export default function AdminTenants() {
                             <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1">
                               <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'snapshot', label: 'Trigger Snapshot', description: 'Start a new discovery run for this tenant.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Trigger Snapshot</button>
                               <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'rebuild-graph', label: 'Rebuild Graph', description: 'Clear and rebuild graph visualization cache.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Rebuild Graph</button>
+                              <button onClick={() => openResetRootModal(t)} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Reset Root User</button>
                               <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'disable', label: 'Disable Tenant', description: 'Disable this tenant. Users will lose access.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-orange-700 hover:bg-orange-50">Disable Tenant</button>
                               <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'suspend', label: 'Suspend Billing', description: 'Suspend billing. Data stays, billing pauses.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-orange-700 hover:bg-orange-50">Suspend Billing</button>
                               {isSuperadmin && (

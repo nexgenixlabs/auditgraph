@@ -10,7 +10,7 @@ import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSele
 
 // ─── Types ────────────────────────────────────────────────────────
 
-type ResourceType = 'storage_account' | 'key_vault' | 'aws_s3_bucket' | 'aws_iam_role' | 'aws_lambda' |
+type ResourceType = 'storage_account' | 'key_vault' | 'aws_s3_bucket' | 'aws_kms_key' | 'aws_iam_role' | 'aws_lambda' |
   'gcp_storage_bucket' | 'gcp_project' | 'gcp_compute_instance';
 
 interface ResourceRow {
@@ -44,6 +44,9 @@ interface ResourceStats {
   total: number;
   storage_accounts: number;
   key_vaults: number;
+  aws_s3_buckets?: number;
+  aws_kms_keys?: number;
+  aws_lambda_functions?: number;
   by_risk: Record<string, number>;
   at_risk: number;
   rotation_compliance?: { total_storage: number; keys_stale: number; avg_key_age_days: number };
@@ -94,7 +97,8 @@ const RESOURCE_TYPE_CONFIG: Record<string, { label: string; badge: string; cloud
   storage_account:     { label: 'Storage Account',  badge: 'bg-blue-100 text-blue-700',   cloud: 'azure' },
   key_vault:           { label: 'Key Vault',        badge: 'bg-purple-100 text-purple-700', cloud: 'azure' },
   aws_s3_bucket:       { label: 'S3 Bucket',        badge: 'bg-amber-100 text-amber-700',  cloud: 'aws' },
-  aws_iam_role:        { label: 'IAM Role',         badge: 'bg-orange-100 text-orange-700', cloud: 'aws' },
+  aws_kms_key:         { label: 'KMS Key',          badge: 'bg-orange-100 text-orange-700', cloud: 'aws' },
+  aws_iam_role:        { label: 'IAM Role',         badge: 'bg-orange-200 text-orange-800', cloud: 'aws' },
   aws_lambda:          { label: 'Lambda Function',  badge: 'bg-yellow-100 text-yellow-700', cloud: 'aws' },
   gcp_storage_bucket:  { label: 'GCS Bucket',       badge: 'bg-red-100 text-red-700',     cloud: 'gcp' },
   gcp_project:         { label: 'GCP Project',      badge: 'bg-rose-100 text-rose-700',   cloud: 'gcp' },
@@ -473,15 +477,19 @@ export default function Resources({ lockedType, pageTitle, pageSubtitle }: Resou
         {!lockedType && (
           <div className="flex rounded-md border border-gray-300 overflow-hidden text-xs">
             {[
-              { key: 'storage_account', label: 'Storage Accounts' },
-              { key: 'key_vault', label: 'Key Vaults' },
-            ].map(t => (
+              { key: '', label: 'All', count: stats?.total },
+              { key: 'storage_account', label: 'Storage', count: stats?.storage_accounts },
+              { key: 'key_vault', label: 'Key Vaults', count: stats?.key_vaults },
+              { key: 'aws_s3_bucket', label: 'S3 Buckets', count: stats?.aws_s3_buckets },
+              { key: 'aws_kms_key', label: 'KMS Keys', count: stats?.aws_kms_keys },
+              { key: 'aws_lambda', label: 'Lambda', count: stats?.aws_lambda_functions },
+            ].filter(t => t.key === '' || (t.count ?? 0) > 0).map(t => (
               <button
                 key={t.key}
                 onClick={() => setTypeFilter(t.key)}
                 className={`px-3 py-1.5 ${typeFilter === t.key ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
               >
-                {t.label}
+                {t.label}{(t.count ?? 0) > 0 && t.key !== '' ? ` (${t.count})` : ''}
               </button>
             ))}
           </div>

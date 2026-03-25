@@ -8632,7 +8632,7 @@ def auth_login():
 def auth_signup():
     """POST /api/auth/signup — create organization + admin user."""
     import re, secrets
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     email = str(data.get('email', '')).strip().lower()
     password = str(data.get('password', ''))
     org_name = str(data.get('organization_name', '')).strip()
@@ -8677,10 +8677,11 @@ def auth_signup():
         except Exception:
             pass
 
-        # Auto-login: generate tokens
+        # Auto-login: generate tokens (must happen before db.close())
         user_for_token = {
             'id': user['id'],
             'username': user['username'],
+            'display_name': user.get('display_name', email.split('@')[0].title()),
             'role': user['role'],
             'organization_id': org['id'],
             'org_name': org['name'],
@@ -8688,12 +8689,22 @@ def auth_signup():
             'is_superadmin': False,
             'portal_role': None,
         }
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 409
+    except Exception as e:
+        logger.exception("Signup DB error for %s / %s", email, org_name)
+        return jsonify({'error': 'Signup failed. Please try again.'}), 500
     finally:
         db.close()
 
-    from app.api.auth import generate_access_token, generate_refresh_token
-    access_token = generate_access_token(user_for_token, portal='client', org_slug=org['slug'])
-    refresh_token = generate_refresh_token(user_for_token, portal='client')
+    # Token generation (outside DB transaction — db already closed)
+    try:
+        from app.api.auth import generate_access_token, generate_refresh_token
+        access_token = generate_access_token(user_for_token, portal='client', org_slug=org['slug'])
+        refresh_token = generate_refresh_token(user_for_token, portal='client')
+    except Exception as e:
+        logger.exception("Signup token generation failed for %s / %s", email, org_name)
+        return jsonify({'error': 'Account created but login failed. Please sign in manually.'}), 500
 
     return jsonify({
         'access_token': access_token,
@@ -8702,7 +8713,7 @@ def auth_signup():
         'user': {
             'id': user['id'],
             'username': user['username'],
-            'display_name': user['display_name'],
+            'display_name': user.get('display_name', ''),
             'role': user['role'],
             'organization_id': org['id'],
             'org_name': org['name'],
@@ -13049,12 +13060,22 @@ def test_azure_connection():
         )
         sub_client = SubscriptionClient(credential)
         subs = []
+        all_states = []
         for sub in sub_client.subscriptions.list():
-            if sub.state and sub.state.lower() in ('enabled', 'warned'):
+            state_str = str(sub.state).lower() if sub.state else 'unknown'
+            all_states.append(state_str)
+            if state_str in ('enabled', 'warned'):
                 subs.append({
                     'id': sub.subscription_id,
                     'name': sub.display_name or sub.subscription_id,
                 })
+
+        if all_states:
+            logger.info("Azure subscriptions found: %d total, %d enabled — states: %s",
+                         len(all_states), len(subs), all_states)
+        else:
+            logger.warning("Azure auth succeeded but 0 subscriptions visible — "
+                           "SPN likely needs Reader RBAC on at least one subscription")
 
         # Auto-advance onboarding stage to 'active' and insert discovered subs
         tid = _org_id()
@@ -13078,10 +13099,15 @@ def test_azure_connection():
             finally:
                 admin_db.close()
 
+        msg = f'Connected successfully. Found {len(subs)} subscription(s).'
+        if not subs:
+            msg += (' The Service Principal authenticated but has no RBAC access to any subscription. '
+                     'Assign at least Reader role on the target subscription(s) in Azure IAM.')
+
         return jsonify({
             'status': 'success',
             'subscriptions': subs,
-            'message': f'Connected successfully. Found {len(subs)} subscription(s).',
+            'message': msg,
         })
     except Exception as e:
         logger.error(f"Azure connection test failed: {e}", exc_info=True)
@@ -13593,12 +13619,22 @@ def test_client_connection():
             )
             sub_client = SubscriptionClient(credential)
             subs = []
+            all_states = []
             for sub in sub_client.subscriptions.list():
-                if sub.state and sub.state.lower() in ('enabled', 'warned'):
+                state_str = str(sub.state).lower() if sub.state else 'unknown'
+                all_states.append(state_str)
+                if state_str in ('enabled', 'warned'):
                     subs.append({
                         'id': sub.subscription_id,
                         'name': sub.display_name or sub.subscription_id,
                     })
+
+            if all_states:
+                logger.info("Azure subscriptions found: %d total, %d enabled — states: %s",
+                             len(all_states), len(subs), all_states)
+            else:
+                logger.warning("Azure auth succeeded but 0 subscriptions visible — "
+                               "SPN likely needs Reader RBAC on at least one subscription")
 
             # If connection_id provided, update its test status and persist subscriptions
             connection_id = data.get('connection_id')
@@ -13641,10 +13677,15 @@ def test_client_connection():
             except Exception:
                 pass
 
+            msg = f'Connected successfully. Found {len(subs)} subscription(s).'
+            if not subs:
+                msg += (' The Service Principal authenticated but has no RBAC access to any subscription. '
+                         'Assign at least Reader role on the target subscription(s) in Azure IAM.')
+
             return jsonify({
                 'status': 'success',
                 'subscriptions': subs,
-                'message': f'Connected successfully. Found {len(subs)} subscription(s).',
+                'message': msg,
             })
         except Exception as e:
             # Update test status on failure
@@ -14062,6 +14103,7 @@ def _ensure_resource_tables(db):
         db._ensure_azure_storage_accounts_table()
         db._ensure_azure_key_vaults_table()
         db._ensure_resource_risk_history_table()
+        db._ensure_aws_s3_buckets_table()
         _resource_tables_ensured = True
 
 def _classify_network(resource):
@@ -14182,6 +14224,99 @@ def get_resources():
                 parts[-1] += " AND (organization_id = %s OR organization_id IS NULL)"
                 params.append(organization_id)
             elif organization_id is not None:
+                parts[-1] += " AND organization_id = %s"
+                params.append(organization_id)
+
+        # AWS S3 Buckets
+        if resource_type in ('', 'aws_s3_bucket'):
+            parts.append("""
+                SELECT id, resource_id, name, 'aws_s3_bucket' AS resource_type,
+                       region AS location, NULL AS resource_group,
+                       aws_account_id AS subscription_id,
+                       'AWS ' || aws_account_id AS subscription_name,
+                       risk_level, risk_score, risk_reasons,
+                       jsonb_build_object(
+                           'public_access_block_enabled', public_access_block_enabled,
+                           'encryption_enabled', encryption_enabled,
+                           'encryption_algorithm', encryption_algorithm,
+                           'versioning_enabled', versioning_enabled,
+                           'logging_enabled', logging_enabled,
+                           'policy_status_is_public', policy_status_is_public
+                       ) AS key_config,
+                       COALESCE(risk_components, '{}') AS risk_components,
+                       COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                       COALESCE(critical_overrides, '[]') AS critical_overrides,
+                       tags, created_at,
+                       NULL AS default_network_action, NULL::text AS public_network_access,
+                       0 AS ip_rules_count, 0 AS vnet_rules_count, 0 AS private_endpoint_count,
+                       NULL AS data_classification, NULL AS classification_source
+                FROM aws_s3_buckets
+                WHERE discovery_run_id = ANY(%s)
+            """)
+            params.append(run_ids)
+            if organization_id and organization_id > 0:
+                parts[-1] += " AND organization_id = %s"
+                params.append(organization_id)
+
+        # AWS KMS Keys
+        if resource_type in ('', 'aws_kms_key'):
+            parts.append("""
+                SELECT id, resource_id, name, 'aws_kms_key' AS resource_type,
+                       region AS location, NULL AS resource_group,
+                       aws_account_id AS subscription_id,
+                       'AWS ' || aws_account_id AS subscription_name,
+                       risk_level, risk_score, risk_reasons,
+                       jsonb_build_object(
+                           'key_state', key_state,
+                           'key_usage', key_usage,
+                           'key_manager', key_manager,
+                           'rotation_enabled', rotation_enabled,
+                           'grants_count', grants_count,
+                           'multi_region', multi_region
+                       ) AS key_config,
+                       COALESCE(risk_components, '{}') AS risk_components,
+                       COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                       COALESCE(critical_overrides, '[]') AS critical_overrides,
+                       tags, created_at,
+                       NULL AS default_network_action, NULL::text AS public_network_access,
+                       0 AS ip_rules_count, 0 AS vnet_rules_count, 0 AS private_endpoint_count,
+                       NULL AS data_classification, NULL AS classification_source
+                FROM aws_kms_keys
+                WHERE discovery_run_id = ANY(%s)
+            """)
+            params.append(run_ids)
+            if organization_id and organization_id > 0:
+                parts[-1] += " AND organization_id = %s"
+                params.append(organization_id)
+
+        # AWS Lambda Functions
+        if resource_type in ('', 'aws_lambda'):
+            parts.append("""
+                SELECT id, resource_id, name, 'aws_lambda' AS resource_type,
+                       region AS location, NULL AS resource_group,
+                       aws_account_id AS subscription_id,
+                       'AWS ' || aws_account_id AS subscription_name,
+                       risk_level, risk_score, risk_reasons,
+                       jsonb_build_object(
+                           'runtime', runtime,
+                           'execution_role_name', execution_role_name,
+                           'vpc_id', vpc_id,
+                           'resource_policy_is_public', resource_policy_is_public,
+                           'has_secrets_in_env', has_secrets_in_env,
+                           'memory_size', memory_size
+                       ) AS key_config,
+                       COALESCE(risk_components, '{}') AS risk_components,
+                       COALESCE(blast_radius_score, 0) AS blast_radius_score,
+                       COALESCE(critical_overrides, '[]') AS critical_overrides,
+                       tags, created_at,
+                       NULL AS default_network_action, NULL::text AS public_network_access,
+                       0 AS ip_rules_count, 0 AS vnet_rules_count, 0 AS private_endpoint_count,
+                       NULL AS data_classification, NULL AS classification_source
+                FROM aws_lambda_functions
+                WHERE discovery_run_id = ANY(%s)
+            """)
+            params.append(run_ids)
+            if organization_id and organization_id > 0:
                 parts[-1] += " AND organization_id = %s"
                 params.append(organization_id)
 
@@ -14355,8 +14490,11 @@ def get_resource_stats():
             sub_filter = " AND subscription_id = ANY(%s)"
             params.append(active_sub_ids)
 
-        include_sa = resource_type != 'key_vault'
-        include_kv = resource_type != 'storage_account'
+        include_sa = resource_type not in ('key_vault', 'aws_s3_bucket', 'aws_kms_key', 'aws_lambda')
+        include_kv = resource_type not in ('storage_account', 'aws_s3_bucket', 'aws_kms_key', 'aws_lambda')
+        include_s3 = resource_type in ('', 'aws_s3_bucket')
+        include_kms = resource_type in ('', 'aws_kms_key')
+        include_lambda = resource_type in ('', 'aws_lambda')
 
         zero_risk = {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
 
@@ -14391,6 +14529,60 @@ def get_resource_stats():
             kv = dict(cursor.fetchone())
         else:
             kv = dict(zero_risk)
+
+        # AWS S3 bucket counts
+        aws_org_filter = ""
+        aws_params = [run_ids]
+        if organization_id and organization_id > 0:
+            aws_org_filter = " AND organization_id = %s"
+            aws_params.append(organization_id)
+
+        if include_s3:
+            cursor.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
+                       COUNT(*) FILTER (WHERE risk_level = 'high') as high,
+                       COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
+                       COUNT(*) FILTER (WHERE risk_level = 'low') as low,
+                       COUNT(*) FILTER (WHERE risk_level = 'info') as info
+                FROM aws_s3_buckets
+                WHERE discovery_run_id = ANY(%s){aws_org_filter}
+            """, aws_params)
+            s3 = dict(cursor.fetchone())
+        else:
+            s3 = dict(zero_risk)
+
+        # AWS KMS key counts
+        if include_kms:
+            cursor.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
+                       COUNT(*) FILTER (WHERE risk_level = 'high') as high,
+                       COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
+                       COUNT(*) FILTER (WHERE risk_level = 'low') as low,
+                       COUNT(*) FILTER (WHERE risk_level = 'info') as info
+                FROM aws_kms_keys
+                WHERE discovery_run_id = ANY(%s){aws_org_filter}
+            """, aws_params)
+            kms_stats = dict(cursor.fetchone())
+        else:
+            kms_stats = dict(zero_risk)
+
+        # AWS Lambda function counts
+        if include_lambda:
+            cursor.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(*) FILTER (WHERE risk_level = 'critical') as critical,
+                       COUNT(*) FILTER (WHERE risk_level = 'high') as high,
+                       COUNT(*) FILTER (WHERE risk_level = 'medium') as medium,
+                       COUNT(*) FILTER (WHERE risk_level = 'low') as low,
+                       COUNT(*) FILTER (WHERE risk_level = 'info') as info
+                FROM aws_lambda_functions
+                WHERE discovery_run_id = ANY(%s){aws_org_filter}
+            """, aws_params)
+            lam = dict(cursor.fetchone())
+        else:
+            lam = dict(zero_risk)
 
         # Rotation compliance & audit posture (storage-only stats)
         rotation_data = None
@@ -14449,19 +14641,23 @@ def get_resource_stats():
 
         cursor.close()
 
-        total = sa['total'] + kv['total']
+        all_types = [sa, kv, s3, kms_stats, lam]
+        total = sum(t['total'] for t in all_types)
         by_risk = {
-            'critical': sa['critical'] + kv['critical'],
-            'high': sa['high'] + kv['high'],
-            'medium': sa['medium'] + kv['medium'],
-            'low': sa['low'] + kv['low'],
-            'info': sa['info'] + kv['info'],
+            'critical': sum(t['critical'] for t in all_types),
+            'high': sum(t['high'] for t in all_types),
+            'medium': sum(t['medium'] for t in all_types),
+            'low': sum(t['low'] for t in all_types),
+            'info': sum(t['info'] for t in all_types),
         }
 
         result = {
             'total': total,
             'storage_accounts': sa['total'],
             'key_vaults': kv['total'],
+            'aws_s3_buckets': s3['total'],
+            'aws_kms_keys': kms_stats['total'],
+            'aws_lambda_functions': lam['total'],
             'by_risk': by_risk,
             'at_risk': by_risk['critical'] + by_risk['high'],
         }
@@ -14521,6 +14717,34 @@ def get_resource_detail(resource_id):
                 FROM azure_key_vaults
                 WHERE discovery_run_id = ANY(%s) AND resource_id = %s{org_filter}
             """, params)
+            row = cursor.fetchone()
+
+        # AWS resource fallbacks (org_filter uses strict = not IS NULL)
+        aws_org_filter = " AND organization_id = %s" if organization_id else ""
+        aws_params = [run_ids, resource_id] + ([organization_id] if organization_id else [])
+
+        if not row:
+            cursor.execute(f"""
+                SELECT *, 'aws_s3_bucket' AS resource_type
+                FROM aws_s3_buckets
+                WHERE discovery_run_id = ANY(%s) AND resource_id = %s{aws_org_filter}
+            """, aws_params)
+            row = cursor.fetchone()
+
+        if not row:
+            cursor.execute(f"""
+                SELECT *, 'aws_kms_key' AS resource_type
+                FROM aws_kms_keys
+                WHERE discovery_run_id = ANY(%s) AND resource_id = %s{aws_org_filter}
+            """, aws_params)
+            row = cursor.fetchone()
+
+        if not row:
+            cursor.execute(f"""
+                SELECT *, 'aws_lambda' AS resource_type
+                FROM aws_lambda_functions
+                WHERE discovery_run_id = ANY(%s) AND resource_id = %s{aws_org_filter}
+            """, aws_params)
             row = cursor.fetchone()
 
         cursor.close()
@@ -14618,6 +14842,89 @@ def get_resource_detail(resource_id):
             resource['_score_integrity'] = 'check_failed'
 
         return jsonify(resource)
+    finally:
+        db.close()
+
+
+def get_aws_cloudtrail_events():
+    """GET /api/aws/cloudtrail — list CloudTrail events with filters."""
+    db = _db()
+    try:
+        db._ensure_aws_s3_buckets_table()  # ensures all AWS tables including cloudtrail
+        organization_id = _org_id()
+        limit = min(request.args.get('limit', 50, type=int), MAX_LIMIT)
+        offset = request.args.get('offset', 0, type=int)
+        identity_id = request.args.get('identity_id', '')
+        event_name = request.args.get('event_name', '')
+        event_source = request.args.get('event_source', '')
+        read_only = request.args.get('read_only', '')
+        start_date = request.args.get('start_date', '')
+        end_date = request.args.get('end_date', '')
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'events': [], 'count': 0, 'total': 0})
+
+        where_clauses = ["discovery_run_id = ANY(%s)"]
+        params = [run_ids]
+
+        if organization_id:
+            where_clauses.append("organization_id = %s")
+            params.append(organization_id)
+        if identity_id:
+            where_clauses.append("identity_id = %s")
+            params.append(identity_id)
+        if event_name:
+            where_clauses.append("event_name ILIKE %s")
+            params.append(f'%{event_name}%')
+        if event_source:
+            where_clauses.append("event_source = %s")
+            params.append(event_source)
+        if read_only == 'true':
+            where_clauses.append("read_only = true")
+        elif read_only == 'false':
+            where_clauses.append("read_only = false")
+        if start_date:
+            where_clauses.append("event_time >= %s")
+            params.append(start_date)
+        if end_date:
+            where_clauses.append("event_time <= %s")
+            params.append(end_date)
+
+        where_sql = " AND ".join(where_clauses)
+
+        cursor.execute(f"SELECT COUNT(*) FROM aws_cloudtrail_events WHERE {where_sql}", params)
+        total = cursor.fetchone()['count']
+
+        cursor.execute(f"""
+            SELECT ct.*, i.display_name as identity_name
+            FROM aws_cloudtrail_events ct
+            LEFT JOIN identities i ON i.id = ct.identity_db_id
+            WHERE {where_sql}
+            ORDER BY ct.event_time DESC
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = cursor.fetchall()
+        cursor.close()
+
+        events = []
+        for row in rows:
+            e = dict(row)
+            for jf in ('request_parameters', 'response_elements', 'resources'):
+                if jf in e and isinstance(e[jf], str):
+                    try:
+                        e[jf] = json.loads(e[jf])
+                    except Exception:
+                        pass
+            if e.get('event_time') and hasattr(e['event_time'], 'isoformat'):
+                e['event_time'] = e['event_time'].isoformat()
+            if e.get('ingested_at') and hasattr(e['ingested_at'], 'isoformat'):
+                e['ingested_at'] = e['ingested_at'].isoformat()
+            events.append(e)
+
+        return jsonify({'events': events, 'count': len(events), 'total': total})
     finally:
         db.close()
 
@@ -16146,6 +16453,92 @@ def provision_organization_handler(organization_id):
             'admin_user': {k: v for k, v in user.items() if k != 'password_hash'},
             'message': f'Tenant provisioned with admin user "{admin_username}"',
         }), 201
+    finally:
+        db.close()
+
+
+def reset_client_root_user(organization_id):
+    """POST /api/admin/clients/<id>/reset-root-user — Reset root admin credentials for a tenant."""
+    data = request.get_json(silent=True) or {}
+    new_username = str(data.get('new_username', '')).strip().lower() or None
+
+    if new_username and len(new_username) < 3:
+        return jsonify({'error': 'new_username must be at least 3 characters'}), 400
+
+    db = Database(_admin_reason='admin_root_user_reset')
+    try:
+        org = db.get_organization_by_id(organization_id)
+        if not org:
+            return jsonify({'error': 'Tenant not found'}), 404
+
+        # Find root admin user for this org
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, username FROM users
+            WHERE organization_id = %s AND role = 'admin'
+            ORDER BY id LIMIT 1
+        """, (organization_id,))
+        root_user = cursor.fetchone()
+        cursor.close()
+
+        if not root_user:
+            return jsonify({'error': 'No admin user found for this tenant'}), 404
+
+        old_username = root_user['username']
+        root_id = root_user['id']
+
+        # Check username uniqueness if changing
+        if new_username and new_username != old_username:
+            existing = db.get_user_by_username(new_username)
+            if existing:
+                return jsonify({'error': f'Username "{new_username}" already exists'}), 409
+
+        # Generate temp password
+        temp_password = secrets.token_urlsafe(16)
+        new_hash = bcrypt.hashpw(temp_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        update_kwargs = {'password_hash': new_hash}
+        if new_username and new_username != old_username:
+            update_kwargs['username'] = new_username
+
+        db.update_user(root_id, **update_kwargs)
+        db.set_force_password_change(root_id, True)
+        db.reset_failed_login(root_id)
+        db.clear_password_reset_token(root_id)
+        db.conn.commit()
+
+        final_username = new_username if new_username else old_username
+
+        # Audit log
+        current_user = getattr(g, 'current_user', None)
+        user_id = current_user.get('id') if current_user else None
+        try:
+            db.log_admin_audit(user_id, 'admin_root_user_reset',
+                               target_organization_id=organization_id,
+                               target_user_id=root_id,
+                               details={
+                                   'old_username': old_username,
+                                   'new_username': final_username,
+                                   'username_changed': new_username is not None and new_username != old_username,
+                               },
+                               ip_address=request.remote_addr)
+        except Exception:
+            pass
+
+        try:
+            _log(db, 'admin_root_user_reset',
+                 f'Root user credentials reset for tenant "{org.get("name")}"',
+                 {'organization_id': organization_id, 'old_username': old_username, 'new_username': final_username})
+        except Exception:
+            pass
+
+        return jsonify({
+            'user_id': root_id,
+            'old_username': old_username,
+            'username': final_username,
+            'temp_password': temp_password,
+            'message': f'Root user credentials reset. New username: {final_username}',
+        })
     finally:
         db.close()
 
@@ -30804,6 +31197,23 @@ def get_risk_summary_full():
                 live_nhi_count = row[4] or 0
             except Exception:
                 pass
+
+            # Include standalone app_registrations (no linked SPN) in NHI count
+            # so Identity Inventory matches Nonhuman Identities section
+            standalone_ar_count = 0
+            try:
+                exp_cursor.execute("""
+                    SELECT COUNT(*) FROM app_registrations
+                    WHERE discovery_run_id = ANY(%s)
+                      AND NOT COALESCE(has_service_principal, false)
+                """, (run_ids,))
+                standalone_ar_count = exp_cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+            live_nhi_count += standalone_ar_count
+            live_customer_count += standalone_ar_count
+            live_identity_count += standalone_ar_count
+
             # Override persisted counts with live values if available
             if live_identity_count > 0:
                 total_identities = live_identity_count

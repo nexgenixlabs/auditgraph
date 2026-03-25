@@ -169,6 +169,7 @@ from app.api.handlers import (
     get_data_security_summary,
     get_organization_by_slug_public,
     provision_organization_handler,
+    reset_client_root_user,
     get_user_organizations_handler,
     sso_status,
     saml_metadata,
@@ -195,6 +196,7 @@ from app.api.handlers import (
     get_system_health,
     get_sla_metrics,
     check_resource_integrity,
+    get_aws_cloudtrail_events,
     get_portal_users_list,
     get_spn_stats,
     get_spn_list,
@@ -817,10 +819,12 @@ def create_app():
 
     @app.errorhandler(500)
     def _internal_error(e):
+        request_id = getattr(g, 'request_id', None)
+        logger.exception(f"500 error [request_id={request_id}]")
         return jsonify({
             'error': 'Internal server error',
             'error_code': 'INTERNAL_ERROR',
-            'request_id': getattr(g, 'request_id', None),
+            'request_id': request_id,
         }), 500
 
     @app.errorhandler(Exception)
@@ -1393,6 +1397,11 @@ def create_app():
     @require_portal_role('superadmin')
     def admin_tenant_reset_discovery(organization_id):
         return admin_reset_tenant_discovery(organization_id)
+
+    @app.post("/api/admin/clients/<int:organization_id>/reset-root-user")
+    @require_portal_role('superadmin', 'poweradmin')
+    def admin_client_reset_root_user(organization_id):
+        return reset_client_root_user(organization_id)
 
     # ── Platform Operations ───────────────────────────────────────
     @app.post("/api/admin/platform/flush-cache")
@@ -2597,6 +2606,14 @@ def create_app():
     @require_role('compliance', 'reader', 'admin')
     def resources_anomalies(resource_id):
         return get_resource_anomalies(resource_id)
+
+    # -----------------------
+    # AWS CloudTrail Events
+    # -----------------------
+    @app.get("/api/aws/cloudtrail")
+    @require_role('compliance', 'reader', 'admin')
+    def aws_cloudtrail():
+        return get_aws_cloudtrail_events()
 
     @app.get("/api/data-security")
     @require_role('compliance', 'reader', 'admin')

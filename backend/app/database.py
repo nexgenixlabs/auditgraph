@@ -5291,7 +5291,7 @@ class Database:
     def update_user(self, user_id, **kwargs):
         """Update user fields. Allowed: display_name, role, enabled, password_hash, organization_id, is_superadmin, portal_role, email, phone."""
         self._ensure_users_table()
-        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'organization_id', 'is_superadmin', 'portal_role', 'email', 'phone'}
+        allowed = {'display_name', 'role', 'enabled', 'password_hash', 'organization_id', 'is_superadmin', 'portal_role', 'email', 'phone', 'username'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_user_by_id(user_id)
@@ -19602,6 +19602,407 @@ class Database:
         finally:
             cursor.close()
 
+
+    # ─── AWS Resource Tables (S3, KMS, Lambda, CloudTrail) ─────────────
+
+    _aws_resource_tables_ensured = False
+
+    def _ensure_aws_s3_buckets_table(self):
+        """Create aws_s3_buckets table if it doesn't exist."""
+        if Database._aws_resource_tables_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS aws_s3_buckets (
+                    id SERIAL PRIMARY KEY,
+                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    resource_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    region TEXT,
+                    aws_account_id TEXT NOT NULL,
+                    cloud_connection_id INTEGER NOT NULL,
+                    public_access_block_enabled BOOLEAN DEFAULT FALSE,
+                    block_public_acls BOOLEAN DEFAULT FALSE,
+                    block_public_policy BOOLEAN DEFAULT FALSE,
+                    policy_status_is_public BOOLEAN DEFAULT FALSE,
+                    acl_grants_public BOOLEAN DEFAULT FALSE,
+                    encryption_enabled BOOLEAN DEFAULT FALSE,
+                    encryption_algorithm TEXT,
+                    kms_key_id TEXT,
+                    bucket_key_enabled BOOLEAN DEFAULT FALSE,
+                    versioning_enabled BOOLEAN DEFAULT FALSE,
+                    mfa_delete BOOLEAN DEFAULT FALSE,
+                    logging_enabled BOOLEAN DEFAULT FALSE,
+                    logging_target_bucket TEXT,
+                    lifecycle_rules_count INTEGER DEFAULT 0,
+                    bucket_policy JSONB DEFAULT '{}',
+                    risk_level TEXT DEFAULT 'info',
+                    risk_score INTEGER DEFAULT 0,
+                    risk_reasons JSONB DEFAULT '[]',
+                    risk_components JSONB DEFAULT '{}',
+                    blast_radius_score INTEGER DEFAULT 0,
+                    critical_overrides JSONB DEFAULT '[]',
+                    tags JSONB DEFAULT '{}',
+                    organization_id INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(discovery_run_id, resource_id)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_run ON aws_s3_buckets(discovery_run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_risk ON aws_s3_buckets(risk_level)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_org ON aws_s3_buckets(organization_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_account ON aws_s3_buckets(aws_account_id)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS aws_kms_keys (
+                    id SERIAL PRIMARY KEY,
+                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    resource_id TEXT NOT NULL,
+                    name TEXT,
+                    key_id TEXT NOT NULL,
+                    region TEXT,
+                    aws_account_id TEXT NOT NULL,
+                    cloud_connection_id INTEGER NOT NULL,
+                    key_state TEXT,
+                    key_usage TEXT,
+                    key_spec TEXT,
+                    key_manager TEXT,
+                    origin TEXT,
+                    rotation_enabled BOOLEAN DEFAULT FALSE,
+                    key_policy JSONB DEFAULT '{}',
+                    grants_count INTEGER DEFAULT 0,
+                    multi_region BOOLEAN DEFAULT FALSE,
+                    multi_region_config JSONB DEFAULT '{}',
+                    risk_level TEXT DEFAULT 'info',
+                    risk_score INTEGER DEFAULT 0,
+                    risk_reasons JSONB DEFAULT '[]',
+                    risk_components JSONB DEFAULT '{}',
+                    blast_radius_score INTEGER DEFAULT 0,
+                    critical_overrides JSONB DEFAULT '[]',
+                    tags JSONB DEFAULT '{}',
+                    organization_id INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(discovery_run_id, resource_id)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_run ON aws_kms_keys(discovery_run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_risk ON aws_kms_keys(risk_level)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_org ON aws_kms_keys(organization_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_account ON aws_kms_keys(aws_account_id)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS aws_lambda_functions (
+                    id SERIAL PRIMARY KEY,
+                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    resource_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    region TEXT,
+                    aws_account_id TEXT NOT NULL,
+                    cloud_connection_id INTEGER NOT NULL,
+                    runtime TEXT,
+                    handler TEXT,
+                    timeout INTEGER DEFAULT 3,
+                    memory_size INTEGER DEFAULT 128,
+                    code_size BIGINT DEFAULT 0,
+                    last_modified TEXT,
+                    execution_role_arn TEXT,
+                    execution_role_name TEXT,
+                    vpc_id TEXT,
+                    subnet_ids JSONB DEFAULT '[]',
+                    security_group_ids JSONB DEFAULT '[]',
+                    resource_policy JSONB DEFAULT '{}',
+                    resource_policy_is_public BOOLEAN DEFAULT FALSE,
+                    environment_variables_count INTEGER DEFAULT 0,
+                    has_secrets_in_env BOOLEAN DEFAULT FALSE,
+                    kms_key_arn TEXT,
+                    dead_letter_config JSONB,
+                    risk_level TEXT DEFAULT 'info',
+                    risk_score INTEGER DEFAULT 0,
+                    risk_reasons JSONB DEFAULT '[]',
+                    risk_components JSONB DEFAULT '{}',
+                    blast_radius_score INTEGER DEFAULT 0,
+                    critical_overrides JSONB DEFAULT '[]',
+                    tags JSONB DEFAULT '{}',
+                    organization_id INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(discovery_run_id, resource_id)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_run ON aws_lambda_functions(discovery_run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_risk ON aws_lambda_functions(risk_level)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_org ON aws_lambda_functions(organization_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_account ON aws_lambda_functions(aws_account_id)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS aws_cloudtrail_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
+                    identity_id TEXT,
+                    event_id TEXT,
+                    event_name TEXT,
+                    event_source TEXT,
+                    event_time TIMESTAMPTZ,
+                    aws_region TEXT,
+                    source_ip_address TEXT,
+                    user_agent TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    request_parameters JSONB DEFAULT '{}',
+                    response_elements JSONB DEFAULT '{}',
+                    resources JSONB DEFAULT '[]',
+                    read_only BOOLEAN DEFAULT FALSE,
+                    management_event BOOLEAN DEFAULT TRUE,
+                    event_category TEXT DEFAULT 'Management',
+                    discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    aws_account_id TEXT NOT NULL,
+                    cloud_connection_id INTEGER NOT NULL,
+                    ingested_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_org ON aws_cloudtrail_events(organization_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_identity ON aws_cloudtrail_events(identity_db_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_time ON aws_cloudtrail_events(event_time)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_event ON aws_cloudtrail_events(event_name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_account ON aws_cloudtrail_events(aws_account_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_run ON aws_cloudtrail_events(discovery_run_id)")
+
+            # RLS policies for organization isolation on all 4 AWS tables
+            for tbl in ('aws_s3_buckets', 'aws_kms_keys', 'aws_lambda_functions', 'aws_cloudtrail_events'):
+                cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+                cursor.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
+                for policy_stmt in [
+                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                ]:
+                    cursor.execute("SAVEPOINT rls_policy")
+                    try:
+                        cursor.execute(policy_stmt)
+                        cursor.execute("RELEASE SAVEPOINT rls_policy")
+                    except Exception:
+                        cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
+
+            self._commit()
+            Database._aws_resource_tables_ensured = True
+        except Exception as e:
+            self._rollback()
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
+            logger.warning("AWS resource tables error: %s", e)
+        finally:
+            cursor.close()
+
+    def save_s3_bucket(self, run_id, data):
+        """Save or update an S3 bucket (UPSERT). Returns DB id."""
+        self._ensure_aws_s3_buckets_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO aws_s3_buckets (
+                discovery_run_id, resource_id, name, region, aws_account_id,
+                cloud_connection_id, public_access_block_enabled, block_public_acls,
+                block_public_policy, policy_status_is_public, acl_grants_public,
+                encryption_enabled, encryption_algorithm, kms_key_id, bucket_key_enabled,
+                versioning_enabled, mfa_delete, logging_enabled, logging_target_bucket,
+                lifecycle_rules_count, bucket_policy,
+                risk_level, risk_score, risk_reasons, risk_components,
+                blast_radius_score, critical_overrides, tags, organization_id
+            ) VALUES (
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s
+            )
+            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
+                name=EXCLUDED.name, region=EXCLUDED.region,
+                aws_account_id=EXCLUDED.aws_account_id,
+                cloud_connection_id=EXCLUDED.cloud_connection_id,
+                public_access_block_enabled=EXCLUDED.public_access_block_enabled,
+                block_public_acls=EXCLUDED.block_public_acls,
+                block_public_policy=EXCLUDED.block_public_policy,
+                policy_status_is_public=EXCLUDED.policy_status_is_public,
+                acl_grants_public=EXCLUDED.acl_grants_public,
+                encryption_enabled=EXCLUDED.encryption_enabled,
+                encryption_algorithm=EXCLUDED.encryption_algorithm,
+                kms_key_id=EXCLUDED.kms_key_id,
+                bucket_key_enabled=EXCLUDED.bucket_key_enabled,
+                versioning_enabled=EXCLUDED.versioning_enabled,
+                mfa_delete=EXCLUDED.mfa_delete,
+                logging_enabled=EXCLUDED.logging_enabled,
+                logging_target_bucket=EXCLUDED.logging_target_bucket,
+                lifecycle_rules_count=EXCLUDED.lifecycle_rules_count,
+                bucket_policy=EXCLUDED.bucket_policy,
+                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
+                risk_reasons=EXCLUDED.risk_reasons,
+                risk_components=EXCLUDED.risk_components,
+                blast_radius_score=EXCLUDED.blast_radius_score,
+                critical_overrides=EXCLUDED.critical_overrides,
+                tags=EXCLUDED.tags, created_at=NOW()
+            RETURNING id
+        """, (
+            run_id, data.get('resource_id'), data.get('name'), data.get('region'),
+            data.get('aws_account_id'), data.get('cloud_connection_id'),
+            data.get('public_access_block_enabled', False),
+            data.get('block_public_acls', False),
+            data.get('block_public_policy', False),
+            data.get('policy_status_is_public', False),
+            data.get('acl_grants_public', False),
+            data.get('encryption_enabled', False),
+            data.get('encryption_algorithm'),
+            data.get('kms_key_id'),
+            data.get('bucket_key_enabled', False),
+            data.get('versioning_enabled', False),
+            data.get('mfa_delete', False),
+            data.get('logging_enabled', False),
+            data.get('logging_target_bucket'),
+            data.get('lifecycle_rules_count', 0),
+            json.dumps(data.get('bucket_policy', {})),
+            data.get('risk_level', 'info'), data.get('risk_score', 0),
+            json.dumps(data.get('risk_reasons', [])),
+            json.dumps(data.get('risk_components', {})),
+            data.get('blast_radius_score', 0),
+            json.dumps(data.get('critical_overrides', [])),
+            json.dumps(data.get('tags', {})),
+            data.get('organization_id') or self._organization_id,
+        ))
+        db_id = cursor.fetchone()[0]
+        self._commit()
+        cursor.close()
+        return db_id
+
+    def save_kms_key(self, run_id, data):
+        """Save or update a KMS key (UPSERT). Returns DB id."""
+        self._ensure_aws_s3_buckets_table()  # ensures all 4 tables
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO aws_kms_keys (
+                discovery_run_id, resource_id, name, key_id, region,
+                aws_account_id, cloud_connection_id,
+                key_state, key_usage, key_spec, key_manager, origin,
+                rotation_enabled, key_policy, grants_count,
+                multi_region, multi_region_config,
+                risk_level, risk_score, risk_reasons, risk_components,
+                blast_radius_score, critical_overrides, tags, organization_id
+            ) VALUES (
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s
+            )
+            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
+                name=EXCLUDED.name, key_id=EXCLUDED.key_id, region=EXCLUDED.region,
+                aws_account_id=EXCLUDED.aws_account_id,
+                cloud_connection_id=EXCLUDED.cloud_connection_id,
+                key_state=EXCLUDED.key_state, key_usage=EXCLUDED.key_usage,
+                key_spec=EXCLUDED.key_spec, key_manager=EXCLUDED.key_manager,
+                origin=EXCLUDED.origin,
+                rotation_enabled=EXCLUDED.rotation_enabled,
+                key_policy=EXCLUDED.key_policy, grants_count=EXCLUDED.grants_count,
+                multi_region=EXCLUDED.multi_region,
+                multi_region_config=EXCLUDED.multi_region_config,
+                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
+                risk_reasons=EXCLUDED.risk_reasons,
+                risk_components=EXCLUDED.risk_components,
+                blast_radius_score=EXCLUDED.blast_radius_score,
+                critical_overrides=EXCLUDED.critical_overrides,
+                tags=EXCLUDED.tags, created_at=NOW()
+            RETURNING id
+        """, (
+            run_id, data.get('resource_id'), data.get('name'), data.get('key_id'),
+            data.get('region'), data.get('aws_account_id'), data.get('cloud_connection_id'),
+            data.get('key_state'), data.get('key_usage'), data.get('key_spec'),
+            data.get('key_manager'), data.get('origin'),
+            data.get('rotation_enabled', False),
+            json.dumps(data.get('key_policy', {})),
+            data.get('grants_count', 0),
+            data.get('multi_region', False),
+            json.dumps(data.get('multi_region_config', {})),
+            data.get('risk_level', 'info'), data.get('risk_score', 0),
+            json.dumps(data.get('risk_reasons', [])),
+            json.dumps(data.get('risk_components', {})),
+            data.get('blast_radius_score', 0),
+            json.dumps(data.get('critical_overrides', [])),
+            json.dumps(data.get('tags', {})),
+            data.get('organization_id') or self._organization_id,
+        ))
+        db_id = cursor.fetchone()[0]
+        self._commit()
+        cursor.close()
+        return db_id
+
+    def save_lambda_function(self, run_id, data):
+        """Save or update a Lambda function (UPSERT). Returns DB id."""
+        self._ensure_aws_s3_buckets_table()  # ensures all 4 tables
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO aws_lambda_functions (
+                discovery_run_id, resource_id, name, region, aws_account_id,
+                cloud_connection_id,
+                runtime, handler, timeout, memory_size, code_size, last_modified,
+                execution_role_arn, execution_role_name,
+                vpc_id, subnet_ids, security_group_ids,
+                resource_policy, resource_policy_is_public,
+                environment_variables_count, has_secrets_in_env, kms_key_arn,
+                dead_letter_config,
+                risk_level, risk_score, risk_reasons, risk_components,
+                blast_radius_score, critical_overrides, tags, organization_id
+            ) VALUES (
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            )
+            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
+                name=EXCLUDED.name, region=EXCLUDED.region,
+                aws_account_id=EXCLUDED.aws_account_id,
+                cloud_connection_id=EXCLUDED.cloud_connection_id,
+                runtime=EXCLUDED.runtime, handler=EXCLUDED.handler,
+                timeout=EXCLUDED.timeout, memory_size=EXCLUDED.memory_size,
+                code_size=EXCLUDED.code_size, last_modified=EXCLUDED.last_modified,
+                execution_role_arn=EXCLUDED.execution_role_arn,
+                execution_role_name=EXCLUDED.execution_role_name,
+                vpc_id=EXCLUDED.vpc_id, subnet_ids=EXCLUDED.subnet_ids,
+                security_group_ids=EXCLUDED.security_group_ids,
+                resource_policy=EXCLUDED.resource_policy,
+                resource_policy_is_public=EXCLUDED.resource_policy_is_public,
+                environment_variables_count=EXCLUDED.environment_variables_count,
+                has_secrets_in_env=EXCLUDED.has_secrets_in_env,
+                kms_key_arn=EXCLUDED.kms_key_arn,
+                dead_letter_config=EXCLUDED.dead_letter_config,
+                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
+                risk_reasons=EXCLUDED.risk_reasons,
+                risk_components=EXCLUDED.risk_components,
+                blast_radius_score=EXCLUDED.blast_radius_score,
+                critical_overrides=EXCLUDED.critical_overrides,
+                tags=EXCLUDED.tags, created_at=NOW()
+            RETURNING id
+        """, (
+            run_id, data.get('resource_id'), data.get('name'), data.get('region'),
+            data.get('aws_account_id'), data.get('cloud_connection_id'),
+            data.get('runtime'), data.get('handler'),
+            data.get('timeout', 3), data.get('memory_size', 128),
+            data.get('code_size', 0), data.get('last_modified'),
+            data.get('execution_role_arn'), data.get('execution_role_name'),
+            data.get('vpc_id'),
+            json.dumps(data.get('subnet_ids', [])),
+            json.dumps(data.get('security_group_ids', [])),
+            json.dumps(data.get('resource_policy', {})),
+            data.get('resource_policy_is_public', False),
+            data.get('environment_variables_count', 0),
+            data.get('has_secrets_in_env', False),
+            data.get('kms_key_arn'),
+            json.dumps(data.get('dead_letter_config')) if data.get('dead_letter_config') else None,
+            data.get('risk_level', 'info'), data.get('risk_score', 0),
+            json.dumps(data.get('risk_reasons', [])),
+            json.dumps(data.get('risk_components', {})),
+            data.get('blast_radius_score', 0),
+            json.dumps(data.get('critical_overrides', [])),
+            json.dumps(data.get('tags', {})),
+            data.get('organization_id') or self._organization_id,
+        ))
+        db_id = cursor.fetchone()[0]
+        self._commit()
+        cursor.close()
+        return db_id
 
     # ─── ICE: Identity Correlation CRUD ──────────────────────────────────
 
