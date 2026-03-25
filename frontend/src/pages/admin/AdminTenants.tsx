@@ -140,6 +140,7 @@ export default function AdminTenants() {
   const [opsReason, setOpsReason] = useState('');
   const [opsConfirm, setOpsConfirm] = useState('');
   const [opsLoading, setOpsLoading] = useState(false);
+  const [configRootUsername, setConfigRootUsername] = useState<string | null>(null);
   const [resetRootModal, setResetRootModal] = useState<{ orgId: number; orgName: string; currentUsername: string } | null>(null);
   const [resetRootUsername, setResetRootUsername] = useState('');
   const [resetRootLoading, setResetRootLoading] = useState(false);
@@ -259,6 +260,7 @@ export default function AdminTenants() {
       const data = await api.post(`/admin/clients/${resetRootModal.orgId}/reset-root-user`, body);
       setResetRootModal(null);
       setShowRootTempPassword(data.temp_password);
+      if (data.username) setConfigRootUsername(data.username);
       setSuccess(data.message || 'Root user credentials reset');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to reset root user');
@@ -339,9 +341,17 @@ export default function AdminTenants() {
     });
     setShowConfigure(t);
     setTenantBilling(null);
+    setConfigRootUsername(null);
     // Fetch billing data for this tenant
     api.get(`/admin/clients/${t.id}/billing`)
       .then(data => { if (data) setTenantBilling(data); })
+      .catch(() => {});
+    // Fetch root admin username
+    api.get(`/users?organization_id=${t.id}`)
+      .then(data => {
+        const root = (data.users || []).find((u: any) => u.role === 'admin');
+        setConfigRootUsername(root?.username || null);
+      })
       .catch(() => {});
   }
 
@@ -794,6 +804,47 @@ export default function AdminTenants() {
           </div>
 
           <div className="p-6">
+            {/* Root Administrator */}
+            <div className="mb-6">
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Root Administrator</h4>
+              <div className="flex items-center justify-between border border-gray-200 rounded-lg px-4 py-3">
+                <div className="min-w-0">
+                  <div className="text-[10px] text-gray-500 mb-0.5">Username</div>
+                  <div className="text-sm font-mono text-gray-800 truncate">
+                    {configRootUsername || <span className="text-gray-400 italic">No admin user provisioned</span>}
+                  </div>
+                </div>
+                {configRootUsername && canWrite && (
+                  <div className="flex items-center gap-2 shrink-0 ml-4">
+                    <button
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          const data = await api.post(`/admin/clients/${showConfigure!.id}/reset-root-user`, {});
+                          setShowRootTempPassword(data.temp_password);
+                          setSuccess(data.message || 'Password reset');
+                        } catch (err: unknown) {
+                          setError(err instanceof Error ? err.message : 'Failed to reset password');
+                        }
+                      }}
+                      className="px-3 py-1.5 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition"
+                    >
+                      Reset Password
+                    </button>
+                    <button
+                      onClick={() => {
+                        setResetRootModal({ orgId: showConfigure!.id, orgName: showConfigure!.name, currentUsername: configRootUsername });
+                        setResetRootUsername('');
+                      }}
+                      className="px-3 py-1.5 text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition"
+                    >
+                      Change Username
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Cloud Providers */}
             <div className="mb-6">
               <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Cloud Providers</h4>

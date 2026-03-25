@@ -337,6 +337,12 @@ export interface DangerousIdentity {
   tier: string;
   key_risk_factors: string[];
   navigateTo?: string;
+  // Per-identity blast radius data (from enriched dangerous_identities)
+  subscription_count?: number;
+  resource_group_count?: number;
+  total_role_count?: number;
+  rbac_role_count?: number;
+  entra_role_count?: number;
 }
 
 export interface AGIRSData {

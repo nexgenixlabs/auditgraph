@@ -279,6 +279,30 @@ export function IdentityContextDrawer() {
 
 // ─── List View ───────────────────────────────────────────────────
 
+function getContextBadge(row: IdentityRow, filterUrl: string): { label: string; value: string; color: string } | null {
+  const query = filterUrl.split('?')[1] || '';
+  if (query.includes('pillar=effective-privilege') || query.includes('contributing_pillar=effective_privilege')) {
+    const tier = row.privilege_tier != null ? `T${row.privilege_tier}` : null;
+    if (tier) return { label: 'Tier', value: tier, color: tier === 'T0' ? COLORS.danger : tier === 'T1' ? '#FF8C42' : COLORS.warning };
+  }
+  if (query.includes('activity_status=stale') || query.includes('activity_status=dormant') || query.includes('pillar=usage-dormancy')) {
+    return { label: 'Status', value: 'Dormant', color: COLORS.elevated };
+  }
+  if (query.includes('pillar=credential-risk') || query.includes('credential_status=')) {
+    return { label: 'Creds', value: 'At Risk', color: COLORS.warning };
+  }
+  if (query.includes('pillar=ownership-governance') || query.includes('has_owner=false')) {
+    return { label: 'Owner', value: 'None', color: COLORS.elevated };
+  }
+  if (query.includes('pillar=external-exposure')) {
+    return { label: 'Scope', value: 'Tenant-wide', color: COLORS.danger };
+  }
+  if (query.includes('blast_radius_score')) {
+    return { label: 'Blast', value: String(row.risk_score), color: COLORS.danger };
+  }
+  return null;
+}
+
 function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFullPage }: {
   filterUrl: string;
   identities: IdentityRow[];
@@ -328,7 +352,9 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
             No identities match this filter.
           </div>
         ) : (
-          identities.map((row, idx) => (
+          identities.map((row, idx) => {
+            const badge = getContextBadge(row, filterUrl);
+            return (
             <div
               key={row.identity_id + idx}
               onClick={() => onSelect(row)}
@@ -361,6 +387,18 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
                 </div>
               </div>
 
+              {/* Context-relevant badge (when available) */}
+              {badge && (
+                <span style={{
+                  fontSize: 8, fontWeight: 700, padding: '2px 6px', borderRadius: 3,
+                  background: `${badge.color}18`, color: badge.color,
+                  border: `1px solid ${badge.color}30`, fontFamily: FONT.mono,
+                  flexShrink: 0,
+                }}>
+                  {badge.value}
+                </span>
+              )}
+
               {/* Risk score */}
               <div style={{
                 fontSize: 13, fontWeight: 700, fontFamily: FONT.mono,
@@ -370,7 +408,8 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
                 {row.risk_score}
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
 

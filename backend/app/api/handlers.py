@@ -82,7 +82,8 @@ def _get_pillar_filter_sql(pillar: str) -> str:
                     AND ra.scope_type = 'tenant')
             )""",
     }
-    return PILLAR_SQL.get(pillar, "")
+    # Normalize hyphens to underscores (frontend sends e.g. "effective-privilege")
+    return PILLAR_SQL.get(pillar, "") or PILLAR_SQL.get(pillar.replace("-", "_"), "")
 
 
 def _get_agirs_factor_sql(factor: str) -> str:
@@ -735,7 +736,7 @@ def get_identities():
         limit = min(limit, MAX_LIMIT)
     offset = request.args.get("offset", default=0, type=int)
     show_deleted = request.args.get('show_deleted', 'false').lower() == 'true'
-    contributing_pillar = request.args.get("contributing_pillar")
+    contributing_pillar = request.args.get("contributing_pillar") or request.args.get("pillar")
     status_filter = request.args.get("status")
     has_roles_filter = request.args.get("hasRoles")
     activity_filter = request.args.get("activity_status")
@@ -31508,10 +31509,63 @@ def get_risk_summary_full():
             except Exception:
                 pass
 
+        # Enrich each dangerous identity with per-identity blast radius data
+        if dangerous and run_ids:
+            try:
+                br_cursor = db.conn.cursor()
+                for d_id in dangerous:
+                    identity_db_id = d_id.get('id')
+                    if not identity_db_id:
+                        continue
+                    # Count unique subscriptions reachable via this identity's role assignments
+                    try:
+                        br_cursor.execute("""
+                            SELECT COUNT(DISTINCT SPLIT_PART(ra.scope, '/', 3))
+                            FROM role_assignments ra
+                            WHERE ra.identity_db_id = %s
+                              AND ra.scope LIKE '/subscriptions/%%'
+                        """, (identity_db_id,))
+                        d_id['subscription_count'] = br_cursor.fetchone()[0] or 0
+                    except Exception:
+                        d_id['subscription_count'] = 0
+
+                    # Count total role assignments (RBAC + Entra)
+                    try:
+                        br_cursor.execute("""
+                            SELECT
+                                (SELECT COUNT(*) FROM role_assignments ra WHERE ra.identity_db_id = %s),
+                                (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = %s)
+                        """, (identity_db_id, identity_db_id))
+                        row = br_cursor.fetchone()
+                        d_id['rbac_role_count'] = row[0] or 0
+                        d_id['entra_role_count'] = row[1] or 0
+                        d_id['total_role_count'] = (row[0] or 0) + (row[1] or 0)
+                    except Exception:
+                        d_id['total_role_count'] = 0
+
+                    # Count resource groups reachable
+                    try:
+                        br_cursor.execute("""
+                            SELECT COUNT(DISTINCT ra.scope)
+                            FROM role_assignments ra
+                            WHERE ra.identity_db_id = %s
+                              AND ra.scope LIKE '/subscriptions/%%/resourceGroups/%%'
+                              AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%/%%'
+                        """, (identity_db_id,))
+                        d_id['resource_group_count'] = br_cursor.fetchone()[0] or 0
+                    except Exception:
+                        d_id['resource_group_count'] = 0
+                br_cursor.close()
+            except Exception:
+                pass
+
         top_ident = dangerous[0] if dangerous else None
-        blast_sev = 'critical' if (exposure_subs >= 5 or exposure_resources >= 100 or exposure_kv >= 3 or exposure_priv >= 20) \
-            else 'high' if (exposure_subs >= 2 or exposure_resources >= 50 or exposure_kv >= 1 or exposure_priv >= 10) \
-            else 'medium' if (exposure_resources >= 10 or exposure_priv >= 5) else 'low'
+        # Per-identity blast severity based on top identity's reach
+        top_subs = top_ident.get('subscription_count', 0) if top_ident else 0
+        top_roles = top_ident.get('total_role_count', 0) if top_ident else 0
+        blast_sev = 'critical' if (top_subs >= 5 or top_roles >= 20) \
+            else 'high' if (top_subs >= 2 or top_roles >= 10) \
+            else 'medium' if (top_subs >= 1 or top_roles >= 5) else 'low'
 
         # 5. Top risks to fix — compute score_improvement as actual AGIRS point gain
         # Use pillar deduction model: each risk category maps to a pillar with a weight.

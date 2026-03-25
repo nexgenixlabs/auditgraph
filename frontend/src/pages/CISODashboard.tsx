@@ -427,15 +427,14 @@ export default function CISODashboard() {
   const overPrivCount = data.pillars.find(p => p.name === 'Effective Privilege')?.identityCount ?? 0;
   const extCount = data.pillars.find(p => p.name === 'External Exposure')?.identityCount ?? 0;
 
-  // Blast radius level — resource-based thresholds
+  // Blast radius level — scoped to TOP identity's reachable resources
   const blastHigh = data.blastRadius.highRisk;
-  const blastSubs = data.tenant.subscriptions || 0;
-  const blastResources = data.resourceStats.total_resources ?? 0;
-  const blastKV = data.resourceStats.key_vaults ?? 0;
-  const blastPriv = data.kpis.privilegedRoles.value;
-  const blastLevel = (blastSubs >= 5 || blastResources >= 100 || blastKV >= 3 || blastPriv >= 20) ? 'CRITICAL'
-    : (blastSubs >= 2 || blastResources >= 50 || blastKV >= 1 || blastPriv >= 10) ? 'HIGH'
-    : (blastResources >= 10 || blastPriv >= 5) ? 'MEDIUM' : 'LOW';
+  const topDangerous = (data.agirs?.dangerous_identities || [])[0];
+  const blastSubs = topDangerous?.subscription_count ?? data.tenant.subscriptions ?? 0;
+  const blastRoles = topDangerous?.total_role_count ?? data.kpis.privilegedRoles.value;
+  const blastLevel = (blastSubs >= 5 || blastRoles >= 20) ? 'CRITICAL'
+    : (blastSubs >= 2 || blastRoles >= 10) ? 'HIGH'
+    : (blastSubs >= 1 || blastRoles >= 5) ? 'MEDIUM' : 'LOW';
   const blastColor = blastLevel === 'CRITICAL' ? COLORS.danger
     : blastLevel === 'HIGH' ? COLORS.elevated
     : blastLevel === 'MEDIUM' ? COLORS.warning : COLORS.success;
@@ -952,18 +951,19 @@ export default function CISODashboard() {
                 <span style={{ fontSize: 8, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui }}>Attack Surface</span>
                 {data.tenant.microsoftCount > 0 && (
                   <span style={{ fontSize: 7, color: COLORS.textDim, fontFamily: FONT.ui }}
-                    title={`AGIRS scores all ${data.tenant.identityCount} identities. Identity Inventory shows ${data.tenant.customerCount} customer identities by default.`}
+                    title={`Total objects: ${data.tenant.identityCount}. Attack Surface shows ${data.tenant.customerCount} customer identities (Microsoft first-party excluded from counts).`}
                   >{data.tenant.customerCount} customer + {data.tenant.microsoftCount} Microsoft system</span>
                 )}
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                 {[
-                  { label: 'Total', value: data.tenant.identityCount, color: COLORS.accent, nav: '/identities' },
+                  { label: 'Total', value: data.tenant.customerCount || data.tenant.identityCount, color: COLORS.accent, nav: '/identities',
+                    tooltip: data.tenant.microsoftCount > 0 ? `${data.tenant.customerCount} customer + ${data.tenant.microsoftCount} Microsoft system (excluded)` : undefined },
                   { label: 'Privileged', value: data.kpis.privilegedRoles.value, color: COLORS.danger, nav: '/identities?pillar=effective-privilege' },
                   { label: 'Machine', value: workloadCount, color: COLORS.purple, nav: '/workload-identities' },
                   { label: 'External', value: guestCount, color: COLORS.elevated, nav: '/identities?identity_category=guest' },
                 ].map(pill => (
-                  <div key={pill.label} style={{ textAlign: 'center' as const }}>
+                  <div key={pill.label} style={{ textAlign: 'center' as const }} title={(pill as any).tooltip}>
                     <DN navigateTo={pill.nav}>
                       <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: pill.value > 0 ? pill.color : COLORS.textDim }}>{pill.value}</span>
                     </DN>
@@ -1003,13 +1003,19 @@ export default function CISODashboard() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                 {(() => {
-                  const topId = (data.agirs.dangerous_identities || [])[0]?.id;
+                  const topIdentity = (data.agirs.dangerous_identities || [])[0];
+                  const topId = topIdentity?.id;
                   const identityNav = topId ? `/identities/${topId}` : '/identities?sort=blast_radius_score&order=desc';
+                  // Use per-identity blast radius data when available, fall back to tenant-wide
+                  const idSubs = topIdentity?.subscription_count ?? data.tenant.subscriptions;
+                  const idRoles = topIdentity?.total_role_count ?? data.kpis.privilegedRoles.value;
+                  const idRGs = topIdentity?.resource_group_count ?? 0;
+                  const idEntraRoles = topIdentity?.entra_role_count ?? 0;
                   return [
-                    { label: 'Subscriptions', value: data.tenant.subscriptions, color: COLORS.accent, nav: identityNav },
-                    { label: 'Resources', value: data.resourceStats.total_resources || data.blastRadius.productionWorkloads, color: COLORS.warning, nav: identityNav },
-                    { label: 'Key Vaults', value: data.resourceStats.key_vaults, color: COLORS.elevated, nav: identityNav },
-                    { label: 'Priv Roles', value: data.kpis.privilegedRoles.value, color: COLORS.danger, nav: identityNav },
+                    { label: 'Subscriptions', value: idSubs, color: COLORS.accent, nav: identityNav },
+                    { label: 'Resource Grps', value: idRGs, color: COLORS.warning, nav: identityNav },
+                    { label: 'Entra Roles', value: idEntraRoles, color: COLORS.elevated, nav: identityNav },
+                    { label: 'RBAC Roles', value: idRoles, color: COLORS.danger, nav: identityNav },
                   ].map(pill => (
                     <div key={pill.label} style={{ textAlign: 'center' as const }}>
                       <DN navigateTo={pill.nav}>
