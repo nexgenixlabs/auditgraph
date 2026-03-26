@@ -4639,7 +4639,7 @@ def get_risk_summary():
             agirs_data = {
                 "score": s,
                 "tier": summary.get('agirs_tier') or (
-                    'A' if s >= 90 else 'B' if s >= 75 else 'C' if s >= 60 else 'D' if s >= 40 else 'F'
+                    'A' if s >= 92 else 'B' if s >= 80 else 'C' if s >= 65 else 'D' if s >= 45 else 'F'
                 ),
             }
         return jsonify({

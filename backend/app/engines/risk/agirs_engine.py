@@ -558,6 +558,7 @@ class AGIRSEngine:
         cursor.execute(f"""
             SELECT
                 i.id,
+                i.identity_id,
                 i.display_name,
                 i.identity_category,
                 COALESCE(i.blast_radius_score, 0) as blast_radius_score,
@@ -575,7 +576,7 @@ class AGIRSEngine:
 
         results = []
         for row in cursor.fetchall():
-            id_, name, category, br_score, risk, tier, activity = row
+            id_, identity_id, name, category, br_score, risk, tier, activity = row
             risk_factors = []
             if tier in ('T0', 'T1'):
                 risk_factors.append(f'{tier} Privilege')
@@ -603,6 +604,7 @@ class AGIRSEngine:
 
             results.append({
                 'id': id_,
+                'identity_id': identity_id,
                 'display_name': name or 'Unknown',
                 'identity_category': category,
                 'blast_radius_score': float(br_score),

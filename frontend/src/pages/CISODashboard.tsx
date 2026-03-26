@@ -859,7 +859,7 @@ export default function CISODashboard() {
                   <div style={{ fontSize: 9, fontWeight: 600, color: COLORS.textSecondary, fontFamily: FONT.ui, marginBottom: 6 }}>Top Risk Identities</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
                     {(data.agirs.dangerous_identities || []).slice(0, 5).map((identity, i, arr) => (
-                      <DN key={identity.id} navigateTo={`/identities/${identity.id}`}>
+                      <DN key={identity.id} navigateTo={`/identities/${identity.identity_id || identity.id}`}>
                         <div style={{
                           display: 'flex', alignItems: 'center', gap: 8,
                           padding: '5px 4px', cursor: 'pointer', transition: 'background 0.15s',

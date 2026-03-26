@@ -190,7 +190,7 @@ export default function PillarDrilldownPanel({ open, onClose, pillarKey, pillarD
                     borderRadius: 8, marginBottom: 4, cursor: 'pointer',
                     transition: 'background 0.2s',
                   }}
-                  onClick={() => navigate(`/identities/${id.id}`)}
+                  onClick={() => navigate(`/identities/${id.identity_id || id.id}`)}
                   title={`View ${id.display_name}`}
                   onMouseEnter={e => { (e.currentTarget as any).style.background = C.surface; }}
                   onMouseLeave={e => { (e.currentTarget as any).style.background = 'transparent'; }}>

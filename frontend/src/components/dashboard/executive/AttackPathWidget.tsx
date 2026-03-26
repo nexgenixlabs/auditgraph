@@ -140,7 +140,7 @@ export function AttackPathWidget({ identities, compact = false, attackPathCount:
           )}
           {nodes.length > 0 && (
             <svg width={svgW} height={svgH} style={{ display: 'block', cursor: topId ? 'pointer' : 'default' }}
-              onClick={topId ? () => navigate(`/identities/${topId.id}`) : undefined}>
+              onClick={topId ? () => navigate(`/identities/${topId.identity_id || topId.id}`) : undefined}>
               <defs>
                 <marker id="atk-arrow" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
                   <path d="M0 0 L10 3.5 L0 7z" fill={COLORS.textDim} />

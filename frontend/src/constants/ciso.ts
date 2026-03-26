@@ -330,6 +330,7 @@ export interface GEIBreakdown {
 
 export interface DangerousIdentity {
   id: number;
+  identity_id?: string;
   display_name: string;
   identity_category: string;
   blast_radius_score: number;
