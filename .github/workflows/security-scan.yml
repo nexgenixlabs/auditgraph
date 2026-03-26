@@ -303,13 +303,13 @@ jobs:
         run: |
           if [ -f security-reports/gitleaks.json ]; then
             LEAK_COUNT=$(python3 -c "
-            import json
-            try:
-                data = json.load(open('security-reports/gitleaks.json'))
-                leaks = data if isinstance(data, list) else data.get('results', [])
-                print(len(leaks))
-            except: print('0')
-            ")
+          import json
+          try:
+              data = json.load(open('security-reports/gitleaks.json'))
+              leaks = data if isinstance(data, list) else data.get('results', [])
+              print(len(leaks))
+          except: print('0')
+          ")
             echo "leaks_found=$LEAK_COUNT" >> $GITHUB_ENV
             echo "### Gitleaks" >> $GITHUB_STEP_SUMMARY
             echo "Secrets detected: $LEAK_COUNT" >> $GITHUB_STEP_SUMMARY
@@ -369,7 +369,7 @@ jobs:
             ${{ matrix.context }}
 
       - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: "${{ matrix.image_name }}:scan"
           format: "json"
@@ -378,7 +378,7 @@ jobs:
           exit-code: "0"        # Don't fail here — gate in security-report job
 
       - name: Run Trivy SARIF scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: "${{ matrix.image_name }}:scan"
           format: "sarif"
@@ -648,24 +648,24 @@ jobs:
           DEP_HIGH=0
           if [ -f all-reports/dependency-scan-reports/pip-audit.json ]; then
             DEP_CRITICAL=$(python3 -c "
-            import json
-            try:
-                data = json.load(open('all-reports/dependency-scan-reports/pip-audit.json'))
-                vulns = data if isinstance(data, list) else data.get('dependencies', [])
-                count = sum(len(v.get('vulns',[])) for v in vulns if v.get('vulns'))
-                print(count)
-            except: print(0)
-            ")
+          import json
+          try:
+              data = json.load(open('all-reports/dependency-scan-reports/pip-audit.json'))
+              vulns = data if isinstance(data, list) else data.get('dependencies', [])
+              count = sum(len(v.get('vulns',[])) for v in vulns if v.get('vulns'))
+              print(count)
+          except: print(0)
+          ")
           fi
           if [ -f all-reports/dependency-scan-reports/npm-audit.json ]; then
             NPM_CRIT=$(python3 -c "
-            import json
-            try:
-                data = json.load(open('all-reports/dependency-scan-reports/npm-audit.json'))
-                meta = data.get('metadata',{}).get('vulnerabilities',{})
-                print(meta.get('critical',0) + meta.get('high',0))
-            except: print(0)
-            ")
+          import json
+          try:
+              data = json.load(open('all-reports/dependency-scan-reports/npm-audit.json'))
+              meta = data.get('metadata',{}).get('vulnerabilities',{})
+              print(meta.get('critical',0) + meta.get('high',0))
+          except: print(0)
+          ")
             DEP_HIGH=$((DEP_HIGH + NPM_CRIT))
           fi
           TOTAL_DEP=$((DEP_CRITICAL + DEP_HIGH))
@@ -681,14 +681,14 @@ jobs:
           for f in all-reports/container-scan-*/trivy-*.json; do
             if [ -f "$f" ]; then
               COUNT=$(python3 -c "
-              import json
-              try:
-                  data = json.load(open('$f'))
-                  results = data.get('Results', [])
-                  crit = sum(1 for r in results for v in r.get('Vulnerabilities',[]) if v.get('Severity','').upper() == 'CRITICAL')
-                  print(crit)
-              except: print(0)
-              ")
+          import json
+          try:
+              data = json.load(open('$f'))
+              results = data.get('Results', [])
+              crit = sum(1 for r in results for v in r.get('Vulnerabilities',[]) if v.get('Severity','').upper() == 'CRITICAL')
+              print(crit)
+          except: print(0)
+          ")
               CONTAINER_CRIT=$((CONTAINER_CRIT + COUNT))
             fi
           done
