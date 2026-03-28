@@ -704,7 +704,7 @@ class AWSDiscoveryEngine:
         """DEPRECATED: TS lineage subprocess removed.
         Lineage engine unified under Python to ensure consistency.
         Python discovery engine is the single source of truth.
-        The TS services/lineage/aws/* files are retained as Phase 2 reference only.
+        The TS reference implementation is archived in docs/reference/lineage-ts-engine/.
         """
         pass
 
