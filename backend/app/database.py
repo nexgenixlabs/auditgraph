@@ -1553,6 +1553,8 @@ class Database:
     _spn_exposure_ensured = False
     _app_reg_exposure_ensured = False
     _ice_columns_ensured = False
+    _discovery_connector_col_ensured = False
+    _app_reg_lineage_cols_ensured = False
 
     def backfill_microsoft_flag(self):
         """Startup backfill of is_microsoft_system for ALL data.
@@ -1584,6 +1586,16 @@ class Database:
             prefix_conditions = " OR ".join([
                 f"LOWER(display_name) LIKE '{p}%%'" for p in customer_prefixes
             ])
+
+            # Pass 0: Discovery connectors are NEVER Microsoft
+            cursor.execute("""
+                UPDATE identities SET is_microsoft_system = false
+                WHERE COALESCE(is_discovery_connector, false) = true
+                  AND COALESCE(is_microsoft_system, false) = true
+            """)
+            connector_fixed = cursor.rowcount
+            if connector_fixed > 0:
+                _log.info("Un-flagged %s discovery connector(s) previously marked as Microsoft", connector_fixed)
 
             # Pass 1: Mark customer-prefix SPNs as NOT Microsoft
             cursor.execute(f"""
@@ -1624,10 +1636,12 @@ class Database:
 
             # Pass 3: All remaining SPNs without customer prefix AND without
             # non-Microsoft org → Microsoft (catches undetected MS SPNs)
+            # Exclude discovery connectors — they should never be flagged as Microsoft
             cursor.execute(f"""
                 UPDATE identities SET is_microsoft_system = true
                 WHERE identity_category = 'service_principal'
                   AND COALESCE(is_microsoft_system, false) = false
+                  AND COALESCE(is_discovery_connector, false) = false
                   AND NOT ({prefix_conditions})
                   AND (app_owner_org_id IS NULL OR app_owner_org_id IN %s)
             """, (ms_tenant_ids,))
@@ -1712,6 +1726,67 @@ class Database:
         finally:
             cursor.close()
         Database._permission_plane_col_ensured = True
+
+    def ensure_identity_lineage_columns(self):
+        """Startup migration: add discovery connector + app registration lineage columns."""
+        if Database._discovery_connector_col_ensured and Database._app_reg_lineage_cols_ensured:
+            return
+        _log = logging.getLogger(__name__)
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_discovery_connector BOOLEAN DEFAULT FALSE")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_object_id VARCHAR(255)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_name VARCHAR(500)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_external_app BOOLEAN DEFAULT FALSE")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_publisher_domain VARCHAR(255)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_sign_in_audience VARCHAR(100)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_owner_display_name VARCHAR(255)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_owner_id VARCHAR(255)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_type VARCHAR(50)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_confidence INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS role_pattern_matched VARCHAR(50)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_risk_flags JSONB DEFAULT '[]'::jsonb")
+            # App Registration metadata signals
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_reply_url_hostnames JSONB")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_likely_service VARCHAR(300)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_likely_service_type VARCHAR(50)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_identifier_uris JSONB")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_notes TEXT")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_required_apis JSONB")
+            # Sign-in activity pattern columns (Prompt 4)
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS signin_pattern VARCHAR(50)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_delegated_signin TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_noninteractive_signin TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS days_since_last_signin INTEGER")
+            # Verdict assembly columns (Prompt 5)
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_confidence VARCHAR(20)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_score INTEGER")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_origin VARCHAR(500)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_origin_source VARCHAR(50)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS recommended_action VARCHAR(20)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_action_text TEXT")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_signals JSONB")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_risk_summary JSONB")
+            # Federated credential classification columns
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS federated_workload_type VARCHAR(50)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS federated_workload_name VARCHAR(500)")
+            # Dependency impact analysis columns
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS dependency_impact VARCHAR(20)")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS dependency_impact_resources JSONB")
+            # Human-readable lineage signals + narrative
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS lineage_signals JSONB")
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS lineage_narrative TEXT")
+            # Observed usage tracking — timestamp when AuditGraph last observed this SPN in use
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS observed_last_used TIMESTAMP")
+            self._commit()
+            Database._discovery_connector_col_ensured = True
+            Database._app_reg_lineage_cols_ensured = True
+            _log.info("Identity lineage columns ensured (34 columns: connector, app_reg_*, owner_*, workload_*, metadata_*, signin_*, verdict_*, federated_*, dependency_*)")
+        except Exception as e:
+            self._rollback()
+            _log.warning("identity_lineage_columns migration error: %s", e)
+        finally:
+            cursor.close()
 
     def sweep_microsoft_flag(self, run_id: int):
         """Post-discovery sweep: mark remaining undetected Microsoft SPNs for a specific run.
@@ -1825,6 +1900,36 @@ class Database:
                     self._rollback()
             Database._ice_columns_ensured = True
 
+        # Ensure is_discovery_connector column exists
+        if not Database._discovery_connector_col_ensured:
+            try:
+                cursor.execute("SAVEPOINT disc_conn_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_discovery_connector BOOLEAN DEFAULT FALSE")
+                cursor.execute("RELEASE SAVEPOINT disc_conn_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT disc_conn_ddl")
+                except Exception:
+                    self._rollback()
+            Database._discovery_connector_col_ensured = True
+
+        # Ensure app registration lineage columns exist
+        if not Database._app_reg_lineage_cols_ensured:
+            try:
+                cursor.execute("SAVEPOINT app_reg_lin_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_object_id VARCHAR(255)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_name VARCHAR(500)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_external_app BOOLEAN DEFAULT FALSE")
+                cursor.execute("RELEASE SAVEPOINT app_reg_lin_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT app_reg_lin_ddl")
+                except Exception:
+                    self._rollback()
+            Database._app_reg_lineage_cols_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -1895,7 +2000,53 @@ class Database:
                 manager_id,
                 manager_upn,
                 job_title,
-                account_category
+                account_category,
+
+                is_discovery_connector,
+
+                app_registration_object_id,
+                app_registration_name,
+                is_external_app,
+                app_reg_publisher_domain,
+                app_reg_sign_in_audience,
+                app_reg_owner_display_name,
+                app_reg_owner_id,
+
+                workload_type,
+                workload_confidence,
+                role_pattern_matched,
+                workload_risk_flags,
+
+                app_reg_reply_url_hostnames,
+                app_reg_likely_service,
+                app_reg_likely_service_type,
+                app_reg_identifier_uris,
+                app_reg_notes,
+                app_reg_required_apis,
+
+                signin_pattern,
+                last_delegated_signin,
+                last_noninteractive_signin,
+                days_since_last_signin,
+
+                verdict_confidence,
+                verdict_score,
+                workload_origin,
+                workload_origin_source,
+                recommended_action,
+                verdict_action_text,
+                verdict_signals,
+                verdict_risk_summary,
+
+                federated_workload_type,
+                federated_workload_name,
+
+                dependency_impact,
+                dependency_impact_resources,
+
+                lineage_signals,
+                lineage_narrative,
+                observed_last_used
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -1910,7 +2061,18 @@ class Database:
                 %s,
                 %s,
                 %s,
-                %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s,
+                %s,
+                %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s,
+                %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -1968,6 +2130,52 @@ class Database:
                 manager_upn = EXCLUDED.manager_upn,
                 job_title = EXCLUDED.job_title,
                 account_category = EXCLUDED.account_category,
+
+                is_discovery_connector = EXCLUDED.is_discovery_connector,
+
+                app_registration_object_id = EXCLUDED.app_registration_object_id,
+                app_registration_name = EXCLUDED.app_registration_name,
+                is_external_app = EXCLUDED.is_external_app,
+                app_reg_publisher_domain = EXCLUDED.app_reg_publisher_domain,
+                app_reg_sign_in_audience = EXCLUDED.app_reg_sign_in_audience,
+                app_reg_owner_display_name = EXCLUDED.app_reg_owner_display_name,
+                app_reg_owner_id = EXCLUDED.app_reg_owner_id,
+
+                workload_type = EXCLUDED.workload_type,
+                workload_confidence = EXCLUDED.workload_confidence,
+                role_pattern_matched = EXCLUDED.role_pattern_matched,
+                workload_risk_flags = EXCLUDED.workload_risk_flags,
+
+                app_reg_reply_url_hostnames = EXCLUDED.app_reg_reply_url_hostnames,
+                app_reg_likely_service = EXCLUDED.app_reg_likely_service,
+                app_reg_likely_service_type = EXCLUDED.app_reg_likely_service_type,
+                app_reg_identifier_uris = EXCLUDED.app_reg_identifier_uris,
+                app_reg_notes = EXCLUDED.app_reg_notes,
+                app_reg_required_apis = EXCLUDED.app_reg_required_apis,
+
+                signin_pattern = EXCLUDED.signin_pattern,
+                last_delegated_signin = EXCLUDED.last_delegated_signin,
+                last_noninteractive_signin = EXCLUDED.last_noninteractive_signin,
+                days_since_last_signin = EXCLUDED.days_since_last_signin,
+
+                verdict_confidence = EXCLUDED.verdict_confidence,
+                verdict_score = EXCLUDED.verdict_score,
+                workload_origin = EXCLUDED.workload_origin,
+                workload_origin_source = EXCLUDED.workload_origin_source,
+                recommended_action = EXCLUDED.recommended_action,
+                verdict_action_text = EXCLUDED.verdict_action_text,
+                verdict_signals = EXCLUDED.verdict_signals,
+                verdict_risk_summary = EXCLUDED.verdict_risk_summary,
+
+                federated_workload_type = EXCLUDED.federated_workload_type,
+                federated_workload_name = EXCLUDED.federated_workload_name,
+
+                dependency_impact = EXCLUDED.dependency_impact,
+                dependency_impact_resources = EXCLUDED.dependency_impact_resources,
+
+                lineage_signals = EXCLUDED.lineage_signals,
+                lineage_narrative = EXCLUDED.lineage_narrative,
+                observed_last_used = EXCLUDED.observed_last_used,
 
                 created_at = NOW()
             RETURNING id
@@ -2034,6 +2242,52 @@ class Database:
                 identity_data.get("manager_upn"),
                 identity_data.get("job_title"),
                 identity_data.get("account_category"),
+
+                identity_data.get("is_discovery_connector", False),
+
+                identity_data.get("app_registration_object_id"),
+                identity_data.get("app_registration_name"),
+                identity_data.get("is_external_app", False),
+                identity_data.get("app_reg_publisher_domain"),
+                identity_data.get("app_reg_sign_in_audience"),
+                identity_data.get("app_reg_owner_display_name"),
+                identity_data.get("app_reg_owner_id"),
+
+                identity_data.get("workload_type"),
+                identity_data.get("workload_confidence", 0),
+                identity_data.get("role_pattern_matched"),
+                json.dumps(identity_data.get("workload_risk_flags", [])),
+
+                json.dumps(identity_data.get("app_reg_reply_url_hostnames")) if identity_data.get("app_reg_reply_url_hostnames") else None,
+                identity_data.get("app_reg_likely_service"),
+                identity_data.get("app_reg_likely_service_type"),
+                json.dumps(identity_data.get("app_reg_identifier_uris")) if identity_data.get("app_reg_identifier_uris") else None,
+                identity_data.get("app_reg_notes"),
+                json.dumps(identity_data.get("app_reg_required_apis")) if identity_data.get("app_reg_required_apis") else None,
+
+                identity_data.get("signin_pattern"),
+                identity_data.get("last_delegated_signin"),
+                identity_data.get("last_noninteractive_signin"),
+                identity_data.get("days_since_last_signin"),
+
+                identity_data.get("verdict_confidence"),
+                identity_data.get("verdict_score"),
+                identity_data.get("workload_origin"),
+                identity_data.get("workload_origin_source"),
+                identity_data.get("recommended_action"),
+                identity_data.get("verdict_action_text"),
+                json.dumps(identity_data.get("verdict_signals")) if identity_data.get("verdict_signals") else None,
+                json.dumps(identity_data.get("verdict_risk_summary")) if identity_data.get("verdict_risk_summary") else None,
+
+                identity_data.get("federated_workload_type"),
+                identity_data.get("federated_workload_name"),
+
+                identity_data.get("dependency_impact"),
+                json.dumps(identity_data.get("dependency_impact_resources")) if identity_data.get("dependency_impact_resources") else None,
+
+                json.dumps(identity_data.get("lineage_signals")) if identity_data.get("lineage_signals") else None,
+                identity_data.get("lineage_narrative"),
+                identity_data.get("observed_last_used"),
             ),
         )
 
@@ -3940,6 +4194,46 @@ class Database:
 
         return credential_id
 
+    # ── ARM Resource Bindings (identity_lineage_bindings) ───────────
+    # Lineage tables created by migration 079. Do not recreate here.
+
+    def save_lineage_binding(self, spn_db_id: int, connection_id: int, binding: dict) -> int:
+        """Upsert an ARM resource binding for a workload identity."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO identity_lineage_bindings (
+                spn_id, connection_id, resource_id, resource_type,
+                resource_name, resource_group, region, subscription_id,
+                binding_method, binding_evidence, confidence_score
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (spn_id, resource_id, binding_method)
+            DO UPDATE SET
+                resource_name    = EXCLUDED.resource_name,
+                resource_group   = EXCLUDED.resource_group,
+                region           = EXCLUDED.region,
+                subscription_id  = EXCLUDED.subscription_id,
+                binding_evidence = EXCLUDED.binding_evidence,
+                confidence_score = EXCLUDED.confidence_score,
+                last_verified_at = NOW()
+            RETURNING id
+        """, (
+            spn_db_id,
+            connection_id,
+            binding.get('resource_id', ''),
+            binding.get('resource_type', ''),
+            binding.get('resource_name', ''),
+            binding.get('resource_group', ''),
+            binding.get('region', ''),
+            binding.get('subscription_id', ''),
+            binding.get('binding_method', ''),
+            json.dumps(binding.get('binding_evidence', {})),
+            binding.get('confidence_score', 0),
+        ))
+        row = cursor.fetchone()
+        cursor.close()
+        self._commit()
+        return row[0] if row else 0
+
     def update_identity_credential_summary(self, identity_db_id: int):
         """
         Update credential_count, next_expiry, and credential_risk on identity
@@ -4189,23 +4483,38 @@ class Database:
             }
         return result
 
-    def get_remediation_summary(self):
+    def get_remediation_summary(self, run_ids=None):
         """Get aggregated remediation action status counts across all identities.
         Excludes Microsoft/system-managed identities."""
         self._ensure_remediation_actions_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT
-                COUNT(*) FILTER (WHERE ra.status = 'open') as open,
-                COUNT(*) FILTER (WHERE ra.status = 'acknowledged') as acknowledged,
-                COUNT(*) FILTER (WHERE ra.status = 'completed') as completed,
-                COUNT(*) FILTER (WHERE ra.status = 'skipped') as skipped,
-                COUNT(*) as total
-            FROM remediation_actions ra
-            LEFT JOIN identities i ON i.identity_id = ra.identity_id
-                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
-            WHERE NOT COALESCE(i.is_microsoft_system, FALSE)
-        """)
+        if run_ids:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE ra.status = 'open') as open,
+                    COUNT(*) FILTER (WHERE ra.status = 'acknowledged') as acknowledged,
+                    COUNT(*) FILTER (WHERE ra.status = 'completed') as completed,
+                    COUNT(*) FILTER (WHERE ra.status = 'skipped') as skipped,
+                    COUNT(*) as total
+                FROM remediation_actions ra
+                JOIN identities i ON i.identity_id = ra.identity_id
+                    AND i.discovery_run_id = ANY(%s)
+                WHERE NOT COALESCE(i.is_microsoft_system, FALSE)
+            """, (run_ids,))
+        else:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE ra.status = 'open') as open,
+                    COUNT(*) FILTER (WHERE ra.status = 'acknowledged') as acknowledged,
+                    COUNT(*) FILTER (WHERE ra.status = 'completed') as completed,
+                    COUNT(*) FILTER (WHERE ra.status = 'skipped') as skipped,
+                    COUNT(*) as total
+                FROM remediation_actions ra
+                LEFT JOIN identities i ON i.identity_id = ra.identity_id
+                    AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs
+                        WHERE status = 'completed' AND organization_id = %s)
+                WHERE NOT COALESCE(i.is_microsoft_system, FALSE)
+            """, (self._organization_id,))
         row = cursor.fetchone()
         cursor.close()
 
@@ -4249,13 +4558,20 @@ class Database:
         return row
 
     def get_remediation_queue(self, status_filter=None, impact_filter=None,
-                               category_filter=None, limit=100):
+                               category_filter=None, limit=100, run_ids=None):
         """Get pending remediations across all identities with playbook + identity info."""
         self._ensure_remediation_actions_table()
         self._ensure_remediation_playbooks()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        sql = """
+        if run_ids:
+            run_clause = "AND i.discovery_run_id = ANY(%s)"
+            run_param = run_ids
+        else:
+            run_clause = "AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s)"
+            run_param = self._organization_id
+
+        sql = f"""
             SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
                    i.identity_category, i.activity_status,
                    rp.id as playbook_id, rp.title as playbook_title,
@@ -4264,11 +4580,11 @@ class Database:
                    ra.executed_at, ra.updated_at
             FROM remediation_actions ra
             JOIN identities i ON i.identity_id = ra.identity_id
-                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
+                {run_clause}
             JOIN remediation_playbooks rp ON rp.id = ra.playbook_id
             WHERE NOT COALESCE(i.is_microsoft_system, FALSE)
         """
-        params = []
+        params = [run_param]
 
         if status_filter:
             sql += " AND ra.status = %s"
@@ -20597,11 +20913,15 @@ class Database:
                 r['metadata'] = json.loads(r['metadata'])
         return rows
 
-    def get_security_finding(self, finding_id: int):
-        """Get a single security finding by ID."""
+    def get_security_finding(self, finding_id: int, organization_id: int = None):
+        """Get a single security finding by ID, scoped to organization."""
         self._ensure_security_findings_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM security_findings WHERE id = %s", (finding_id,))
+        if organization_id:
+            cursor.execute("SELECT * FROM security_findings WHERE id = %s AND organization_id = %s",
+                           (finding_id, organization_id))
+        else:
+            cursor.execute("SELECT * FROM security_findings WHERE id = %s", (finding_id,))
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -20617,16 +20937,25 @@ class Database:
         return result
 
     def update_security_finding_status(self, finding_id: int, status: str,
-                                       changed_by: str = None):
-        """Update a security finding's status. Returns updated row or None."""
+                                       changed_by: str = None,
+                                       organization_id: int = None):
+        """Update a security finding's status, scoped to organization. Returns updated row or None."""
         self._ensure_security_findings_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            UPDATE security_findings
-            SET status = %s, status_changed_by = %s, status_changed_at = NOW()
-            WHERE id = %s
-            RETURNING *
-        """, (status, changed_by, finding_id))
+        if organization_id:
+            cursor.execute("""
+                UPDATE security_findings
+                SET status = %s, status_changed_by = %s, status_changed_at = NOW()
+                WHERE id = %s AND organization_id = %s
+                RETURNING *
+            """, (status, changed_by, finding_id, organization_id))
+        else:
+            cursor.execute("""
+                UPDATE security_findings
+                SET status = %s, status_changed_by = %s, status_changed_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (status, changed_by, finding_id))
         row = cursor.fetchone()
         self._commit()
         cursor.close()

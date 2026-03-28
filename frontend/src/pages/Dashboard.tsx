@@ -454,7 +454,15 @@ export default function Dashboard() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: COLORS.textMuted }}>AGIRS Score</div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider flex items-center gap-1" style={{ color: COLORS.textMuted }}>
+                      AGIRS Score
+                      <span className="relative group">
+                        <span className="cursor-help" style={{ fontSize: 14, color: COLORS.textMuted, opacity: 0.6 }}>{'\u24D8'}</span>
+                        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block text-[10px] px-2.5 py-1.5 rounded-md max-w-[280px] whitespace-normal z-50 shadow-lg pointer-events-none leading-relaxed" style={{ background: '#0f172a', border: `1px solid ${COLORS.border}`, color: '#e2e8f0' }}>
+                          AGIRS (AuditGraph Identity Risk Score) — measures your identity attack surface across 7 pillars: privilege, dormancy, credentials, ownership, trust, federation, and external exposure. Score of 100 = zero identity risk.
+                        </span>
+                      </span>
+                    </div>
                     <div className="flex items-center gap-2 mt-0.5">
                       <span className="text-2xl font-bold" style={{ fontFamily: FONT.mono, color: getScoreColor(agirsSummary.score) }}>{agirsSummary.score.toFixed(1)}</span>
                       <CISOBadge label={agirsSummary.tier} color={getTierColor(agirsSummary.tier)} />

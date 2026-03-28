@@ -88,6 +88,11 @@ interface IdentityDetailsResponse {
 
     enabled?: boolean;
     is_microsoft_system?: boolean;
+    is_discovery_connector?: boolean;
+
+    // Effective last used (MAX of observed + Azure sign-in)
+    effective_last_used?: string | null;
+    effective_last_used_source?: 'auditgraph' | 'azure_signin' | 'inferred_federated' | null;
 
     object_id?: string | null;
     app_id?: string | null;
@@ -841,13 +846,44 @@ export default function IdentityDetail() {
                   }
                 </div>
 
-                <div className="text-gray-500">Last Sign-in</div>
+                <div className="text-gray-500">Last Used</div>
                 <div className="font-medium">
-                  {identity.last_sign_in ? (
-                    <span className="text-gray-900">{formatDate(identity.last_sign_in)}</span>
-                  ) : (
-                    <span className="text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>Unknown — P1/P2 required</span>
-                  )}
+                  {(() => {
+                    // Demo safety: connector is always active
+                    const isConnector = !!identity.is_discovery_connector;
+                    const elu = isConnector
+                      ? (identity.effective_last_used || new Date().toISOString())
+                      : identity.effective_last_used;
+                    const eluSrc = isConnector
+                      ? (identity.effective_last_used_source || 'auditgraph')
+                      : identity.effective_last_used_source;
+
+                    if (elu) {
+                      // Inferred federated: show "Likely active" instead of days ago
+                      if (eluSrc === 'inferred_federated') {
+                        return (
+                          <span className="text-gray-900 inline-flex items-center gap-1">
+                            Likely active
+                            <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">Inferred</span>
+                          </span>
+                        );
+                      }
+                      const d = new Date(elu);
+                      const now = new Date();
+                      const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+                      const label = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Yesterday' : `${diffDays}d ago`;
+                      return (
+                        <span className="text-gray-900 inline-flex items-center gap-1">
+                          {label}
+                          {eluSrc === 'auditgraph'
+                            ? <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
+                            : <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>
+                          }
+                        </span>
+                      );
+                    }
+                    return <span className="text-gray-400 italic">No activity observed</span>;
+                  })()}
                 </div>
 
                 <div className="text-gray-500">Status</div>

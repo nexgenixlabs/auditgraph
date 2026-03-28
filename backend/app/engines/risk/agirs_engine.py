@@ -141,14 +141,31 @@ class AGIRSEngine:
             cursor.close()
 
     def _get_run_ids(self, cursor, organization_id: int) -> List[int]:
-        """Get latest completed discovery run IDs for this organization."""
+        """Get latest completed discovery run IDs — one per cloud_connection.
+
+        SSOT: mirrors _latest_run_ids() in handlers.py.
+        Returns one run per connected cloud_connection_id (not last-10).
+        """
+        cursor.execute("""
+            SELECT DISTINCT ON (dr.cloud_connection_id) dr.id
+            FROM discovery_runs dr
+            JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
+            WHERE dr.status = 'completed' AND dr.organization_id = %s
+              AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
+              AND cc.status = 'connected'
+            ORDER BY dr.cloud_connection_id, dr.id DESC
+        """, (organization_id,))
+        rows = cursor.fetchall()
+        if rows:
+            return [r[0] for r in rows]
+        # Fallback: absolute latest single run
         cursor.execute("""
             SELECT id FROM discovery_runs
             WHERE status = 'completed' AND organization_id = %s
-            ORDER BY completed_at DESC LIMIT 10
+            ORDER BY id DESC LIMIT 1
         """, (organization_id,))
-        rows = cursor.fetchall()
-        return [r[0] for r in rows] if rows else []
+        row = cursor.fetchone()
+        return [row[0]] if row else []
 
     # ── HIRI ──────────────────────────────────────────────────────
 
@@ -156,12 +173,15 @@ class AGIRSEngine:
         """Human Identity Risk Index — deduction model per 100 humans."""
         rid_tuple = tuple(run_ids)
 
+        # SSOT: identity population — deleted_at IS NULL, is_microsoft_system=false,
+        # discovery_run_id from caller's run_ids (canonical: _latest_run_ids)
         # Total human count (human_user + guest)
         cursor.execute("""
             SELECT COUNT(*) FROM identities
             WHERE discovery_run_id IN %s
               AND identity_category IN ('human_user', 'guest')
-              AND COALESCE(deleted_at, '9999-01-01') > NOW()
+              AND deleted_at IS NULL
+              AND NOT COALESCE(is_microsoft_system, false)
         """, (rid_tuple,))
         human_count = cursor.fetchone()[0] or 0
 
@@ -271,13 +291,15 @@ class AGIRSEngine:
         """Non-Human Identity Risk Index — per-NHI deduction with scope multipliers."""
         rid_tuple = tuple(run_ids)
 
+        # SSOT: identity population — deleted_at IS NULL, is_microsoft_system=false,
+        # discovery_run_id from caller's run_ids (canonical: _latest_run_ids)
         # Total NHI count
         cursor.execute("""
             SELECT COUNT(*) FROM identities
             WHERE discovery_run_id IN %s
               AND identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
-              AND COALESCE(is_microsoft_system, FALSE) = FALSE
-              AND COALESCE(deleted_at, '9999-01-01') > NOW()
+              AND NOT COALESCE(is_microsoft_system, false)
+              AND deleted_at IS NULL
         """, (rid_tuple,))
         nhi_count = cursor.fetchone()[0] or 0
 

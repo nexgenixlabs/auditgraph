@@ -943,7 +943,12 @@ def get_identity_details(identity_id: str):
                    i.deleted_at,
                    -- Additional detail fields
                    i.last_sign_in,
-                   COALESCE(i.is_microsoft_system, false) as is_microsoft_system
+                   COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
+                   -- Observed usage tracking
+                   i.observed_last_used,
+                   i.last_noninteractive_signin,
+                   COALESCE(i.is_discovery_connector, false) as is_discovery_connector,
+                   i.federated_workload_type
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -1012,7 +1017,49 @@ def get_identity_details(identity_id: str):
             "discovery_run_id": row[30],
             "last_sign_in": row[34].isoformat() if row[34] else None,
             "is_microsoft_system": bool(row[35]),
+            "is_discovery_connector": bool(row[38]) if len(row) > 38 else False,
         }
+
+        # Compute effective_last_used = MAX(observed, Azure sign-in)
+        from datetime import datetime as _dt
+        def _try_parse_dt(v):
+            if not v:
+                return None
+            if hasattr(v, 'timestamp'):
+                return v
+            try:
+                return _dt.fromisoformat(str(v).replace('Z', '+00:00').replace('+00:00', ''))
+            except (ValueError, TypeError):
+                return None
+
+        obs_raw = row[36] if len(row) > 36 else None
+        ni_raw = row[37] if len(row) > 37 else None
+        signin_raw = row[34]  # last_sign_in
+
+        eff_candidates = [
+            (_try_parse_dt(obs_raw), 'auditgraph'),
+            (_try_parse_dt(ni_raw), 'azure_signin'),
+            (_try_parse_dt(signin_raw), 'azure_signin'),
+        ]
+        eff_last = None
+        eff_src = None
+        for dt, src in eff_candidates:
+            if dt and (eff_last is None or dt > eff_last):
+                eff_last = dt
+                eff_src = src
+
+        # Federated inference: federated identities (GitHub OIDC, AKS) don't
+        # generate Azure sign-in logs. Infer usage from created_datetime.
+        fed_wt_raw = row[39] if len(row) > 39 else None
+        if fed_wt_raw and eff_last is None:
+            created_dt = _try_parse_dt(row[10])  # created_datetime
+            if created_dt:
+                eff_last = created_dt
+                eff_src = 'inferred_federated'
+
+        identity["effective_last_used"] = eff_last.isoformat() if eff_last else None
+        identity["effective_last_used_source"] = eff_src
+        identity["federated_workload_type"] = fed_wt_raw
 
         run_completed_at = row[31].isoformat() if row[31] else None
         current_run_id = row[30]
@@ -3202,7 +3249,41 @@ def _identity_list_select():
                 WHERE gaf.identity_id = i.id
                   AND gaf.status IN ('open', 'acknowledged', 'in_progress')
             ) as attack_path_count,
-            EXTRACT(EPOCH FROM (NOW() - i.created_datetime)) / 86400 as identity_age_days
+            EXTRACT(EPOCH FROM (NOW() - i.created_datetime)) / 86400 as identity_age_days,
+            COALESCE(i.is_discovery_connector, false) as is_discovery_connector,
+            i.app_registration_object_id,
+            i.app_registration_name,
+            COALESCE(i.is_external_app, false) as is_external_app,
+            i.app_reg_publisher_domain,
+            i.app_reg_sign_in_audience,
+            i.app_reg_owner_display_name,
+            i.app_reg_owner_id,
+            i.workload_type,
+            COALESCE(i.workload_confidence, 0) as workload_confidence,
+            i.role_pattern_matched,
+            i.workload_risk_flags,
+            i.app_reg_reply_url_hostnames,
+            i.app_reg_likely_service,
+            i.app_reg_likely_service_type,
+            i.app_reg_identifier_uris,
+            i.app_reg_notes,
+            i.app_reg_required_apis,
+            i.signin_pattern,
+            i.last_delegated_signin,
+            i.last_noninteractive_signin,
+            COALESCE(i.days_since_last_signin, -1) as days_since_last_signin,
+            i.verdict_confidence,
+            COALESCE(i.verdict_score, 0),
+            i.workload_origin,
+            i.workload_origin_source,
+            i.recommended_action,
+            i.verdict_action_text,
+            i.verdict_signals,
+            i.verdict_risk_summary,
+            i.federated_workload_type,
+            i.federated_workload_name,
+            i.dependency_impact,
+            i.observed_last_used
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -3284,6 +3365,40 @@ def _map_identity_row(row):
         ),
         "attack_path_count": int(row[46] or 0) if len(row) > 46 else 0,
         "identity_age_days": int(row[47]) if len(row) > 47 and row[47] is not None else None,
+        "is_discovery_connector": bool(row[48]) if len(row) > 48 and row[48] is not None else False,
+        "app_registration_object_id": row[49] if len(row) > 49 else None,
+        "app_registration_name": row[50] if len(row) > 50 else None,
+        "is_external_app": bool(row[51]) if len(row) > 51 and row[51] is not None else False,
+        "app_reg_publisher_domain": row[52] if len(row) > 52 else None,
+        "app_reg_sign_in_audience": row[53] if len(row) > 53 else None,
+        "app_reg_owner_display_name": row[54] if len(row) > 54 else None,
+        "app_reg_owner_id": row[55] if len(row) > 55 else None,
+        "workload_type": row[56] if len(row) > 56 else None,
+        "workload_confidence": int(row[57]) if len(row) > 57 and row[57] is not None else 0,
+        "role_pattern_matched": row[58] if len(row) > 58 else None,
+        "workload_risk_flags": row[59] if len(row) > 59 and row[59] else [],
+        "app_reg_reply_url_hostnames": row[60] if len(row) > 60 and row[60] else None,
+        "app_reg_likely_service": row[61] if len(row) > 61 else None,
+        "app_reg_likely_service_type": row[62] if len(row) > 62 else None,
+        "app_reg_identifier_uris": row[63] if len(row) > 63 and row[63] else None,
+        "app_reg_notes": row[64] if len(row) > 64 else None,
+        "app_reg_required_apis": row[65] if len(row) > 65 and row[65] else None,
+        "signin_pattern": row[66] if len(row) > 66 else None,
+        "last_delegated_signin": row[67].isoformat() if len(row) > 67 and row[67] else None,
+        "last_noninteractive_signin": row[68].isoformat() if len(row) > 68 and row[68] else None,
+        "days_since_last_signin": int(row[69]) if len(row) > 69 and row[69] is not None and row[69] >= 0 else None,
+        "verdict_confidence": row[70] if len(row) > 70 else None,
+        "verdict_score": int(row[71]) if len(row) > 71 and row[71] is not None else 0,
+        "workload_origin": row[72] if len(row) > 72 else None,
+        "workload_origin_source": row[73] if len(row) > 73 else None,
+        "recommended_action": row[74] if len(row) > 74 else None,
+        "verdict_action_text": row[75] if len(row) > 75 else None,
+        "verdict_signals": row[76] if len(row) > 76 and row[76] else [],
+        "verdict_risk_summary": row[77] if len(row) > 77 and row[77] else [],
+        "federated_workload_type": row[78] if len(row) > 78 else None,
+        "federated_workload_name": row[79] if len(row) > 79 else None,
+        "dependency_impact": row[80] if len(row) > 80 else None,
+        "observed_last_used": row[81].isoformat() if len(row) > 81 and row[81] and hasattr(row[81], 'isoformat') else (row[81] if len(row) > 81 else None),
     }
 
 
@@ -4740,18 +4855,63 @@ def get_exposure_summary():
 
 
 def get_attack_path_count():
-    """Lightweight attack path count from graph_attack_findings."""
+    """Unified attack path count — reads from attack_paths table (canonical source,
+    same as RiskSummaryEngine) with graph_attack_findings as supplemental.
+    Returns max() of both for consistent reporting across all screens."""
     db = _db()
     try:
-        stats = db.get_graph_attack_finding_stats(organization_id=_org_id())
+        org_id = _org_id()
+        conn_id = _connection_id()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, conn_id)
+
+        ap_total = ap_critical = ap_high = ap_medium = ap_low = ap_affected = 0
+        gf_total = 0
+
+        if run_ids:
+            # Primary: attack_paths table (canonical, matches risk_summary)
+            try:
+                cursor.execute("""
+                    SELECT
+                        COUNT(*),
+                        COUNT(*) FILTER (WHERE severity = 'critical'),
+                        COUNT(*) FILTER (WHERE severity = 'high'),
+                        COUNT(*) FILTER (WHERE severity = 'medium'),
+                        COUNT(*) FILTER (WHERE severity = 'low'),
+                        COUNT(DISTINCT source_entity_id)
+                    FROM attack_paths
+                    WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+                """, (org_id, run_ids))
+                row = cursor.fetchone()
+                ap_total = row[0] or 0
+                ap_critical = row[1] or 0
+                ap_high = row[2] or 0
+                ap_medium = row[3] or 0
+                ap_low = row[4] or 0
+                ap_affected = row[5] or 0
+            except Exception:
+                pass
+
+            # Supplemental: graph_attack_findings (BFS analysis)
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM graph_attack_findings
+                    WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+                """, (org_id, run_ids))
+                gf_total = cursor.fetchone()[0] or 0
+            except Exception:
+                pass
+
+        cursor.close()
+        total = max(ap_total, gf_total)
         return jsonify({
-            "total": stats.get('total', 0),
-            "open": stats.get('open', 0),
-            "critical": stats.get('critical', 0),
-            "high": stats.get('high', 0),
-            "medium": stats.get('medium', 0),
-            "low": stats.get('low', 0),
-            "affected_identities": stats.get('affected_identities', 0),
+            "total": total,
+            "open": total,  # all paths are open by default
+            "critical": ap_critical,
+            "high": ap_high,
+            "medium": ap_medium,
+            "low": ap_low,
+            "affected_identities": ap_affected,
         })
     except Exception:
         return jsonify({"total": 0, "open": 0, "critical": 0, "high": 0,
@@ -7155,7 +7315,31 @@ def post_bulk_remediation():
         if status not in valid_statuses:
             return jsonify({'error': f'status must be one of: {", ".join(valid_statuses)}'}), 400
 
-        result = db.bulk_upsert_remediation_actions(identity_ids, status, notes)
+        # Validate all identity_ids belong to the caller's tenant
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if run_ids:
+            cursor.execute("""
+                SELECT identity_id FROM identities
+                WHERE identity_id = ANY(%s)
+                  AND discovery_run_id = ANY(%s)
+            """, (identity_ids, run_ids))
+            validated_ids = [row[0] for row in cursor.fetchall()]
+        else:
+            validated_ids = []
+        cursor.close()
+
+        rejected = len(identity_ids) - len(validated_ids)
+        if rejected > 0:
+            logger.warning(
+                "Bulk remediation: %d identity_ids rejected (not in caller's tenant)",
+                rejected,
+            )
+
+        if not validated_ids:
+            return jsonify({'error': 'No valid identity_ids for this tenant'}), 400
+
+        result = db.bulk_upsert_remediation_actions(validated_ids, status, notes)
 
         _log(db,'remediation_updated', f'Bulk {status} applied to {result["identity_count"]} identities ({result["updated_count"]} actions)', {
             'bulk': True,
@@ -7386,14 +7570,19 @@ def get_remediation_queue_handler():
         category_filter = request.args.get('category')
         limit = min(int(request.args.get('limit', '100')), 500)
 
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.close()
+
         queue = db.get_remediation_queue(
             status_filter=status_filter,
             impact_filter=impact_filter,
             category_filter=category_filter,
             limit=limit,
+            run_ids=run_ids,
         )
 
-        summary = db.get_remediation_summary()
+        summary = db.get_remediation_summary(run_ids=run_ids)
 
         return jsonify({
             'queue': queue,
@@ -7422,12 +7611,17 @@ def batch_auto_remediate():
         if action_def['risk'] == 'high':
             return jsonify({'error': 'High-risk actions cannot be batch-executed. Use individual execution with approval.'}), 400
 
-        # Get open remediations
+        # Get open remediations — scoped to caller's tenant
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.close()
+
         queue = db.get_remediation_queue(
             status_filter='open',
             impact_filter=impact_filter,
             category_filter=category_filter,
             limit=max_items,
+            run_ids=run_ids,
         )
 
         user_id = None
@@ -7549,7 +7743,10 @@ def get_remediation_dashboard_summary():
     """Get aggregated remediation progress for the dashboard widget."""
     db = _db()
     try:
-        summary = db.get_remediation_summary()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        cursor.close()
+        summary = db.get_remediation_summary(run_ids=run_ids)
         return jsonify(summary)
     finally:
         db.close()
@@ -19155,6 +19352,521 @@ def validate_org_isolation():
 
 
 # ──────────────────────────────────────────────────────────
+# Identity Lineage (Phase 91)
+# ──────────────────────────────────────────────────────────
+
+import re as _re
+
+_ARM_SUB_RE = _re.compile(r'^/subscriptions/([^/]+)', _re.IGNORECASE)
+
+
+def _extract_subscription_id(resource_id: str) -> str:
+    """Extract the Azure subscription ID from an ARM resource_id path.
+
+    ARM paths follow the pattern:
+        /subscriptions/{subId}/resourceGroups/{rg}/providers/...
+    Returns the subscription UUID, or empty string if not parseable.
+    """
+    m = _ARM_SUB_RE.match(resource_id or '')
+    return m.group(1) if m else ''
+
+
+def _build_federated_mapping(row: dict) -> dict:
+    """Convert a credentials-table row into the FederatedMapping shape expected
+    by the frontend (FederatedMappingsPanel.tsx).
+
+    Uses the canonical classifier from AzureDiscoveryEngine to determine
+    workload type, then builds the frontend-compatible evidence dict.
+    """
+    from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+
+    issuer = row.get('issuer') or ''
+    subject = row.get('subject') or ''
+    cls = AzureDiscoveryEngine._classify_federated_credential(issuer, subject)
+    wtype = cls['federated_workload_type']
+
+    # ── type-specific evidence ──
+    _TYPE_TO_RESOURCE = {
+        'github_actions': 'FederatedGitHub',
+        'aks_workload': 'FederatedAKS',
+        'external_federation': 'FederatedExternal',
+    }
+    _TYPE_TO_CONFIDENCE = {
+        'github_actions': 95,
+        'aks_workload': 90,
+        'external_federation': 80,
+    }
+
+    if wtype == 'github_actions':
+        org, repo, branch, env = '', '', None, None
+        if subject.startswith('repo:'):
+            parts = subject[5:]
+            colon_idx = parts.find(':')
+            org_repo = parts[:colon_idx] if colon_idx > 0 else parts
+            remainder = parts[colon_idx + 1:] if colon_idx > 0 else ''
+            slash = org_repo.find('/')
+            org = org_repo[:slash] if slash > 0 else org_repo
+            repo = org_repo[slash + 1:] if slash > 0 else ''
+            if remainder.startswith('ref:'):
+                branch = remainder[4:]
+            elif remainder.startswith('environment:'):
+                env = remainder[12:]
+        evidence = {'org': org, 'repo': repo, 'branch': branch, 'environment': env}
+        resource_name = f'{org}/{repo}' if repo else org or issuer
+    elif wtype == 'aks_workload':
+        namespace, sa = '', ''
+        if 'system:serviceaccount:' in subject:
+            sa_parts = subject.split('system:serviceaccount:')[-1].split(':')
+            namespace = sa_parts[0] if len(sa_parts) > 0 else ''
+            sa = sa_parts[1] if len(sa_parts) > 1 else ''
+        evidence = {'namespace': namespace, 'serviceAccount': sa}
+        resource_name = f'{namespace}/{sa}' if sa else subject
+    else:
+        evidence = {'issuer': issuer, 'subject': subject}
+        resource_name = row.get('display_name') or issuer
+
+    return {
+        'resource_type': _TYPE_TO_RESOURCE.get(wtype, 'FederatedExternal'),
+        'resource_name': resource_name,
+        'binding_method': 'FederatedCredential',
+        'confidence_score': _TYPE_TO_CONFIDENCE.get(wtype, 80),
+        'binding_evidence': evidence,
+    }
+
+
+def get_identity_lineage(identity_id):
+    """GET /api/identities/<identity_id>/lineage — Unified lineage endpoint.
+
+    Single source of truth for ALL identity lineage data.
+    Used by LineageTab, LineageDetailPanel, and any future consumer.
+    Data sourced from: identities table, identity_lineage_bindings,
+    credentials (federated), role_assignments.
+    """
+    db = _db()
+    try:
+        organization_id = _org_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery run found'}), 404
+
+        cursor.execute("""
+            SELECT id, identity_id, display_name, identity_category, object_id,
+                   app_id, created_datetime, owner_count,
+                   COALESCE(cloud, 'azure') AS cloud,
+                   last_sign_in,
+                   app_registration_object_id, app_registration_name, is_external_app,
+                   app_reg_publisher_domain, app_reg_sign_in_audience,
+                   app_reg_owner_display_name, app_reg_owner_id,
+                   app_reg_reply_url_hostnames, app_reg_likely_service,
+                   app_reg_likely_service_type, app_reg_identifier_uris,
+                   app_reg_notes, app_reg_required_apis,
+                   workload_type, workload_confidence, role_pattern_matched, workload_risk_flags,
+                   signin_pattern, last_delegated_signin, last_noninteractive_signin,
+                   days_since_last_signin,
+                   verdict_confidence, verdict_score,
+                   workload_origin, workload_origin_source,
+                   recommended_action, verdict_action_text,
+                   verdict_signals, verdict_risk_summary,
+                   is_discovery_connector,
+                   federated_workload_type, federated_workload_name,
+                   dependency_impact, dependency_impact_resources,
+                   lineage_signals, lineage_narrative,
+                   observed_last_used
+            FROM identities
+            WHERE discovery_run_id = ANY(%s) AND identity_id = %s
+        """, (run_ids, identity_id))
+        identity = cursor.fetchone()
+        if not identity:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = identity['id']
+
+        # ── Role assignments ──────────────────────────────────────────
+        role_assignments = []
+        try:
+            cursor.execute("SAVEPOINT lin_roles")
+            cursor.execute("""
+                SELECT role_name, scope, scope_type, resource_type, resource_name
+                FROM role_assignments WHERE identity_db_id = %s ORDER BY role_name
+            """, (db_id,))
+            role_assignments = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("RELEASE SAVEPOINT lin_roles")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT lin_roles")
+            except Exception:
+                pass
+
+        # ── Enrichment tier ───────────────────────────────────────────
+        enrichment_tier = 'STATIC'
+        try:
+            cursor.execute("SAVEPOINT lin_p2")
+            cursor.execute("""
+                SELECT 1 FROM workload_signin_events
+                WHERE identity_db_id = %s LIMIT 1
+            """, (db_id,))
+            has_p2 = cursor.fetchone() is not None
+            cursor.execute("RELEASE SAVEPOINT lin_p2")
+            if has_p2:
+                enrichment_tier = 'P2_AUDIT'
+            elif identity.get('signin_pattern') or identity.get('last_sign_in'):
+                enrichment_tier = 'P1_SIGNIN'
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT lin_p2")
+            except Exception:
+                pass
+            if identity.get('signin_pattern') or identity.get('last_sign_in'):
+                enrichment_tier = 'P1_SIGNIN'
+
+        # ── Resource bindings (split ARM vs managed identity) ─────────
+        arm_associations = []
+        managed_identity_bindings = []
+        try:
+            cursor.execute("SAVEPOINT lin_rb")
+            cursor.execute("""
+                SELECT resource_id, resource_type, resource_name,
+                       resource_group, subscription_id, region,
+                       binding_method, confidence_score,
+                       binding_evidence, last_verified_at
+                FROM identity_lineage_bindings
+                WHERE spn_id = %s
+                ORDER BY confidence_score DESC
+            """, (db_id,))
+            for row in cursor.fetchall():
+                ev = row.get('binding_evidence')
+                if isinstance(ev, str):
+                    try:
+                        ev = json.loads(ev)
+                    except Exception:
+                        ev = {}
+                binding = {
+                    'resource_id': row['resource_id'],
+                    'resource_type': row['resource_type'],
+                    'resource_name': row.get('resource_name') or '',
+                    'resource_group': row.get('resource_group') or '',
+                    'subscription_id': row.get('subscription_id') or '',
+                    'region': row.get('region') or '',
+                    'binding_method': row.get('binding_method') or '',
+                    'confidence_score': row.get('confidence_score') or 0,
+                    'binding_evidence': ev if isinstance(ev, dict) else {},
+                    'last_verified_at': row['last_verified_at'].isoformat() if row.get('last_verified_at') and hasattr(row['last_verified_at'], 'isoformat') else row.get('last_verified_at'),
+                }
+                method = (binding['binding_method'] or '').lower()
+                if 'managedidentity' in method:
+                    managed_identity_bindings.append(binding)
+                else:
+                    arm_associations.append(binding)
+            cursor.execute("RELEASE SAVEPOINT lin_rb")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT lin_rb")
+            except Exception:
+                pass
+
+        # ── Federated credentials ─────────────────────────────────────
+        federated_credentials = []
+        try:
+            cursor.execute("SAVEPOINT lin_fed")
+            cursor.execute("""
+                SELECT key_id, display_name, issuer, subject
+                FROM credentials
+                WHERE identity_db_id = %s AND credential_type = 'federated'
+                ORDER BY display_name
+            """, (db_id,))
+            for row in cursor.fetchall():
+                federated_credentials.append(
+                    _build_federated_mapping(row)
+                )
+            cursor.execute("RELEASE SAVEPOINT lin_fed")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT lin_fed")
+            except Exception:
+                pass
+
+        # ── Dependency impact ─────────────────────────────────────────
+        dep_impact_raw = identity.get('dependency_impact') or 'none_detected'
+        dep_resources_raw = identity.get('dependency_impact_resources')
+        if isinstance(dep_resources_raw, str):
+            try:
+                dep_resources_raw = json.loads(dep_resources_raw)
+            except Exception:
+                dep_resources_raw = []
+        dep_resources = dep_resources_raw if isinstance(dep_resources_raw, list) else []
+
+        if dep_impact_raw == 'high':
+            high_names = [r.get('resource_name', '?') for r in dep_resources if r.get('impact_level') == 'high']
+            impact_stmt = 'If deleted, this will impact:\n' + '\n'.join(
+                f'  - {n}' for n in high_names[:5]
+            )
+            remaining = len(dep_resources) - len(high_names[:5])
+            if remaining > 0:
+                impact_stmt += f'\n  + {remaining} more resource(s)'
+        elif dep_impact_raw == 'medium':
+            impact_stmt = f'If deleted, {len(dep_resources)} resource(s) may be affected.'
+        elif dep_resources:
+            impact_stmt = f'{len(dep_resources)} low-impact resource(s) bound.'
+        else:
+            impact_stmt = 'No direct resource bindings detected.'
+
+        # ── Verdict signals ───────────────────────────────────────────
+        signals_raw = identity.get('verdict_signals')
+        if isinstance(signals_raw, str):
+            try:
+                signals_raw = json.loads(signals_raw)
+            except Exception:
+                signals_raw = []
+        signals = signals_raw if isinstance(signals_raw, list) else []
+
+        risk_summary_raw = identity.get('verdict_risk_summary')
+        if isinstance(risk_summary_raw, str):
+            try:
+                risk_summary_raw = json.loads(risk_summary_raw)
+            except Exception:
+                risk_summary_raw = []
+        risk_summary = risk_summary_raw if isinstance(risk_summary_raw, list) else []
+
+        # ── Sign-in data ──────────────────────────────────────────────
+        sign_in = None
+        sp = identity.get('signin_pattern')
+        observed_raw = identity.get('observed_last_used')
+        observed_iso = observed_raw.isoformat() if observed_raw and hasattr(observed_raw, 'isoformat') else observed_raw
+
+        if sp or identity.get('last_sign_in') or identity.get('days_since_last_signin') is not None:
+            sign_in = {
+                'pattern': sp or 'never_used',
+                'dormancy_days': identity.get('days_since_last_signin') if identity.get('days_since_last_signin') is not None else -1,
+                'last_sign_in': identity['last_sign_in'].isoformat() if identity.get('last_sign_in') and hasattr(identity['last_sign_in'], 'isoformat') else identity.get('last_sign_in'),
+                'last_delegated': identity['last_delegated_signin'].isoformat() if identity.get('last_delegated_signin') and hasattr(identity['last_delegated_signin'], 'isoformat') else identity.get('last_delegated_signin'),
+                'last_noninteractive': identity['last_noninteractive_signin'].isoformat() if identity.get('last_noninteractive_signin') and hasattr(identity['last_noninteractive_signin'], 'isoformat') else identity.get('last_noninteractive_signin'),
+                'observed_last_used': observed_iso,
+            }
+
+        # ── Effective last used: MAX(observed, Azure sign-in) ────────
+        from datetime import datetime as _dt
+        def _try_parse(v):
+            if not v:
+                return None
+            if hasattr(v, 'timestamp'):
+                return v
+            try:
+                return _dt.fromisoformat(str(v).replace('Z', '+00:00').replace('+00:00', ''))
+            except (ValueError, TypeError):
+                return None
+
+        eff_candidates = [
+            (_try_parse(observed_raw), 'auditgraph'),
+            (_try_parse(identity.get('last_noninteractive_signin')), 'azure_signin'),
+            (_try_parse(identity.get('last_sign_in')), 'azure_signin'),
+        ]
+        eff_last_used = None
+        eff_source = None
+        for dt, src in eff_candidates:
+            if dt and (eff_last_used is None or dt > eff_last_used):
+                eff_last_used = dt
+                eff_source = src
+
+        # Federated inference: infer usage from created_datetime when no sign-in data
+        if identity.get('federated_workload_type') and eff_last_used is None:
+            created_dt = _try_parse(identity.get('created_datetime'))
+            if created_dt:
+                eff_last_used = created_dt
+                eff_source = 'inferred_federated'
+
+        # ── App registration ──────────────────────────────────────────
+        app_registration = None
+        if identity.get('app_registration_name') or identity.get('app_registration_object_id'):
+            owners = []
+            if identity.get('app_reg_owner_display_name'):
+                owners.append({
+                    'display_name': identity['app_reg_owner_display_name'],
+                    'id': identity.get('app_reg_owner_id', ''),
+                })
+            hostnames = identity.get('app_reg_reply_url_hostnames')
+            inferred_urls = hostnames if isinstance(hostnames, list) else (
+                [hostnames] if hostnames else []
+            )
+            app_registration = {
+                'object_id': identity.get('app_registration_object_id'),
+                'display_name': identity.get('app_registration_name') or identity.get('display_name', ''),
+                'is_external': identity.get('is_external_app', False),
+                'publisher_domain': identity.get('app_reg_publisher_domain'),
+                'sign_in_audience': identity.get('app_reg_sign_in_audience'),
+                'owners': owners,
+                'likely_service': identity.get('app_reg_likely_service'),
+                'reply_url_hostnames': inferred_urls,
+                'identifier_uris': identity.get('app_reg_identifier_uris'),
+                'notes': identity.get('app_reg_notes') or '',
+                'required_apis': identity.get('app_reg_required_apis'),
+                'created_at': identity.get('created_datetime'),
+            }
+
+        # ── Role topology ─────────────────────────────────────────────
+        role_topology = None
+        wt = identity.get('workload_type')
+        if wt and wt != 'unknown':
+            role_topology = {
+                'workload_type': wt,
+                'workload_confidence': identity.get('workload_confidence') or 0,
+                'role_pattern_matched': identity.get('role_pattern_matched'),
+                'role_assignments': [
+                    {'role_name': r['role_name'], 'scope': r['scope'],
+                     'scope_type': r.get('scope_type', ''), 'resource_type': r.get('resource_type', '')}
+                    for r in role_assignments
+                ],
+            }
+
+        # ── Orphan status mapping ─────────────────────────────────────
+        _VERDICT_TO_ORPHAN = {
+            'ORPHANED': 'SAFE_TO_RETIRE',
+            'UNUSED': 'SAFE_TO_RETIRE',
+            'AT_RISK': 'CAUTION',
+            'STALE': 'CAUTION',
+            'NEEDS_REVIEW': 'UNKNOWN',
+            'HEALTHY': 'NOT_ORPHANED',
+        }
+        rec_action = (identity.get('recommended_action') or '').upper()
+        orphan_badge = _VERDICT_TO_ORPHAN.get(rec_action, 'UNKNOWN')
+        if orphan_badge == 'SAFE_TO_RETIRE' and len(role_assignments) > 0:
+            orphan_badge = 'CAUTION'
+
+        # ── Human-readable lineage_signals (enriched with ROLE) ─────
+        lin_signals_raw = identity.get('lineage_signals')
+        if isinstance(lin_signals_raw, str):
+            try:
+                lin_signals_raw = json.loads(lin_signals_raw)
+            except Exception:
+                lin_signals_raw = []
+        lineage_signals = lin_signals_raw if isinstance(lin_signals_raw, list) else []
+
+        # Add ROLE signal from actual role_assignments (not available during discovery verdict)
+        if role_assignments:
+            top_roles = role_assignments[:3]
+            role_summaries = []
+            for r in top_roles:
+                rn = r.get('role_name', 'Unknown Role')
+                rt = r.get('resource_type') or r.get('scope_type', '')
+                rname = r.get('resource_name', '')
+                if rname:
+                    role_summaries.append(f'{rn} on {rname}')
+                elif rt:
+                    role_summaries.append(f'{rn} ({rt})')
+                else:
+                    role_summaries.append(rn)
+            extra = len(role_assignments) - len(top_roles)
+            value = '; '.join(role_summaries)
+            if extra > 0:
+                value += f' +{extra} more'
+            lineage_signals.append({
+                'type': 'ROLE',
+                'label': 'Roles',
+                'value': value,
+                'confidence': 'medium' if len(role_assignments) > 0 else 'low',
+            })
+
+        # Add warning badges
+        lineage_warnings = []
+        days_since_raw = identity.get('days_since_last_signin')
+        if days_since_raw is not None and days_since_raw > 365:
+            lineage_warnings.append('No recent usage')
+        if not identity.get('app_reg_owner_display_name') and identity.get('app_registration_object_id'):
+            lineage_warnings.append('Owner inactive')
+        if dep_impact_raw in ('high', 'medium'):
+            lineage_warnings.append('Still has active access')
+
+        # Narrative (from DB, enriched with role context)
+        lineage_narrative_raw = identity.get('lineage_narrative') or ''
+        # Append role detail if roles exist and narrative doesn't mention them
+        if role_assignments and 'role' not in lineage_narrative_raw.lower():
+            top = role_assignments[0]
+            rn = top.get('role_name', 'Unknown Role')
+            rname = top.get('resource_name', '')
+            if rname:
+                lineage_narrative_raw += f' It has active {rn} access on {rname}.'
+            else:
+                lineage_narrative_raw += f' It has active {rn} access.'
+
+        cursor.close()
+        return jsonify({
+            # Identity context
+            'identity_id': identity['identity_id'],
+            'display_name': identity['display_name'],
+            'identity_category': identity['identity_category'],
+            'cloud': identity['cloud'],
+
+            # Workload origin
+            'workload_origin': {
+                'origin': identity.get('workload_origin') or 'Unknown',
+                'source': identity.get('workload_origin_source') or 'none',
+                'workload_type': identity.get('workload_type'),
+                'workload_confidence': identity.get('workload_confidence') or 0,
+                'is_discovery_connector': identity.get('is_discovery_connector', False),
+            },
+
+            # Confidence
+            'confidence': {
+                'level': identity.get('verdict_confidence') or 'low',
+                'score': identity.get('verdict_score') or 0,
+                'enrichment_tier': enrichment_tier,
+                'signals': signals,
+            },
+
+            # ARM resource associations (appId/clientId binding)
+            'arm_associations': arm_associations,
+
+            # Managed identity bindings (system/user-assigned)
+            'managed_identity_bindings': managed_identity_bindings,
+
+            # Federated credentials (GitHub Actions, AKS OIDC, etc.)
+            'federated_credentials': federated_credentials,
+
+            # Dependency impact — what breaks if deleted
+            'dependency_impact': {
+                'level': dep_impact_raw,
+                'resources': dep_resources,
+                'statement': impact_stmt,
+                'total_bound': len(dep_resources),
+            },
+
+            # Recommended action
+            'recommended_action': {
+                'action': rec_action or 'NEEDS_REVIEW',
+                'action_text': identity.get('verdict_action_text') or '',
+                'orphan_status': orphan_badge,
+                'risk_summary': risk_summary,
+                'active_role_count': len(role_assignments),
+            },
+
+            # Human-readable lineage (executive display)
+            'lineage_signals': lineage_signals,
+            'lineage_narrative': lineage_narrative_raw,
+            'lineage_warnings': lineage_warnings,
+
+            # Effective last used (MAX of observed + Azure sign-in)
+            'effective_last_used': eff_last_used.isoformat() if eff_last_used else None,
+            'effective_last_used_source': eff_source,
+
+            # Supplementary data (for panels that need it)
+            'role_topology': role_topology,
+            'app_registration': app_registration,
+            'sign_in': sign_in,
+        })
+    except Exception as e:
+        logger.error(f"Identity lineage failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# Backward-compatible alias — old SPN lineage endpoint calls unified handler
+get_spn_lineage = get_identity_lineage
+
+
+# ──────────────────────────────────────────────────────────
 # App Registration Audit (Phase 74)
 # ──────────────────────────────────────────────────────────
 
@@ -19375,7 +20087,7 @@ def get_app_reg_detail(app_id):
         linked_spn = None
         if data.get('linked_spn_id'):
             cursor.execute("""
-                SELECT id, display_name, identity_category, risk_level, activity_status
+                SELECT id, identity_id, display_name, identity_category, risk_level, activity_status
                 FROM identities WHERE id = %s
             """, (data['linked_spn_id'],))
             spn_row = cursor.fetchone()
@@ -24949,7 +25661,7 @@ def get_finding_detail(finding_id):
     """GET /api/findings/<id> — single security finding detail."""
     db = _db()
     try:
-        finding = db.get_security_finding(finding_id)
+        finding = db.get_security_finding(finding_id, organization_id=_org_id())
         if not finding:
             return jsonify({'error': 'Finding not found'}), 404
         return jsonify(finding)
@@ -24970,7 +25682,8 @@ def update_finding_status_handler(finding_id):
     db = _db()
     try:
         changed_by = user['username'] if user else data.get('changed_by')
-        result = db.update_security_finding_status(finding_id, new_status, changed_by)
+        result = db.update_security_finding_status(finding_id, new_status, changed_by,
+                                                   organization_id=_org_id())
         if not result:
             return jsonify({'error': 'Finding not found'}), 404
 
@@ -27279,7 +27992,8 @@ def acknowledge_security_finding_handler(finding_id):
     db = _db()
     try:
         changed_by = user['username'] if user else 'system'
-        result = db.update_security_finding_status(int(finding_id), 'acknowledged', changed_by)
+        result = db.update_security_finding_status(int(finding_id), 'acknowledged', changed_by,
+                                                   organization_id=_org_id())
         if not result:
             return jsonify({'error': 'Finding not found'}), 404
         _log(db, 'security_finding_acknowledged',
@@ -27296,7 +28010,8 @@ def resolve_security_finding_handler(finding_id):
     db = _db()
     try:
         changed_by = user['username'] if user else 'system'
-        result = db.update_security_finding_status(int(finding_id), 'resolved', changed_by)
+        result = db.update_security_finding_status(int(finding_id), 'resolved', changed_by,
+                                                   organization_id=_org_id())
         if not result:
             return jsonify({'error': 'Finding not found'}), 404
         _log(db, 'security_finding_resolved',
@@ -31176,7 +31891,9 @@ def get_risk_summary_full():
         live_human_count = 0
         live_nhi_count = 0
         if run_ids:
-            # Live identity count — ensures denominator matches Identity Inventory
+            # SSOT: identity population — deleted_at IS NULL, is_microsoft_system=false,
+            # discovery_run_id from _latest_run_ids(). Must match Identity Inventory.
+            # App registrations are NOT added — only identities table counts.
             try:
                 exp_cursor.execute("""
                     SELECT COUNT(*),
@@ -31188,7 +31905,7 @@ def get_risk_summary_full():
                                             AND NOT COALESCE(is_microsoft_system, false))
                     FROM identities
                     WHERE discovery_run_id = ANY(%s)
-                      AND COALESCE(deleted_at, '9999-01-01') > NOW()
+                      AND deleted_at IS NULL
                 """, (run_ids,))
                 row = exp_cursor.fetchone()
                 live_identity_count = row[0] or 0
@@ -31198,22 +31915,6 @@ def get_risk_summary_full():
                 live_nhi_count = row[4] or 0
             except Exception:
                 pass
-
-            # Include standalone app_registrations (no linked SPN) in NHI count
-            # so Identity Inventory matches Nonhuman Identities section
-            standalone_ar_count = 0
-            try:
-                exp_cursor.execute("""
-                    SELECT COUNT(*) FROM app_registrations
-                    WHERE discovery_run_id = ANY(%s)
-                      AND NOT COALESCE(has_service_principal, false)
-                """, (run_ids,))
-                standalone_ar_count = exp_cursor.fetchone()[0] or 0
-            except Exception:
-                pass
-            live_nhi_count += standalone_ar_count
-            live_customer_count += standalone_ar_count
-            live_identity_count += standalone_ar_count
 
             # Override persisted counts with live values if available
             if live_identity_count > 0:
@@ -31225,10 +31926,17 @@ def get_risk_summary_full():
                 human_count = live_human_count
             if nhi_count == 0 and live_nhi_count > 0:
                 nhi_count = live_nhi_count
+            # Gate resource counts by activated subscriptions (matches Resources page filter)
+            active_sub_ids, _, _ = _active_subscription_ids(exp_cursor, org_id, conn_id)
             for tbl, var in [("azure_storage_accounts", "sa"), ("azure_key_vaults", "kv")]:
                 try:
                     exp_cursor.execute(f"SAVEPOINT full_{var}")
-                    exp_cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)", (run_ids,))
+                    if active_sub_ids:
+                        exp_cursor.execute(
+                            f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s) AND subscription_id = ANY(%s)",
+                            (run_ids, active_sub_ids))
+                    else:
+                        exp_cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)", (run_ids,))
                     val = exp_cursor.fetchone()[0] or 0
                     if var == "sa":
                         sa_count = val
@@ -31475,7 +32183,7 @@ def get_risk_summary_full():
                 rid_tuple = tuple(run_ids)
                 # Try blast_radius_score first, fall back to risk_score
                 di_cursor.execute("""
-                    SELECT i.id, i.display_name, i.identity_category,
+                    SELECT i.id, i.identity_id, i.display_name, i.identity_category,
                            COALESCE(i.blast_radius_score, 0) as blast_radius_score,
                            COALESCE(i.risk_score, 0) as risk_score,
                            COALESCE(i.privilege_tier, 'T3') as tier,
@@ -31490,7 +32198,7 @@ def get_risk_summary_full():
                     LIMIT 5
                 """, (rid_tuple,))
                 for row in di_cursor.fetchall():
-                    id_, name, cat, br_score, risk, tier, activity = row
+                    id_, identity_id, name, cat, br_score, risk, tier, activity = row
                     risk_factors = []
                     if tier in ('T0', 'T1'):
                         risk_factors.append(f'{tier} Privilege')
@@ -31499,7 +32207,8 @@ def get_risk_summary_full():
                     if risk >= 70:
                         risk_factors.append(f'Risk score {risk}')
                     dangerous.append({
-                        'id': id_, 'display_name': name or 'Unknown',
+                        'id': id_, 'identity_id': identity_id,
+                        'display_name': name or 'Unknown',
                         'identity_category': cat,
                         'blast_radius_score': float(br_score),
                         'risk_score': int(risk), 'tier': tier,

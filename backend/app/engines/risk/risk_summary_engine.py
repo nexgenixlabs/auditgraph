@@ -58,7 +58,11 @@ class RiskSummaryEngine:
         return summary
 
     def _compute_identity_counts(self, summary: dict):
-        """Core identity risk counts — isolated cursor."""
+        """Core identity risk counts — isolated cursor.
+
+        SSOT: identity population — deleted_at IS NULL, is_microsoft_system=false,
+        discovery_run_id from caller's run_ids (canonical: _latest_run_ids).
+        """
         cursor = self.db.conn.cursor()
         try:
             cursor.execute("""
@@ -101,6 +105,7 @@ class RiskSummaryEngine:
                     COUNT(*) as total_count
                 FROM identities i
                 WHERE i.discovery_run_id = ANY(%s)
+                  AND i.deleted_at IS NULL
             """, (self.run_ids,))
             r = cursor.fetchone()
 
@@ -118,6 +123,7 @@ class RiskSummaryEngine:
                 cursor.execute("""
                     SELECT COUNT(*) FROM identities i
                     WHERE i.discovery_run_id = ANY(%s)
+                      AND i.deleted_at IS NULL
                       AND i.identity_category = 'guest'
                       AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                            OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
@@ -186,21 +192,37 @@ class RiskSummaryEngine:
         """
         cursor = self.db.conn.cursor()
         try:
-            # Attack path count — from attack_paths table (same source as /api/attack-paths page)
+            # Attack path count — max of attack_paths and graph_attack_findings
+            # (matches live endpoint logic in get_attack_path_count / get_risk_summary_full)
+            ap_count = 0
             try:
                 cursor.execute("SAVEPOINT rse_ap")
                 cursor.execute("""
                     SELECT COUNT(*) FROM attack_paths
                     WHERE organization_id = %s AND discovery_run_id = ANY(%s)
                 """, (self.org_id, self.run_ids))
-                summary['attack_paths'] = cursor.fetchone()[0] or 0
+                ap_count = cursor.fetchone()[0] or 0
                 cursor.execute("RELEASE SAVEPOINT rse_ap")
             except Exception:
                 try:
                     cursor.execute("ROLLBACK TO SAVEPOINT rse_ap")
                 except Exception:
                     pass
-                summary['attack_paths'] = 0
+            gf_count = 0
+            try:
+                cursor.execute("SAVEPOINT rse_gf")
+                cursor.execute("""
+                    SELECT COUNT(*) FROM graph_attack_findings
+                    WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+                """, (self.org_id, self.run_ids))
+                gf_count = cursor.fetchone()[0] or 0
+                cursor.execute("RELEASE SAVEPOINT rse_gf")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT rse_gf")
+                except Exception:
+                    pass
+            summary['attack_paths'] = max(ap_count, gf_count)
 
             # Resource counts
             for table, key in [('azure_storage_accounts', 'storage_accounts'),

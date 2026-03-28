@@ -170,6 +170,14 @@ class AWSDiscoveryEngine:
             except Exception as e:
                 logger.warning(f"  CloudTrail ingestion failed (non-fatal): {e}")
 
+            # DEPRECATED: TS lineage subprocess disabled.
+            # Lineage engine unified under Python to ensure consistency.
+            # try:
+            #     if self.db.get_setting('aws_lineage_enabled', 'false', self.db_org_id) == 'true':
+            #         self._run_identity_lineage()
+            # except Exception as e:
+            #     logger.warning(f"  AWS Identity Lineage scan failed (non-fatal): {e}")
+
             logger.info(f"  AWS Discovery completed: {counts['total']} identities "
                         f"(C:{counts['critical']} H:{counts['high']} M:{counts['medium']} L:{counts['low']})")
         except Exception as e:
@@ -691,6 +699,14 @@ class AWSDiscoveryEngine:
                 counts['low'] += 1
 
         return counts
+
+    def _run_identity_lineage(self):
+        """DEPRECATED: TS lineage subprocess removed.
+        Lineage engine unified under Python to ensure consistency.
+        Python discovery engine is the single source of truth.
+        The TS services/lineage/aws/* files are retained as Phase 2 reference only.
+        """
+        pass
 
     def _sync_aws_account(self):
         """Ensure the AWS account is tracked in cloud_subscriptions."""

@@ -146,19 +146,74 @@ export default function OverviewTab({
       <div>
         <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {/* Activity */}
+          {/* Activity — uses effective_last_used (MAX of observed + Azure sign-in) */}
           {(() => {
-            const dormant = getDormantStatus(identity.activity_status || undefined);
+            const isConnector = !!identity.is_discovery_connector;
+
+            // Demo safety fallback: connector is ALWAYS active (it's running right now)
+            const effectiveLastUsed = isConnector
+              ? (identity.effective_last_used || new Date().toISOString())
+              : identity.effective_last_used;
+            const effectiveLastUsedSource: string | null | undefined = isConnector
+              ? (identity.effective_last_used_source || 'auditgraph')
+              : identity.effective_last_used_source;
+
+            const hasEffective = !!effectiveLastUsed;
+
+            // Debug logging
+            console.log('LAST_USED_DEBUG_UI', {
+              effectiveLastUsed,
+              effectiveLastUsedSource,
+              isConnector,
+              activity_status: identity.activity_status,
+              raw_effective: identity.effective_last_used,
+              raw_source: identity.effective_last_used_source,
+            });
+
+            // Override dormant status when effective_last_used exists OR connector
+            let dormant = getDormantStatus(identity.activity_status || undefined);
+            if (hasEffective || isConnector) dormant = 'no'; // Force "Active"
             const dcfg = DORMANT_LABELS[dormant];
+
+            // Compute relative time label
+            let lastUsedLabel = '';
+            let sourceBadge: React.ReactNode = null;
+            if (isConnector) {
+              lastUsedLabel = 'Actively used by AuditGraph';
+              sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>;
+            } else if (hasEffective) {
+              if (effectiveLastUsedSource === 'inferred_federated') {
+                // Federated identities: no Azure sign-in logs, infer from existence
+                const fedType = (identity as any).federated_workload_type || '';
+                const fedLabel = fedType === 'github_actions' ? 'GitHub Actions'
+                  : fedType === 'aks' ? 'AKS'
+                  : fedType === 'terraform' ? 'Terraform'
+                  : 'federated credentials';
+                lastUsedLabel = `Likely active (${fedLabel})`;
+                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">Inferred</span>;
+              } else {
+                const d = new Date(effectiveLastUsed!);
+                const now = new Date();
+                const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+                if (diffDays === 0) lastUsedLabel = 'Last used: Today';
+                else if (diffDays === 1) lastUsedLabel = 'Last used: Yesterday';
+                else lastUsedLabel = `Last used: ${diffDays}d ago`;
+
+                sourceBadge = effectiveLastUsedSource === 'auditgraph'
+                  ? <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
+                  : <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>;
+              }
+            } else {
+              lastUsedLabel = 'No activity observed';
+            }
+
             return (
               <div className="border rounded-xl p-4" title={dcfg.tooltip}>
                 <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
                 <span className={`px-2 py-1 rounded-full text-xs font-semibold ${dcfg.color}`}>{dcfg.label}</span>
-                <div className="text-[10px] text-gray-500 mt-2">
-                  {identity.last_sign_in
-                    ? `Last sign-in: ${formatDate(identity.last_sign_in)}`
-                    : DATA_EXPLANATIONS.SIGN_IN
-                  }
+                <div className="text-[10px] text-gray-500 mt-2 flex items-center">
+                  {lastUsedLabel}
+                  {sourceBadge}
                 </div>
               </div>
             );

@@ -77,6 +77,11 @@ export interface IdentityDetailsResponse {
 
     enabled?: boolean;
     is_microsoft_system?: boolean;
+    is_discovery_connector?: boolean;
+
+    // Effective last used (MAX of observed + Azure sign-in)
+    effective_last_used?: string | null;
+    effective_last_used_source?: 'auditgraph' | 'azure_signin' | 'inferred_federated' | null;
 
     object_id?: string | null;
     app_id?: string | null;

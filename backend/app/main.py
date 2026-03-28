@@ -201,6 +201,8 @@ from app.api.handlers import (
     get_spn_stats,
     get_spn_list,
     get_spn_detail,
+    get_identity_lineage,
+    get_spn_lineage,
     get_storage_stats,
     validate_org_isolation,
     run_manual_cleanup,
@@ -880,6 +882,7 @@ def create_app():
             ('cleanup_microsoft_remediations', lambda: _db_init.cleanup_microsoft_remediations()),
             ('permission_plane_column', lambda: _db_init.ensure_permission_plane_column()),
             ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
+            ('identity_lineage_columns', lambda: _db_init.ensure_identity_lineage_columns()),
             ('spn_exposure', lambda: _db_init._ensure_spn_exposure()),
             ('app_reg_exposure', lambda: _db_init._ensure_app_reg_exposure()),
             ('workload_telemetry', lambda: _db_init._ensure_workload_telemetry_tables()),
@@ -2712,6 +2715,16 @@ def create_app():
     @app.get("/api/spns/<path:identity_id>")
     def spn_detail(identity_id):
         return get_spn_detail(identity_id)
+
+    # Unified lineage endpoint — single source of truth for all identity lineage data
+    @app.get("/api/identities/<identity_id>/lineage")
+    def identity_lineage(identity_id):
+        return get_identity_lineage(identity_id)
+
+    # Deprecated alias — old SPN lineage route redirects to unified handler
+    @app.get("/api/spn/<path:spn_id>/lineage")
+    def spn_lineage(spn_id):
+        return get_spn_lineage(spn_id)
 
     # Phase 74: App Registration Audit
     @app.get("/api/app-registrations/stats")

@@ -54,7 +54,7 @@ interface Recommendation {
 
 interface AppRegDetail {
   app_registration: Record<string, unknown>;
-  linked_spn: { id: number; display_name: string; identity_category: string; risk_level: string; activity_status: string } | null;
+  linked_spn: { id: number; identity_id?: string; display_name: string; identity_category: string; risk_level: string; activity_status: string } | null;
   recommendations: Recommendation[];
 }
 
@@ -346,7 +346,7 @@ function AppRegDrillDown({ detail, onClose }: { detail: AppRegDetail; onClose: (
                 </span>
               </div>
               <button
-                onClick={() => window.open(`/identities/${detail.linked_spn!.id}`, '_blank')}
+                onClick={() => window.open(`/identities/${detail.linked_spn!.identity_id || detail.linked_spn!.id}`, '_blank')}
                 className="mt-2 text-[10px] text-blue-600 hover:text-blue-800 font-medium"
               >
                 Open SPN Detail &rarr;

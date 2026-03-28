@@ -31,6 +31,25 @@ import { PhantomExposureTable } from '../components/dashboard/executive/PhantomE
 import { GovernanceEffectivenessTable } from '../components/dashboard/executive/GovernanceEffectivenessTable';
 // useCanonicalMetrics replaced by consolidated /api/risk/summary/full endpoint
 
+function InfoTip({ text }: { text: string }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', marginLeft: 4 }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      <span style={{ fontSize: 14, color: COLORS.textDim, cursor: 'help', opacity: 0.6 }}>{'\u24D8'}</span>
+      {show && (
+        <span style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          background: '#0f172a', border: `1px solid ${COLORS.border}`, padding: '6px 10px',
+          borderRadius: 6, fontSize: 10, color: '#e2e8f0', maxWidth: 280, whiteSpace: 'normal',
+          zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', marginBottom: 6, pointerEvents: 'none',
+          fontFamily: FONT.ui, lineHeight: 1.4, fontWeight: 400,
+        }}>{text}</span>
+      )}
+    </span>
+  );
+}
+
 // ─── Empty Data (no hardcoded values) ────────────────────────────
 
 // Flatten agirs — eliminate double-nesting (data.agirs.agirs.score → data.agirs.score)
@@ -713,8 +732,8 @@ export default function CISODashboard() {
               <ScoreRing score={score} size={48} strokeWidth={4} color={getScoreColor(score)} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 8, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: COLORS.textMuted, fontFamily: FONT.ui }}>
-                  AGIRS{' '}
-                  <span title="Identity Attack Surface Score — measures exposure across 7 pillars based on your identity configuration. Higher = better posture. Score = 100 minus proportional risk penalties." style={{ cursor: 'help', opacity: 0.6 }}>{'\u24D8'}</span>
+                  AGIRS
+                  <InfoTip text="AGIRS (AuditGraph Identity Risk Score) — measures your identity attack surface across 7 pillars: privilege, dormancy, credentials, ownership, trust, federation, and external exposure. Score of 100 = zero identity risk. Updated on each discovery scan." />
                 </div>
                 <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONT.mono, color: COLORS.text }}>{score.toFixed(1)}</span>
                 <span style={{ fontSize: 8, color: COLORS.textSecondary, fontFamily: FONT.ui }}>/100</span>
@@ -998,13 +1017,13 @@ export default function CISODashboard() {
               </div>
               <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: FONT.ui, marginBottom: 6 }}>
                 {(data.agirs.dangerous_identities || []).length > 0
-                  ? <>If <DN navigateTo={`/identities/${data.agirs.dangerous_identities[0].id}`}><span style={{ color: '#60A5FA', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}>{data.agirs.dangerous_identities[0]?.display_name}</span></DN> is compromised, an attacker could reach:</>
+                  ? <>If <DN navigateTo={`/identities/${data.agirs.dangerous_identities[0].identity_id || data.agirs.dangerous_identities[0].id}`}><span style={{ color: '#60A5FA', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}>{data.agirs.dangerous_identities[0]?.display_name}</span></DN> is compromised, an attacker could reach:</>
                   : 'What an attacker could reach from a privileged identity'}
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                 {(() => {
                   const topIdentity = (data.agirs.dangerous_identities || [])[0];
-                  const topId = topIdentity?.id;
+                  const topId = topIdentity?.identity_id || topIdentity?.id;
                   const identityNav = topId ? `/identities/${topId}` : '/identities?sort=blast_radius_score&order=desc';
                   // Use per-identity blast radius data when available, fall back to tenant-wide
                   const idSubs = topIdentity?.subscription_count ?? data.tenant.subscriptions;

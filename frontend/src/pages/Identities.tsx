@@ -15,6 +15,8 @@ import { maskCredential } from '../utils/maskCredential';
 import { STATUS_BADGE, type IdentityStatus } from '../utils/resolveStatus';
 import IdentityDrawer from '../components/IdentityDrawer';
 import ExposureGraph from '../components/graph/ExposureGraph';
+import { OrphanBadgeCompact } from '../components/lineage';
+import LineageDetailPanel from '../components/LineageDetailPanel';
 import {
   type IdentityCategory, type RiskLevel, type DormantStatus,
   type PrivilegedLevel, type EffectiveScope, type CredentialHealth,
@@ -70,6 +72,52 @@ interface IdentityRow {
   agent_identity_type?: string | null;
   detected_platform?: string | null;
   classification_confidence?: number | null;
+  // Identity Lineage (Phase 91)
+  lineage_score?: number | null;
+  orphan_status?: string | null;
+  // Discovery connector flag
+  is_discovery_connector?: boolean;
+  // App Registration lineage
+  app_registration_object_id?: string | null;
+  app_registration_name?: string | null;
+  is_external_app?: boolean;
+  app_reg_publisher_domain?: string | null;
+  app_reg_sign_in_audience?: string | null;
+  app_reg_owner_display_name?: string | null;
+  app_reg_owner_id?: string | null;
+  // Workload topology inference
+  workload_type?: string | null;
+  workload_confidence?: number;
+  role_pattern_matched?: string | null;
+  workload_risk_flags?: string[];
+  // App Registration metadata signals
+  app_reg_reply_url_hostnames?: string[] | null;
+  app_reg_likely_service?: string | null;
+  app_reg_likely_service_type?: string | null;
+  app_reg_identifier_uris?: string[] | null;
+  app_reg_notes?: string | null;
+  app_reg_required_apis?: string[] | null;
+  // Sign-in pattern fields
+  signin_pattern?: string | null;
+  last_delegated_signin?: string | null;
+  last_noninteractive_signin?: string | null;
+  days_since_last_signin?: number | null;
+  // Verdict assembly fields (Prompt 5)
+  verdict_confidence?: string | null;
+  verdict_score?: number;
+  workload_origin?: string | null;
+  workload_origin_source?: string | null;
+  recommended_action?: string | null;
+  verdict_action_text?: string | null;
+  verdict_signals?: Array<{ source: string; weight: number; detail: string }>;
+  verdict_risk_summary?: string[];
+  // Federated credential classification
+  federated_workload_type?: string | null;
+  federated_workload_name?: string | null;
+  // Dependency impact
+  dependency_impact?: string | null;
+  // Observed usage tracking
+  observed_last_used?: string | null;
 }
 
 interface SavedView {
@@ -84,6 +132,17 @@ interface SavedView {
   user_id: number;
   creator_name?: string;
 }
+
+const WORKLOAD_BADGE: Record<string, { label: string; badgeClass: string; short: string }> = {
+  container_workload: { label: 'Container / AKS', badgeClass: 'bg-blue-100 text-blue-700', short: 'Container' },
+  cicd_pipeline:      { label: 'CI/CD Pipeline', badgeClass: 'bg-purple-100 text-purple-700', short: 'CI/CD' },
+  data_pipeline:      { label: 'Data Pipeline', badgeClass: 'bg-teal-100 text-teal-700', short: 'Data' },
+  config_reader:      { label: 'Config Reader', badgeClass: 'bg-gray-100 text-gray-600', short: 'Reader' },
+  monitoring_agent:   { label: 'Monitoring Agent', badgeClass: 'bg-gray-100 text-gray-600', short: 'Monitor' },
+  audit_connector:    { label: 'Audit Connector', badgeClass: 'bg-amber-100 text-amber-700', short: 'Audit' },
+  admin_identity:     { label: 'Admin / Privileged', badgeClass: 'bg-red-100 text-red-700', short: 'Admin' },
+  storage_workload:   { label: 'Storage Workload', badgeClass: 'bg-cyan-100 text-cyan-700', short: 'Storage' },
+};
 
 type SortField =
   | 'display_name'
@@ -328,6 +387,8 @@ export default function IdentitiesPage() {
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
+  // Identity Lineage orphan filter
+  const [orphanFilter, setOrphanFilter] = useState(false);
   // AI Agent Governance filter state (additive, gated by feature flag)
   const [agentFilterEnabled, setAgentFilterEnabled] = useState(false); // feature flag
   const [agentFilter, setAgentFilter] = useState(false);              // filter active
@@ -366,8 +427,12 @@ export default function IdentitiesPage() {
   const [drawerIdentityId, setDrawerIdentityId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'graph'>('table');
 
+  // Lineage detail panel
+  const [lineagePanelIdentity, setLineagePanelIdentity] = useState<IdentityRow | null>(null);
+
   // Enabled cloud providers (drives category filter options)
   const [enabledClouds, setEnabledClouds] = useState<string[]>([]);
+  const [cloudFilter, setCloudFilter] = useState<string>('all');
 
   // Phase 7: Snapshot selector state
   const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
@@ -588,6 +653,23 @@ export default function IdentitiesPage() {
             agent_identity_type: raw.agent_identity_type || null,
             detected_platform: raw.detected_platform || null,
             classification_confidence: raw.classification_confidence ?? null,
+            // Lineage fields
+            workload_type: raw.workload_type || null,
+            workload_confidence: raw.workload_confidence ?? 0,
+            workload_origin: raw.workload_origin || null,
+            verdict_confidence: raw.verdict_confidence || null,
+            recommended_action: raw.recommended_action || null,
+            federated_workload_type: raw.federated_workload_type || null,
+            federated_workload_name: raw.federated_workload_name || null,
+            dependency_impact: raw.dependency_impact || null,
+            is_discovery_connector: raw.is_discovery_connector ?? false,
+            app_registration_object_id: raw.app_registration_object_id || null,
+            is_external_app: raw.is_external_app ?? false,
+            app_reg_owner_display_name: raw.app_reg_owner_display_name || null,
+            signin_pattern: raw.signin_pattern || null,
+            last_noninteractive_signin: raw.last_noninteractive_signin || null,
+            days_since_last_signin: raw.days_since_last_signin ?? null,
+            observed_last_used: raw.observed_last_used || null,
           }));
           if (!cancelled) setIdentities(rows);
           return;
@@ -642,6 +724,38 @@ export default function IdentitiesPage() {
           privileged_level: raw.privileged_level || 'standard',
           credential_health: raw.credential_health || 'none',
           identity_age_days: raw.identity_age_days ?? null,
+          is_discovery_connector: raw.is_discovery_connector ?? false,
+          app_registration_object_id: raw.app_registration_object_id || null,
+          app_registration_name: raw.app_registration_name || null,
+          is_external_app: raw.is_external_app ?? false,
+          app_reg_publisher_domain: raw.app_reg_publisher_domain || null,
+          app_reg_sign_in_audience: raw.app_reg_sign_in_audience || null,
+          app_reg_owner_display_name: raw.app_reg_owner_display_name || null,
+          app_reg_owner_id: raw.app_reg_owner_id || null,
+          // Workload + verdict lineage fields
+          workload_type: raw.workload_type || null,
+          workload_confidence: raw.workload_confidence ?? 0,
+          role_pattern_matched: raw.role_pattern_matched || null,
+          workload_risk_flags: raw.workload_risk_flags || [],
+          app_reg_reply_url_hostnames: raw.app_reg_reply_url_hostnames || null,
+          app_reg_likely_service: raw.app_reg_likely_service || null,
+          app_reg_likely_service_type: raw.app_reg_likely_service_type || null,
+          signin_pattern: raw.signin_pattern || null,
+          last_noninteractive_signin: raw.last_noninteractive_signin || null,
+          last_delegated_signin: raw.last_delegated_signin || null,
+          days_since_last_signin: raw.days_since_last_signin ?? null,
+          verdict_confidence: raw.verdict_confidence || null,
+          verdict_score: raw.verdict_score ?? 0,
+          workload_origin: raw.workload_origin || null,
+          workload_origin_source: raw.workload_origin_source || null,
+          recommended_action: raw.recommended_action || null,
+          verdict_action_text: raw.verdict_action_text || null,
+          verdict_signals: raw.verdict_signals || [],
+          verdict_risk_summary: raw.verdict_risk_summary || [],
+          federated_workload_type: raw.federated_workload_type || null,
+          federated_workload_name: raw.federated_workload_name || null,
+          dependency_impact: raw.dependency_impact || null,
+          observed_last_used: raw.observed_last_used || null,
         }));
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
@@ -834,6 +948,29 @@ export default function IdentitiesPage() {
           privileged_level: raw.privileged_level || 'standard',
           credential_health: raw.credential_health || 'none',
           identity_age_days: raw.identity_age_days ?? null,
+          is_discovery_connector: raw.is_discovery_connector ?? false,
+          app_registration_object_id: raw.app_registration_object_id || null,
+          app_registration_name: raw.app_registration_name || null,
+          is_external_app: raw.is_external_app ?? false,
+          app_reg_publisher_domain: raw.app_reg_publisher_domain || null,
+          app_reg_sign_in_audience: raw.app_reg_sign_in_audience || null,
+          app_reg_owner_display_name: raw.app_reg_owner_display_name || null,
+          app_reg_owner_id: raw.app_reg_owner_id || null,
+          workload_type: raw.workload_type || null,
+          workload_confidence: raw.workload_confidence ?? 0,
+          app_reg_likely_service: raw.app_reg_likely_service || null,
+          signin_pattern: raw.signin_pattern || null,
+          last_noninteractive_signin: raw.last_noninteractive_signin || null,
+          days_since_last_signin: raw.days_since_last_signin ?? null,
+          verdict_confidence: raw.verdict_confidence || null,
+          verdict_score: raw.verdict_score ?? 0,
+          workload_origin: raw.workload_origin || null,
+          workload_origin_source: raw.workload_origin_source || null,
+          recommended_action: raw.recommended_action || null,
+          federated_workload_type: raw.federated_workload_type || null,
+          federated_workload_name: raw.federated_workload_name || null,
+          dependency_impact: raw.dependency_impact || null,
+          observed_last_used: raw.observed_last_used || null,
         }));
         setQueryResults(rows);
         setQueryTotal(data.total ?? rows.length);
@@ -1089,6 +1226,7 @@ export default function IdentitiesPage() {
     let result = [...identities];
     const s = safeLower(search);
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
+    if (cloudFilter !== 'all') result = result.filter(i => safeLower(i.cloud) === cloudFilter);
     if (multiRiskFilter.length > 0) {
       result = result.filter(i => multiRiskFilter.includes(safeLower(i.risk_level)));
     } else if (riskFilter !== 'all') {
@@ -1145,6 +1283,12 @@ export default function IdentitiesPage() {
     if (hasRolesFilter) {
       result = result.filter(i => (i.rbac_role_count ?? 0) + (i.entra_role_count ?? 0) > 0);
     }
+    if (orphanFilter) {
+      result = result.filter(i => {
+        const os = i.orphan_status || '';
+        return os === 'SAFE_TO_RETIRE' || os === 'CAUTION' || os === 'BLOCKED';
+      });
+    }
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -1196,7 +1340,7 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -1324,7 +1468,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 9; // checkbox + 8 primary columns (Age column removed)
+  const colSpan = 10; // checkbox + 8 primary columns + lineage
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1824,9 +1968,39 @@ export default function IdentitiesPage() {
                 <button onClick={() => { setAgentFilter(false); }} className="hover:text-violet-600">&times;</button>
               </span>
             )}
+            {orphanFilter && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                Orphaned
+                <button onClick={() => { setOrphanFilter(false); }} className="hover:text-amber-600">&times;</button>
+              </span>
+            )}
           </div>
         )}
       </div>
+
+      {/* Cloud Selector Tabs */}
+      {!loading && enabledClouds.length > 1 && (
+        <div className="flex items-center gap-1 mb-2">
+          {[
+            { key: 'all', label: 'All Clouds', color: 'bg-violet-600' },
+            ...(enabledClouds.includes('azure') ? [{ key: 'azure', label: 'Azure', color: 'bg-blue-600' }] : []),
+            ...(enabledClouds.includes('aws') ? [{ key: 'aws', label: 'AWS', color: 'bg-amber-600' }] : []),
+            ...(enabledClouds.includes('gcp') ? [{ key: 'gcp', label: 'GCP', color: 'bg-red-600' }] : []),
+          ].map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setCloudFilter(tab.key)}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                cloudFilter === tab.key
+                  ? `${tab.color} text-white shadow-sm`
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Category Filter Tabs */}
       {!loading && identities.length > 0 && (
@@ -1907,6 +2081,20 @@ export default function IdentitiesPage() {
               )}
             </button>
           )}
+          <button
+            onClick={() => setOrphanFilter(!orphanFilter)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
+              orphanFilter
+                ? 'bg-amber-500 text-white shadow-sm'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            Orphaned
+          </button>
         </div>
       )}
 
@@ -1940,6 +2128,7 @@ export default function IdentitiesPage() {
                 <SortHeader label="Sensitive Access" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Seen" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="First Seen" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <th className="px-2 py-2.5 text-xs whitespace-nowrap">Lineage</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -1969,6 +2158,9 @@ export default function IdentitiesPage() {
                             {i.display_name}
                             {!!i.agent_identity_type && i.agent_identity_type === 'ai_agent' && (
                               <span className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-violet-100 text-violet-700 flex-shrink-0" title={`AI Agent (${i.detected_platform || 'detected'})`}>AI</span>
+                            )}
+                            {!!i.is_discovery_connector && (
+                              <span className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0" title="This SPN is the AuditGraph discovery connector">Discovery Connector</span>
                             )}
                           </div>
                           <div className="text-[10px] text-gray-400 font-mono truncate">{i.identity_id.substring(0, 12)}…</div>
@@ -2004,15 +2196,46 @@ export default function IdentitiesPage() {
                     {/* Sensitive Access (Scope) */}
                     <td className="px-2 py-2"><ScopeBadge scope={i.effective_scope} cloud={i.cloud} /></td>
 
-                    {/* Last Seen */}
+                    {/* Last Seen — uses effective_last_used with connector fallback */}
                     <td className="px-2 py-2 whitespace-nowrap">
                       {(() => {
-                        const ls = formatLastSeen(i.last_seen_auth);
-                        return ls.label === 'Never' ? (
-                          <span className="text-[10px] text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>{ls.label}</span>
-                        ) : (
-                          <span className={`text-xs ${ls.colorClass}`} title={i.last_seen_auth || undefined}>{ls.label}</span>
-                        );
+                        const isConnector = !!i.is_discovery_connector;
+
+                        // Demo safety: connector is always active
+                        const obsDate = isConnector
+                          ? (i.observed_last_used || new Date().toISOString())
+                          : (i.observed_last_used || null);
+                        const authDate = i.last_seen_auth || i.last_noninteractive_signin || null;
+
+                        // Pick the most recent (effective_last_used)
+                        let bestDate: string | null = null;
+                        let source: 'auditgraph' | 'azure' | null = null;
+                        if (obsDate && authDate) {
+                          bestDate = new Date(obsDate) >= new Date(authDate) ? obsDate : authDate;
+                          source = new Date(obsDate) >= new Date(authDate) ? 'auditgraph' : 'azure';
+                        } else if (obsDate) {
+                          bestDate = obsDate;
+                          source = 'auditgraph';
+                        } else if (authDate) {
+                          bestDate = authDate;
+                          source = 'azure';
+                        }
+
+                        if (bestDate) {
+                          const ls = formatLastSeen(bestDate);
+                          return (
+                            <span className={`text-xs ${ls.colorClass}`} title={bestDate}>
+                              {ls.label}
+                              {source === 'auditgraph' && <span className="ml-1 text-[8px] text-emerald-600 font-semibold align-super">AG</span>}
+                            </span>
+                          );
+                        }
+                        if (i.days_since_last_signin != null && i.days_since_last_signin >= 0) {
+                          const d = i.days_since_last_signin;
+                          const color = d <= 30 ? 'text-green-600' : d <= 90 ? 'text-yellow-600' : 'text-red-500';
+                          return <span className={`text-xs ${color}`}>{d === 0 ? 'Today' : `${d}d ago`}</span>;
+                        }
+                        return <span className="text-[10px] text-gray-400 italic">No activity observed</span>;
                       })()}
                     </td>
 
@@ -2023,6 +2246,150 @@ export default function IdentitiesPage() {
                       ) : (
                         <span className="text-[10px] text-gray-400 italic">—</span>
                       )}
+                    </td>
+
+                    {/* Lineage — Priority: connector > federated > workload_origin > external > owner > ownerless > system */}
+                    <td className="px-2 py-2 max-w-[200px]">
+                      {(() => {
+                        // Confidence badge: high=green, medium=amber, low=gray
+                        const confBadge = i.verdict_confidence === 'high'
+                          ? <span className="px-1 py-0 rounded text-[7px] font-bold bg-green-100 text-green-700 border border-green-300 flex-shrink-0">HIGH</span>
+                          : i.verdict_confidence === 'medium'
+                          ? <span className="px-1 py-0 rounded text-[7px] font-bold bg-amber-100 text-amber-700 border border-amber-200 flex-shrink-0">MED</span>
+                          : i.verdict_confidence === 'low'
+                          ? <span className="px-1 py-0 rounded text-[7px] font-bold bg-gray-100 text-gray-500 border border-gray-200 flex-shrink-0">LOW</span>
+                          : null;
+
+                        // Dependency impact indicator
+                        const depBadge = i.dependency_impact === 'high'
+                          ? <span className="px-1 py-0 rounded text-[7px] font-bold bg-red-100 text-red-700 border border-red-300 flex-shrink-0" title="High dependency impact">DEP</span>
+                          : i.dependency_impact === 'medium'
+                          ? <span className="px-1 py-0 rounded text-[7px] font-bold bg-amber-100 text-amber-700 border border-amber-200 flex-shrink-0" title="Medium dependency impact">DEP</span>
+                          : null;
+
+                        const lineageBtn = (primary: React.ReactNode, subtitle: string) => (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setLineagePanelIdentity(i); }}
+                            className="flex flex-col gap-0 text-left hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition group w-full"
+                            title="Click to view lineage details"
+                          >
+                            <div className="flex items-center gap-1 min-w-0">
+                              {primary}
+                              {confBadge}
+                              {depBadge}
+                            </div>
+                            <span className="text-[9px] text-gray-400">{subtitle}</span>
+                          </button>
+                        );
+
+                        // P1: Discovery connector
+                        if (i.is_discovery_connector) {
+                          return lineageBtn(
+                            <span className="text-[10px] text-amber-700 font-semibold truncate group-hover:text-amber-800">AuditGraph Connector</span>,
+                            'Discovery SPN'
+                          );
+                        }
+
+                        // P2: Federated credential (GitHub Actions, AKS, etc.)
+                        if (i.federated_workload_type) {
+                          const fedLabel = i.federated_workload_type === 'github_actions'
+                            ? `GitHub Actions${i.federated_workload_name ? ` · ${i.federated_workload_name}` : ' (OIDC)'}`
+                            : i.federated_workload_type === 'aks'
+                            ? `AKS Workload${i.federated_workload_name ? ` · ${i.federated_workload_name}` : ''}`
+                            : i.federated_workload_name || i.federated_workload_type;
+                          return lineageBtn(
+                            <span className="text-[10px] text-purple-700 font-semibold truncate group-hover:text-purple-800">{fedLabel}</span>,
+                            'Federated Credential'
+                          );
+                        }
+
+                        // P3: Workload origin from verdict (reply_url, ARM binding, etc.)
+                        if (i.workload_origin && !['role_inference', 'heuristic_github', 'heuristic_terraform', 'heuristic_automation', 'display_name_fallback', 'signin_pattern_fallback'].includes(i.workload_origin_source || '')) {
+                          return lineageBtn(
+                            <span className="text-[10px] text-blue-700 font-medium truncate group-hover:text-blue-800">{i.workload_origin}</span>,
+                            i.workload_origin_source === 'reply_url' ? 'Reply URL' : i.workload_origin_source === 'arm_binding' ? 'ARM Binding' : 'Verified Origin'
+                          );
+                        }
+
+                        // P3.5: Heuristic detection (GitHub, Terraform, automation)
+                        if (i.workload_origin && (i.workload_origin_source || '').startsWith('heuristic_')) {
+                          const hLabel = i.workload_origin_source === 'heuristic_github' ? 'Inferred: GitHub'
+                            : i.workload_origin_source === 'heuristic_terraform' ? 'Inferred: IaC'
+                            : 'Inferred: Automation';
+                          return lineageBtn(
+                            <>
+                              <span className="text-[10px] text-indigo-700 font-semibold truncate group-hover:text-indigo-800">{i.workload_origin}</span>
+                              <span className="px-1 py-0 rounded text-[7px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-300 flex-shrink-0">INF</span>
+                            </>,
+                            hLabel
+                          );
+                        }
+
+                        // P4: External app
+                        if (i.is_external_app) {
+                          return lineageBtn(
+                            <>
+                              <span className="text-[10px] text-gray-700 font-medium truncate group-hover:text-blue-600">
+                                {i.app_reg_publisher_domain || i.app_registration_name || 'External'}
+                              </span>
+                              <span className="px-1 py-0 rounded text-[8px] font-bold bg-orange-100 text-orange-700 border border-orange-300 flex-shrink-0">Ext</span>
+                            </>,
+                            'External App'
+                          );
+                        }
+
+                        // P5: Workload origin from role inference (lower priority)
+                        if (i.workload_origin && i.workload_origin_source === 'role_inference') {
+                          return lineageBtn(
+                            <span className="text-[10px] text-gray-700 font-medium truncate group-hover:text-blue-600">{i.workload_origin}</span>,
+                            'Role Pattern'
+                          );
+                        }
+
+                        // P6: App reg with owner
+                        if (i.app_reg_owner_display_name) {
+                          return lineageBtn(
+                            <>
+                              <span className="text-[10px] text-gray-700 font-medium truncate group-hover:text-blue-600">{i.app_reg_owner_display_name}</span>
+                              <span className="text-[9px] text-gray-400 group-hover:text-blue-500 flex-shrink-0">{'\u2197'}</span>
+                            </>,
+                            i.app_reg_likely_service || 'Owner'
+                          );
+                        }
+
+                        // P7: App reg without owner (ownerless)
+                        if (i.app_registration_object_id) {
+                          return lineageBtn(
+                            <>
+                              <span className="text-[10px] text-red-600 font-medium group-hover:text-red-700">No owner</span>
+                              <span className="px-1 py-0 rounded text-[8px] font-bold bg-amber-50 text-amber-700 border border-amber-200 flex-shrink-0">Ownerless</span>
+                            </>,
+                            i.app_reg_likely_service || 'App Registration'
+                          );
+                        }
+
+                        // P8: Microsoft system SPN
+                        if (i.identity_category === 'service_principal' && i.identity_type !== 'ManagedIdentity') {
+                          return (
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-gray-400">Microsoft</span>
+                              <span className="px-1 py-0 rounded text-[8px] font-bold bg-blue-50 text-blue-600 border border-blue-200 flex-shrink-0">System</span>
+                            </div>
+                          );
+                        }
+
+                        // Fallback
+                        return <span className="text-[10px] text-gray-300">{'\u2014'}</span>;
+                      })()}
+                      {/* Workload type badge (always shown below lineage if classified) */}
+                      {!!i.workload_type && i.workload_type !== 'unknown' && (() => {
+                        const wb = WORKLOAD_BADGE[i.workload_type!];
+                        return wb ? (
+                          <span className={`mt-0.5 inline-block px-1 py-0 rounded text-[8px] font-semibold ${wb.badgeClass}`} title={`${wb.label} (${i.workload_confidence || 0}% confidence)`}>
+                            {wb.short}
+                          </span>
+                        ) : null;
+                      })()}
                     </td>
 
                   </tr>
@@ -2124,6 +2491,11 @@ export default function IdentitiesPage() {
             <button onClick={() => setAddToGroupOpen(false)} className="mt-4 w-full py-2 text-sm text-gray-500 hover:text-gray-700 transition">Cancel</button>
           </div>
         </div>
+      )}
+
+      {/* Lineage Detail Panel */}
+      {lineagePanelIdentity && (
+        <LineageDetailPanel identity={lineagePanelIdentity} onClose={() => setLineagePanelIdentity(null)} />
       )}
     </div>
   );

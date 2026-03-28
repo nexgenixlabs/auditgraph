@@ -11,6 +11,8 @@ import { generateSPNReport } from '../utils/spnPdfGenerator';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { LineageTab } from '../components/lineage';
+import LineageDetailPanel from '../components/LineageDetailPanel';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -53,6 +55,40 @@ interface SPNRow {
   credential_age_days: number;
   cross_subscription: boolean;
   activity_confidence: number;
+  is_discovery_connector?: boolean;
+  app_registration_object_id?: string | null;
+  app_registration_name?: string | null;
+  is_external_app?: boolean;
+  app_reg_publisher_domain?: string | null;
+  app_reg_sign_in_audience?: string | null;
+  app_reg_owner_display_name?: string | null;
+  app_reg_owner_id?: string | null;
+  // Workload topology inference
+  workload_type?: string | null;
+  workload_confidence?: number;
+  role_pattern_matched?: string | null;
+  workload_risk_flags?: string[];
+  // App Registration metadata signals
+  app_reg_reply_url_hostnames?: string[] | null;
+  app_reg_likely_service?: string | null;
+  app_reg_likely_service_type?: string | null;
+  app_reg_identifier_uris?: string[] | null;
+  app_reg_notes?: string | null;
+  app_reg_required_apis?: string[] | null;
+  // Sign-in pattern fields
+  signin_pattern?: string | null;
+  last_delegated_signin?: string | null;
+  last_noninteractive_signin?: string | null;
+  days_since_last_signin?: number | null;
+  // Verdict assembly fields (Prompt 5)
+  verdict_confidence?: string | null;
+  verdict_score?: number;
+  workload_origin?: string | null;
+  workload_origin_source?: string | null;
+  recommended_action?: string | null;
+  verdict_action_text?: string | null;
+  verdict_signals?: Array<{ source: string; weight: number; detail: string }>;
+  verdict_risk_summary?: string[];
 }
 
 interface SPNStats {
@@ -75,6 +111,17 @@ interface SPNStats {
   cross_sub_count: number;
   avg_exposure_score: number;
 }
+
+const WORKLOAD_BADGE: Record<string, { label: string; badgeClass: string; short: string }> = {
+  container_workload: { label: 'Container / AKS', badgeClass: 'bg-blue-100 text-blue-700', short: 'Container' },
+  cicd_pipeline:      { label: 'CI/CD Pipeline', badgeClass: 'bg-purple-100 text-purple-700', short: 'CI/CD' },
+  data_pipeline:      { label: 'Data Pipeline', badgeClass: 'bg-teal-100 text-teal-700', short: 'Data' },
+  config_reader:      { label: 'Config Reader', badgeClass: 'bg-gray-100 text-gray-600', short: 'Reader' },
+  monitoring_agent:   { label: 'Monitoring Agent', badgeClass: 'bg-gray-100 text-gray-600', short: 'Monitor' },
+  audit_connector:    { label: 'Audit Connector', badgeClass: 'bg-amber-100 text-amber-700', short: 'Audit' },
+  admin_identity:     { label: 'Admin / Privileged', badgeClass: 'bg-red-100 text-red-700', short: 'Admin' },
+  storage_workload:   { label: 'Storage Workload', badgeClass: 'bg-cyan-100 text-cyan-700', short: 'Storage' },
+};
 
 interface ExposureFinding {
   finding_type: string;
@@ -228,12 +275,14 @@ function ComponentBar({ label, score, max, color }: { label: string; score: numb
 function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: () => void }) {
   const identity = detail.identity;
   const name = (identity.display_name as string) || 'Unknown';
+  const identityId = (identity.identity_id as string) || '';
   const exp = detail.exposure;
   const level = getExposureLevel(exp.total);
   const levelConfig = EXPOSURE_LEVEL_CONFIG[level];
   const lcConfig = LIFECYCLE_STATE_CONFIG[exp.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
   const ownerConfig = OWNER_STATUS_CONFIG[exp.owner_status] || OWNER_STATUS_CONFIG.unknown;
   const scopeConfig = SCOPE_FLAG_CONFIG[exp.effective_scope_flag] || SCOPE_FLAG_CONFIG.resource;
+  const [activeTab, setActiveTab] = useState<'exposure' | 'lineage'>('exposure');
 
   // Group findings by component
   const findingsByComponent: Record<string, ExposureFinding[]> = {};
@@ -253,7 +302,12 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
           {/* Header */}
           <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between shrink-0">
             <div>
-              <h2 className="text-base font-bold text-gray-900 truncate max-w-[500px]" title={name}>{name}</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-gray-900 truncate max-w-[500px]" title={name}>{name}</h2>
+                {!!(identity as any).is_discovery_connector && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0">Discovery Connector</span>
+                )}
+              </div>
               <div className="flex items-center gap-2 mt-1">
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${levelConfig.badgeClass}`}>
                   Exposure: {exp.total}/100
@@ -275,12 +329,85 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
                   <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white">CAN ESCALATE</span>
                 )}
               </div>
+              {!!(identity as any).app_registration_name && (
+                <div className="mt-1.5 space-y-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-gray-500">App Registration:</span>
+                    <span className="text-[10px] font-medium text-gray-700">{(identity as any).app_registration_name}</span>
+                    {!!(identity as any).is_external_app && (
+                      <span className="px-1 py-0 rounded text-[8px] font-bold bg-orange-100 text-orange-700 border border-orange-300">External</span>
+                    )}
+                  </div>
+                  {!!((identity as any).app_reg_publisher_domain || (identity as any).app_reg_owner_display_name) && (
+                    <div className="flex items-center gap-3 text-[10px] text-gray-500">
+                      {!!(identity as any).app_reg_publisher_domain && (
+                        <span>Publisher: <span className="text-gray-700 font-medium">{(identity as any).app_reg_publisher_domain}</span></span>
+                      )}
+                      {!!(identity as any).app_reg_owner_display_name && (
+                        <span>Owner: <span className="text-gray-700 font-medium">{(identity as any).app_reg_owner_display_name}</span></span>
+                      )}
+                      {!!(identity as any).app_reg_sign_in_audience && (
+                        <span>Audience: <span className="text-gray-700">{(identity as any).app_reg_sign_in_audience}</span></span>
+                      )}
+                    </div>
+                  )}
+                  {!!(identity as any).app_registration_object_id && (
+                    <a
+                      href={`https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/Overview/appId/${(identity as any).app_registration_object_id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[10px] text-blue-600 hover:text-blue-700 font-medium"
+                    >
+                      View in Azure Portal {'\u2197'}
+                    </a>
+                  )}
+                </div>
+              )}
             </div>
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg font-bold p-1">x</button>
           </div>
 
+          {/* Tab toggle */}
+          <div className="border-b border-gray-200 bg-white px-6 shrink-0">
+            <nav className="flex -mb-px">
+              <button
+                onClick={() => setActiveTab('exposure')}
+                className={`px-4 py-2 text-xs font-medium border-b-2 transition ${
+                  activeTab === 'exposure'
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  Exposure
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab('lineage')}
+                className={`px-4 py-2 text-xs font-medium border-b-2 transition ${
+                  activeTab === 'lineage'
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                  Identity Lineage
+                </span>
+              </button>
+            </nav>
+          </div>
+
           {/* Scrollable content */}
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            {activeTab === 'lineage' ? (
+              <LineageTab spnId={identityId} />
+            ) : (<>
             {/* Critical Overrides banner */}
             {exp.critical_overrides.length > 0 && (
               <div className="bg-red-50 border border-red-300 rounded-lg p-3">
@@ -430,6 +557,7 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
                 </div>
               </section>
             )}
+            </>)}
           </div>
 
           {/* Footer */}
@@ -480,6 +608,7 @@ export default function SPNDashboard() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SPNDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [lineagePanelSpn, setLineagePanelSpn] = useState<SPNRow | null>(null);
 
   // Sync from URL
   useEffect(() => {
@@ -838,14 +967,15 @@ export default function SPNDashboard() {
                 <th className="px-3 py-2.5 text-xs">Lifecycle</th>
                 <th className="px-3 py-2.5 text-xs">Owner</th>
                 <th className="px-3 py-2.5 text-xs">Scope</th>
+                <th className="px-3 py-2.5 text-xs">Lineage</th>
                 <th className="px-3 py-2.5 text-xs w-6"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={8} className="px-3 py-8 text-center text-gray-400">Loading workload identities...</td></tr>
+                <tr><td colSpan={9} className="px-3 py-8 text-center text-gray-400">Loading workload identities...</td></tr>
               ) : sorted.length === 0 ? (
-                <tr><td colSpan={8} className="px-3 py-8 text-center text-gray-400">No workload identities found. Capture a snapshot to populate.</td></tr>
+                <tr><td colSpan={9} className="px-3 py-8 text-center text-gray-400">No workload identities found. Capture a snapshot to populate.</td></tr>
               ) : sorted.map(spn => {
                 const lcCfg = LIFECYCLE_STATE_CONFIG[spn.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
                 const owCfg = OWNER_STATUS_CONFIG[spn.owner_status] || OWNER_STATUS_CONFIG.unknown;
@@ -860,7 +990,12 @@ export default function SPNDashboard() {
                     onClick={() => setSelectedId(selectedId === spn.identity_id ? null : spn.identity_id)}
                   >
                     <td className="px-3 py-2 max-w-[200px]">
-                      <div className="font-medium text-gray-900 truncate" title={spn.display_name}>{spn.display_name}</div>
+                      <div className="font-medium text-gray-900 truncate flex items-center gap-1" title={spn.display_name}>
+                        {spn.display_name}
+                        {!!spn.is_discovery_connector && (
+                          <span className="inline-flex items-center px-1 py-0 rounded text-[8px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0" title="AuditGraph discovery connector">Connector</span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1 mt-0.5">
                         {!!spn.can_escalate && <span className="px-1 py-0 rounded text-[8px] font-bold bg-red-600 text-white">ESC</span>}
                         {!!spn.cross_subscription && <span className="px-1 py-0 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">X-SUB</span>}
@@ -896,6 +1031,45 @@ export default function SPNDashboard() {
                         {scCfg.label}
                       </span>
                     </td>
+                    <td className="px-3 py-2 max-w-[150px]">
+                      {spn.is_discovery_connector ? (
+                        <div className="flex flex-col gap-0 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition group" onClick={(e) => { e.stopPropagation(); setLineagePanelSpn(spn); }}>
+                          <span className="text-[10px] text-amber-700 font-semibold group-hover:text-amber-800">AuditGraph Connector</span>
+                          <span className="text-[9px] text-amber-500">Discovery SPN</span>
+                        </div>
+                      ) : spn.is_external_app ? (
+                        <div className="flex flex-col gap-0 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition group" onClick={(e) => { e.stopPropagation(); setLineagePanelSpn(spn); }}>
+                          <div className="flex items-center gap-1 min-w-0">
+                            <span className="text-[10px] text-gray-700 font-medium truncate group-hover:text-blue-600">{spn.app_reg_publisher_domain || spn.app_registration_name}</span>
+                            <span className="px-1 py-0 rounded text-[8px] font-bold bg-orange-100 text-orange-700 flex-shrink-0">Ext</span>
+                          </div>
+                          <span className="text-[9px] text-gray-400">External App</span>
+                        </div>
+                      ) : spn.app_reg_owner_display_name ? (
+                        <div className="flex flex-col gap-0 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition group" onClick={(e) => { e.stopPropagation(); setLineagePanelSpn(spn); }}>
+                          <span className="text-[10px] text-gray-700 font-medium truncate group-hover:text-blue-600">{spn.app_reg_owner_display_name}</span>
+                          <span className="text-[9px] text-gray-400">Owner</span>
+                        </div>
+                      ) : spn.app_registration_object_id ? (
+                        <div className="flex flex-col gap-0 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition group" onClick={(e) => { e.stopPropagation(); setLineagePanelSpn(spn); }}>
+                          <div className="flex items-center gap-1 min-w-0">
+                            <span className="text-[10px] text-red-600 font-medium group-hover:text-red-700">No owner</span>
+                            <span className="px-1 py-0 rounded text-[8px] font-bold bg-amber-50 text-amber-700 border border-amber-200 flex-shrink-0">Ownerless</span>
+                          </div>
+                          <span className="text-[9px] text-gray-400">App Registration</span>
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-gray-300">{'\u2014'}</span>
+                      )}
+                      {!!spn.workload_type && spn.workload_type !== 'unknown' && (() => {
+                        const wb = WORKLOAD_BADGE[spn.workload_type!];
+                        return wb ? (
+                          <span className={`mt-0.5 inline-block px-1 py-0 rounded text-[8px] font-semibold ${wb.badgeClass}`} title={`${wb.label} (${spn.workload_confidence || 0}% confidence)`}>
+                            {wb.short}
+                          </span>
+                        ) : null;
+                      })()}
+                    </td>
                     <td className="px-3 py-2 text-gray-400">{'\u2192'}</td>
                   </tr>
                 );
@@ -913,6 +1087,13 @@ export default function SPNDashboard() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
           <div className="animate-spin h-8 w-8 border-2 border-blue-600 border-t-transparent rounded-full" />
         </div>
+      )}
+      {lineagePanelSpn && (
+        <LineageDetailPanel
+          identity={lineagePanelSpn as any}
+          onClose={() => setLineagePanelSpn(null)}
+          onBackToDetail={() => { const id = lineagePanelSpn.identity_id; setLineagePanelSpn(null); setSelectedId(id); }}
+        />
       )}
     </div>
   );
