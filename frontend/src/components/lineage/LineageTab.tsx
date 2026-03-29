@@ -150,11 +150,33 @@ function LoadingSkeleton(): React.ReactElement {
 
 // ── Main Component ─────────────────────────────────────────────────────────
 
+// Verdict badge colors (shared with LineageDetailPanel)
+const VERDICT_COLORS: Record<string, { label: string; cls: string; border: string }> = {
+  ORPHANED:                { label: 'Orphaned',          cls: 'text-red-700',     border: 'border-red-300' },
+  GHOST_MSI:               { label: 'Ghost MSI',         cls: 'text-purple-700',  border: 'border-purple-300' },
+  FEDERATED_MISCONFIGURED: { label: 'Fed Misconfigured', cls: 'text-orange-700',  border: 'border-orange-300' },
+  AT_RISK:                 { label: 'At Risk',           cls: 'text-amber-700',   border: 'border-amber-300' },
+  STALE:                   { label: 'Stale',             cls: 'text-amber-700',   border: 'border-amber-300' },
+  UNUSED:                  { label: 'Unused',            cls: 'text-gray-600',    border: 'border-gray-300' },
+  NEEDS_REVIEW:            { label: 'Needs Review',      cls: 'text-blue-700',    border: 'border-blue-300' },
+  HEALTHY:                 { label: 'Healthy',           cls: 'text-green-700',   border: 'border-green-300' },
+};
+
+interface VerdictEntry {
+  verdict: string;
+  previous_verdict: string | null;
+  verdict_changed: boolean;
+  scored_at: string;
+  confidence_score: number;
+  discovery_run_id: number;
+}
+
 export function LineageTab({ spnId }: { spnId: string }): React.ReactElement {
   const { withConnection } = useConnection();
   const [data, setData] = useState<LineageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [verdictHistory, setVerdictHistory] = useState<VerdictEntry[]>([]);
 
   useEffect(() => {
     if (!spnId) return;
@@ -175,6 +197,17 @@ export function LineageTab({ spnId }: { spnId: string }): React.ReactElement {
         }
       });
 
+    return () => abort.abort();
+  }, [spnId, withConnection]);
+
+  // Fetch verdict history
+  useEffect(() => {
+    if (!spnId) return;
+    const abort = new AbortController();
+    fetch(withConnection(`/api/identities/${spnId}/verdict-history`), { signal: abort.signal })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => { if (Array.isArray(d)) setVerdictHistory(d.slice(0, 5)); })
+      .catch(() => {});
     return () => abort.abort();
   }, [spnId, withConnection]);
 
@@ -297,6 +330,7 @@ export function LineageTab({ spnId }: { spnId: string }): React.ReactElement {
           <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">Recommended Action</h3>
           <div className={`px-3 py-2.5 rounded-lg border ${
             data.recommended_action.action === 'ORPHANED' ? 'bg-red-50 border-red-200' :
+            data.recommended_action.action === 'GHOST_MSI' ? 'bg-purple-50 border-purple-200' :
             data.recommended_action.action === 'AT_RISK'  ? 'bg-amber-50 border-amber-200' :
             data.recommended_action.action === 'STALE'    ? 'bg-amber-50 border-amber-200' :
             data.recommended_action.action === 'HEALTHY'  ? 'bg-green-50 border-green-200' :
@@ -304,6 +338,7 @@ export function LineageTab({ spnId }: { spnId: string }): React.ReactElement {
           }`}>
             <p className={`text-xs leading-relaxed ${
               data.recommended_action.action === 'ORPHANED' ? 'text-red-700' :
+              data.recommended_action.action === 'GHOST_MSI' ? 'text-purple-700' :
               data.recommended_action.action === 'AT_RISK'  ? 'text-amber-700' :
               data.recommended_action.action === 'STALE'    ? 'text-amber-700' :
               data.recommended_action.action === 'HEALTHY'  ? 'text-green-700' :
@@ -311,6 +346,31 @@ export function LineageTab({ spnId }: { spnId: string }): React.ReactElement {
             }`}>
               {data.recommended_action.action_text}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Verdict History */}
+      {verdictHistory.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-lg px-4 py-3">
+          <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-2">Verdict History</h3>
+          <div className="space-y-2">
+            {verdictHistory.map((entry, idx) => {
+              const badge = VERDICT_COLORS[entry.verdict] || VERDICT_COLORS.NEEDS_REVIEW;
+              return (
+                <div key={idx} className={`flex items-center gap-2 px-2.5 py-1.5 rounded border ${badge.border} bg-gray-50`}>
+                  <span className={`text-[10px] font-bold ${badge.cls}`}>{badge.label || entry.verdict}</span>
+                  <span className="text-[10px] text-gray-400">
+                    {new Date(entry.scored_at).toLocaleDateString()}
+                  </span>
+                  {entry.verdict_changed && entry.previous_verdict && (
+                    <span className="text-[10px] text-gray-400 italic">
+                      was {(VERDICT_COLORS[entry.previous_verdict] || { label: entry.previous_verdict }).label}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

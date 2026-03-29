@@ -49,6 +49,7 @@ function InlineRoleBadges({ roles }: { roles: RoleData[] }) {
 }
 
 // Central identity node
+// TODO: Add resource_name subtitle for SAMI nodes when node component supports subtitles
 export function IdentityNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-blue-500 bg-blue-50';
   return (

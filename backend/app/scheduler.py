@@ -949,6 +949,11 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         _track_job('agent_sp_signin_enrichment', db_org_id,
                    _run_agent_sp_signin_enrichment, current_run_id, db_org_id, db)
 
+        # NHI sign-in enrichment: backfill signin_pattern via auditLogs/signIns
+        # for identities where signInActivity was empty (no P2 license)
+        _track_job('nhi_signin_enrichment', db_org_id,
+                   _run_nhi_signin_enrichment, current_run_id, db_org_id, db)
+
         # AI Agent Governance Phase 2: orphaned agent SPN detection
         _track_job('agent_orphan_detection', db_org_id,
                    _run_agent_orphan_detection, current_run_id, db_org_id, db)
@@ -3573,6 +3578,165 @@ def _run_agent_sp_signin_enrichment(current_run_id, db_org_id, db):
 
     except Exception as e:
         logger.warning("SP sign-in enrichment failed (non-blocking): %s", e)
+
+
+def _run_nhi_signin_enrichment(current_run_id, db_org_id, db):
+    """Enrich ALL NHI identities with sign-in data from auditLogs/signIns.
+
+    The Graph API signInActivity property on servicePrincipals requires Entra ID P2
+    licensing, which many tenants don't have. This job uses the auditLogs/signIns
+    endpoint (requires AuditLog.Read.All) as a fallback to fill signin_pattern for
+    identities that still show 'never_used' from the inline discovery enrichment.
+
+    Processes in batches, prioritizing identities with no sign-in data (NULL or
+    'never_used' signin_pattern). Non-blocking on failure.
+    """
+    import time as _time
+
+    batch_size = 200
+
+    try:
+        # Get Azure credentials for this org
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT cc.azure_directory_id, cc.client_id, cc.metadata
+            FROM cloud_connections cc
+            WHERE cc.organization_id = %s AND cc.provider = 'azure'
+              AND cc.status = 'connected'
+            LIMIT 1
+        """, (db_org_id,))
+        azure_conn_row = cursor.fetchone()
+        cursor.close()
+
+        if not azure_conn_row:
+            return
+
+        azure_directory_id, client_id, metadata = azure_conn_row
+        if isinstance(metadata, str):
+            import json as _json
+            metadata = _json.loads(metadata)
+        metadata = metadata or {}
+        from app.encryption import decrypt_field
+        if 'client_secret' in metadata:
+            metadata['client_secret'] = decrypt_field(metadata['client_secret'])
+        client_secret = metadata.get('client_secret')
+
+        if not all([azure_directory_id, client_id, client_secret]):
+            return
+
+        from azure.identity import ClientSecretCredential
+        credential = ClientSecretCredential(
+            tenant_id=azure_directory_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+
+        from app.engines.discovery.activity_tracker import ActivityTracker
+        tracker = ActivityTracker(credential)
+
+        # First call: check if we even have AuditLog.Read.All
+        # Use the discovery connector itself as a test probe
+        _test = tracker.get_last_sign_in(client_id)
+        if tracker.has_auditlog_access is False:
+            logger.info(
+                "NHI signin enrichment: AuditLog.Read.All not granted for org %s, skipping",
+                db_org_id,
+            )
+            return
+
+        # Find NHIs with no real sign-in data, from current run
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.object_id, i.app_id, i.display_name,
+                   i.created_datetime
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+              AND i.identity_category IN (
+                  'service_principal', 'managed_identity_system', 'managed_identity_user'
+              )
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+              AND (i.signin_pattern IS NULL OR i.signin_pattern = 'never_used')
+              AND i.last_sign_in IS NULL
+            ORDER BY i.id
+            LIMIT %s
+        """, (current_run_id, batch_size))
+        identities = cursor.fetchall()
+        cursor.close()
+
+        if not identities:
+            logger.info("NHI signin enrichment: no unenriched identities for org %s", db_org_id)
+            return
+
+        logger.info(
+            "NHI signin enrichment: processing %d identities for org %s (run %s)",
+            len(identities), db_org_id, current_run_id,
+        )
+
+        enriched = 0
+        skipped = 0
+        for db_id, identity_id, object_id, app_id, display_name, created_dt in identities:
+            # Try object_id first (SP sign-in), then app_id (app sign-in)
+            last_seen = None
+            source = None
+
+            if object_id:
+                last_seen = tracker.get_service_principal_last_sign_in(object_id)
+                if last_seen:
+                    source = 'sp_signin'
+
+            if not last_seen and app_id:
+                last_seen = tracker.get_last_sign_in(app_id)
+                if last_seen:
+                    source = 'app_signin'
+
+            if last_seen:
+                from datetime import datetime as _dt, timezone as _tz
+                now = _dt.now(_tz.utc)
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=_tz.utc)
+                days_since = (now - last_seen).days
+
+                # Reclassify pattern based on actual sign-in data
+                pattern = 'machine_only'  # SP/app sign-ins are non-interactive
+
+                ucursor = db.conn.cursor()
+                ucursor.execute("""
+                    UPDATE identities SET
+                        signin_pattern = %s,
+                        last_sign_in = %s,
+                        last_noninteractive_signin = %s,
+                        days_since_last_signin = %s,
+                        activity_status = CASE
+                            WHEN %s <= 30 THEN 'active'
+                            WHEN %s <= 90 THEN 'inactive'
+                            ELSE 'stale'
+                        END
+                    WHERE id = %s
+                """, (pattern, last_seen, last_seen, days_since,
+                      days_since, days_since, db_id))
+                db.conn.commit()
+                ucursor.close()
+                enriched += 1
+
+                if enriched <= 5:
+                    logger.info(
+                        "  Enriched %s: %s=%s (%d days ago)",
+                        display_name, source, last_seen.isoformat(), days_since,
+                    )
+            else:
+                skipped += 1
+
+            # Rate limit: 150ms between Graph API calls (two calls per identity possible)
+            _time.sleep(0.15)
+
+        logger.info(
+            "NHI signin enrichment for org %s: %d enriched, %d still never_used (of %d)",
+            db_org_id, enriched, skipped, len(identities),
+        )
+
+    except Exception as e:
+        logger.warning("NHI signin enrichment failed (non-blocking): %s", e)
 
 
 def _run_agent_orphan_detection(current_run_id, db_org_id, db):

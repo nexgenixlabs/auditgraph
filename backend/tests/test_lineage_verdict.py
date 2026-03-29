@@ -78,6 +78,13 @@ def _make_identity(**overrides):
         'workload_risk_flags': [],
     }
     base.update(overrides)
+    # Synthesize 'roles' list from role_count if roles not explicitly provided
+    # _assemble_lineage_verdict computes has_roles from identity.get('roles', []),
+    # not from role_count. Ensure tests with role_count > 0 have actual roles.
+    rc = base.get('role_count', 0)
+    if rc > 0 and 'roles' not in overrides:
+        base['roles'] = [{'role_name': f'Role-{i}', 'scope': f'/subscriptions/sub-{i}'}
+                         for i in range(rc)]
     return base
 
 

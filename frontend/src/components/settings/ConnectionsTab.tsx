@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { maskCredential } from '../../utils/maskCredential';
 import { DiscoveryProgressModal } from './DiscoveryProgressModal';
 import type {
@@ -59,6 +59,95 @@ export interface ConnectionsTabProps {
   setError: (v: string | null) => void;
   setSuccess: (v: string | null) => void;
   cloudSectionRef: React.RefObject<HTMLDivElement | null>;
+}
+
+interface AKSCluster {
+  id: number;
+  cluster_name: string;
+  resource_group: string;
+  layer2_scan_enabled: boolean;
+}
+
+function AKSDeepScanSection({ isAdmin, setError, setSuccess }: {
+  isAdmin: boolean;
+  setError: (v: string | null) => void;
+  setSuccess: (v: string | null) => void;
+}) {
+  const [clusters, setClusters] = useState<AKSCluster[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [toggling, setToggling] = useState<number | null>(null);
+
+  const fetchClusters = useCallback(async () => {
+    try {
+      const res = await fetch('/api/aks-clusters');
+      if (res.ok) {
+        const data = await res.json();
+        setClusters(data.clusters || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchClusters(); }, [fetchClusters]);
+
+  if (clusters.length === 0) return null;
+
+  const handleToggle = async (clusterId: number, enabled: boolean) => {
+    setToggling(clusterId);
+    try {
+      const res = await fetch(`/api/aks-clusters/${clusterId}/layer2`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        setSuccess(`Deep scan ${enabled ? 'enabled' : 'disabled'} — activates on next discovery run`);
+        fetchClusters();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Failed to toggle deep scan');
+      }
+    } catch { setError('Failed to toggle deep scan'); }
+    setToggling(null);
+  };
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm p-6">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-blue-600 transition w-full"
+      >
+        <span className={`transition-transform ${expanded ? 'rotate-90' : ''}`}>&#9654;</span>
+        AKS Deep Scan
+        <span className="text-xs text-gray-400 ml-1">({clusters.length} cluster{clusters.length !== 1 ? 's' : ''})</span>
+      </button>
+      {expanded && (
+        <div className="mt-3 space-y-2">
+          <p className="text-xs text-gray-500">Kubernetes API access required. Reads ClusterRoleBindings only.</p>
+          {clusters.map(c => (
+            <div key={c.id} className="flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50">
+              <div>
+                <span className="text-sm font-medium text-gray-800">{c.cluster_name}</span>
+                <span className="text-xs text-gray-400 ml-2">{c.resource_group}</span>
+              </div>
+              {isAdmin && (
+                <button
+                  onClick={() => handleToggle(c.id, !c.layer2_scan_enabled)}
+                  disabled={toggling === c.id}
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition ${
+                    c.layer2_scan_enabled
+                      ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                      : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                  } ${toggling === c.id ? 'opacity-50' : ''}`}
+                >
+                  {c.layer2_scan_enabled ? 'Deep Scan ON' : 'Deep Scan OFF'}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ConnectionsTab({
@@ -1026,6 +1115,8 @@ export function ConnectionsTab({
               </p>
             </div>
           </div>
+          {/* Section 4: AKS Deep Scan (Layer 2) */}
+          <AKSDeepScanSection isAdmin={isAdmin} setError={setError} setSuccess={setSuccess} />
       {/* Discovery Progress Modal */}
       {modalConnId && modalConn && (
         <DiscoveryProgressModal

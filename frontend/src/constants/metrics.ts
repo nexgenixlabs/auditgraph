@@ -211,7 +211,7 @@ export const THRESHOLDS = {
 
 // ── Activity / Dormancy ──────────────────────────────────────────────
 
-export type DormantStatus = 'yes' | 'idle' | 'never' | 'new' | 'no' | 'unknown';
+export type DormantStatus = 'yes' | 'idle' | 'never' | 'new' | 'no' | 'likely_active' | 'unknown';
 
 export function getDormantStatus(activityStatus?: string): DormantStatus {
   const act = safeLower(activityStatus);
@@ -220,6 +220,7 @@ export function getDormantStatus(activityStatus?: string): DormantStatus {
   if (act === 'inactive') return 'idle';
   if (act === 'recently_created') return 'new';
   if (act === 'active') return 'no';
+  if (act === 'likely_active') return 'likely_active';
   return 'unknown';
 }
 
@@ -229,6 +230,7 @@ export const DORMANT_LABELS: Record<DormantStatus, { label: string; color: strin
   never:   { label: 'Never Used',                                                                    color: 'bg-red-100 text-red-800',   tooltip: 'Created 30+ days ago with no recorded sign-in' },
   new:     { label: 'New',                                                                           color: 'bg-blue-100 text-blue-700', tooltip: 'Created within the last 30 days' },
   no:      { label: 'Active',                                                                        color: 'bg-green-100 text-green-700', tooltip: 'Sign-in activity within the last 30 days' },
+  likely_active: { label: 'Likely Active', color: 'bg-purple-100 text-purple-700', tooltip: 'Azure does not emit sign-in logs for federated identities (GitHub, AKS, Terraform). Activity is inferred based on configuration and role usage.' },
   unknown: { label: 'Unknown',                                                                       color: 'bg-gray-100 text-gray-500', tooltip: 'No sign-in data — requires Azure AD Premium P1/P2 license' },
 };
 
@@ -352,6 +354,37 @@ export const LIFECYCLE_BAR_COLORS: Record<string, string> = {
 export const COMPONENT_MAX: Record<string, number> = {
   privilege: 40, credential_risk: 25, exposure: 20, lifecycle: 10, visibility: 5,
 };
+
+// ── Compute / Container Resource Types (SSOT — mirrors backend constants.py) ──
+
+export const COMPUTE_RESOURCE_TYPES = {
+  APP_SERVICE: 'app_service',
+  FUNCTION: 'function_app',
+  VIRTUAL_MACHINE: 'virtual_machine',
+  LOGIC_APP: 'logic_app',
+} as const;
+
+export const CONTAINER_RESOURCE_TYPES = {
+  AKS_CLUSTER: 'aks_cluster',
+  ACR_REGISTRY: 'acr_registry',
+} as const;
+
+export const DATABASE_SERVER_TYPES = {
+  AZURE_SQL: 'azure_sql',
+  POSTGRESQL: 'postgresql',
+  MYSQL: 'mysql',
+  COSMOSDB: 'cosmosdb',
+} as const;
+
+export const IDENTITY_PLANE_OPTIONS: { value: string; label: string }[] = [
+  { value: COMPUTE_RESOURCE_TYPES.APP_SERVICE, label: 'App Service' },
+  { value: COMPUTE_RESOURCE_TYPES.FUNCTION, label: 'Function App' },
+  { value: COMPUTE_RESOURCE_TYPES.VIRTUAL_MACHINE, label: 'VM' },
+  { value: COMPUTE_RESOURCE_TYPES.LOGIC_APP, label: 'Logic App' },
+  { value: CONTAINER_RESOURCE_TYPES.AKS_CLUSTER, label: 'AKS Cluster' },
+  { value: CONTAINER_RESOURCE_TYPES.ACR_REGISTRY, label: 'ACR Registry' },
+  { value: 'db_admin', label: 'DB Admin' },
+];
 
 // ── Workload Identity Type Config ────────────────────────────────────
 

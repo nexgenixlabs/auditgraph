@@ -25,7 +25,7 @@ import {
   PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, EFFECTIVE_SCOPE_ORDER, CREDENTIAL_HEALTH_CONFIG,
   SCOPE_LABELS, CATEGORY_LABELS_MULTI, IDENTITY_CATEGORIES,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
-  getCategoriesForClouds,
+  getCategoriesForClouds, IDENTITY_PLANE_OPTIONS,
 } from '../constants/metrics';
 
 interface IdentityRow {
@@ -387,6 +387,8 @@ export default function IdentitiesPage() {
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
+  // Identity Plane filter (Phase 2A: compute resource type association)
+  const [identityPlaneFilter, setIdentityPlaneFilter] = useState<string[]>([]);
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // AI Agent Governance filter state (additive, gated by feature flag)
@@ -1238,6 +1240,12 @@ export default function IdentitiesPage() {
       result = result.filter(i => i.identity_category === categoryFilter);
     }
     if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
+    if (identityPlaneFilter.length > 0) {
+      result = result.filter(i => {
+        const wt = safeLower(i.workload_type);
+        return identityPlaneFilter.some(f => wt.includes(f));
+      });
+    }
     if (multiSubscriptionFilter.length > 0) {
       result = result.filter(i => multiSubscriptionFilter.includes(i.subscription_id || '') || multiSubscriptionFilter.includes(i.primary_subscription_id || ''));
     } else if (subscriptionFilter !== 'all') {
@@ -1845,6 +1853,14 @@ export default function IdentitiesPage() {
             label="Group"
             placeholder="Search groups…"
           />
+          <MultiSelectFilter
+            options={IDENTITY_PLANE_OPTIONS}
+            selected={identityPlaneFilter}
+            onChange={(vals) => { setIdentityPlaneFilter(vals); clearActiveView(); }}
+            label="Identity Plane"
+            placeholder="Resource type…"
+            searchable={false}
+          />
           <div className="flex items-center gap-2">
             <MultiSelectFilter
               options={[
@@ -1864,7 +1880,7 @@ export default function IdentitiesPage() {
               setWorkloadFilter(false); setSubscriptionFilter('all'); setMultiSubscriptionFilter([]);
               setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all');
               setCaFilter('all'); setGroupFilter('all'); setMultiGroupFilter([]); setStatusFilter('all'); setMultiStatusFilter([]);
-              setHasRolesFilter(false); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true });
+              setHasRolesFilter(false); setIdentityPlaneFilter([]); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true });
             }}
               className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 whitespace-nowrap">
               Clear

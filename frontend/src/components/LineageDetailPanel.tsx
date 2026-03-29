@@ -83,12 +83,14 @@ interface LineageResponse {
 // ── Verdict badge config ─────────────────────────────────────────────────────
 
 const VERDICT_BADGE: Record<string, { label: string; cls: string; icon: string }> = {
-  ORPHANED:     { label: 'Orphaned',     cls: 'bg-red-100 text-red-700',     icon: '\u26a0\ufe0f' },
-  AT_RISK:      { label: 'At Risk',      cls: 'bg-amber-100 text-amber-700', icon: '\u26a0' },
-  STALE:        { label: 'Stale',        cls: 'bg-amber-100 text-amber-700', icon: '\u23f3' },
-  UNUSED:       { label: 'Unused',       cls: 'bg-gray-100 text-gray-600',   icon: '\u2013' },
-  NEEDS_REVIEW: { label: 'Needs Review', cls: 'bg-blue-100 text-blue-700',   icon: '\ud83d\udd0d' },
-  HEALTHY:      { label: 'Healthy',      cls: 'bg-green-100 text-green-700', icon: '\u2713' },
+  ORPHANED:                { label: 'Orphaned',                cls: 'bg-red-100 text-red-700',       icon: '\u26a0\ufe0f' },
+  GHOST_MSI:               { label: 'Ghost MSI',               cls: 'bg-purple-100 text-purple-700', icon: '\ud83d\udc7b' },
+  FEDERATED_MISCONFIGURED: { label: 'Federated Misconfigured', cls: 'bg-orange-100 text-orange-700', icon: '\ud83d\udd17' },
+  AT_RISK:                 { label: 'At Risk',                 cls: 'bg-amber-100 text-amber-700',   icon: '\u26a0' },
+  STALE:                   { label: 'Stale',                   cls: 'bg-amber-100 text-amber-700',   icon: '\u23f3' },
+  UNUSED:                  { label: 'Unused',                  cls: 'bg-gray-100 text-gray-600',     icon: '\u2013' },
+  NEEDS_REVIEW:            { label: 'Needs Review',            cls: 'bg-blue-100 text-blue-700',     icon: '\ud83d\udd0d' },
+  HEALTHY:                 { label: 'Healthy',                 cls: 'bg-green-100 text-green-700',   icon: '\u2713' },
 };
 
 const CONFIDENCE_DOT: Record<string, string> = {

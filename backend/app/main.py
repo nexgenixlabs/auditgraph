@@ -532,6 +532,28 @@ from app.api.handlers import (
     revoke_invitation_handler,
     validate_invitation_handler,
     accept_invitation_handler,
+    # Phase 2A: Entra Group Scanner
+    get_entra_groups,
+    get_entra_group_stats,
+    get_identity_entra_groups,
+    # Phase 2A: Resource Identity Links
+    get_resource_identity_links,
+    get_resource_identity_links_stats,
+    # Lineage Verdicts
+    get_identity_verdict_history,
+    get_dashboard_verdict_changes,
+    # Phase 2A: Compute Identity Plane
+    get_compute_resources,
+    get_compute_resource_detail,
+    get_compute_identity_risk,
+    get_identity_compute_findings,
+    # Phase 2B: AKS / ACR Container
+    get_aks_clusters,
+    get_dashboard_container_risk,
+    toggle_layer2_scan,
+    # Phase 3A: Data Plane Identities
+    get_database_servers,
+    get_database_server_detail,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -916,6 +938,14 @@ def create_app():
             ('azure_key_vaults', lambda: _db_init._ensure_azure_key_vaults_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
             ('agent_classifications', lambda: _db_init._ensure_agent_classifications_table()),
+            ('entra_groups', lambda: _db_init._ensure_entra_group_tables()),
+            ('associated_resource_columns', lambda: _db_init.ensure_associated_resource_columns()),
+            ('resource_identity_links', lambda: _db_init._ensure_resource_identity_links_table()),
+            ('lineage_verdicts', lambda: _db_init._ensure_lineage_verdicts_table()),
+            ('role_assignment_group_cols', lambda: _db_init._ensure_role_assignment_group_cols()),
+            ('compute_tables', lambda: _db_init._ensure_compute_tables()),
+            ('container_tables', lambda: _db_init._ensure_container_tables()),
+            ('database_tables', lambda: _db_init._ensure_database_tables()),
         ]
 
         for label, op in _startup_ops:
@@ -2716,6 +2746,32 @@ def create_app():
     def spn_detail(identity_id):
         return get_spn_detail(identity_id)
 
+    # -----------------------
+    # Phase 2A: Entra Group Scanner
+    # -----------------------
+    @app.get("/api/entra-groups/stats")
+    def entra_groups_stats():
+        return get_entra_group_stats()
+
+    @app.get("/api/entra-groups")
+    def entra_groups_list():
+        return get_entra_groups()
+
+    @app.get("/api/identities/<identity_id>/entra-groups")
+    def identity_entra_groups(identity_id):
+        return get_identity_entra_groups(identity_id)
+
+    # -----------------------
+    # Phase 2A: Resource Identity Links
+    # -----------------------
+    @app.get("/api/resource-identity-links")
+    def resource_identity_links_list():
+        return get_resource_identity_links()
+
+    @app.get("/api/resource-identity-links/stats")
+    def resource_identity_links_stats():
+        return get_resource_identity_links_stats()
+
     # Unified lineage endpoint — single source of truth for all identity lineage data
     @app.get("/api/identities/<identity_id>/lineage")
     def identity_lineage(identity_id):
@@ -2725,6 +2781,54 @@ def create_app():
     @app.get("/api/spn/<path:spn_id>/lineage")
     def spn_lineage(spn_id):
         return get_spn_lineage(spn_id)
+
+    # Lineage Verdicts — historical verdict tracking
+    @app.get("/api/identities/<identity_id>/verdict-history")
+    def identity_verdict_history(identity_id):
+        return get_identity_verdict_history(identity_id)
+
+    @app.get("/api/dashboard/verdict-changes")
+    def dashboard_verdict_changes():
+        return get_dashboard_verdict_changes()
+
+    # Phase 2A: Compute Identity Plane
+    @app.get("/api/compute-resources")
+    def compute_resources_list():
+        return get_compute_resources()
+
+    @app.get("/api/compute-resources/<int:resource_id>")
+    def compute_resource_detail(resource_id):
+        return get_compute_resource_detail(resource_id)
+
+    @app.get("/api/dashboard/compute-risk")
+    def dashboard_compute_risk():
+        return get_compute_identity_risk()
+
+    @app.get("/api/identities/<identity_id>/compute-findings")
+    def identity_compute_findings(identity_id):
+        return get_identity_compute_findings(identity_id)
+
+    # Phase 2B: AKS / ACR Container
+    @app.get("/api/aks-clusters")
+    def aks_cluster_list():
+        return get_aks_clusters()
+
+    @app.get("/api/dashboard/container-risk")
+    def dashboard_container_risk():
+        return get_dashboard_container_risk()
+
+    @app.post("/api/aks-clusters/<int:cluster_id>/layer2")
+    def aks_layer2_toggle(cluster_id):
+        return toggle_layer2_scan(cluster_id)
+
+    # Phase 3A: Data Plane Identities — Database Servers
+    @app.get("/api/database-servers")
+    def database_server_list():
+        return get_database_servers()
+
+    @app.get("/api/database-servers/<int:server_id>")
+    def database_server_detail(server_id):
+        return get_database_server_detail(server_id)
 
     # Phase 74: App Registration Audit
     @app.get("/api/app-registrations/stats")

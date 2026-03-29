@@ -102,6 +102,18 @@ export interface IdentityDetailsResponse {
     ca_coverage_status?: string | null;
     ca_mfa_enforced?: boolean;
     removable_role_count?: number;
+    group_count?: number;
+    privileged_groups?: { group_name: string; group_type: string; inherited_role_count: number; highest_scope: string }[];
+    resource_context?: {
+      resource_id: string;
+      resource_type: string;
+      resource_name: string;
+      resource_group: string | null;
+      subscription_id: string | null;
+      state?: string | null;
+      jit_enabled?: boolean | null;
+      env_secret_count?: number;
+    } | null;
   };
   roles: any[];
   graph_permissions: any[];

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -41,6 +41,51 @@ export interface CorrelatedAccountsData {
   human_identity: { id: number; display_name: string } | null;
   accounts: CorrelatedAccount[];
   zombie_persona: boolean;
+}
+
+// ── Compute Findings inline component (FIX 5) ──
+const FINDING_SEVERITY: Record<string, { cls: string; label: string }> = {
+  CRITICAL: { cls: 'bg-red-100 text-red-700', label: 'Critical' },
+  HIGH:     { cls: 'bg-orange-100 text-orange-700', label: 'High' },
+  MEDIUM:   { cls: 'bg-yellow-100 text-yellow-700', label: 'Medium' },
+  LOW:      { cls: 'bg-blue-100 text-blue-700', label: 'Low' },
+};
+
+function ComputeFindings({ identityId }: { identityId: string }) {
+  const [findings, setFindings] = useState<any[]>([]);
+  useEffect(() => {
+    if (!identityId) return;
+    fetch(`/api/identities/${identityId}/compute-findings`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.findings?.length) setFindings(d.findings); })
+      .catch(() => {});
+  }, [identityId]);
+
+  if (!findings.length) return null;
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+      <div className="text-sm font-semibold text-amber-900 mb-2 flex items-center gap-2">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+        </svg>
+        Compute Findings ({findings.length})
+      </div>
+      <div className="space-y-2">
+        {findings.map((f: any, i: number) => {
+          const sev = FINDING_SEVERITY[f.severity] || FINDING_SEVERITY.MEDIUM;
+          return (
+            <div key={i} className="flex items-start gap-2 text-sm">
+              <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sev.cls} shrink-0`}>
+                {sev.label}
+              </span>
+              <span className="text-gray-800">{f.title}</span>
+              {!!f.resource && <span className="text-gray-400 text-xs ml-auto shrink-0">{f.resource}</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export interface OverviewTabProps {
@@ -159,20 +204,12 @@ export default function OverviewTab({
               : identity.effective_last_used_source;
 
             const hasEffective = !!effectiveLastUsed;
-
-            // Debug logging
-            console.log('LAST_USED_DEBUG_UI', {
-              effectiveLastUsed,
-              effectiveLastUsedSource,
-              isConnector,
-              activity_status: identity.activity_status,
-              raw_effective: identity.effective_last_used,
-              raw_source: identity.effective_last_used_source,
-            });
+            const isFederatedInferred = effectiveLastUsedSource === 'inferred_federated';
 
             // Override dormant status when effective_last_used exists OR connector
             let dormant = getDormantStatus(identity.activity_status || undefined);
-            if (hasEffective || isConnector) dormant = 'no'; // Force "Active"
+            if (isConnector || (hasEffective && !isFederatedInferred)) dormant = 'no';
+            if (isFederatedInferred) dormant = 'likely_active';
             const dcfg = DORMANT_LABELS[dormant];
 
             // Compute relative time label
@@ -181,40 +218,46 @@ export default function OverviewTab({
             if (isConnector) {
               lastUsedLabel = 'Actively used by AuditGraph';
               sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>;
+            } else if (isFederatedInferred) {
+              // Rule 2: Federated identities — never show "Never Used"
+              const fedType = (identity as any).federated_workload_type || '';
+              const fedLabel = fedType === 'github_actions' ? 'GitHub Actions'
+                : fedType === 'aks' ? 'AKS'
+                : fedType === 'terraform' ? 'Terraform'
+                : 'federated workload';
+              lastUsedLabel = `No Azure logs \u2014 inferred from ${fedLabel}`;
+              sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">Inferred</span>;
             } else if (hasEffective) {
-              if (effectiveLastUsedSource === 'inferred_federated') {
-                // Federated identities: no Azure sign-in logs, infer from existence
-                const fedType = (identity as any).federated_workload_type || '';
-                const fedLabel = fedType === 'github_actions' ? 'GitHub Actions'
-                  : fedType === 'aks' ? 'AKS'
-                  : fedType === 'terraform' ? 'Terraform'
-                  : 'federated credentials';
-                lastUsedLabel = `Likely active (${fedLabel})`;
-                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">Inferred</span>;
-              } else {
-                const d = new Date(effectiveLastUsed!);
-                const now = new Date();
-                const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
-                if (diffDays === 0) lastUsedLabel = 'Last used: Today';
-                else if (diffDays === 1) lastUsedLabel = 'Last used: Yesterday';
-                else lastUsedLabel = `Last used: ${diffDays}d ago`;
+              const d = new Date(effectiveLastUsed!);
+              const now = new Date();
+              const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+              if (diffDays === 0) lastUsedLabel = 'Last used: Today';
+              else if (diffDays === 1) lastUsedLabel = 'Last used: Yesterday';
+              else lastUsedLabel = `Last used: ${diffDays}d ago`;
 
-                sourceBadge = effectiveLastUsedSource === 'auditgraph'
-                  ? <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
-                  : <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>;
-              }
+              sourceBadge = effectiveLastUsedSource === 'auditgraph'
+                ? <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
+                : <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>;
             } else {
               lastUsedLabel = 'No activity observed';
             }
 
             return (
-              <div className="border rounded-xl p-4" title={dcfg.tooltip}>
+              <div className="border rounded-xl p-4 relative group" title={dcfg.tooltip}>
                 <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
                 <span className={`px-2 py-1 rounded-full text-xs font-semibold ${dcfg.color}`}>{dcfg.label}</span>
                 <div className="text-[10px] text-gray-500 mt-2 flex items-center">
                   {lastUsedLabel}
                   {sourceBadge}
                 </div>
+                {/* Rule 3: Explanation tooltip for federated identities */}
+                {isFederatedInferred && (
+                  <div className="absolute left-0 bottom-full mb-2 w-64 bg-gray-900 text-white text-[10px] rounded-lg p-3 hidden group-hover:block z-50 shadow-lg pointer-events-none">
+                    Azure does not emit sign-in logs for federated identities (GitHub, AKS, Terraform).
+                    Activity is inferred based on configuration and role usage.
+                    <div className="mt-1 text-gray-300">Confidence: Medium</div>
+                  </div>
+                )}
               </div>
             );
           })()}
@@ -293,6 +336,56 @@ export default function OverviewTab({
           </div>
         </div>
       </div>
+
+      {/* Rule 4: Activity Source panel — shows data source hierarchy */}
+      {!!(identity as any).activity_sources && (
+        <div className="border border-gray-200 rounded-xl p-4">
+          <div className="text-sm font-semibold text-gray-900 mb-2">Activity Source</div>
+          <div className="space-y-1.5">
+            {((identity as any).activity_sources as Array<{ type: string; label: string; available: boolean; detail?: string }>).map((src) => (
+              <div key={src.type} className="flex items-center gap-2 text-xs">
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${src.available ? 'bg-green-500' : 'bg-gray-300'}`} />
+                <span className={src.available ? 'text-gray-800' : 'text-gray-400'}>{src.label}</span>
+                {src.available && <span className="text-[10px] text-green-600 font-medium">Available</span>}
+                {!src.available && <span className="text-[10px] text-gray-400">Not available</span>}
+                {!!src.detail && <span className="text-[10px] text-purple-600 ml-1">— {src.detail}</span>}
+              </div>
+            ))}
+          </div>
+          {!!(identity as any).federated_workload_type && (
+            <div className="mt-3 p-2 bg-purple-50 border border-purple-100 rounded-lg text-[10px] text-purple-700">
+              Azure does not emit sign-in logs for federated identities (GitHub, AKS, Terraform).
+              Activity is inferred based on configuration and role usage.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Rule 6: Active Access hints for federated identities */}
+      {!!((identity as any).federated_active_access as Array<{ role: string; scope: string; scope_type: string }> | undefined)?.length && (
+        <div className="border border-purple-200 rounded-xl p-4 bg-purple-50/30">
+          <div className="text-sm font-semibold text-gray-900 mb-2">Active Access</div>
+          <div className="text-[10px] text-gray-500 mb-2">
+            Has active role assignments — implies usage even without sign-in logs
+          </div>
+          <div className="space-y-1">
+            {((identity as any).federated_active_access as Array<{ role: string; scope: string; scope_type: string }>).slice(0, 5).map((a, idx) => {
+              const scopeShort = a.scope?.split('/').filter(Boolean).slice(-2).join('/') || a.scope;
+              return (
+                <div key={idx} className="flex items-center gap-2 text-xs">
+                  <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-medium">{a.role}</span>
+                  <span className="text-gray-400">{'\u2192'}</span>
+                  <span className="text-gray-600 truncate" title={a.scope}>{scopeShort}</span>
+                  <span className="text-[9px] text-gray-400">({a.scope_type})</span>
+                </div>
+              );
+            })}
+            {((identity as any).federated_active_access as Array<unknown>).length > 5 && (
+              <div className="text-[10px] text-gray-400">+ {((identity as any).federated_active_access as Array<unknown>).length - 5} more</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Risk Score Trajectory */}
       {riskHistory.length >= 2 && (
@@ -441,6 +534,98 @@ export default function OverviewTab({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Hosted On — SAMI resource context */}
+      {!!identity.resource_context && !!identity.resource_context.resource_id && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+          <div className="text-sm font-semibold text-blue-900 mb-2 flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+            </svg>
+            Hosted On
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+            <div>
+              <div className="text-xs text-blue-600 font-medium">Resource</div>
+              <div className="text-gray-900 font-mono text-xs mt-0.5 truncate" title={identity.resource_context.resource_name || ''}>
+                {identity.resource_context.resource_name || 'Unknown'}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-blue-600 font-medium">Type</div>
+              <div className="text-gray-900 text-xs mt-0.5 truncate" title={identity.resource_context.resource_type || ''}>
+                {(identity.resource_context.resource_type || '').split('/').pop()}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-blue-600 font-medium">Resource Group</div>
+              <div className="text-gray-900 text-xs mt-0.5 truncate" title={identity.resource_context.resource_group || ''}>
+                {identity.resource_context.resource_group || 'N/A'}
+              </div>
+            </div>
+          </div>
+          {/* Compute context badges */}
+          {(identity.resource_context.state || identity.resource_context.jit_enabled !== undefined || (identity.resource_context.env_secret_count ?? 0) > 0) && (
+            <div className="flex gap-2 mt-2 flex-wrap">
+              {!!identity.resource_context.state && (
+                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                  identity.resource_context.state === 'running' ? 'bg-green-100 text-green-700' :
+                  identity.resource_context.state === 'stopped' || identity.resource_context.state === 'deallocated' ? 'bg-gray-100 text-gray-600' :
+                  'bg-blue-100 text-blue-700'
+                }`}>
+                  {identity.resource_context.state}
+                </span>
+              )}
+              {identity.resource_context.jit_enabled === true && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+                  JIT Enabled
+                </span>
+              )}
+              {identity.resource_context.jit_enabled === false && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700">
+                  No JIT
+                </span>
+              )}
+              {(identity.resource_context.env_secret_count ?? 0) > 0 && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                  {identity.resource_context.env_secret_count} Env Secret{(identity.resource_context.env_secret_count ?? 0) > 1 ? 's' : ''} Exposed
+                </span>
+              )}
+            </div>
+          )}
+          <div className="text-xs text-blue-500 mt-2 font-mono truncate" title={identity.resource_context.resource_id}>
+            {identity.resource_context.resource_id}
+          </div>
+        </div>
+      )}
+
+      {/* Compute findings (FIX 5) */}
+      <ComputeFindings identityId={identity.identity_id} />
+
+      {/* Database Admin context (Phase 3A) */}
+      {!!data && !!(data as any).database_admin_context && (data as any).database_admin_context.length > 0 && (
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Database Admin</h3>
+          <div className="space-y-2">
+            {((data as any).database_admin_context as Array<{server_name:string; server_type:string; risk_level:string; mixed_auth_enabled:boolean; has_open_firewall:boolean}>).map((srv, i) => (
+              <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50">
+                <div>
+                  <span className="text-sm font-medium text-gray-800">{srv.server_name}</span>
+                  <span className="text-xs text-gray-400 ml-2">{srv.server_type}</span>
+                </div>
+                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                  srv.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                  srv.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                  'bg-green-100 text-green-700'
+                }`}>
+                  {srv.risk_level === 'critical' ? 'Mixed Auth + Open FW' :
+                   srv.risk_level === 'high' ? 'Mixed Auth' : 'AAD-Only'}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

@@ -52,7 +52,7 @@ Dependencies:
 import os
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,7 @@ from azure.keyvault.secrets import SecretClient
 from azure.keyvault.keys import KeyClient
 from azure.keyvault.certificates import CertificateClient
 from app.database import Database
+from app.constants import Verdict, IdentityCategory
 from .models import DiscoveryResult
 import json
 
@@ -152,10 +153,26 @@ class AzureDiscoveryEngine:
 
         # Auto-discover all accessible subscriptions, partitioned by tenant
         all_subs = self._discover_subscriptions()
-        self.subscriptions = [s for s in all_subs if s.get('tenant_id') == self.azure_directory_id]
+        native_subs = [s for s in all_subs if s.get('tenant_id') == self.azure_directory_id]
         self.foreign_subscriptions = [s for s in all_subs if s.get('tenant_id') != self.azure_directory_id]
         if self.foreign_subscriptions:
             logger.info("Found %s subscription(s) from other tenants", len(self.foreign_subscriptions))
+
+        # Filter to only ACTIVATED (monitored) subscriptions — the user chose which
+        # subscriptions to scan in the UI.  If no cloud_subscriptions rows exist yet
+        # (very first connection, before any sync), scan all native subscriptions so
+        # the initial sync can populate the registry.
+        monitored_ids = self._get_monitored_subscription_ids()
+        if monitored_ids is not None:
+            before = len(native_subs)
+            self.subscriptions = [s for s in native_subs if s['id'] in monitored_ids]
+            skipped = before - len(self.subscriptions)
+            if skipped:
+                logger.info("Filtered to %s activated subscription(s), skipping %s inactive", len(self.subscriptions), skipped)
+        else:
+            # No cloud_subscriptions rows yet — scan everything for initial sync
+            self.subscriptions = native_subs
+
         sub_names = [f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions]
         logger.info("Discovery Engine initialized for %s subscription(s): %s", len(self.subscriptions), ', '.join(sub_names) or 'none')
 
@@ -164,24 +181,102 @@ class AzureDiscoveryEngine:
         self._resource_spn_cache: Dict[str, Dict[str, str]] = {}
 
     def _update_job_progress(self, stage, progress, discovery_run_id=None):
-        """Report progress to snapshot_jobs. Non-fatal on failure."""
+        """Report progress to snapshot_jobs. Non-fatal on failure.
+
+        Uses _commit()/_rollback() to preserve RLS context after
+        transaction boundary changes.
+        """
         job_id = getattr(self, 'snapshot_job_id', None)
         if not job_id:
             return
         try:
-            self.db.update_snapshot_job_progress(job_id, stage, progress, discovery_run_id)
+            cursor = self.db.conn.cursor()
+            try:
+                if discovery_run_id is not None:
+                    cursor.execute("""
+                        UPDATE snapshot_jobs
+                        SET stage = %s, progress = %s, discovery_run_id = %s,
+                            last_heartbeat_at = NOW()
+                        WHERE id = %s AND status = 'running'
+                    """, (stage, progress, discovery_run_id, job_id))
+                else:
+                    cursor.execute("""
+                        UPDATE snapshot_jobs
+                        SET stage = %s, progress = %s, last_heartbeat_at = NOW()
+                        WHERE id = %s AND status = 'running'
+                    """, (stage, progress, job_id))
+                self.db._commit()
+            except Exception as e:
+                logger.warning("Job progress update failed: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+            finally:
+                cursor.close()
         except Exception as e:
-            logger.warning("Job progress update failed: %s", e)
+            logger.warning("Job progress update failed (outer): %s", e)
 
     def _update_job_metrics(self, identities=0, resources=0, subscriptions=0):
-        """Update discovered counts on snapshot job. Non-fatal on failure."""
+        """Update discovered counts on snapshot job. Non-fatal on failure.
+
+        Inline UPDATE instead of delegating to db.update_snapshot_job_metrics()
+        which does its own _commit() that would conflict with caller's
+        transaction management.
+        """
         job_id = getattr(self, 'snapshot_job_id', None)
         if not job_id:
             return
         try:
-            self.db.update_snapshot_job_metrics(job_id, identities, resources, subscriptions)
+            cursor = self.db.conn.cursor()
+            try:
+                cursor.execute("""
+                    UPDATE snapshot_jobs
+                    SET identities_discovered = %s,
+                        resources_discovered = %s,
+                        subscriptions_discovered = %s,
+                        duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::integer
+                    WHERE id = %s
+                """, (identities, resources, subscriptions, job_id))
+                self.db._commit()
+            except Exception as e:
+                logger.warning("Job metrics update failed: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+            finally:
+                cursor.close()
         except Exception:
             pass
+
+    def _get_monitored_subscription_ids(self) -> Optional[Set[str]]:
+        """Query cloud_subscriptions for activated (monitored=true) subscription IDs.
+
+        Returns:
+            Set of subscription IDs that are monitored, or None if no
+            cloud_subscriptions rows exist yet for this connection (first run).
+        """
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                SELECT account_id, monitored FROM cloud_subscriptions
+                WHERE cloud_connection_id = %s AND deleted = false
+            """, (self.cloud_connection_id,))
+            rows = cursor.fetchall()
+            cursor.close()
+            if not rows:
+                return None  # no rows yet — first connection, scan all
+            monitored = set()
+            for r in rows:
+                aid = r[0] if not isinstance(r, dict) else r.get('account_id')
+                mon = r[1] if not isinstance(r, dict) else r.get('monitored')
+                if mon:
+                    monitored.add(aid)
+            return monitored
+        except Exception as e:
+            logger.warning("Failed to query monitored subscriptions: %s", e)
+            return None  # fail-open: scan all
 
     def _discover_subscriptions(self) -> List[Dict[str, str]]:
         """Auto-discover all Azure subscriptions accessible to the service principal.
@@ -311,6 +406,14 @@ class AzureDiscoveryEngine:
         ca_policies = await self._discover_conditional_access()
         self._update_job_progress('discovering_identities', 35)
 
+        # Step 3.11: Module 3 — Audit Provenance (creation/modification history)
+        logger.info("Discovering audit provenance (M3)...")
+        await self._discover_audit_provenance(service_principals)
+
+        # Step 3.12: Module 5 — Owned Objects Scanner
+        logger.info("Discovering owned objects (M5)...")
+        await self._discover_owned_objects(service_principals)
+
         # Step 4: Discover ALL users in the tenant
         logger.info("Discovering Users...")
         users = await self._discover_users(all_principal_ids)
@@ -323,7 +426,44 @@ class AzureDiscoveryEngine:
         logger.info("Found %s user-assigned managed identities", len(managed_identities))
         
         all_identities = service_principals + users + managed_identities
-        
+
+        # Step 5a: Discover Entra Groups
+        logger.info("Discovering Entra Groups...")
+        self._update_job_progress('discovering_groups', 42)
+        groups = await self._discover_groups()
+        logger.info("Found %s security groups", len(groups))
+
+        # Step 5b: Discover Group Memberships (nested up to 3 levels)
+        group_memberships = await self._discover_group_memberships(groups)
+        self._update_job_progress('discovering_groups', 44)
+
+        # Step 5c: Compute member/nested counts (rbac_roles populated at save time
+        # from the canonical role_assignments list to avoid JSONB drift — FIX A)
+        PRIVILEGED_ROLES = {
+            'Owner', 'Contributor', 'User Access Administrator',
+            'Role Based Access Control Administrator',
+            'Key Vault Administrator', 'Storage Account Contributor',
+        }
+        # Build group_id→roles index from the canonical ARM role_assignments list
+        group_id_set = {g['group_id'] for g in groups}
+        group_role_index: Dict[str, list] = {}
+        for ra in role_assignments:
+            pid = ra.get('principal_id')
+            if pid in group_id_set:
+                group_role_index.setdefault(pid, []).append(ra)
+
+        for group in groups:
+            grp_roles = group_role_index.get(group['group_id'], [])
+            group['rbac_roles'] = [
+                {'role_name': r['role_name'], 'scope': r.get('scope', ''), 'scope_type': r.get('scope_type', '')}
+                for r in grp_roles
+            ]
+            group['is_privileged'] = any(r['role_name'] in PRIVILEGED_ROLES for r in grp_roles)
+            members_list = group_memberships.get(group['group_id'], [])
+            group['member_count'] = len([m for m in members_list if m['depth'] == 0])
+            group['nested_group_count'] = len([m for m in members_list if m['member_type'] == 'group' and m['depth'] == 0])
+        logger.info("Privileged groups: %s", sum(1 for g in groups if g['is_privileged']))
+
         # Step 6: Calculate risks (enhanced points-based scoring)
         logger.info("Calculating Risk Levels...")
         self._update_job_progress('analyzing_risk', 48)
@@ -341,6 +481,10 @@ class AzureDiscoveryEngine:
         logger.info("Checking Last Activity...")
         self._update_job_progress('analyzing_risk', 56)
         final_identities = self._check_activity(identities_with_creds)
+
+        # Step 8.1: Module 4 — Sign-in Intelligence
+        logger.info("Discovering sign-in intelligence (M4)...")
+        await self._discover_signin_intelligence(final_identities)
 
         # Step 8.5: Infer workload type from role topology
         logger.info("Inferring workload types from role topology...")
@@ -379,6 +523,32 @@ class AzureDiscoveryEngine:
         logger.info("Saved %s identities", saved_count)
         self._identities_saved_count = saved_count
         self._update_job_metrics(identities=saved_count, subscriptions=len(self.subscriptions))
+
+        # Step 9.1: Save Entra Groups
+        logger.info("Saving Entra groups...")
+        try:
+            self._save_entra_groups(run_id, groups, group_memberships)
+        except Exception as e:
+            logger.error("Error saving Entra groups: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # Step 9.2: Expand group-held roles to individual members in role_assignments
+        try:
+            self._expand_group_roles_to_members(run_id, role_assignments, groups, group_memberships)
+        except Exception as e:
+            logger.error("Error expanding group roles to members: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # Step 9.5: Populate normalized lineage tables
+        # (identity_orphan_classifications, identity_lineage_scores, lineage_verdicts)
+        self._populate_lineage_tables(run_id, final_identities)
+
         self._update_job_progress('discovering_resources', 68)
 
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
@@ -460,6 +630,51 @@ class AzureDiscoveryEngine:
             logger.warning("Identity exposure enhancement error: %s", e)
             self.db._rollback()
 
+        # Step 9b-3: Compute Identity Plane (App Services, Functions, VMs, Logic Apps)
+        self._update_job_progress('discovering_compute', 75)
+        logger.info("Discovering Compute Identity Plane...")
+        try:
+            from app.engines.discovery.compute_scanner import ComputeScanner
+            compute_scanner = ComputeScanner(
+                self.credential, self.db, self.subscriptions, org_id_val,
+            )
+            compute_stats = compute_scanner.scan(run_id)
+            logger.info(
+                "Compute scan complete: %s resources, %s MSI linked, %s env secrets",
+                compute_stats.get('resources_found', 0),
+                compute_stats.get('msi_linked', 0),
+                compute_stats.get('env_secrets_found', 0),
+            )
+        except Exception as e:
+            logger.error("Compute identity plane error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # Step 9b-4: Container Identity Plane (AKS + ACR)
+        self._update_job_progress('discovering_containers', 78)
+        logger.info("Discovering Container Identity Plane...")
+        try:
+            from app.engines.discovery.container_scanner import ContainerScanner
+            container_scanner = ContainerScanner(
+                self.credential, self.db, self.subscriptions, org_id_val,
+            )
+            container_stats = container_scanner.scan(run_id)
+            logger.info(
+                "Container scan complete: %s AKS, %s fed creds (%s wildcard), %s ACR",
+                container_stats.get('aks_clusters_found', 0),
+                container_stats.get('federated_credentials', 0),
+                container_stats.get('wildcard_credentials', 0),
+                container_stats.get('acr_registries', 0),
+            )
+        except Exception as e:
+            logger.error("Container identity plane error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
         # Step 9c: Discover App Registrations
         self._update_job_progress('discovering_apps', 80)
         logger.info("Discovering App Registrations...")
@@ -489,6 +704,28 @@ class AzureDiscoveryEngine:
         except Exception as e:
             logger.error("App registration discovery error: %s", e, exc_info=True)
             self.db._rollback()
+
+        # Step 9b-5: Data Plane Identity Scanner (Azure SQL, PostgreSQL, MySQL, CosmosDB)
+        self._update_job_progress('discovering_databases', 84)
+        logger.info("Discovering Data Plane Identities...")
+        try:
+            from app.engines.discovery.database_scanner import DatabaseScanner
+            database_scanner = DatabaseScanner(
+                self.credential, self.db, self.subscriptions, org_id_val,
+            )
+            db_stats = database_scanner.scan(run_id)
+            logger.info(
+                "Database scan complete: %s servers (%s mixed auth, %s open firewall)",
+                db_stats.get('total_servers', 0),
+                db_stats.get('mixed_auth_count', 0),
+                db_stats.get('open_firewall_count', 0),
+            )
+        except Exception as e:
+            logger.error("Data plane identity scan error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
 
         # Step 9d: ARM Resource Graph — find resources referencing SPN appIds
         self._update_job_progress('scanning_resources', 88)
@@ -834,11 +1071,22 @@ class AzureDiscoveryEngine:
 
             async with aiohttp.ClientSession() as session:
                 page = 0
+                sign_in_available = True
                 while url:
                     page += 1
                     async with session.get(url, headers=headers) as resp:
                         if resp.status != 200:
                             body = await resp.text()
+                            # If signInActivity fails (403 / needs P2), retry page 1 without it
+                            if page == 1 and ('signInActivity' in body or resp.status == 403):
+                                logger.warning("SP signInActivity requires Entra ID P2 — retrying without it")
+                                sign_in_available = False
+                                select_no_sia = select_fields.replace(',signInActivity', '')
+                                url = (
+                                    f"https://graph.microsoft.com/v1.0/servicePrincipals"
+                                    f"?$select={select_no_sia}&$top=999"
+                                )
+                                continue
                             logger.error("Graph API error %s on SP page %s: %s", resp.status, page, body[:500])
                             break
                         data = await resp.json()
@@ -923,6 +1171,13 @@ class AzureDiscoveryEngine:
                                 identity_dict["identity_category"] = "managed_identity_system"
                                 identity_dict["identity_type"] = "managed_identity_system"
 
+                                # Parse ARM resource ID from alternativeNames for SAMI→Resource cross-link
+                                for alt in alt_names:
+                                    alt_str = str(alt)
+                                    if alt_str.startswith('/subscriptions/'):
+                                        self._parse_sami_resource(identity_dict, alt_str)
+                                        break
+
                             identity_dict["alternative_names"] = alt_names
                             identity_dict["is_microsoft_system"] = False
                             identities.append(identity_dict)
@@ -950,11 +1205,51 @@ class AzureDiscoveryEngine:
                             skipped_microsoft_count, sami_count, uami_count)
                 logger.info("Total: %s identities (%s customer, %s Microsoft)", len(identities), len(identities) - skipped_microsoft_count, skipped_microsoft_count)
 
-            logger.info("Discovered %s service principals across %s page(s)", len(identities), page)
+            logger.info("Discovered %s service principals across %s page(s) (signInActivity=%s)",
+                        len(identities), page, sign_in_available)
             return identities
         except Exception as e:
             logger.error("Error discovering service principals: %s", e)
             return []
+
+    @staticmethod
+    def _parse_sami_resource(identity_dict: dict, arm_resource_id: str):
+        """Parse an ARM resource ID from SAMI alternativeNames into associated_resource_* fields.
+
+        Expected format: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
+        Handles nested types like Microsoft.Sql/servers/databases.
+        """
+        import re
+        parts = arm_resource_id.split('/')
+        # Minimum: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
+        # That's at least 9 parts: ['', 'subscriptions', sub, 'resourceGroups', rg, 'providers', provider, type, name]
+        if len(parts) < 9:
+            return
+
+        sub_id = parts[2] if len(parts) > 2 else None
+        rg = parts[4] if len(parts) > 4 and parts[3].lower() == 'resourcegroups' else None
+
+        # Extract provider/type/name — everything after 'providers/'
+        try:
+            prov_idx = next(i for i, p in enumerate(parts) if p.lower() == 'providers')
+            provider_parts = parts[prov_idx + 1:]  # e.g. ['Microsoft.Compute', 'virtualMachines', 'myVM']
+            if len(provider_parts) >= 2:
+                # provider_parts[0] = namespace (Microsoft.Compute)
+                # provider_parts[1] = type (virtualMachines)
+                # provider_parts[2] = name (myVM)
+                # For nested: Microsoft.Sql/servers/myServer/databases/myDB
+                resource_type = f"{provider_parts[0]}/{provider_parts[1]}"
+                resource_name = provider_parts[2] if len(provider_parts) > 2 else provider_parts[1]
+            else:
+                return
+        except StopIteration:
+            return
+
+        identity_dict['associated_resource_id'] = arm_resource_id
+        identity_dict['associated_resource_type'] = resource_type
+        identity_dict['associated_resource_name'] = resource_name
+        identity_dict['associated_resource_group'] = rg
+        identity_dict['associated_subscription_id'] = sub_id
 
     async def _fetch_app_registration_map(self) -> Dict[str, Dict[str, Any]]:
         """Fetch all App Registrations and return a lookup keyed by appId.
@@ -1119,6 +1414,32 @@ class AzureDiscoveryEngine:
         'e406a681-f3d4-42a8-90b6-c2b029497af1': 'azure_storage',
         'cfa8b339-82a2-471a-a3c9-0fc0be7a4093': 'azure_key_vault',
         '00000002-0000-0000-c000-000000000000': 'azure_ad_graph_legacy',
+        '00000007-0000-0000-c000-000000000000': 'dynamics_crm',
+        '00000003-0000-0ff1-ce00-000000000000': 'sharepoint_online',
+        '00000002-0000-0ff1-ce00-000000000000': 'exchange_online',
+        '00000009-0000-0000-c000-000000000000': 'power_bi',
+        '0000000a-0000-0000-c000-000000000000': 'intune',
+        'c5393580-f805-4401-95e8-94b7a6ef2fc2': 'office_365_management',
+        'ca7f3f0b-7d91-482c-8e09-c5d840d0eac5': 'log_analytics',
+        '022907d3-0f1b-48f7-badc-1ba6abab6d66': 'azure_sql',
+    }
+
+    # Map frozensets of API usage → workload type labels
+    API_USAGE_WORKLOAD_MAP = {
+        frozenset({'microsoft_graph'}): 'directory_management',
+        frozenset({'microsoft_graph', 'azure_service_management'}): 'cloud_management',
+        frozenset({'azure_storage'}): 'data_pipeline',
+        frozenset({'azure_storage', 'azure_key_vault'}): 'secure_data_pipeline',
+        frozenset({'azure_key_vault'}): 'secrets_management',
+        frozenset({'sharepoint_online'}): 'sharepoint_integration',
+        frozenset({'exchange_online'}): 'mail_integration',
+        frozenset({'dynamics_crm'}): 'crm_integration',
+        frozenset({'power_bi'}): 'analytics',
+        frozenset({'intune'}): 'device_management',
+        frozenset({'log_analytics'}): 'monitoring',
+        frozenset({'azure_sql'}): 'database_workload',
+        frozenset({'microsoft_graph', 'sharepoint_online'}): 'collaboration_platform',
+        frozenset({'microsoft_graph', 'exchange_online'}): 'mail_automation',
     }
 
     def _extract_app_reg_signals(self, app: dict, tenant_domain: str) -> dict:
@@ -1187,10 +1508,31 @@ class AzureDiscoveryEngine:
 
         # --- requiredResourceAccess: which APIs this app calls ---
         api_accesses: list = []
+        required_permission_ids: list = []
+        high_risk_manifest_perms: list = []
         for rra in (app.get('requiredResourceAccess') or []):
             resource_id = rra.get('resourceAppId', '')
-            api_accesses.append(self.KNOWN_APIS.get(resource_id, f'unknown_{resource_id[:8]}'))
+            api_name = self.KNOWN_APIS.get(resource_id, f'unknown_{resource_id[:8]}')
+            api_accesses.append(api_name)
+            for ra in (rra.get('resourceAccess') or []):
+                perm_id = ra.get('id', '')
+                perm_type = ra.get('type', '')  # 'Role' (Application) or 'Scope' (Delegated)
+                entry = {
+                    'resource_app_id': resource_id,
+                    'resource_api_name': api_name,
+                    'permission_id': perm_id,
+                    'type': perm_type,
+                }
+                required_permission_ids.append(entry)
+                # Cross-ref with HIGH_RISK_PERMISSION_GUIDS
+                if perm_id in HIGH_RISK_PERMISSION_GUIDS:
+                    high_risk_manifest_perms.append({
+                        **entry,
+                        'permission_name': HIGH_RISK_PERMISSION_GUIDS[perm_id],
+                    })
         signals['app_reg_required_apis'] = api_accesses or None
+        signals['app_reg_required_permission_ids'] = required_permission_ids or None
+        signals['app_reg_high_risk_manifest_perms'] = high_risk_manifest_perms or None
 
         return signals
 
@@ -1447,6 +1789,238 @@ class AzureDiscoveryEngine:
             'workload_risk_flags': [],
         }
 
+    def _expand_group_roles_to_members(self, run_id: int, role_assignments: dict,
+                                         groups: list, group_memberships: dict):
+        """Expand group-held RBAC roles to individual members in role_assignments table.
+
+        For each group that holds RBAC roles, creates role_assignment rows for each
+        member identity with principal_type='group' (or 'group_nested' for nested members).
+        Uses NOT EXISTS to avoid duplicating direct assignments.
+        """
+        # Ensure group columns exist
+        self.db._ensure_role_assignment_group_cols()
+
+        # Idempotent: skip if group rows already exist for this run
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE i.discovery_run_id = %s AND ra.principal_type != 'direct'
+            """, (run_id,))
+            existing = cursor.fetchone()[0]
+            if existing > 0:
+                logger.info("Group role expansion: %s rows already exist for run %s, skipping", existing, run_id)
+                cursor.close()
+                return
+        finally:
+            cursor.close()
+
+        # Build group_role_index: group_id → list of role dicts
+        group_role_index = {}
+        for group in groups:
+            gid = group.get('group_id') or group.get('id')
+            if not gid:
+                continue
+            rbac_roles = group.get('rbac_roles') or []
+            if isinstance(rbac_roles, str):
+                import json as _json
+                try:
+                    rbac_roles = _json.loads(rbac_roles)
+                except Exception:
+                    rbac_roles = []
+            if rbac_roles:
+                group_role_index[gid] = rbac_roles
+
+        if not group_role_index:
+            logger.info("Group role expansion: no groups with RBAC roles found")
+            return
+
+        # Build oid_to_dbid map: object_id → identity db id
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("SELECT id, identity_id FROM identities WHERE discovery_run_id = %s", (run_id,))
+            oid_to_dbid = {row[1]: row[0] for row in cursor.fetchall()}
+        finally:
+            cursor.close()
+
+        expanded_count = 0
+        for group_id, roles in group_role_index.items():
+            members = group_memberships.get(group_id, [])
+            for member in members:
+                member_oid = member.get('member_object_id') or member.get('id')
+                if not member_oid:
+                    continue
+                db_id = oid_to_dbid.get(member_oid)
+                if not db_id:
+                    continue
+
+                depth = member.get('depth', 0)
+                is_nested = member.get('is_nested', False) or depth > 0
+                ptype = 'group_nested' if is_nested else 'group'
+
+                for role in roles:
+                    role_name = role.get('role_name', '')
+                    scope = role.get('scope', '')
+                    if not role_name or not scope:
+                        continue
+
+                    # Dedup: skip if this identity already has a direct assignment with same role+scope
+                    cursor = self.db.conn.cursor()
+                    try:
+                        cursor.execute("""
+                            SELECT 1 FROM role_assignments
+                            WHERE identity_db_id = %s AND role_name = %s AND scope = %s
+                            LIMIT 1
+                        """, (db_id, role_name, scope))
+                        if cursor.fetchone():
+                            continue
+                    finally:
+                        cursor.close()
+
+                    self.db.save_role_assignment(db_id, {
+                        'role_name': role_name,
+                        'scope': scope,
+                        'scope_type': role.get('scope_type', 'subscription'),
+                        'principal_id': member_oid,
+                        'role_type': 'azure',
+                        'principal_type': ptype,
+                        'group_principal_azure_object_id': group_id,
+                    })
+                    expanded_count += 1
+
+        logger.info("Group role expansion: %s inherited role rows created for run %s", expanded_count, run_id)
+
+    def _populate_lineage_tables(self, run_id: int, identities: list):
+        """Populate normalized lineage tables from verdict data on identities.
+
+        Writes to identity_orphan_classifications and identity_lineage_scores
+        for NHI identities that have verdict data and a saved DB id.
+        """
+        oc_count = 0
+        ls_count = 0
+        try:
+            cursor = self.db.conn.cursor()
+            for identity in identities:
+                db_id = identity.get('_db_id')
+                if not db_id:
+                    continue
+                if identity.get('identity_category') not in (
+                    'service_principal', 'managed_identity_user', 'managed_identity_system'
+                ):
+                    continue
+
+                # --- identity_orphan_classifications ---
+                rec_action = (identity.get('recommended_action') or '').upper()
+                if rec_action:
+                    _VERDICT_TO_ORPHAN = {
+                        Verdict.ORPHANED: 'SAFE_TO_RETIRE',
+                        Verdict.UNUSED: 'SAFE_TO_RETIRE',
+                        Verdict.GHOST_MSI: 'SAFE_TO_RETIRE',
+                        Verdict.AT_RISK: 'CAUTION',
+                        Verdict.STALE: 'CAUTION',
+                        Verdict.NEEDS_REVIEW: 'UNKNOWN',
+                        Verdict.HEALTHY: 'NOT_ORPHANED',
+                        Verdict.FEDERATED_MISCONFIGURED: 'CAUTION',
+                    }
+                    oc_status = _VERDICT_TO_ORPHAN.get(rec_action, 'UNKNOWN')
+                    oc_reasons = identity.get('verdict_risk_summary')
+                    all_roles = (identity.get('roles') or []) + (identity.get('entra_roles') or [])
+                    _READ_ONLY = {'reader', 'viewer'}
+                    active_rc = sum(
+                        1 for r in all_roles
+                        if not any(ro in (r.get('role_name') or r.get('role_definition_name') or '').lower()
+                                   for ro in _READ_ONLY)
+                    )
+                    if oc_status == 'SAFE_TO_RETIRE' and active_rc > 0:
+                        oc_status = 'CAUTION'
+                    try:
+                        cursor.execute("""
+                            INSERT INTO identity_orphan_classifications
+                                (spn_id, connection_id, orphan_status, orphan_reasons,
+                                 active_role_count, recommended_action, classified_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                            ON CONFLICT (spn_id) DO UPDATE SET
+                                orphan_status = EXCLUDED.orphan_status,
+                                orphan_reasons = EXCLUDED.orphan_reasons,
+                                active_role_count = EXCLUDED.active_role_count,
+                                recommended_action = EXCLUDED.recommended_action,
+                                classified_at = NOW()
+                        """, (
+                            db_id,
+                            self.cloud_connection_id,
+                            oc_status,
+                            json.dumps(oc_reasons) if oc_reasons else None,
+                            active_rc,
+                            identity.get('verdict_action_text'),
+                        ))
+                        oc_count += 1
+                    except Exception as e:
+                        logger.warning("orphan_classification insert failed for id=%s: %s", db_id, e)
+                        try:
+                            self.db._rollback()
+                            cursor = self.db.conn.cursor()
+                        except Exception:
+                            pass
+
+                # --- identity_lineage_scores ---
+                v_score = identity.get('verdict_score')
+                if v_score is not None:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO identity_lineage_scores
+                                (spn_id, lineage_score, scored_at)
+                            VALUES (%s, %s, NOW())
+                            ON CONFLICT (spn_id) DO UPDATE SET
+                                lineage_score = EXCLUDED.lineage_score,
+                                scored_at = NOW()
+                        """, (db_id, max(0, min(100, v_score))))
+                        ls_count += 1
+                    except Exception as e:
+                        logger.warning("lineage_score insert failed for id=%s: %s", db_id, e)
+                        try:
+                            self.db._rollback()
+                            cursor = self.db.conn.cursor()
+                        except Exception:
+                            pass
+
+                # --- lineage_verdicts (historical tracking) ---
+                rec_action = (identity.get('recommended_action') or '').upper()
+                if rec_action and db_id:
+                    prev_verdict = None
+                    try:
+                        cursor.execute("""
+                            SELECT lv.verdict FROM lineage_verdicts lv
+                            WHERE lv.identity_id = %s AND lv.discovery_run_id != %s
+                            ORDER BY lv.scored_at DESC LIMIT 1
+                        """, (db_id, run_id))
+                        prev_row = cursor.fetchone()
+                        if prev_row:
+                            prev_verdict = prev_row[0]
+                    except Exception:
+                        pass
+
+                    verdict_changed = prev_verdict is not None and prev_verdict != rec_action
+                    self.db.save_lineage_verdict(run_id, db_id, {
+                        'verdict': rec_action,
+                        'confidence_score': (identity.get('verdict_score') or 0) / 100.0,
+                        'contributing_factors': identity.get('verdict_signals'),
+                        'previous_verdict': prev_verdict,
+                        'verdict_changed': verdict_changed,
+                        'verdict_source': 'lineage_engine',
+                    })
+
+            self.db._commit()
+            cursor.close()
+            logger.info("Lineage tables populated: %s orphan_classifications, %s lineage_scores",
+                         oc_count, ls_count)
+        except Exception as e:
+            logger.warning("Lineage table population failed: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
     def _assemble_lineage_verdict(self, identity: Dict[str, Any]) -> Dict[str, Any]:
         """Assemble a lineage verdict from all signal sources for a workload identity.
 
@@ -1470,7 +2044,15 @@ class AzureDiscoveryEngine:
         score = 0
 
         # ── Signal 1: Role topology ──────────────────────────────────
-        has_roles = (identity.get('role_count') or 0) > 0
+        # active_role_count excludes read-only roles (Reader/Viewer) for scoring,
+        # but has_roles includes ALL roles — Reader on a Key Vault is still real access.
+        all_roles = (identity.get('roles') or []) + (identity.get('entra_roles') or [])
+        _READ_ONLY = {'reader', 'viewer'}
+        active_role_count = sum(
+            1 for r in all_roles
+            if not any(ro in (r.get('role_name') or r.get('role_definition_name') or '').lower() for ro in _READ_ONLY)
+        )
+        has_roles = len(all_roles) > 0
         workload_type = identity.get('workload_type') or 'unknown'
         workload_conf = identity.get('workload_confidence') or 0
 
@@ -1522,10 +2104,15 @@ class AzureDiscoveryEngine:
         days_since = identity.get('days_since_last_signin')
         last_sign_in = identity.get('last_sign_in')
 
-        if signin_pattern and signin_pattern not in ('unknown', 'none'):
+        if signin_pattern and signin_pattern not in ('unknown', 'none', 'never_used'):
             signals.append({'source': 'signin_pattern', 'weight': 20,
                             'detail': f'Sign-in pattern: {signin_pattern}'})
             score += 20
+        elif signin_pattern == 'never_used':
+            # Never authenticated — negative signal toward orphan/review
+            signals.append({'source': 'signin_pattern', 'weight': -10,
+                            'detail': 'Never authenticated (no sign-in history)'})
+            score = max(0, score - 10)
         elif last_sign_in:
             signals.append({'source': 'signin_last_seen', 'weight': 10,
                             'detail': f'Last sign-in recorded (days ago: {days_since})'})
@@ -1620,6 +2207,33 @@ class AzureDiscoveryEngine:
                 })
                 score += h_weight
 
+        # ── Signal 8: API Usage Pattern (M1) ────────────────────────
+        api_usage = identity.get('api_usage_pattern')
+        if api_usage and api_usage != 'none':
+            signals.append({'source': 'api_usage_pattern', 'weight': 15,
+                            'detail': f'API usage pattern: {api_usage}'})
+            score += 15
+
+        # ── Signal 9: Audit Provenance (M3) ─────────────────────────
+        audit_created_by = identity.get('audit_created_by')
+        if audit_created_by:
+            audit_method = identity.get('audit_creation_method', 'unknown')
+            signals.append({'source': 'audit_provenance', 'weight': 20,
+                            'detail': f'Created by {audit_created_by} via {audit_method}'})
+            score += 20
+
+        # ── Signal 10: Owned Objects (M5) ────────────────────────────
+        is_platform = identity.get('is_platform_spn', False)
+        owned_count = identity.get('owned_object_count', 0)
+        if is_platform:
+            signals.append({'source': 'platform_spn', 'weight': 25,
+                            'detail': f'Platform SPN: owns/created multiple applications'})
+            score += 25
+        elif owned_count > 0:
+            signals.append({'source': 'owned_objects', 'weight': 10,
+                            'detail': f'Owns {owned_count} object(s) in directory'})
+            score += 10
+
         # ── Clamp score ──────────────────────────────────────────────
         score = max(0, min(100, score))
 
@@ -1634,6 +2248,8 @@ class AzureDiscoveryEngine:
         elif fed_wt:
             confidence = 'high'
         elif heuristic and heuristic['confidence'] == 'medium':
+            confidence = 'medium'
+        elif audit_created_by:
             confidence = 'medium'
         elif workload_type != 'unknown' and workload_conf >= 60:
             confidence = 'medium'
@@ -1663,6 +2279,10 @@ class AzureDiscoveryEngine:
             # P4: Heuristic detection (GitHub, Terraform, automation)
             origin = heuristic['origin']
             origin_source = heuristic['origin_source']
+        elif audit_created_by and identity.get('audit_creation_method') not in ('unknown', None):
+            method = identity.get('audit_creation_method', 'unknown')
+            origin = f'Created by {audit_created_by} via {method}'
+            origin_source = 'audit_provenance'
         elif workload_type != 'unknown':
             origin = f'{workload_type.replace("_", " ").title()} (inferred from roles)'
             origin_source = 'role_inference'
@@ -1672,7 +2292,7 @@ class AzureDiscoveryEngine:
 
         # Last resort: if still Unknown but we have ANY evidence, use it
         if origin == 'Unknown':
-            if signin_pattern and signin_pattern not in ('unknown', 'none'):
+            if signin_pattern and signin_pattern not in ('unknown', 'none', 'never_used'):
                 origin = f'{signin_pattern.replace("_", " ").title()} workload'
                 origin_source = 'signin_pattern_fallback'
             elif has_roles and has_app_reg:
@@ -1683,25 +2303,37 @@ class AzureDiscoveryEngine:
         risk_flags = identity.get('workload_risk_flags') or []
         risk_summary = list(risk_flags)  # copy
 
-        # Strong signal = any first-class lineage evidence explaining the identity.
-        # Priority: ARM/MI binding > Federated cred > Heuristic > App reg metadata > Sign-in > Strong role pattern.
-        # If ANY strong signal is present, the identity is NOT marked NEEDS_REVIEW.
-        has_strong_signal = (
+        # never_used is a negative orphan signal — identity has never authenticated
+        if signin_pattern == 'never_used':
+            risk_summary.append('never_authenticated')
+
+        # Confirmed signal = hard evidence that the identity is actively managed
+        # or bound to infrastructure. These override ORPHANED verdict.
+        has_confirmed_signal = (
             has_arm_binding
             or bool(fed_wt)
+            or bool(app_reg_owner)
+            or (signin_pattern and signin_pattern not in ('unknown', 'none', 'never_used'))
+            or bool(last_sign_in)
+        )
+
+        # Strong signal = any lineage evidence (confirmed OR inferred).
+        # Prevents NEEDS_REVIEW verdict but does NOT prevent ORPHANED.
+        has_strong_signal = (
+            has_confirmed_signal
             or bool(heuristic)
             or bool(likely_service)
             or bool(reply_urls)
-            or bool(app_reg_owner)
-            or (signin_pattern and signin_pattern not in ('unknown', 'none'))
-            or bool(last_sign_in)
             or (workload_type != 'unknown' and workload_conf >= 60)
+            or bool(audit_created_by)
+            or bool(is_platform)
+            or (api_usage and api_usage != 'none')
         )
 
         if is_connector:
             action = 'HEALTHY'
             action_text = 'AuditGraph connector — no action required.'
-        elif has_roles and not app_reg_owner and not last_sign_in and confidence != 'high':
+        elif has_roles and not app_reg_owner and not last_sign_in and not has_confirmed_signal:
             action = 'ORPHANED'
             action_text = 'Has active roles but no owner and no sign-in history. Assign an owner or disable.'
             risk_summary.append('Ownerless identity with active permissions')
@@ -1709,6 +2341,11 @@ class AzureDiscoveryEngine:
             action = 'UNUSED'
             action_text = 'No roles and no sign-in activity detected. Consider removing.'
             risk_summary.append('No permissions or activity detected')
+        elif identity.get('identity_category') == IdentityCategory.MANAGED_IDENTITY_SYSTEM \
+             and identity.get('associated_resource_id') is None and has_roles:
+            action = Verdict.GHOST_MSI
+            action_text = 'System-assigned MI with no host resource. The resource may have been deleted.'
+            risk_summary.append('Ghost MSI — host resource missing')
         elif 'shared_identity' in risk_flags or 'shared_credential' in risk_flags:
             action = 'AT_RISK'
             action_text = 'Shared identity or credential detected. Review access and rotate credentials.'
@@ -1853,6 +2490,41 @@ class AzureDiscoveryEngine:
                 'confidence': 'medium',
             })
 
+        # API usage pattern signal (M1)
+        if api_usage and api_usage != 'none':
+            lineage_signals.append({
+                'type': 'API', 'label': 'APIs',
+                'value': f'Usage pattern: {api_usage.replace("_", " ").title()}',
+                'confidence': 'medium',
+            })
+
+        # Provenance signal (M3)
+        if audit_created_by:
+            method = identity.get('audit_creation_method', 'unknown')
+            lineage_signals.append({
+                'type': 'PROVENANCE', 'label': 'Created By',
+                'value': f'{audit_created_by} ({method})',
+                'confidence': 'medium',
+            })
+
+        # Platform SPN signal (M5)
+        if is_platform:
+            evidence = identity.get('platform_spn_evidence') or {}
+            lineage_signals.append({
+                'type': 'PLATFORM', 'label': 'Platform',
+                'value': f'Owns {evidence.get("owned_app_count", 0)} apps, created {evidence.get("created_app_count", 0)} apps',
+                'confidence': 'high',
+            })
+
+        # High sign-in failure alert (M4)
+        fail_count = identity.get('signin_failure_count_30d', 0)
+        if fail_count and fail_count >= 10:
+            lineage_signals.append({
+                'type': 'ALERT', 'label': 'Sign-in Failures',
+                'value': f'{fail_count} failed sign-ins in last 30 days',
+                'confidence': 'high',
+            })
+
         # ── Lineage narrative ──────────────────────────────────────────
         # Human-readable paragraph summarizing all evidence and risk.
         narrative_parts = []
@@ -1883,15 +2555,14 @@ class AzureDiscoveryEngine:
 
         # What it accesses
         if has_roles:
-            role_count = identity.get('role_count', 0)
             if workload_type != 'unknown':
                 narrative_parts.append(
-                    f'It has {role_count} active role{"s" if role_count != 1 else ""} '
+                    f'It has {active_role_count} active role{"s" if active_role_count != 1 else ""} '
                     f'classified as {workload_type.replace("_", " ")}.'
                 )
             else:
                 narrative_parts.append(
-                    f'It has {role_count} active role{"s" if role_count != 1 else ""} '
+                    f'It has {active_role_count} active role{"s" if active_role_count != 1 else ""} '
                     f'but the workload type is unclassified.'
                 )
 
@@ -1913,6 +2584,21 @@ class AzureDiscoveryEngine:
             narrative_parts.append(f'It was last active {days_since} day{"s" if days_since != 1 else ""} ago{source_tag}.')
         elif not last_sign_in and not last_ni and not obs_dt:
             narrative_parts.append('No sign-in activity has ever been recorded.')
+
+        # Provenance (M3)
+        if audit_created_by:
+            method = identity.get('audit_creation_method', 'unknown')
+            narrative_parts.append(f'It was created by {audit_created_by} via {method}.')
+
+        # Resources accessed (M4)
+        signin_resources = identity.get('signin_resources_accessed')
+        if signin_resources and isinstance(signin_resources, list):
+            top_res = [r.get('name', '?') for r in signin_resources[:3]]
+            narrative_parts.append(f'It accesses {", ".join(top_res)}.')
+
+        # Sign-in failure warning (M4)
+        if fail_count and fail_count >= 10:
+            narrative_parts.append(f'Warning: {fail_count} sign-in failures in the last 30 days.')
 
         # Owner risk
         if has_app_reg and not app_reg_owner:
@@ -1966,6 +2652,412 @@ class AzureDiscoveryEngine:
             'effective_last_used_source': effective_last_used_source,
         }
 
+    # ── Module 5: Owned Objects Scanner ─────────────────────────────────
+
+    async def _discover_owned_objects(self, service_principals: list):
+        """Discover owned and created objects per SPN via Graph API.
+
+        Calls GET /v1.0/servicePrincipals/{id}/ownedObjects and /createdObjects.
+        Skips Microsoft system SPNs. Detects platform SPNs (owns >=2 apps OR created >=3 apps).
+        Sets owned_objects, created_objects, owned_object_count, created_object_count,
+        is_platform_spn, platform_spn_evidence on each identity dict.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+
+        token = self.credential.get_token("https://graph.microsoft.com/.default")
+        headers = {"Authorization": f"Bearer {token.token}"}
+
+        enriched = 0
+        platform_count = 0
+
+        async with aiohttp.ClientSession() as session:
+            for sp in service_principals:
+                if sp.get('is_microsoft_system'):
+                    continue
+                obj_id = sp.get('object_id')
+                if not obj_id:
+                    continue
+
+                owned = []
+                created = []
+
+                # Fetch ownedObjects
+                try:
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/servicePrincipals/{obj_id}"
+                        f"/ownedObjects?$select=id,displayName&$top=100"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for obj in data.get('value', []):
+                                owned.append({
+                                    'id': obj.get('id'),
+                                    'display_name': obj.get('displayName'),
+                                    'odata_type': obj.get('@odata.type', ''),
+                                })
+                        elif resp.status == 403:
+                            logger.debug("ownedObjects 403 for %s — skipping", obj_id)
+                except Exception as e:
+                    logger.debug("ownedObjects error for %s: %s", obj_id, e)
+
+                await _asyncio.sleep(0.15)  # Rate limit 150ms
+
+                # Fetch createdObjects
+                try:
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/servicePrincipals/{obj_id}"
+                        f"/createdObjects?$select=id,displayName&$top=100"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for obj in data.get('value', []):
+                                created.append({
+                                    'id': obj.get('id'),
+                                    'display_name': obj.get('displayName'),
+                                    'odata_type': obj.get('@odata.type', ''),
+                                })
+                        elif resp.status == 403:
+                            logger.debug("createdObjects 403 for %s — skipping", obj_id)
+                except Exception as e:
+                    logger.debug("createdObjects error for %s: %s", obj_id, e)
+
+                await _asyncio.sleep(0.15)
+
+                # Set on identity dict
+                sp['owned_objects'] = owned or None
+                sp['created_objects'] = created or None
+                sp['owned_object_count'] = len(owned)
+                sp['created_object_count'] = len(created)
+
+                # Detect platform SPNs
+                owned_apps = sum(1 for o in owned if 'application' in (o.get('odata_type') or '').lower())
+                created_apps = sum(1 for c in created if 'application' in (c.get('odata_type') or '').lower())
+                is_platform = owned_apps >= 2 or created_apps >= 3
+                sp['is_platform_spn'] = is_platform
+                if is_platform:
+                    sp['platform_spn_evidence'] = {
+                        'owned_app_count': owned_apps,
+                        'created_app_count': created_apps,
+                        'owned_total': len(owned),
+                        'created_total': len(created),
+                    }
+                    platform_count += 1
+                else:
+                    sp['platform_spn_evidence'] = None
+
+                if owned or created:
+                    enriched += 1
+
+        logger.info("Owned objects: %s SPNs enriched, %s platform SPNs detected", enriched, platform_count)
+
+    # ── Module 3: AAD Audit Log Provenance ────────────────────────────
+
+    @staticmethod
+    def _classify_creation_method(initiated_by: dict) -> str:
+        """Classify the creation method from an audit log's initiatedBy field.
+
+        Returns one of: 'portal', 'terraform', 'cli_powershell', 'programmatic',
+        'user_initiated', 'unknown'.
+        """
+        if not initiated_by:
+            return 'unknown'
+        app = initiated_by.get('app') or {}
+        user = initiated_by.get('user') or {}
+        app_name = (app.get('displayName') or '').lower()
+        user_agent = (app.get('servicePrincipalName') or '').lower()
+
+        if 'azure portal' in app_name or 'portal' in app_name:
+            return 'portal'
+        if 'terraform' in app_name or 'terraform' in user_agent:
+            return 'terraform'
+        if any(kw in app_name for kw in ('powershell', 'az cli', 'azure cli', 'azcli')):
+            return 'cli_powershell'
+        if app.get('appId') or app.get('displayName'):
+            return 'programmatic'
+        if user.get('userPrincipalName') or user.get('displayName'):
+            return 'user_initiated'
+        return 'unknown'
+
+    async def _discover_audit_provenance(self, service_principals: list):
+        """Discover AAD audit log provenance for service principals.
+
+        Calls directoryAudits to find:
+        - Creation event (who created this SPN and how)
+        - Recent modifications in the last 90 days
+
+        Bails on 403 (AuditLog.Read.All not granted).
+        Skips Microsoft system SPNs.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+        from urllib.parse import quote
+
+        token = self.credential.get_token("https://graph.microsoft.com/.default")
+        headers = {"Authorization": f"Bearer {token.token}"}
+
+        enriched = 0
+        ninety_days_ago = (datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%dT00:00:00Z')
+
+        async with aiohttp.ClientSession() as session:
+            for sp in service_principals:
+                if sp.get('is_microsoft_system'):
+                    continue
+                obj_id = sp.get('object_id')
+                if not obj_id:
+                    continue
+
+                # Fetch creation event
+                created_by = None
+                creation_method = 'unknown'
+                creation_date = None
+                try:
+                    filter_str = (
+                        f"targetResources/any(t: t/id eq '{obj_id}') "
+                        f"and activityDisplayName eq 'Add service principal'"
+                    )
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/auditLogs/directoryAudits"
+                        f"?$filter={quote(filter_str)}&$top=1&$orderby=activityDateTime asc"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 403:
+                            logger.info("Audit provenance: AuditLog.Read.All not granted — skipping module")
+                            return  # Bail entirely
+                        if resp.status == 200:
+                            data = await resp.json()
+                            events = data.get('value', [])
+                            if events:
+                                event = events[0]
+                                initiated = event.get('initiatedBy', {})
+                                user_info = initiated.get('user') or {}
+                                app_info = initiated.get('app') or {}
+                                created_by = (
+                                    user_info.get('userPrincipalName')
+                                    or user_info.get('displayName')
+                                    or app_info.get('displayName')
+                                    or 'Unknown'
+                                )
+                                creation_method = self._classify_creation_method(initiated)
+                                creation_date = event.get('activityDateTime')
+                except Exception as e:
+                    logger.debug("Audit creation lookup error for %s: %s", obj_id, e)
+
+                await _asyncio.sleep(0.15)
+
+                # Fetch recent modifications (last 90 days)
+                recent_mods = []
+                mod_count = 0
+                try:
+                    filter_str = (
+                        f"targetResources/any(t: t/id eq '{obj_id}') "
+                        f"and activityDateTime ge {ninety_days_ago}"
+                    )
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/auditLogs/directoryAudits"
+                        f"?$filter={quote(filter_str)}&$top=10&$orderby=activityDateTime desc"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            events = data.get('value', [])
+                            mod_count = len(events)
+                            for event in events:
+                                initiated = event.get('initiatedBy', {})
+                                user_info = initiated.get('user') or {}
+                                app_info = initiated.get('app') or {}
+                                recent_mods.append({
+                                    'activity': event.get('activityDisplayName'),
+                                    'date': event.get('activityDateTime'),
+                                    'actor': (
+                                        user_info.get('userPrincipalName')
+                                        or app_info.get('displayName')
+                                        or 'Unknown'
+                                    ),
+                                    'method': self._classify_creation_method(initiated),
+                                })
+                except Exception as e:
+                    logger.debug("Audit recent mods error for %s: %s", obj_id, e)
+
+                await _asyncio.sleep(0.15)
+
+                # Set on identity dict
+                sp['audit_created_by'] = created_by
+                sp['audit_creation_method'] = creation_method
+                sp['audit_creation_date'] = creation_date
+                sp['audit_recent_modifications'] = recent_mods or None
+                sp['audit_modification_count_90d'] = mod_count
+                if created_by:
+                    enriched += 1
+
+        logger.info("Audit provenance: %s SPNs enriched with creation/modification data", enriched)
+
+    # ── Module 4: AAD Sign-in Intelligence ────────────────────────────
+
+    @staticmethod
+    def _classify_ip(ip_str: str) -> str:
+        """Classify an IP address into category.
+
+        Returns one of: 'internal_rfc1918', 'azure_datacenter', 'external', 'unknown'.
+        """
+        import ipaddress as _ipa
+        if not ip_str:
+            return 'unknown'
+        try:
+            addr = _ipa.ip_address(ip_str)
+            if addr.is_private:
+                return 'internal_rfc1918'
+            # Azure DC heuristic: common first octets for Azure public IPs
+            first_octet = int(ip_str.split('.')[0]) if '.' in ip_str else 0
+            if first_octet in (13, 20, 40, 52, 104):
+                return 'azure_datacenter'
+            return 'external'
+        except (ValueError, TypeError):
+            return 'unknown'
+
+    @staticmethod
+    def _process_signin_intelligence(identity: dict, sign_ins: list):
+        """Process sign-in events and set intelligence fields on identity dict.
+
+        Extracts IPs, resources, locations, client apps, failure/success counts.
+        """
+        ips = {}
+        resources = {}
+        locations = {}
+        client_apps = {}
+        failures = 0
+        successes = 0
+
+        for si in sign_ins:
+            # IP
+            ip = si.get('ipAddress')
+            if ip:
+                if ip not in ips:
+                    ips[ip] = {
+                        'ip': ip,
+                        'classification': AzureDiscoveryEngine._classify_ip(ip),
+                        'count': 0,
+                    }
+                ips[ip]['count'] += 1
+
+            # Resource
+            res = si.get('resourceDisplayName')
+            if res:
+                if res not in resources:
+                    resources[res] = {'name': res, 'count': 0}
+                resources[res]['count'] += 1
+
+            # Location
+            loc = si.get('location') or {}
+            city = loc.get('city') or ''
+            country = loc.get('countryOrRegion') or ''
+            loc_key = f"{city},{country}" if city or country else ''
+            if loc_key:
+                if loc_key not in locations:
+                    locations[loc_key] = {'city': city, 'country': country, 'count': 0}
+                locations[loc_key]['count'] += 1
+
+            # Client app
+            client = si.get('clientAppUsed') or ''
+            if client:
+                if client not in client_apps:
+                    client_apps[client] = {'app': client, 'count': 0}
+                client_apps[client]['count'] += 1
+
+            # Status
+            status = si.get('status') or {}
+            error_code = status.get('errorCode', 0)
+            if error_code and error_code != 0:
+                failures += 1
+            else:
+                successes += 1
+
+        identity['signin_ips'] = list(ips.values()) or None
+        identity['signin_resources_accessed'] = list(resources.values()) or None
+        identity['signin_locations'] = list(locations.values()) or None
+        identity['signin_client_apps'] = list(client_apps.values()) or None
+        identity['signin_failure_count_30d'] = failures
+        identity['signin_success_count_30d'] = successes
+        identity['signin_total_events_30d'] = len(sign_ins)
+
+    async def _discover_signin_intelligence(self, identities: list):
+        """Discover sign-in intelligence for workload identities via Graph API.
+
+        Calls GET /v1.0/auditLogs/signIns with servicePrincipalId filter.
+        6-hour cache via setting key. Rate limit 150ms. Bails on 403.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+        from urllib.parse import quote
+
+        # 6-hour cache check
+        cache_key = f'signin_intelligence_last_run_{self.cloud_connection_id}'
+        try:
+            last_run = self.db.get_setting(cache_key, None, organization_id=self.db._organization_id)
+            if last_run:
+                last_dt = datetime.fromisoformat(last_run.replace('Z', '+00:00').replace('+00:00', ''))
+                if (datetime.utcnow() - last_dt).total_seconds() < 6 * 3600:
+                    logger.info("Sign-in intelligence: cached (last run %s) — skipping", last_run)
+                    return
+        except Exception:
+            pass
+
+        token = self.credential.get_token("https://graph.microsoft.com/.default")
+        headers = {"Authorization": f"Bearer {token.token}"}
+        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00Z')
+        select_fields = 'createdDateTime,resourceDisplayName,ipAddress,location,clientAppUsed,status,servicePrincipalId'
+
+        enriched = 0
+        batch_count = 0
+
+        async with aiohttp.ClientSession() as session:
+            for identity in identities:
+                if identity.get('identity_category') not in ('service_principal', 'managed_identity_user', 'managed_identity_system'):
+                    continue
+                if identity.get('is_microsoft_system'):
+                    continue
+                obj_id = identity.get('object_id')
+                if not obj_id:
+                    continue
+
+                try:
+                    filter_str = (
+                        f"servicePrincipalId eq '{obj_id}' "
+                        f"and createdDateTime ge {thirty_days_ago}"
+                    )
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/auditLogs/signIns"
+                        f"?$filter={quote(filter_str)}&$top=50"
+                        f"&$orderby=createdDateTime desc&$select={select_fields}"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 403:
+                            logger.info("Sign-in intelligence: 403 — signIns API not available, skipping module")
+                            return  # Bail entirely
+                        if resp.status == 200:
+                            data = await resp.json()
+                            sign_ins = data.get('value', [])
+                            if sign_ins:
+                                self._process_signin_intelligence(identity, sign_ins)
+                                enriched += 1
+                except Exception as e:
+                    logger.debug("Sign-in intelligence error for %s: %s", obj_id, e)
+
+                await _asyncio.sleep(0.15)
+                batch_count += 1
+                if batch_count % 100 == 0:
+                    logger.info("Sign-in intelligence: processed %s identities...", batch_count)
+
+        # Update cache timestamp
+        try:
+            self.db.save_setting(cache_key, datetime.utcnow().isoformat(), organization_id=self.db._organization_id)
+        except Exception:
+            pass
+
+        logger.info("Sign-in intelligence: %s identities enriched out of %s processed", enriched, batch_count)
+
     # ── Heuristic workload detection ──────────────────────────────────
     # Detects workloads when federated identity and ARM bindings are absent.
     # Catches: GitHub Actions with client secrets, Terraform SPNs, automation scripts.
@@ -1987,7 +3079,12 @@ class AzureDiscoveryEngine:
         app_reg_notes = (identity.get('app_reg_notes') or '').lower()
         app_reg_name = (identity.get('app_registration_name') or '').lower()
         signin_pattern = identity.get('signin_pattern') or ''
-        has_roles = (identity.get('role_count') or 0) > 0
+        all_roles = (identity.get('roles') or []) + (identity.get('entra_roles') or [])
+        _READ_ONLY = {'reader', 'viewer'}
+        has_roles = any(
+            not any(ro in (r.get('role_name') or r.get('role_definition_name') or '').lower() for ro in _READ_ONLY)
+            for r in all_roles
+        ) if all_roles else False
         workload_type = identity.get('workload_type') or 'unknown'
 
         # Collect role names for Terraform detection
@@ -2740,6 +3837,29 @@ class AzureDiscoveryEngine:
 
                 if grants and grants.value:
                     for grant in grants.value:
+                        # Resolve resource SPN to get actual resource name
+                        resource_spn_id = str(grant.resource_id) if grant.resource_id else ''
+                        resource_name = 'Microsoft Graph'
+                        resource_app_id = ''
+                        if resource_spn_id and resource_spn_id in self._resource_spn_cache:
+                            cached = self._resource_spn_cache[resource_spn_id]
+                            resource_name = cached.get('display_name', 'Microsoft Graph')
+                            resource_app_id = cached.get('app_id', '')
+                        elif resource_spn_id:
+                            try:
+                                res_sp = await self.graph_client.service_principals.by_service_principal_id(
+                                    resource_spn_id
+                                ).get()
+                                if res_sp:
+                                    resource_name = res_sp.display_name or 'Microsoft Graph'
+                                    resource_app_id = str(res_sp.app_id) if res_sp.app_id else ''
+                                    self._resource_spn_cache[resource_spn_id] = {
+                                        'display_name': resource_name,
+                                        'app_id': resource_app_id,
+                                        'roles': {},
+                                    }
+                            except Exception:
+                                pass
                         scope_str = grant.scope or ''
                         for perm_name in scope_str.split():
                             perm_name = perm_name.strip()
@@ -2747,7 +3867,8 @@ class AzureDiscoveryEngine:
                                 permissions.append({
                                     'name': perm_name,
                                     'description': perm_name,
-                                    'resource_name': 'Microsoft Graph',
+                                    'resource_name': resource_name,
+                                    'resource_app_id': resource_app_id,
                                     'permission_type': 'Delegated',
                                     'consent_type': grant.consent_type or 'Unknown',
                                 })
@@ -2761,6 +3882,46 @@ class AzureDiscoveryEngine:
                 permissions_map[sp_identity_id] = permissions
                 if len(permissions_map) <= 5:  # Show first 5
                     logger.info("%s: %s permission(s)", sp['display_name'], len(permissions))
+
+        # ── M1: Compute api_usage_pattern per SPN from distinct resource APIs ──
+        for sp in service_principals:
+            sp_identity_id = sp.get('identity_id')
+            perms = permissions_map.get(sp_identity_id, [])
+            if not perms:
+                continue
+            # Collect distinct resource API names
+            resource_apis = set()
+            for p in perms:
+                rname = p.get('resource_name', '')
+                # Map display name back to KNOWN_APIS key
+                for api_id, api_label in self.KNOWN_APIS.items():
+                    if api_label.replace('_', ' ') in rname.lower() or rname.lower().replace(' ', '_') == api_label:
+                        resource_apis.add(api_label)
+                        break
+                else:
+                    # Try resource_app_id directly
+                    rap_id = p.get('resource_app_id', '')
+                    if rap_id in self.KNOWN_APIS:
+                        resource_apis.add(self.KNOWN_APIS[rap_id])
+                    elif 'graph' in rname.lower():
+                        resource_apis.add('microsoft_graph')
+            api_list = sorted(resource_apis)
+            sp['oauth2_resource_apis'] = api_list or None
+            # Match against API_USAGE_WORKLOAD_MAP
+            pattern = 'none'
+            frozen = frozenset(resource_apis)
+            if frozen in self.API_USAGE_WORKLOAD_MAP:
+                pattern = self.API_USAGE_WORKLOAD_MAP[frozen]
+            elif resource_apis:
+                # Try subset matching — find the best match
+                best_match = None
+                best_size = 0
+                for key_set, label in self.API_USAGE_WORKLOAD_MAP.items():
+                    if key_set.issubset(frozen) and len(key_set) > best_size:
+                        best_match = label
+                        best_size = len(key_set)
+                pattern = best_match or f'multi_api_{len(resource_apis)}'
+            sp['api_usage_pattern'] = pattern
 
         logger.info("Permissions: %s application + %s delegated across %s SPNs%s",
                      app_perm_total, delegated_perm_total, len(permissions_map),
@@ -3675,6 +4836,210 @@ class AzureDiscoveryEngine:
 
         return ('info', None)
     
+    # ─── Group Scanner (Phase 2A) ──────────────────────────────────────
+
+    async def _discover_groups(self) -> List[Dict[str, Any]]:
+        """Discover Entra ID security groups via Graph API with pagination."""
+        import aiohttp
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+
+            select_fields = ','.join([
+                'id', 'displayName', 'description', 'mailEnabled',
+                'securityEnabled', 'groupTypes', 'membershipRule',
+                'isAssignableToRole', 'createdDateTime',
+            ])
+            url: str | None = (
+                f"https://graph.microsoft.com/v1.0/groups"
+                f"?$select={select_fields}&$top=999"
+            )
+
+            all_groups: list[dict] = []
+            page = 0
+            first_error_logged = False
+
+            async with aiohttp.ClientSession() as session:
+                while url:
+                    page += 1
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status != 200:
+                            body = await resp.text()
+                            logger.error("Graph API error %s on groups page %s: %s", resp.status, page, body[:500])
+                            break
+                        data = await resp.json()
+
+                    for g in data.get('value', []):
+                        try:
+                            security_enabled = g.get('securityEnabled', False)
+                            # Skip pure mail/M365 groups that aren't security-enabled
+                            if not security_enabled:
+                                continue
+
+                            group_types = g.get('groupTypes') or []
+                            # Determine membership type
+                            membership_type = None
+                            if 'DynamicMembership' in group_types:
+                                membership_type = 'dynamic'
+                            elif g.get('membershipRule'):
+                                membership_type = 'dynamic'
+                            else:
+                                membership_type = 'assigned'
+
+                            all_groups.append({
+                                'group_id': g.get('id'),
+                                'display_name': g.get('displayName'),
+                                'description': g.get('description'),
+                                'mail_enabled': g.get('mailEnabled', False),
+                                'security_enabled': True,
+                                'group_types': group_types,
+                                'membership_type': membership_type,
+                                'is_role_assignable': g.get('isAssignableToRole', False),
+                                'created_datetime': g.get('createdDateTime'),
+                                'is_privileged': False,
+                                'member_count': 0,
+                                'nested_group_count': 0,
+                                'rbac_roles': [],
+                            })
+                        except Exception as e:
+                            if not first_error_logged:
+                                logger.warning("Error parsing group %s: %s", g.get('id'), e)
+                                first_error_logged = True
+
+                    url = data.get('@odata.nextLink')
+
+            logger.info("Fetched %s security groups across %s page(s)", len(all_groups), page)
+            return all_groups
+
+        except Exception as e:
+            logger.error("Group discovery failed: %s", e)
+            return []
+
+    async def _discover_group_memberships(self, groups: List[Dict[str, Any]]) -> Dict[str, List[Dict]]:
+        """Discover group memberships with nested resolution up to 3 levels.
+
+        Returns dict mapping group_id → list of member dicts.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+
+        MAX_DEPTH = 3
+        memberships: Dict[str, List[Dict]] = {}
+
+        if not groups:
+            return memberships
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+            first_error_logged = False
+
+            async with aiohttp.ClientSession() as session:
+
+                async def _fetch_members(group_id: str, depth: int, visited: set) -> List[Dict]:
+                    """Recursively fetch members, resolving nested groups."""
+                    if depth > MAX_DEPTH or group_id in visited:
+                        return []
+                    visited.add(group_id)
+
+                    members: list[dict] = []
+                    url: str | None = (
+                        f"https://graph.microsoft.com/v1.0/groups/{group_id}/members"
+                        f"?$select=id,displayName,@odata.type&$top=999"
+                    )
+
+                    while url:
+                        try:
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status != 200:
+                                    break
+                                data = await resp.json()
+
+                            for m in data.get('value', []):
+                                odata_type = m.get('@odata.type', '')
+                                member_id = m.get('id')
+                                if not member_id:
+                                    continue
+
+                                if '#microsoft.graph.user' in odata_type:
+                                    member_type = 'user'
+                                elif '#microsoft.graph.servicePrincipal' in odata_type:
+                                    member_type = 'servicePrincipal'
+                                elif '#microsoft.graph.group' in odata_type:
+                                    member_type = 'group'
+                                else:
+                                    member_type = 'other'
+
+                                members.append({
+                                    'member_object_id': member_id,
+                                    'member_type': member_type,
+                                    'member_display_name': m.get('displayName'),
+                                    'is_nested': depth > 0,
+                                    'depth': depth,
+                                })
+
+                                # Recursively resolve nested groups
+                                if member_type == 'group' and depth < MAX_DEPTH:
+                                    nested = await _fetch_members(member_id, depth + 1, visited)
+                                    members.extend(nested)
+
+                            url = data.get('@odata.nextLink')
+                        except Exception as e:
+                            nonlocal first_error_logged
+                            if not first_error_logged:
+                                logger.warning("Error fetching members for group %s: %s", group_id, e)
+                                first_error_logged = True
+                            break
+
+                    return members
+
+                # Fetch memberships sequentially with rate limiting
+                for i, group in enumerate(groups):
+                    gid = group.get('group_id')
+                    if not gid:
+                        continue
+                    visited: set = set()
+                    members = await _fetch_members(gid, 0, visited)
+                    memberships[gid] = members
+
+                    if i > 0 and i % 50 == 0:
+                        logger.info("Group membership progress: %s/%s groups", i, len(groups))
+
+                    await _asyncio.sleep(0.15)  # Rate limit
+
+            return memberships
+
+        except Exception as e:
+            logger.error("Group membership discovery failed: %s", e)
+            return memberships
+
+    def _save_entra_groups(self, run_id: int, groups: List[Dict], group_memberships: Dict[str, List[Dict]]):
+        """Save discovered groups and their memberships to the database."""
+        saved = 0
+        for group in groups:
+            try:
+                group_db_id = self.db.save_entra_group(run_id, group)
+                if not group_db_id:
+                    continue
+                saved += 1
+
+                # Save memberships for this group
+                members = group_memberships.get(group.get('group_id', ''), [])
+                for member in members:
+                    try:
+                        self.db.save_entra_group_membership(group_db_id, member, run_id)
+                    except Exception as e:
+                        logger.debug("Save membership error: %s", e)
+            except Exception as e:
+                logger.error("Save group error for %s: %s", group.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        logger.info("Saved %s/%s Entra groups with memberships", saved, len(groups))
+
     async def _discover_entra_roles(self) -> List[Dict[str, Any]]:
         """Discover Entra ID directory role assignments for given principals"""
         try:
@@ -4875,8 +6240,16 @@ class AzureDiscoveryEngine:
             except Exception as e:
                 logger.error("Entitlement check failed, proceeding without limit: %s", e)
 
+        # Ensure clean transaction state before identity save loop.
+        # Prior operations (job progress/metrics) may have left a poisoned
+        # transaction; rollback clears it so the first identity isn't lost.
+        try:
+            self.db._rollback()
+        except Exception:
+            pass
+
         for identity in identities:
-            
+
             # Set source for multi-cloud
             identity['source'] = 'azure'
             if not identity.get('permission_plane'):
@@ -4913,10 +6286,28 @@ class AzureDiscoveryEngine:
             
             try:
                 identity_db_id = self.db.save_identity(run_id, identity)
+                identity['_db_id'] = identity_db_id
             except Exception as e:
                 logger.error("save_identity FAILED for %s: %s", identity.get('display_name'), e)
                 self.db._rollback()
                 continue
+
+            # Save resource→identity link for SAMIs with associated_resource_id
+            if identity.get('associated_resource_id') and identity_db_id:
+                try:
+                    self.db.save_resource_identity_link(run_id, {
+                        'resource_id': identity['associated_resource_id'],
+                        'resource_type': identity.get('associated_resource_type', ''),
+                        'resource_name': identity.get('associated_resource_name', ''),
+                        'resource_group': identity.get('associated_resource_group'),
+                        'subscription_id': identity.get('associated_subscription_id'),
+                        'identity_db_id': identity_db_id,
+                        'identity_id': identity.get('identity_id', ''),
+                        'identity_display_name': identity.get('display_name', ''),
+                        'link_type': 'system_assigned',
+                    })
+                except Exception as e:
+                    logger.warning("save_resource_identity_link failed for %s: %s", identity.get('display_name'), e)
 
             # Save all per-identity metadata (roles, subs, creds, permissions, PIM, etc.)
             try:

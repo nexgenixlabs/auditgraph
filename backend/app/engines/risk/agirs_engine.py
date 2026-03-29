@@ -27,6 +27,7 @@ N2_DORMANT_NHI_WEIGHT = 3
 N3_ZOMBIE_NHI_WEIGHT = 6
 N4_EXPIRED_CRED_WEIGHT = 2
 N5_OWNERLESS_APP_WEIGHT = 5
+N6_FEDERATED_MISCONFIG_WEIGHT = 4
 
 # ── Scope multipliers ────────────────────────────────────────────
 SCOPE_MULT = {
@@ -374,6 +375,18 @@ class AGIRSEngine:
         except Exception:
             pass
 
+        # N6: FEDERATED_MISCONFIGURED — overly-broad federated credential subjects
+        n6_fed_misconfig = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT lv.identity_id) FROM lineage_verdicts lv
+                JOIN identities i ON i.id = lv.identity_id
+                WHERE i.discovery_run_id IN %s AND lv.verdict = 'FEDERATED_MISCONFIGURED'
+            """, (rid_tuple,))
+            n6_fed_misconfig = cursor.fetchone()[0] or 0
+        except Exception:
+            pass
+
         # Apply average scope multiplier (1.5 for mix of subscription-level)
         avg_scope_mult = 1.3  # Moderate default
 
@@ -381,8 +394,12 @@ class AGIRSEngine:
                n2_dormant * N2_DORMANT_NHI_WEIGHT +
                n3_zombie * N3_ZOMBIE_NHI_WEIGHT +
                n4_expired * N4_EXPIRED_CRED_WEIGHT +
-               n5_ownerless_apps * N5_OWNERLESS_APP_WEIGHT) * avg_scope_mult
+               n5_ownerless_apps * N5_OWNERLESS_APP_WEIGHT +
+               n6_fed_misconfig * N6_FEDERATED_MISCONFIG_WEIGHT) * avg_scope_mult
         normalized = min(raw / max(nhi_count, 1) * 100, 500)
+        # FIX C: FEDERATED_MISCONFIGURED NHIRI boost — 20% deduction multiplier
+        if n6_fed_misconfig > 0:
+            normalized *= 1.20
         score = round(max(100 - normalized, 0), 2)
 
         return {
@@ -394,6 +411,7 @@ class AGIRSEngine:
                 'zombie_nhi': n3_zombie,
                 'expired_creds': n4_expired,
                 'ownerless_apps': n5_ownerless_apps,
+                'federated_misconfigured': n6_fed_misconfig,
             },
             'deduction_details': [
                 {'factor': 'Orphaned NHI', 'count': n1_orphaned, 'weight': N1_ORPHANED_WEIGHT, 'deduction': round(n1_orphaned * N1_ORPHANED_WEIGHT * avg_scope_mult, 1)},
@@ -401,6 +419,7 @@ class AGIRSEngine:
                 {'factor': 'Zombie NHI', 'count': n3_zombie, 'weight': N3_ZOMBIE_NHI_WEIGHT, 'deduction': round(n3_zombie * N3_ZOMBIE_NHI_WEIGHT * avg_scope_mult, 1)},
                 {'factor': 'Expired credentials', 'count': n4_expired, 'weight': N4_EXPIRED_CRED_WEIGHT, 'deduction': round(n4_expired * N4_EXPIRED_CRED_WEIGHT * avg_scope_mult, 1)},
                 {'factor': 'Ownerless high-risk apps', 'count': n5_ownerless_apps, 'weight': N5_OWNERLESS_APP_WEIGHT, 'deduction': round(n5_ownerless_apps * N5_OWNERLESS_APP_WEIGHT * avg_scope_mult, 1)},
+                {'factor': 'Federated misconfigured', 'count': n6_fed_misconfig, 'weight': N6_FEDERATED_MISCONFIG_WEIGHT, 'deduction': round(n6_fed_misconfig * N6_FEDERATED_MISCONFIG_WEIGHT * avg_scope_mult, 1)},
             ],
         }
 
@@ -503,12 +522,49 @@ class AGIRSEngine:
         # Weighted average (equal 25% each)
         gei_score = round(sum(c['score'] for c in components) / 4, 2)
 
+        # Phase 3A: Mixed auth penalty — reduce GEI proportional to % of mixed-auth DBs
+        mixed_auth_penalty = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE mixed_auth_enabled) as mixed
+                FROM database_servers WHERE discovery_run_id IN %s
+            """, (rid_tuple,))
+            row = cursor.fetchone()
+            total_db, mixed_db = (row[0] or 0), (row[1] or 0)
+            if total_db > 0:
+                mixed_auth_penalty = round((mixed_db / total_db) * 10, 1)  # max -10
+                gei_score = round(max(gei_score - mixed_auth_penalty, 0), 2)
+        except Exception:
+            pass  # database_servers table may not exist yet
+
         return {
             'score': gei_score,
             'components': components,
+            'mixed_auth_penalty': mixed_auth_penalty,
         }
 
     # ── Blast Radius Danger Score ─────────────────────────────────
+
+    def _load_cluster_admin_identity_ids(self, cursor, run_ids: List[int]) -> set:
+        """Load identity IDs linked to AKS clusters with non-system cluster-admin bindings.
+
+        FIX D: Cluster-admin Danger Score 2.0 multiplier.
+        Only applies when Layer 2 data is available (aks_rbac_bindings populated).
+        """
+        try:
+            cursor.execute("""
+                SELECT DISTINCT i.id
+                FROM aks_rbac_bindings arb
+                JOIN aks_clusters ac ON ac.id = arb.aks_cluster_id
+                JOIN identities i ON i.azure_object_id = ac.system_msi_principal_id
+                    AND i.discovery_run_id = ac.discovery_run_id
+                WHERE arb.discovery_run_id IN %s
+                  AND arb.is_cluster_admin = TRUE
+                  AND arb.subject_name NOT LIKE 'system:%%'
+            """, (tuple(run_ids),))
+            return {row[0] for row in cursor.fetchall()}
+        except Exception:
+            return set()
 
     def _update_blast_radius_scores(self, cursor, run_ids: List[int]):
         """Compute and persist blast_radius_score on each identity."""
@@ -520,6 +576,9 @@ class AGIRSEngine:
             self.db._commit()
         except Exception:
             self.db._rollback()
+
+        # FIX D: Load cluster-admin identity IDs for 2.0 multiplier
+        cluster_admin_ids = self._load_cluster_admin_identity_ids(cursor, run_ids)
 
         # Fetch identities with their tier, activity, scope info
         cursor.execute("""
@@ -560,7 +619,10 @@ class AGIRSEngine:
             if multi_tenant:
                 exposure_mult *= 1.3
 
-            score = round(privilege_weight * scope_mult * dormancy_mult * exposure_mult, 2)
+            # FIX D: Cluster-admin 2.0 multiplier (highest in system)
+            cluster_admin_mult = 2.0 if id_ in cluster_admin_ids else 1.0
+
+            score = round(privilege_weight * scope_mult * dormancy_mult * exposure_mult * cluster_admin_mult, 2)
             updates.append((score, id_))
 
         # Batch update

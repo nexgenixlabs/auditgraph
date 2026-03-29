@@ -417,6 +417,63 @@ export default function CISODashboard() {
     return () => { cancelled = true; };
   }, [selectedConnectionId]);
 
+  // Verdict changes (lineage verdict tracking)
+  const [verdictChanges, setVerdictChanges] = useState<{
+    total_changed: number; worsened: number; improved: number;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(withConnection('/api/dashboard/verdict-changes'))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setVerdictChanges(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedConnectionId]);
+
+  // Compute Identity Risk (Phase 2A)
+  const [computeRisk, setComputeRisk] = useState<{
+    total_compute: number; with_msi: number; with_env_secrets: number; with_jit: number;
+    by_type: Record<string, number>;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(withConnection('/api/dashboard/compute-risk'))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setComputeRisk(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedConnectionId]);
+
+  // Container Identity Risk (Phase 2B)
+  const [containerRisk, setContainerRisk] = useState<{
+    total_clusters: number; wi_enabled: number; total_fed_creds: number;
+    wildcard_creds: number; total_acr: number; admin_enabled_count: number;
+    federated_misconfigured_count: number;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(withConnection('/api/dashboard/container-risk'))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setContainerRisk(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedConnectionId]);
+
+  // Data Plane Identity Risk (Phase 3A)
+  const [dataRisk, setDataRisk] = useState<{
+    total_database_servers: number; mixed_auth_count: number;
+    open_firewall_count: number; no_aad_admin_count: number;
+    by_type: Record<string, number>;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(withConnection('/api/dashboard/posture'))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d && d.data_identity_risk) setDataRisk(d.data_identity_risk); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedConnectionId]);
+
   // Connection scope label
   const scopeLabel = selectedConnectionId
     ? connections.find(c => c.id === selectedConnectionId)?.label || `Connection ${selectedConnectionId}`
@@ -957,6 +1014,89 @@ export default function CISODashboard() {
                 </span>
               </div>
             </DN>
+          )}
+
+          {/* ─── Verdict Changes Banner ─── */}
+          {verdictChanges && verdictChanges.total_changed > 0 && (
+            <DN navigateTo="/identities?verdict_changed=true">
+              <div style={{
+                background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
+                borderRadius: 6, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <span style={{ fontSize: 12 }}>{'\uD83D\uDD04'}</span>
+                <span style={{ fontSize: 10, color: COLORS.purple, fontFamily: FONT.ui }}>
+                  <strong>{verdictChanges.total_changed}</strong> identities changed verdict
+                  {verdictChanges.worsened > 0 && <> &middot; <span style={{ color: COLORS.danger }}>{verdictChanges.worsened} worsened</span></>}
+                  {verdictChanges.improved > 0 && <> &middot; <span style={{ color: COLORS.success }}>{verdictChanges.improved} improved</span></>}
+                </span>
+              </div>
+            </DN>
+          )}
+
+          {/* ─── Compute Identity Risk Banner ─── */}
+          {computeRisk && computeRisk.total_compute > 0 && (
+            <div style={{
+              background: `${COLORS.accent}08`, border: `1px solid ${COLORS.accent}30`,
+              borderRadius: 6, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 12 }}>{'\uD83D\uDDA5\uFE0F'}</span>
+              <span style={{ fontSize: 10, color: COLORS.text, fontFamily: FONT.ui }}>
+                <strong>{computeRisk.total_compute}</strong> compute resources
+                &middot; <DN navigateTo="/identities?compute=true"><span style={{ color: COLORS.accent }}>{computeRisk.with_msi} with MSI</span></DN>
+                {computeRisk.with_env_secrets > 0 && (
+                  <> &middot; <span style={{ color: COLORS.warning }}>{computeRisk.with_env_secrets} exposed secrets</span></>
+                )}
+                {computeRisk.with_jit > 0 && (
+                  <> &middot; <span style={{ color: COLORS.success }}>{computeRisk.with_jit} JIT enabled</span></>
+                )}
+              </span>
+            </div>
+          )}
+
+          {/* ─── Container Identity Risk Banner (Phase 2B) ─── */}
+          {containerRisk && containerRisk.total_clusters > 0 && (
+            <div style={{
+              background: `${COLORS.accent}08`, border: `1px solid ${COLORS.accent}30`,
+              borderRadius: 6, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 12 }}>{'\u2693'}</span>
+              <span style={{ fontSize: 10, color: COLORS.text, fontFamily: FONT.ui }}>
+                <strong>{containerRisk.total_clusters}</strong> AKS cluster{containerRisk.total_clusters !== 1 ? 's' : ''}
+                &middot; {containerRisk.wi_enabled} workload identity
+                &middot; {containerRisk.total_fed_creds} federated creds
+                {containerRisk.wildcard_creds > 0 && (
+                  <> &middot; <span style={{ color: COLORS.warning }}>{containerRisk.wildcard_creds} wildcard</span></>
+                )}
+                {containerRisk.total_acr > 0 && (
+                  <> &middot; {containerRisk.total_acr} ACR{containerRisk.admin_enabled_count > 0 && (
+                    <span style={{ color: COLORS.warning }}> ({containerRisk.admin_enabled_count} admin enabled)</span>
+                  )}</>
+                )}
+              </span>
+            </div>
+          )}
+
+          {/* ─── Data Plane Identity Risk Banner (Phase 3A) ─── */}
+          {dataRisk && dataRisk.total_database_servers > 0 && (
+            <div style={{
+              background: `${dataRisk.mixed_auth_count > 0 ? COLORS.danger : COLORS.success}08`,
+              border: `1px solid ${dataRisk.mixed_auth_count > 0 ? COLORS.danger : COLORS.success}30`,
+              borderRadius: 6, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 12 }}>{'\uD83D\uDDC4'}</span>
+              <span style={{ fontSize: 10, color: COLORS.text, fontFamily: FONT.ui }}>
+                <strong>{dataRisk.total_database_servers}</strong> database server{dataRisk.total_database_servers !== 1 ? 's' : ''}
+                {dataRisk.mixed_auth_count > 0 && (
+                  <> &middot; <span style={{ color: COLORS.danger }}>{dataRisk.mixed_auth_count} mixed auth</span></>
+                )}
+                {dataRisk.open_firewall_count > 0 && (
+                  <> &middot; <span style={{ color: COLORS.warning }}>{dataRisk.open_firewall_count} open firewall</span></>
+                )}
+                {dataRisk.no_aad_admin_count > 0 && (
+                  <> &middot; <span style={{ color: COLORS.textMuted }}>{dataRisk.no_aad_admin_count} no AAD admin</span></>
+                )}
+              </span>
+            </div>
           )}
 
           {/* ─── Row 2: ATTACK SURFACE + WORST CASE BLAST RADIUS ─── */}
