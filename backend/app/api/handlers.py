@@ -421,6 +421,27 @@ def _apply_sub_filter(query, params, cursor, org_id, connection_id=None):
     return query, params
 
 
+def _resolve_identity_id(cursor, identity_id: str, run_ids: list) -> str:
+    """Resolve an identity param to UUID identity_id.
+
+    Accepts either a UUID string (returned as-is) or a numeric DB id
+    (looked up in the identities table). This allows frontend links that
+    use the numeric DB id (e.g. from dangerous_identities) to work.
+    """
+    try:
+        db_id = int(identity_id)
+    except (ValueError, TypeError):
+        return identity_id  # already a UUID
+    cursor.execute(
+        "SELECT identity_id FROM identities WHERE id = %s AND discovery_run_id = ANY(%s) LIMIT 1",
+        (db_id, run_ids),
+    )
+    row = cursor.fetchone()
+    if row:
+        return row[0] if isinstance(row, (tuple, list)) else row.get('identity_id', identity_id)
+    return identity_id  # fallback — let the main query 404 naturally
+
+
 def _latest_run_ids(cursor, organization_id=None, connection_id=None):
     """Get latest completed discovery run IDs — one per ACTIVE cloud_connection_id.
 
@@ -3415,6 +3436,7 @@ def _identity_list_select():
     """Returns the SELECT ... FROM portion of the identities list query."""
     return """
         SELECT
+            i.id,
             i.identity_id,
             i.display_name,
             i.identity_type,
@@ -3681,6 +3703,7 @@ def _map_identity_row(row):
     entra_count = int(row.get('entra_role_count') or 0)
 
     result = {
+        "id": row.get('id'),
         "identity_id": row.get('identity_id'),
         "display_name": display_name,
         "identity_type": identity_type,

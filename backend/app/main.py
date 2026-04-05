@@ -714,6 +714,28 @@ def create_app():
     # Phase 1 Security Hardening: Input sanitization (XSS/SQLi defense-in-depth)
     app.before_request(sanitize_request)
 
+    # Resolve numeric identity_id URL params to UUID strings.
+    # Some frontend links (e.g. CISO dangerous identities) may use DB ids.
+    @app.before_request
+    def _resolve_identity_param():
+        va = request.view_args
+        if not va or 'identity_id' not in va:
+            return
+        raw = va['identity_id']
+        try:
+            db_id = int(raw)
+        except (ValueError, TypeError):
+            return  # already a UUID — no resolution needed
+        from app.api.handlers import _db, _org_id, _connection_id, _latest_run_ids, _resolve_identity_id
+        try:
+            db = _db()
+            cursor = db.conn.cursor()
+            run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+            if run_ids:
+                va['identity_id'] = _resolve_identity_id(cursor, raw, run_ids)
+        except Exception:
+            pass  # let the handler deal with it
+
     # Phase 4A: Request ID correlation + Phase 68: Request timing middleware
     @app.before_request
     def _start_timer():
