@@ -190,8 +190,12 @@ function formatAge(days: number | null | undefined): string {
   return mos > 0 ? `${yrs}y ${mos}mo` : `${yrs}y`;
 }
 
-function formatLastSeen(dateStr?: string | null): { label: string; colorClass: string } {
-  if (!dateStr) return { label: 'Never', colorClass: 'text-gray-400 italic' };
+function formatLastSeen(dateStr?: string | null, authSource?: string | null): { label: string; colorClass: string } {
+  if (!dateStr) {
+    return authSource === 'static_analysis_only'
+      ? { label: 'Not observed', colorClass: 'text-gray-400 italic' }
+      : { label: 'Never', colorClass: 'text-red-400 italic' };
+  }
   try {
     const days = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
     if (days === 0) return { label: 'Today', colorClass: 'text-green-500' };
@@ -2320,7 +2324,14 @@ export default function IdentitiesPage() {
                     <td className="px-2 py-2 whitespace-nowrap">
                       {(() => {
                         if (!i.last_signin_at) {
-                          return <span className="text-red-600 text-xs font-medium">Never</span>;
+                          return (
+                            <span
+                              className={`text-xs font-medium ${i.auth_source === 'static_analysis_only' ? 'text-gray-400 italic' : 'text-red-600'}`}
+                              title={i.auth_source === 'static_analysis_only' ? 'No sign-in logs available — rescan for latest' : 'No sign-in recorded'}
+                            >
+                              {i.auth_source === 'static_analysis_only' ? 'Not observed' : 'Never'}
+                            </span>
+                          );
                         }
                         const diff = Date.now() - new Date(i.last_signin_at).getTime();
                         const days = Math.floor(diff / 86400000);

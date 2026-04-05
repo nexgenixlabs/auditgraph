@@ -949,7 +949,7 @@ function UsageTab({ detail, dormantStatus, roles }: { detail: IdentityDetail; do
         </div>
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-gray-500">Relative</span>
-          <span className="text-sm text-gray-700">{relativeTime(usageData?.last_used || detail.last_seen_auth) || 'Never / Unknown'}</span>
+          <span className="text-sm text-gray-700">{relativeTime(usageData?.last_used || detail.last_seen_auth) || (detail.auth_source === 'static_analysis_only' ? 'Not observed' : 'Never')}</span>
         </div>
         <div className="flex items-center justify-between">
           <span className="text-xs text-gray-500">Source</span>

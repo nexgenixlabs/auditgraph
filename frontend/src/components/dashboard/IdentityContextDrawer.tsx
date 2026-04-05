@@ -1485,11 +1485,14 @@ function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNav
     { label: 'Assigned Roles', value: (
       <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: COLORS.text }}>{roleCount}</span>
     )},
-    { label: 'Last Authentication', value: (
-      <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textSecondary }}>
-        {detail.last_seen_auth ? new Date(detail.last_seen_auth).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Never'}
-      </span>
-    )},
+    { label: 'Last Authentication', value: (() => {
+      const authDate = (detail as any).last_signin_at || detail.last_seen_auth || detail.last_sign_in;
+      if (authDate) {
+        return <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textSecondary }}>{new Date(authDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>;
+      }
+      const src = (detail as any).auth_source;
+      return <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textDim }}>{src === 'static_analysis_only' ? 'Not observed' : 'Never'}</span>;
+    })()},
     { label: 'Last Activity', value: (() => {
       const candidates = [detail.last_seen_auth, detail.last_sign_in].filter(Boolean) as string[];
       const latest = candidates.length > 0 ? candidates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] : null;

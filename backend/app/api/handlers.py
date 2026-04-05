@@ -1245,7 +1245,8 @@ def get_identity_details(identity_id: str):
                 last_signin_ip = signin_row[1]
                 auth_source = 'entra_signin_log'
             elif identity.get('last_sign_in'):
-                auth_source = 'aad_audit'
+                last_signin_at = identity['last_sign_in']
+                auth_source = 'graph_sign_in_activity'
         except Exception:
             pass
 
@@ -3646,10 +3647,12 @@ def _identity_list_select():
             i.dependency_impact,
             i.observed_last_used,
 
-            (SELECT wse.created_datetime
-             FROM workload_signin_events wse
-             WHERE wse.identity_db_id = i.id AND wse.status = 'success'
-             ORDER BY wse.created_datetime DESC LIMIT 1
+            COALESCE(
+                (SELECT wse.created_datetime
+                 FROM workload_signin_events wse
+                 WHERE wse.identity_db_id = i.id AND wse.status = 'success'
+                 ORDER BY wse.created_datetime DESC LIMIT 1),
+                i.last_sign_in
             ) AS last_signin_at,
 
             (SELECT wse.ip_address
@@ -3662,7 +3665,7 @@ def _identity_list_select():
                 WHEN EXISTS (SELECT 1 FROM workload_signin_events wse WHERE wse.identity_db_id = i.id LIMIT 1)
                     THEN 'entra_signin_log'
                 WHEN i.last_sign_in IS NOT NULL
-                    THEN 'aad_audit'
+                    THEN 'graph_sign_in_activity'
                 ELSE 'static_analysis_only'
             END AS auth_source
         FROM identities i
