@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 
+
 interface NavItem {
   to: string;
   label: string;
@@ -84,6 +85,18 @@ const reportsIcon = icon('M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012
 // Settings
 const settingsIcon = icon('M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4');
 
+// AI Agents (Lucide "Bot" — distinct robot head shape)
+const agentBotIcon = (
+  <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 8V4H8" />
+    <rect x="4" y="8" width="16" height="12" rx="2" />
+    <path d="M2 14h2" />
+    <path d="M20 14h2" />
+    <path d="M15 13v2" />
+    <path d="M9 13v2" />
+  </svg>
+);
+
 // Connectors
 const connectorsIcon = icon('M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01');
 
@@ -96,7 +109,6 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [openSubGroups, setOpenSubGroups] = useState<Record<string, boolean>>({});
-
   const navGroups: NavGroup[] = useMemo(() => {
     const groups: NavGroup[] = [
       {
@@ -116,7 +128,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#8b5cf6',
         items: [
           { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/workload-identities', label: 'Non-Human Identities', icon: nonHumanIcon },
+          { to: '/ai-agents', label: 'AI Agents', icon: agentBotIcon },
           { to: '/service-accounts', label: 'Privileged Access', icon: governanceIcon },
           { to: '/identity-graph', label: 'Identity Graph', icon: accessGraphIcon },
         ],
@@ -129,8 +141,6 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon },
           { to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon },
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
-          { to: '/key-vaults', label: 'Secrets & Keys', icon: secretsIcon },
-          { to: '/storage-accounts', label: 'Storage Exposure', icon: storageIcon },
         ],
       },
       {
@@ -138,7 +148,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#dc2626',
         items: [
           { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
-          { to: '/graph-findings', label: 'Attack Paths', icon: findingsIcon },
+          { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
+          { to: '/remediation-queue', label: 'Remediation Queue', icon: remediationIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
           { to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon },
         ],

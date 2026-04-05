@@ -10,6 +10,18 @@ env:
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
   RESOURCE_GROUP: auditgraph-dev-rg
 
+# ──────────────────────────────────────────────────────
+# Required GitHub Actions secrets for this workflow:
+#   TEST_DB_PASSWORD       — CI test database password
+#   CI_JWT_SECRET          — CI test JWT signing secret
+#   CI_ADMIN_JWT_SECRET    — CI test admin JWT secret
+#   CI_CLIENT_JWT_SECRET   — CI test client JWT secret
+#   ACR_LOGIN_SERVER       — Azure Container Registry host
+#   ACR_USERNAME           — ACR pull credentials
+#   ACR_PASSWORD           — ACR pull credentials
+#   AZURE_CREDENTIALS      — Azure service principal JSON
+# ──────────────────────────────────────────────────────
+
 jobs:
   # ─── Pre-Deploy: Isolation & Guardrail Tests ──────
   test-guardrails:
@@ -20,7 +32,7 @@ jobs:
         env:
           POSTGRES_DB: auditgraph_test
           POSTGRES_USER: auditgraph
-          POSTGRES_PASSWORD: auditgraph_test
+          POSTGRES_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
         ports:
           - 5432:5432
         options: >-
@@ -30,6 +42,18 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate required CI secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.TEST_DB_PASSWORD }}" ] && MISSING="$MISSING TEST_DB_PASSWORD"
+          [ -z "${{ secrets.CI_JWT_SECRET }}" ] && MISSING="$MISSING CI_JWT_SECRET"
+          [ -z "${{ secrets.CI_ADMIN_JWT_SECRET }}" ] && MISSING="$MISSING CI_ADMIN_JWT_SECRET"
+          [ -z "${{ secrets.CI_CLIENT_JWT_SECRET }}" ] && MISSING="$MISSING CI_CLIENT_JWT_SECRET"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required secrets:$MISSING"
+            exit 1
+          fi
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -75,13 +99,13 @@ jobs:
           DB_PORT: 5432
           DB_NAME: auditgraph_test
           DB_USER: auditgraph
-          DB_PASSWORD: auditgraph_test
+          DB_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           DB_ADMIN_USER: auditgraph
-          DB_ADMIN_PASSWORD: auditgraph_test
+          DB_ADMIN_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           DB_SSLMODE: disable
-          JWT_SECRET: ci-test-secret
-          ADMIN_JWT_SECRET: ci-admin-test
-          CLIENT_JWT_SECRET: ci-client-test
+          JWT_SECRET: ${{ secrets.CI_JWT_SECRET }}
+          ADMIN_JWT_SECRET: ${{ secrets.CI_ADMIN_JWT_SECRET }}
+          CLIENT_JWT_SECRET: ${{ secrets.CI_CLIENT_JWT_SECRET }}
           ENFORCE_ADMIN_GUARD: 'false'
         run: |
           PYTHONPATH=. python tests/test_production_guardrails.py

@@ -789,7 +789,6 @@ export default function DataSecurity() {
                     <ClassificationBadge classification={selectedResource.data_classification} />
                     <button onClick={() => handleDeclassify(selectedResource.id)} style={{
                       background: 'none', border: 'none', color: G.textMuted, cursor: 'pointer', fontSize: 10,
-                      textDecoration: 'underline',
                     }}>Remove</button>
                   </div>
                   {selectedResource.classification_source && (

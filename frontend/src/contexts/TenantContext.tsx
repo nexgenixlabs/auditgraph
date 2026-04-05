@@ -68,20 +68,28 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
     let mounted = true;
     setLoading(true);
 
-    // Use the raw fetch (not the intercepted one) since this is pre-auth
-    const origFetch = window.fetch;
-    origFetch(`/api/clients/by-slug/${encodeURIComponent(orgSlug)}`)
+    // Validate slug via POST (rate-limited, prevents tenant enumeration via URL path)
+    fetch('/api/tenants/validate-slug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: orgSlug }),
+    })
       .then(res => {
-        if (!res.ok) throw new Error(res.status === 404 ? 'Organization not found' : 'Failed to resolve organization');
+        if (!res.ok) throw new Error('Failed to validate organization');
         return res.json();
       })
       .then(data => {
         if (!mounted) return;
-        const t = data.organization || data.tenant;
-        if (!t.enabled) {
+        if (!data.valid) {
+          setError('Organization not found');
+          setLoading(false);
+          return;
+        }
+        const org = data.org;
+        if (!org.enabled) {
           setError('This organization is currently disabled. Please contact your administrator.');
         } else {
-          setResolvedOrganization(t);
+          setResolvedOrganization(org);
         }
         setLoading(false);
       })

@@ -9,13 +9,15 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone
 
 from app.engines.correlation.remediation import generate_remediation_commands
+from app.constants.roles import EntraRole, RBACRole, _lower
 
 
-CRITICAL_ROLES = {
-    'owner', 'global administrator', 'user access administrator',
-    'privileged role administrator', 'privileged authentication administrator',
-    'contributor', 'key vault secrets officer', 'application administrator',
-}
+CRITICAL_ROLES = _lower(frozenset({
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.PRIVILEGED_AUTH_ADMIN, EntraRole.APPLICATION_ADMIN,
+    RBACRole.OWNER, RBACRole.USER_ACCESS_ADMIN,
+    RBACRole.CONTRIBUTOR, RBACRole.KEY_VAULT_SECRETS_OFFICER,
+}))
 
 
 class OrphanedAccountDetector:
@@ -176,9 +178,9 @@ class OrphanedAccountDetector:
     def _pick_highest_role(self, role_names):
         """Pick the highest-privilege role."""
         priority = [
-            'Global Administrator', 'Owner', 'User Access Administrator',
-            'Privileged Role Administrator', 'Contributor',
-            'Application Administrator', 'Key Vault Secrets Officer',
+            EntraRole.GLOBAL_ADMIN, RBACRole.OWNER, RBACRole.USER_ACCESS_ADMIN,
+            EntraRole.PRIVILEGED_ROLE_ADMIN, RBACRole.CONTRIBUTOR,
+            EntraRole.APPLICATION_ADMIN, RBACRole.KEY_VAULT_SECRETS_OFFICER,
         ]
         for p in priority:
             for rn in role_names:

@@ -6,31 +6,32 @@ with escalation metadata.
 """
 
 import logging
+from app.constants.roles import EntraRole, RBACRole
 
 logger = logging.getLogger(__name__)
 
 ROLE_PRIVILEGE_RANK = {
-    'reader': 1,
-    'monitoring reader': 1,
-    'log analytics reader': 1,
-    'backup reader': 1,
-    'cost management reader': 1,
-    'contributor': 2,
-    'storage blob data contributor': 2,
-    'network contributor': 2,
-    'virtual machine contributor': 2,
-    'sql db contributor': 2,
-    'key vault contributor': 2,
-    'owner': 3,
-    'user access administrator': 3,
-    'application administrator': 4,
-    'cloud application administrator': 4,
-    'privileged role administrator': 4,
-    'security administrator': 4,
-    'exchange administrator': 4,
-    'intune administrator': 4,
-    'global administrator': 5,
-    'company administrator': 5,
+    RBACRole.READER.lower(): 1,
+    RBACRole.MONITORING_READER.lower(): 1,
+    RBACRole.LOG_ANALYTICS_READER.lower(): 1,
+    RBACRole.BACKUP_READER.lower(): 1,
+    RBACRole.COST_MANAGEMENT_READER.lower(): 1,
+    RBACRole.CONTRIBUTOR.lower(): 2,
+    RBACRole.STORAGE_BLOB_DATA_CONTRIBUTOR.lower(): 2,
+    RBACRole.NETWORK_CONTRIBUTOR.lower(): 2,
+    RBACRole.VIRTUAL_MACHINE_CONTRIBUTOR.lower(): 2,
+    RBACRole.SQL_DB_CONTRIBUTOR.lower(): 2,
+    RBACRole.KEY_VAULT_CONTRIBUTOR.lower(): 2,
+    RBACRole.OWNER.lower(): 3,
+    RBACRole.USER_ACCESS_ADMIN.lower(): 3,
+    EntraRole.APPLICATION_ADMIN.lower(): 4,
+    EntraRole.CLOUD_APP_ADMIN.lower(): 4,
+    EntraRole.PRIVILEGED_ROLE_ADMIN.lower(): 4,
+    EntraRole.SECURITY_ADMIN.lower(): 4,
+    EntraRole.EXCHANGE_ADMIN.lower(): 4,
+    EntraRole.INTUNE_ADMIN.lower(): 4,
+    EntraRole.GLOBAL_ADMIN.lower(): 5,
+    EntraRole.COMPANY_ADMIN.lower(): 5,
 }
 
 

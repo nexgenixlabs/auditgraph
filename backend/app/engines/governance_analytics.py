@@ -11,6 +11,7 @@ Evaluates 4 metric types:
 
 import logging
 from datetime import datetime
+from app.constants.roles import EntraRole, RBACRole
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,10 @@ METRIC_TYPES = [
     'inactive_identity_ratio',
 ]
 
-PRIVILEGED_ROLES = ('Owner', 'Contributor', 'User Access Administrator',
-                    'Global Administrator', 'Privileged Role Administrator')
+PRIVILEGED_ROLES = (
+    RBACRole.OWNER, RBACRole.CONTRIBUTOR, RBACRole.USER_ACCESS_ADMIN,
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+)
 
 RISK_THRESHOLDS = {
     'critical': 0.5,

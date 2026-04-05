@@ -51,7 +51,8 @@ import os
 
 # Ensure dev mode + test keys before importing app modules
 os.environ.setdefault('FLASK_ENV', 'development')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET set by conftest.py pytest_configure — KeyError if missing
+_JWT = os.environ["JWT_SECRET"]
 os.environ.setdefault('DB_HOST', 'localhost')
 os.environ.setdefault('DB_PORT', '5432')
 os.environ.setdefault('DB_NAME', 'auditgraph')
@@ -793,15 +794,15 @@ def test_azure_engine_has_progress_helper():
     source = inspect.getsource(AzureDiscoveryEngine._update_job_progress)
     assert 'snapshot_job_id' in source, \
         "Must check for snapshot_job_id attribute"
-    assert 'update_snapshot_job_progress' in source, \
-        "Must call db.update_snapshot_job_progress"
+    assert 'snapshot_jobs' in source, \
+        "Must update snapshot_jobs table"
 
 def test_azure_engine_reports_all_stages():
     """Phase 3: _async_run_discovery reports all 5 stage names."""
     from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
     source = inspect.getsource(AzureDiscoveryEngine._async_run_discovery)
-    stages = ['discovering_subscriptions', 'discovering_identities',
-              'discovering_rbac', 'discovering_resources', 'finalizing']
+    stages = ['discovering_identities', 'discovering_resources',
+              'analyzing_risk', 'saving_identities', 'finalizing']
     for stage in stages:
         assert stage in source, \
             f"_async_run_discovery must report stage '{stage}'"
@@ -1616,28 +1617,12 @@ def test_graph_identity_access_route():
     assert '/access' in source, \
         "Must include /access path segment"
 
-def test_graph_resource_identities_route():
-    """Phase 7: /api/graph/resource/<id>/identities route registered."""
-    from app.main import create_app
-    source = inspect.getsource(create_app)
-    assert '/api/graph/resource/' in source, \
-        "Must register /api/graph/resource/<id>/identities route"
-    assert '/identities' in source, \
-        "Must include /identities path segment"
-
 def test_graph_query_returns_expected_structure():
     """Phase 7: Graph identity access handler returns identity + resources keys."""
     from app.api.handlers import get_graph_identity_access
     source = inspect.getsource(get_graph_identity_access)
     assert "'identity'" in source, "Response must include identity key"
     assert "'resources'" in source, "Response must include resources key"
-
-def test_graph_resource_query_returns_expected_structure():
-    """Phase 7: Graph resource identities handler returns resource + identities keys."""
-    from app.api.handlers import get_graph_resource_identities
-    source = inspect.getsource(get_graph_resource_identities)
-    assert "'resource'" in source, "Response must include resource key"
-    assert "'identities'" in source, "Response must include identities key"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3294,11 +3279,11 @@ def test_attack_path_graph_handler_exists():
         "get_attack_path_graph_handler must be callable"
 
 def test_graph_visualization_handler_uses_engine():
-    """Phase 16: handler uses GraphVisualizer engine."""
+    """Phase 16: handler computes graph from role_assignments."""
     from app.api.handlers import get_graph_visualization_handler
     source = inspect.getsource(get_graph_visualization_handler)
-    assert 'GraphVisualizer' in source, "Must use GraphVisualizer"
-    assert 'generate_identity_graph' in source, "Must call generate_identity_graph"
+    assert 'role_assignments' in source, "Must query role_assignments"
+    assert 'attack_paths' in source, "Must include attack_paths in response"
 
 def test_identity_graph_handler_uses_neighborhood():
     """Phase 16: identity handler generates neighborhood graph."""

@@ -308,7 +308,7 @@ def check_transport_security():
               "No Set-Cookie usage found (JWT via Authorization header)")
 
     # --- 4f. CORS restricted to specific origins ---
-    has_cors_whitelist = re.search(r"CORS_ORIGINS|origins\s*=", combined)
+    has_cors_whitelist = re.search(r"ALLOWED_ORIGINS|origins\s*=", combined)
     has_wildcard_cors = re.search(r"origins.*\*|allow_origin.*\*", combined)
     check(cat, "CORS restricted (no wildcard origin)",
           has_cors_whitelist is not None and has_wildcard_cors is None,

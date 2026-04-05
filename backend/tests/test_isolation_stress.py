@@ -25,6 +25,8 @@ import os
 import sys
 import threading
 
+import pytest
+
 # Ensure local dev config before any app imports
 os.environ.setdefault('APP_ENV', 'local')
 os.environ.setdefault('FLASK_ENV', 'development')
@@ -181,6 +183,7 @@ def _teardown_test_env():
 # Test 1: Tenant A can only see Org A data
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_tenant_sees_only_own_data():
     """RLS-enforced connection for Org A must return only Org A rows."""
     _setup_test_env()
@@ -214,6 +217,7 @@ def test_tenant_sees_only_own_data():
 # Test 2: Cross-tenant WHERE clause returns zero rows
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_cross_tenant_returns_empty():
     """Org A cannot fetch Org B data even with explicit WHERE organization_id = B."""
     _setup_test_env()
@@ -239,6 +243,7 @@ def test_cross_tenant_returns_empty():
 # Test 3: Sentinel org_id (-1) matches nothing
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_sentinel_org_matches_nothing():
     """Organization_id = -1 should match zero rows in any table."""
     _setup_test_env()
@@ -388,6 +393,7 @@ def test_close_resets_context():
 # Test 9: Concurrent multi-tenant stress test (RLS enforcement)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_concurrent_isolation():
     """2 tenants × 20 iterations × concurrent threads — verify zero leakage."""
     _setup_test_env()

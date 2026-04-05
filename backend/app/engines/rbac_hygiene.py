@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import logging
+from app.constants.roles import EntraRole, RBACRole, _lower
 
 logger = logging.getLogger(__name__)
 
@@ -42,45 +43,46 @@ logger = logging.getLogger(__name__)
 
 TIER_WEIGHTS = {'T1': 30, 'T2': 20, 'T3': 10, 'T4': 5}
 
-# RBAC roles by tier
-T1_RBAC = {'owner', 'user access administrator'}
-T2_RBAC = {
-    'contributor', 'key vault administrator', 'security admin',
-    'managed identity operator', 'managed identity contributor',
-    'storage blob data owner', 'virtual machine contributor',
-}
-T3_RBAC = {
-    'key vault secrets officer', 'key vault crypto officer',
-    'storage blob data contributor', 'network contributor',
-    'sql db contributor', 'web plan contributor',
-    'logic app contributor', 'automation contributor',
-    'data factory contributor', 'cosmos db account reader role',
-}
-T4_RBAC = {
-    'reader', 'storage blob data reader', 'key vault reader',
-    'key vault secrets user', 'monitoring reader',
-    'security reader', 'log analytics reader',
-    'cost management reader', 'billing reader',
-}
+# RBAC roles by tier (lowercase for case-insensitive matching)
+T1_RBAC = _lower(frozenset({RBACRole.OWNER, RBACRole.USER_ACCESS_ADMIN}))
+T2_RBAC = _lower(frozenset({
+    RBACRole.CONTRIBUTOR, RBACRole.KEY_VAULT_ADMIN,
+    EntraRole.SECURITY_ADMIN,
+    RBACRole.MANAGED_IDENTITY_OPERATOR, RBACRole.MANAGED_IDENTITY_CONTRIBUTOR,
+    RBACRole.STORAGE_BLOB_DATA_OWNER, RBACRole.VIRTUAL_MACHINE_CONTRIBUTOR,
+}))
+T3_RBAC = _lower(frozenset({
+    RBACRole.KEY_VAULT_SECRETS_OFFICER, RBACRole.KEY_VAULT_CRYPTO_OFFICER,
+    RBACRole.STORAGE_BLOB_DATA_CONTRIBUTOR, RBACRole.NETWORK_CONTRIBUTOR,
+    RBACRole.SQL_DB_CONTRIBUTOR, RBACRole.WEB_PLAN_CONTRIBUTOR,
+    RBACRole.LOGIC_APP_CONTRIBUTOR, RBACRole.AUTOMATION_CONTRIBUTOR,
+    RBACRole.DATA_FACTORY_CONTRIBUTOR, RBACRole.COSMOS_DB_ACCOUNT_READER,
+}))
+T4_RBAC = _lower(frozenset({
+    RBACRole.READER, RBACRole.STORAGE_BLOB_DATA_READER, RBACRole.KEY_VAULT_READER,
+    RBACRole.KEY_VAULT_SECRETS_USER, RBACRole.MONITORING_READER,
+    RBACRole.SECURITY_READER, RBACRole.LOG_ANALYTICS_READER,
+    RBACRole.COST_MANAGEMENT_READER, RBACRole.BILLING_READER,
+}))
 
-# Entra roles by tier
-T1_ENTRA = {'global administrator', 'privileged role administrator'}
-T2_ENTRA = {
-    'application administrator', 'cloud application administrator',
-    'user administrator', 'exchange administrator',
-    'security administrator', 'conditional access administrator',
-    'authentication administrator', 'intune administrator',
-    'password administrator', 'groups administrator',
-}
-T3_ENTRA = {
-    'directory readers', 'reports reader', 'message center reader',
-    'helpdesk administrator', 'license administrator',
-    'service support administrator', 'compliance administrator',
-}
-T4_ENTRA = {
-    'directory readers', 'usage summary reports reader',
-    'message center reader',
-}
+# Entra roles by tier (lowercase for case-insensitive matching)
+T1_ENTRA = _lower(frozenset({EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN}))
+T2_ENTRA = _lower(frozenset({
+    EntraRole.APPLICATION_ADMIN, EntraRole.CLOUD_APP_ADMIN,
+    EntraRole.USER_ADMIN, EntraRole.EXCHANGE_ADMIN,
+    EntraRole.SECURITY_ADMIN, EntraRole.CONDITIONAL_ACCESS_ADMIN,
+    EntraRole.AUTH_ADMIN, EntraRole.INTUNE_ADMIN,
+    EntraRole.PASSWORD_ADMIN, EntraRole.GROUPS_ADMIN,
+}))
+T3_ENTRA = _lower(frozenset({
+    EntraRole.DIRECTORY_READERS, EntraRole.REPORTS_READER, EntraRole.MESSAGE_CENTER_READER,
+    EntraRole.HELPDESK_ADMIN, EntraRole.LICENSE_ADMIN,
+    EntraRole.SERVICE_SUPPORT_ADMIN, EntraRole.COMPLIANCE_ADMIN,
+}))
+T4_ENTRA = _lower(frozenset({
+    EntraRole.DIRECTORY_READERS, EntraRole.USAGE_SUMMARY_READER,
+    EntraRole.MESSAGE_CENTER_READER,
+}))
 
 # Combined sets for quick lookup
 PRIVILEGED_RBAC_ROLES = T1_RBAC | T2_RBAC

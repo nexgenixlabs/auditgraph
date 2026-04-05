@@ -18,6 +18,7 @@ import {
   DORMANT_LABELS,
   getDormantStatus,
 } from './types';
+import { OWNER_STATUS_CONFIG } from '../../constants/metrics';
 
 export interface CorrelatedAccount {
   id: number;
@@ -235,6 +236,14 @@ export default function OverviewTab({
               else if (diffDays === 1) lastUsedLabel = 'Last used: Yesterday';
               else lastUsedLabel = `Last used: ${diffDays}d ago`;
 
+              // Append source qualifier when identity authenticated but
+              // roles show no activity (prevents misleading "used today"
+              // when no Azure resources were actually accessed).
+              const qualifier = (identity as any).activity_source_qualifier;
+              if (qualifier) {
+                lastUsedLabel += ` \u00b7 ${qualifier}`;
+              }
+
               sourceBadge = effectiveLastUsedSource === 'auditgraph'
                 ? <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
                 : <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>;
@@ -311,6 +320,17 @@ export default function OverviewTab({
             )}
           </div>
 
+          {/* Ownership */}
+          <div className="border rounded-xl p-4">
+            <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Ownership</div>
+            {(() => {
+              const os = (identity as any).owner_status;
+              const cfg = OWNER_STATUS_CONFIG[os] ?? OWNER_STATUS_CONFIG['unknown'];
+              return <span className={`px-2 py-1 rounded-full text-xs font-semibold ${cfg.badgeClass}`}>{cfg.label}</span>;
+            })()}
+            <div className="text-[10px] text-gray-500 mt-2">{identity.owner_count || 0} owner(s)</div>
+          </div>
+
           {/* PIM */}
           <div className="border rounded-xl p-4">
             <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">PIM</div>
@@ -358,6 +378,21 @@ export default function OverviewTab({
               Activity is inferred based on configuration and role usage.
             </div>
           )}
+        </div>
+      )}
+
+      {/* Activity source mismatch warning — identity authenticated but
+          no role-scoped activity detected. Same visual style as the
+          "No owners assigned" amber banner. */}
+      {!!(identity as any).activity_mismatch_warning && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
+          <svg className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <div>
+            <div className="text-sm font-semibold text-amber-800">Activity Source Mismatch</div>
+            <div className="text-xs text-amber-600 mt-1">{(identity as any).activity_mismatch_warning}</div>
+          </div>
         </div>
       )}
 
@@ -623,6 +658,59 @@ export default function OverviewTab({
                   {srv.risk_level === 'critical' ? 'Mixed Auth + Open FW' :
                    srv.risk_level === 'high' ? 'Mixed Auth' : 'AAD-Only'}
                 </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Analytics context (Phase 3B) */}
+      {!!data && !!(data as any).analytics_context && !!(data as any).analytics_context.workspace_type && (
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Analytics Workspace</h3>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 py-2 px-3 rounded-lg bg-gray-50">
+              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                (data as any).analytics_context.workspace_type === 'databricks' ? 'bg-red-100 text-red-700' :
+                (data as any).analytics_context.workspace_type === 'synapse' ? 'bg-blue-100 text-blue-700' :
+                'bg-purple-100 text-purple-700'
+              }`}>
+                {(data as any).analytics_context.workspace_type === 'databricks' ? 'Databricks' :
+                 (data as any).analytics_context.workspace_type === 'synapse' ? 'Synapse' : 'Azure ML'}
+              </span>
+              <span className="text-sm font-medium text-gray-800">{(data as any).analytics_context.workspace_name}</span>
+            </div>
+            {(data as any).analytics_context.no_expiry_pat_count > 0 && (
+              <div className="text-xs text-red-600 px-3">
+                {'\u26A0'} {(data as any).analytics_context.no_expiry_pat_count} active PATs with no expiry — credentials bypass Entra lifecycle
+              </div>
+            )}
+            {(data as any).analytics_context.admin_sprawl_flag && (
+              <div className="text-xs text-amber-600 px-3">
+                {'\u26A0'} Workspace admin sprawl (recommended: {'\u2264'}3)
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* DevOps pipeline context (Phase 4A) */}
+      {!!data && !!(data as any).devops_context && (data as any).devops_context.length > 0 && (
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Used in Pipelines</h3>
+          <div className="space-y-2">
+            {((data as any).devops_context as Array<{
+              ado_organization: string; ado_project: string;
+              connection_name: string; scope_level: string; is_subscription_scope: boolean;
+            }>).map((sc, i) => (
+              <div key={i} className="flex items-center gap-2 py-2 px-3 rounded-lg bg-gray-50">
+                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                  sc.is_subscription_scope ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
+                }`}>
+                  {sc.is_subscription_scope ? 'SUBSCRIPTION' : sc.scope_level?.toUpperCase() || 'RESOURCE'}
+                </span>
+                <span className="text-sm font-medium text-gray-800">{sc.connection_name}</span>
+                <span className="text-xs text-gray-400">{sc.ado_organization}/{sc.ado_project}</span>
               </div>
             ))}
           </div>

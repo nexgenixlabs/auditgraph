@@ -571,8 +571,19 @@ def _compute_live_metrics(cursor, run_ids, organization_id):
                 ) as over_privileged,
                 COUNT(*) FILTER (WHERE
                     i.activity_status IN ('stale','never_used')
-                    AND (EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
-                         OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id))
+                    AND (EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator','privileged role administrator',
+                            'privileged authentication administrator',
+                            'application administrator','cloud application administrator',
+                            'hybrid identity administrator','domain name administrator',
+                            'external identity provider administrator',
+                            'user administrator','exchange administrator',
+                            'sharepoint administrator','teams administrator',
+                            'security administrator','conditional access administrator',
+                            'authentication administrator','helpdesk administrator'))
+                     OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator')))
                 ) as dormant_privileged,
                 COUNT(*) FILTER (WHERE
                     COALESCE(i.blast_radius_score,0) >= 70

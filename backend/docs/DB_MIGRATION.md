@@ -294,7 +294,7 @@ az containerapp create \
     DB_PORT="5432" \
     DB_NAME="${DB_NAME}" \
     DB_SSLMODE="require" \
-    CORS_ORIGINS="https://${ENV}.app.${DOMAIN},https://${ENV}.admin.${DOMAIN}" \
+    ALLOWED_ORIGINS="https://${ENV}.app.${DOMAIN},https://${ENV}.admin.${DOMAIN}" \
   --secrets \
     db-user="${APP_USER}" \
     db-password="${APP_PW}" \

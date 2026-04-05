@@ -180,6 +180,113 @@ class ConnectionLifecycleService:
         finally:
             cursor.close()
 
+    def purge_connection_data(self, org_id: int, connection_id: int) -> dict:
+        """Delete all data for a connection but KEEP the cloud_connections row.
+
+        Used for auth_failed connections where we want to clear stale data
+        (identities, runs, etc.) without removing the connection itself.
+        The user can then re-authenticate and run a fresh scan.
+        """
+        summary = {}
+        cursor = self.db.conn.cursor()
+
+        try:
+            # Step 0: Cancel in-flight discovery jobs
+            cancelled = self._cancel_inflight_jobs(cursor, connection_id)
+            if cancelled > 0:
+                summary['jobs_cancelled'] = cancelled
+
+            # Step 1: Count discovery runs
+            cursor.execute("""
+                SELECT id FROM discovery_runs
+                WHERE cloud_connection_id = %s AND organization_id = %s
+            """, (connection_id, org_id))
+            run_ids = [r[0] for r in cursor.fetchall()]
+            summary['discovery_runs_found'] = len(run_ids)
+
+            # Step 2: Clean tables with cloud_connection_id column
+            for table in CC_TABLES:
+                try:
+                    cursor.execute("SAVEPOINT purge_cc")
+                    cursor.execute(
+                        f"DELETE FROM {table} WHERE cloud_connection_id = %s",
+                        (connection_id,)
+                    )
+                    deleted = cursor.rowcount
+                    cursor.execute("RELEASE SAVEPOINT purge_cc")
+                    if deleted > 0:
+                        summary[table] = deleted
+                        logger.info("  purge %s: %d rows deleted", table, deleted)
+                except Exception as e:
+                    logger.debug("  purge %s: skipped (%s)", table, e)
+                    try:
+                        cursor.execute("ROLLBACK TO SAVEPOINT purge_cc")
+                    except Exception:
+                        pass
+
+            # Step 3: Delete discovery_runs → FK CASCADE handles child tables
+            if run_ids:
+                cursor.execute("""
+                    DELETE FROM discovery_runs
+                    WHERE cloud_connection_id = %s AND organization_id = %s
+                """, (connection_id, org_id))
+                summary['discovery_runs'] = cursor.rowcount
+                logger.info("  purge discovery_runs: %d deleted (+ cascade)",
+                            cursor.rowcount)
+
+            # Step 4: Delete cloud_subscriptions
+            try:
+                cursor.execute("SAVEPOINT purge_sub")
+                cursor.execute("""
+                    DELETE FROM cloud_subscriptions
+                    WHERE cloud_connection_id = %s AND organization_id = %s
+                """, (connection_id, org_id))
+                deleted = cursor.rowcount
+                cursor.execute("RELEASE SAVEPOINT purge_sub")
+                if deleted > 0:
+                    summary['cloud_subscriptions'] = deleted
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT purge_sub")
+                except Exception:
+                    pass
+
+            # NOTE: We intentionally do NOT delete the cloud_connections row.
+            # The connection stays so the user can re-authenticate and re-scan.
+
+            self.db.conn.commit()
+
+            total_deleted = sum(v for v in summary.values() if isinstance(v, int))
+            logger.info(
+                "Connection %d data purged for org %d. "
+                "Total rows deleted: %d (connection row retained)",
+                connection_id, org_id, total_deleted
+            )
+
+            return {
+                'purged': True,
+                'connection_id': connection_id,
+                'runs_removed': len(run_ids),
+                'jobs_cancelled': cancelled,
+                'rows_deleted': summary,
+                'total_deleted': total_deleted,
+            }
+
+        except Exception as e:
+            logger.error("Connection data purge failed for %d: %s",
+                         connection_id, e, exc_info=True)
+            try:
+                self.db.conn.rollback()
+            except Exception:
+                pass
+            return {
+                'purged': False,
+                'connection_id': connection_id,
+                'error': str(e),
+            }
+        finally:
+            cursor.close()
+
     def _cancel_inflight_jobs(self, cursor, connection_id: int) -> int:
         """Cancel any queued/running snapshot jobs for this connection.
 

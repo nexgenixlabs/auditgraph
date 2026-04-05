@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { WORKLOAD_TYPE_CONFIG, LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG } from '../constants/metrics';
+import { verdictBadgeClasses, verdictLabel } from '../constants/verdicts';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -37,6 +38,9 @@ interface WorkloadRow {
   next_expiry?: string | null;
   credential_count?: number;
   has_expired_credentials?: boolean;
+  recommended_action?: string | null;
+  verdict_confidence?: string | null;
+  workload_type?: string | null;
 }
 
 interface WorkloadStats {
@@ -45,6 +49,7 @@ interface WorkloadStats {
   exposure_critical: number;
   can_escalate_count: number;
   orphaned_count: number;
+  ungoverned_count: number;
   blind_count: number;
   stale_credentials: number;
   zombie_count: number;
@@ -355,12 +360,18 @@ const WorkloadIdentities: React.FC = () => {
 
       {/* Top 4 Audit Metrics */}
       {stats && (
-        <div className="grid grid-cols-4 gap-3 mb-5">
+        <div className="grid grid-cols-5 gap-3 mb-5">
           <button onClick={() => { setOwnerFilter('orphaned'); updateParams('owner', 'orphaned'); }}
             className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
             <p className="text-xs text-gray-500 dark:text-slate-400">Orphaned</p>
             <p className="text-2xl font-bold mt-1 text-red-600 dark:text-red-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.orphaned_count}</p>
-            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">No owner assigned</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">No owner + inactive</p>
+          </button>
+          <button onClick={() => { setOwnerFilter('ungoverned'); updateParams('owner', 'ungoverned'); }}
+            className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
+            <p className="text-xs text-gray-500 dark:text-slate-400">Ungoverned</p>
+            <p className="text-2xl font-bold mt-1 text-amber-600 dark:text-amber-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.ungoverned_count}</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Active but no owner</p>
           </button>
           <button onClick={() => { setLifecycleFilter('likely_dormant'); updateParams('lifecycle', 'likely_dormant'); }}
             className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
@@ -407,6 +418,7 @@ const WorkloadIdentities: React.FC = () => {
           className="text-xs border border-gray-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-800 text-gray-700 dark:text-slate-300">
           <option value="">All Owners</option>
           <option value="orphaned">Orphaned</option>
+          <option value="ungoverned">Ungoverned</option>
           <option value="single_owner">Single Owner</option>
           <option value="owned">Owned</option>
           <option value="resource_bound">Resource Bound</option>
@@ -453,16 +465,17 @@ const WorkloadIdentities: React.FC = () => {
                 Last Active <SortIcon col="last_sign_in" />
               </th>
               <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-28">Ownership Confidence</th>
+              <th className="text-center px-2 py-2 text-xs font-medium text-gray-500 dark:text-slate-400 w-24">Lineage</th>
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={9} className="text-center py-8">
+              <tr><td colSpan={10} className="text-center py-8">
                 <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
               </td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No non-human identities found</td></tr>
+              <tr><td colSpan={10} className="text-center py-8 text-sm text-gray-400 dark:text-slate-500">No non-human identities found</td></tr>
             )}
             {!loading && items.map(row => {
               const owCfg = OWNER_STATUS_CONFIG[row.owner_status] || OWNER_STATUS_CONFIG.unknown;
@@ -524,6 +537,14 @@ const WorkloadIdentities: React.FC = () => {
                   {/* Ownership Confidence */}
                   <td className="text-center px-2 py-2">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${owCfg.badgeClass}`}>{owCfg.label}</span>
+                  </td>
+                  {/* Lineage */}
+                  <td className="text-center px-2 py-2">
+                    {(() => {
+                      const v = row.recommended_action;
+                      if (!v) return <span className="text-[10px] text-gray-300">—</span>;
+                      return <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${verdictBadgeClasses(v)}`}>{verdictLabel(v)}</span>;
+                    })()}
                   </td>
                 </tr>
               );

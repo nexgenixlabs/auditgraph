@@ -7,18 +7,29 @@
  */
 import React, { createContext, useContext, useState, useCallback } from 'react';
 
+/** Pre-populated identity metadata from the calling context (e.g. finding row).
+ *  Used as immediate display while the full detail API loads. */
+export interface IdentityPrefill {
+  display_name?: string;
+  identity_category?: string;
+  risk_level?: string;
+  risk_score?: number;
+}
+
+/** selectedIdentityId: numeric DB id OR UUID identity_id string — both accepted. */
 interface DrawerState {
   open: boolean;
   filterUrl: string | null;
-  selectedIdentityId: number | null;
+  selectedIdentityId: number | string | null;
+  prefill: IdentityPrefill | null;
 }
 
 interface IdentityDrawerContextValue {
   state: DrawerState;
   openDrawer: (filterUrl: string) => void;
-  openIdentity: (id: number) => void;
+  openIdentity: (id: number | string, prefill?: IdentityPrefill) => void;
   closeDrawer: () => void;
-  selectIdentity: (id: number) => void;
+  selectIdentity: (id: number | string) => void;
   backToList: () => void;
 }
 
@@ -29,26 +40,30 @@ export function IdentityDrawerProvider({ children }: { children: React.ReactNode
     open: false,
     filterUrl: null,
     selectedIdentityId: null,
+    prefill: null,
   });
 
   const openDrawer = useCallback((filterUrl: string) => {
-    setState({ open: true, filterUrl, selectedIdentityId: null });
+    setState({ open: true, filterUrl, selectedIdentityId: null, prefill: null });
   }, []);
 
-  const openIdentity = useCallback((id: number) => {
-    setState({ open: true, filterUrl: '/identities', selectedIdentityId: id });
+  const openIdentity = useCallback((id: number | string, prefill?: IdentityPrefill) => {
+    setState({ open: true, filterUrl: null, selectedIdentityId: id, prefill: prefill || null });
   }, []);
 
   const closeDrawer = useCallback(() => {
-    setState({ open: false, filterUrl: null, selectedIdentityId: null });
+    setState({ open: false, filterUrl: null, selectedIdentityId: null, prefill: null });
   }, []);
 
-  const selectIdentity = useCallback((id: number) => {
-    setState(prev => ({ ...prev, selectedIdentityId: id }));
+  const selectIdentity = useCallback((id: number | string) => {
+    setState(prev => ({ ...prev, selectedIdentityId: id, prefill: null }));
   }, []);
 
   const backToList = useCallback(() => {
-    setState(prev => ({ ...prev, selectedIdentityId: null }));
+    setState(prev => {
+      if (!prev.filterUrl) return { open: false, filterUrl: null, selectedIdentityId: null, prefill: null };
+      return { ...prev, selectedIdentityId: null, prefill: null };
+    });
   }, []);
 
   return (

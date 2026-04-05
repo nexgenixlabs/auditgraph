@@ -14,10 +14,11 @@ import re
 import time
 import uuid
 
-from app.config import IS_DEV, IS_LOCAL, log_startup_banner
+from app.config import APP_ENV, IS_DEV, IS_LOCAL, log_startup_banner
 from app.logging_config import configure_logging
 from app.metrics import MetricsCollector
 from app.security import rate_limit, add_security_headers
+from app.constants.agirs import PURGE_RATE_LIMIT_REQUESTS, PURGE_RATE_LIMIT_WINDOW_SECONDS
 from app.idempotency import idempotent
 from app.api.validation import (
     validate_json, LOGIN_SCHEMA, REFRESH_SCHEMA, CREATE_CONNECTION_SCHEMA,
@@ -157,17 +158,8 @@ from app.api.handlers import (
     get_onboarding_status,
     test_azure_connection,
     simulate_risk,
-    get_resources,
-    get_resource_stats,
-    get_resource_detail,
-    get_resource_access,
-    get_resource_findings,
-    get_resource_anomalies,
-    get_resource_expiry_summary,
-    get_resource_compliance_summary,
-    get_data_security_combined,
-    get_data_security_summary,
     get_organization_by_slug_public,
+    validate_organization_slug,
     provision_organization_handler,
     reset_client_root_user,
     get_user_organizations_handler,
@@ -195,8 +187,6 @@ from app.api.handlers import (
     prometheus_metrics,
     get_system_health,
     get_sla_metrics,
-    check_resource_integrity,
-    get_aws_cloudtrail_events,
     get_portal_users_list,
     get_spn_stats,
     get_spn_list,
@@ -240,6 +230,7 @@ from app.api.handlers import (
     deactivate_subscription,
     reconcile_subscriptions,
     get_subscriptions_distinct,
+    get_subscriptions_scope_summary,
     get_identity_subscriptions,
     activate_client_subscription,
     get_discovery_status,
@@ -276,6 +267,7 @@ from app.api.handlers import (
     create_client_connection,
     update_client_connection,
     delete_client_connection,
+    purge_client_connection_data,
     cleanup_inactive_connections_handler,
     rotate_connector_credentials,
     check_connector_credential_expiry_handler,
@@ -313,13 +305,7 @@ from app.api.handlers import (
     get_exposure_summary,
     get_attack_path_count,
     get_dangerous_identities,
-    # Phase 91: Sensitive Data Intelligence
-    get_resource_classifications,
-    classify_resource,
-    declassify_resource,
-    auto_classify_resources,
     get_sensitive_access_for_identity,
-    get_resource_access_map,
     get_blast_radius_summary,
     platform_integrity_check_handler,
     data_source_map_handler,
@@ -353,7 +339,6 @@ from app.api.handlers import (
     acknowledge_risk_finding,
     resolve_risk_finding,
     get_graph_identity_access,
-    get_graph_resource_identities,
     get_graph_identity_attack_paths,
     get_nhi_security_findings,
     get_dashboard_summary_handler,
@@ -430,6 +415,7 @@ from app.api.handlers import (
     get_attack_path_detail,
     get_identity_persisted_attack_paths,
     trigger_attack_path_analysis,
+    get_attack_surface_summary,
     get_fix_recommendations_list,
     get_fix_recommendations_stats_handler,
     get_fix_recommendation_detail,
@@ -537,23 +523,17 @@ from app.api.handlers import (
     get_entra_group_stats,
     get_identity_entra_groups,
     # Phase 2A: Resource Identity Links
-    get_resource_identity_links,
-    get_resource_identity_links_stats,
     # Lineage Verdicts
     get_identity_verdict_history,
     get_dashboard_verdict_changes,
-    # Phase 2A: Compute Identity Plane
-    get_compute_resources,
-    get_compute_resource_detail,
-    get_compute_identity_risk,
-    get_identity_compute_findings,
-    # Phase 2B: AKS / ACR Container
-    get_aks_clusters,
-    get_dashboard_container_risk,
-    toggle_layer2_scan,
-    # Phase 3A: Data Plane Identities
-    get_database_servers,
-    get_database_server_detail,
+    # Key Vault Access Graph
+    get_identity_keyvault_access,
+    # Remediation Queue (attack-path driven)
+    create_remediation_queue_item,
+    list_remediation_queue,
+    get_remediation_queue_item_detail,
+    patch_remediation_queue_item,
+    get_remediation_queue_summary,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -562,9 +542,22 @@ logger = logging.getLogger(__name__)
 
 
 def _validate_startup_secrets():
-    """Fail fast if critical secrets are missing in production."""
+    """Fail fast if critical secrets are missing or debug flags leak into production."""
+    # ── Block production-hostile flags in non-dev environments ──
+    if not IS_DEV:
+        hostile = []
+        if os.getenv("FLASK_DEBUG"):
+            hostile.append("FLASK_DEBUG")
+        if os.getenv("FLASK_ENV") == "development":
+            hostile.append("FLASK_ENV=development")
+        if hostile:
+            raise RuntimeError(
+                f"Production-hostile config detected: {', '.join(hostile)}. "
+                f"These must not be set when APP_ENV={APP_ENV}"
+            )
+
     if IS_DEV:
-        return  # Skip in local/dev
+        return  # Skip secret checks in local/dev
 
     required = [
         ('ADMIN_JWT_SECRET', 'Admin portal JWT signing'),
@@ -700,12 +693,19 @@ def create_app():
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB request size limit
 
-    cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
+    allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    if not allowed_origins:
+        raise RuntimeError(
+            "ALLOWED_ORIGINS env var is required and must not be empty. "
+            "Example: ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173"
+        )
     CORS(app, resources={r"/*": {
-        "origins": [o.strip() for o in cors_origins],
+        "origins": allowed_origins,
         "allow_headers": ["Content-Type", "Authorization", "X-Portal-Context",
-                          "X-Organization-Id", "X-API-Key", "Idempotency-Key"],
+                          "X-Organization-Id", "X-API-Key", "Idempotency-Key",
+                          "X-CSRF-Token", "X-Tenant-ID"],
         "expose_headers": ["Content-Type", "X-Idempotency-Key", "X-Idempotent-Replayed"],
+        "supports_credentials": True,
     }})
 
     # Authentication middleware (Phase 31)
@@ -934,18 +934,13 @@ def create_app():
             ('ai_audit_log', lambda: _db_init._ensure_ai_audit_log_table()),
             ('sa_attestations', lambda: _db_init._ensure_sa_attestations_table()),
             ('billing_events', lambda: _db_init._ensure_billing_events_table()),
-            ('azure_storage_accounts', lambda: _db_init._ensure_azure_storage_accounts_table()),
-            ('azure_key_vaults', lambda: _db_init._ensure_azure_key_vaults_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
             ('agent_classifications', lambda: _db_init._ensure_agent_classifications_table()),
             ('entra_groups', lambda: _db_init._ensure_entra_group_tables()),
             ('associated_resource_columns', lambda: _db_init.ensure_associated_resource_columns()),
-            ('resource_identity_links', lambda: _db_init._ensure_resource_identity_links_table()),
             ('lineage_verdicts', lambda: _db_init._ensure_lineage_verdicts_table()),
+            ('keyvault_metadata', lambda: _db_init._ensure_keyvault_metadata_table()),
             ('role_assignment_group_cols', lambda: _db_init._ensure_role_assignment_group_cols()),
-            ('compute_tables', lambda: _db_init._ensure_compute_tables()),
-            ('container_tables', lambda: _db_init._ensure_container_tables()),
-            ('database_tables', lambda: _db_init._ensure_database_tables()),
         ]
 
         for label, op in _startup_ops:
@@ -1075,11 +1070,6 @@ def create_app():
     def ai_health():
         return ai_health_handler()
 
-    @app.get("/api/system/resource-integrity")
-    @require_role('admin')
-    def resource_integrity():
-        return check_resource_integrity()
-
     # -----------------------
     # Authentication (Phase 31)
     # -----------------------
@@ -1109,6 +1099,7 @@ def create_app():
         return auth_refresh()
 
     @app.post("/api/auth/logout")
+    @require_role('viewer')
     def logout():
         return auth_logout()
 
@@ -1516,6 +1507,7 @@ def create_app():
         return get_client_billing_summary()
 
     @app.get("/api/client/billing/usage")
+    @require_role('admin', 'security_admin')
     def client_billing_usage():
         return get_client_usage_metering()
 
@@ -1689,6 +1681,11 @@ def create_app():
     @app.get("/api/clients/by-slug/<slug>")
     def client_by_slug(slug):
         return get_organization_by_slug_public(slug)
+
+    @app.post("/api/tenants/validate-slug")
+    @rate_limit(max_requests=5, window_seconds=60)
+    def tenants_validate_slug():
+        return validate_organization_slug()
 
     @app.post("/api/tenants/<int:organization_id>/provision")
     @require_portal_role('superadmin', 'poweradmin')
@@ -2106,6 +2103,10 @@ def create_app():
     def identity_graph_data(identity_id):
         return get_identity_graph_data(identity_id)
 
+    @app.get("/api/identities/<identity_id>/keyvault-access")
+    def identity_keyvault_access(identity_id):
+        return get_identity_keyvault_access(identity_id)
+
     # -----------------------
     # Identity Lifecycle (Phase 35)
     # -----------------------
@@ -2384,6 +2385,12 @@ def create_app():
     def client_connections_delete(connection_id):
         return delete_client_connection(connection_id)
 
+    @app.post("/api/client/connections/<int:connection_id>/purge-data")
+    @require_role('admin')
+    @rate_limit(max_requests=PURGE_RATE_LIMIT_REQUESTS, window_seconds=PURGE_RATE_LIMIT_WINDOW_SECONDS)
+    def client_connections_purge_data(connection_id):
+        return purge_client_connection_data(connection_id)
+
     @app.post("/api/admin/cleanup-inactive-connections")
     @require_role('admin')
     def admin_cleanup_inactive():
@@ -2597,99 +2604,10 @@ def create_app():
     def identity_groups(identity_id):
         return get_identity_groups_handler(identity_id)
 
-    # -----------------------
-    # Azure Resource Discovery (Phase 52)
-    # -----------------------
-    @app.get("/api/resources/stats")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_stats():
-        return get_resource_stats()
-
-    @app.get("/api/resources/expiry-summary")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_expiry_summary():
-        return get_resource_expiry_summary()
-
-    @app.get("/api/resources/compliance-summary")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_compliance_summary():
-        return get_resource_compliance_summary()
-
-    @app.get("/api/resources")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_list():
-        return get_resources()
-
-    @app.get("/api/resources/<path:resource_id>")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_detail(resource_id):
-        return get_resource_detail(resource_id)
-
-    @app.get("/api/resources/<path:resource_id>/access")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_access(resource_id):
-        return get_resource_access(resource_id)
-
-    @app.get("/api/resources/<path:resource_id>/findings")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_findings(resource_id):
-        return get_resource_findings(resource_id)
-
-    @app.get("/api/resources/<path:resource_id>/anomalies")
-    @require_role('compliance', 'reader', 'admin')
-    def resources_anomalies(resource_id):
-        return get_resource_anomalies(resource_id)
-
-    # -----------------------
-    # AWS CloudTrail Events
-    # -----------------------
-    @app.get("/api/aws/cloudtrail")
-    @require_role('compliance', 'reader', 'admin')
-    def aws_cloudtrail():
-        return get_aws_cloudtrail_events()
-
-    @app.get("/api/data-security")
-    @require_role('compliance', 'reader', 'admin')
-    def data_security_combined():
-        return get_data_security_combined()
-
-    @app.get("/api/data-security/summary")
-    @require_role('compliance', 'reader', 'admin')
-    def data_security_summary():
-        return get_data_security_summary()
-
-    # -----------------------
-    # Sensitive Data Intelligence (Phase 91)
-    # -----------------------
-    @app.get("/api/resources/classifications")
-    @require_role('compliance', 'reader', 'admin')
-    def resource_classifications():
-        return get_resource_classifications()
-
-    @app.post("/api/resources/<int:resource_id>/classify")
-    @require_role('admin')
-    def resource_classify(resource_id):
-        return classify_resource(resource_id)
-
-    @app.delete("/api/resources/<int:resource_id>/classify")
-    @require_role('admin')
-    def resource_declassify(resource_id):
-        return declassify_resource(resource_id)
-
-    @app.post("/api/resources/auto-classify")
-    @require_role('admin')
-    def resource_auto_classify():
-        return auto_classify_resources()
-
     @app.get("/api/identities/<identity_id>/sensitive-access")
     @require_role('compliance', 'reader', 'admin')
     def identity_sensitive_access(identity_id):
         return get_sensitive_access_for_identity(identity_id)
-
-    @app.get("/api/resources/<int:resource_id>/access-map")
-    @require_role('compliance', 'reader', 'admin')
-    def resource_access_map(resource_id):
-        return get_resource_access_map(resource_id)
 
     @app.get("/api/blast-radius/summary")
     @require_role('compliance', 'reader', 'admin')
@@ -2761,17 +2679,6 @@ def create_app():
     def identity_entra_groups(identity_id):
         return get_identity_entra_groups(identity_id)
 
-    # -----------------------
-    # Phase 2A: Resource Identity Links
-    # -----------------------
-    @app.get("/api/resource-identity-links")
-    def resource_identity_links_list():
-        return get_resource_identity_links()
-
-    @app.get("/api/resource-identity-links/stats")
-    def resource_identity_links_stats():
-        return get_resource_identity_links_stats()
-
     # Unified lineage endpoint — single source of truth for all identity lineage data
     @app.get("/api/identities/<identity_id>/lineage")
     def identity_lineage(identity_id):
@@ -2790,45 +2697,6 @@ def create_app():
     @app.get("/api/dashboard/verdict-changes")
     def dashboard_verdict_changes():
         return get_dashboard_verdict_changes()
-
-    # Phase 2A: Compute Identity Plane
-    @app.get("/api/compute-resources")
-    def compute_resources_list():
-        return get_compute_resources()
-
-    @app.get("/api/compute-resources/<int:resource_id>")
-    def compute_resource_detail(resource_id):
-        return get_compute_resource_detail(resource_id)
-
-    @app.get("/api/dashboard/compute-risk")
-    def dashboard_compute_risk():
-        return get_compute_identity_risk()
-
-    @app.get("/api/identities/<identity_id>/compute-findings")
-    def identity_compute_findings(identity_id):
-        return get_identity_compute_findings(identity_id)
-
-    # Phase 2B: AKS / ACR Container
-    @app.get("/api/aks-clusters")
-    def aks_cluster_list():
-        return get_aks_clusters()
-
-    @app.get("/api/dashboard/container-risk")
-    def dashboard_container_risk():
-        return get_dashboard_container_risk()
-
-    @app.post("/api/aks-clusters/<int:cluster_id>/layer2")
-    def aks_layer2_toggle(cluster_id):
-        return toggle_layer2_scan(cluster_id)
-
-    # Phase 3A: Data Plane Identities — Database Servers
-    @app.get("/api/database-servers")
-    def database_server_list():
-        return get_database_servers()
-
-    @app.get("/api/database-servers/<int:server_id>")
-    def database_server_detail(server_id):
-        return get_database_server_detail(server_id)
 
     # Phase 74: App Registration Audit
     @app.get("/api/app-registrations/stats")
@@ -3076,6 +2944,10 @@ def create_app():
     @app.get("/api/subscriptions/distinct")
     def subscriptions_distinct():
         return get_subscriptions_distinct()
+
+    @app.get("/api/subscriptions/scope-summary")
+    def subscriptions_scope_summary():
+        return get_subscriptions_scope_summary()
 
     @app.get("/api/identities/<path:identity_id>/subscriptions")
     def identity_subscriptions(identity_id):
@@ -3331,10 +3203,6 @@ def create_app():
     @app.get("/api/graph/identity/<identity_id>/access")
     def graph_identity_access(identity_id):
         return get_graph_identity_access(identity_id)
-
-    @app.get("/api/graph/resource/<path:resource_id>/identities")
-    def graph_resource_identities(resource_id):
-        return get_graph_resource_identities(resource_id)
 
     # -----------------------
     # Phase 8: Privilege Escalation Paths
@@ -3634,7 +3502,7 @@ def create_app():
     def attack_paths_list():
         return get_attack_paths_list()
 
-    @app.get("/api/attack-paths/<int:path_id>")
+    @app.get("/api/attack-paths/<path_id>")
     def attack_path_detail(path_id):
         return get_attack_path_detail(path_id)
 
@@ -3645,6 +3513,35 @@ def create_app():
     @app.post("/api/attack-paths/analyze")
     def attack_paths_analyze():
         return trigger_attack_path_analysis()
+
+    @app.get("/api/dashboard/attack-surface")
+    def dashboard_attack_surface():
+        return get_attack_surface_summary()
+
+    # -----------------------
+    # Remediation Queue (attack-path driven)
+    # -----------------------
+    @app.get("/api/remediation-queue/summary")
+    def rq_summary():
+        return get_remediation_queue_summary()
+
+    @app.get("/api/remediation-queue/<int:item_id>")
+    def rq_item_detail(item_id):
+        return get_remediation_queue_item_detail(item_id)
+
+    @app.get("/api/remediation-queue")
+    def rq_list():
+        return list_remediation_queue()
+
+    @app.post("/api/remediation-queue")
+    @require_role('admin', 'security_admin', 'auditor')
+    def rq_create():
+        return create_remediation_queue_item()
+
+    @app.patch("/api/remediation-queue/<int:item_id>")
+    @require_role('admin', 'security_admin', 'auditor')
+    def rq_patch(item_id):
+        return patch_remediation_queue_item(item_id)
 
     # -----------------------
     # Phase 8: Graph Attack Findings & Identity Risk Scores
@@ -4050,4 +3947,4 @@ def _register_v1_routes(app):
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=5001, debug=os.getenv("FLASK_ENV") == "development")
+    app.run(host="0.0.0.0", port=5001, debug=False)

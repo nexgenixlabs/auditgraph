@@ -15,6 +15,21 @@ env:
   CLIENT_APP: auditgraph-app-dev
   ADMIN_APP: auditgraph-admin-dev
 
+  # ──────────────────────────────────────────────────────
+  # Required GitHub Actions secrets for this workflow:
+  #   TEST_DB_PASSWORD         — CI test database password
+  #   CI_JWT_SECRET            — CI test JWT signing secret
+  #   CI_ADMIN_JWT_SECRET      — CI test admin JWT secret
+  #   CI_CLIENT_JWT_SECRET     — CI test client JWT secret
+  #   AZURE_CLIENT_ID          — Azure service principal
+  #   AZURE_CLIENT_SECRET      — Azure service principal
+  #   AZURE_SUBSCRIPTION_ID    — Azure subscription
+  #   AZURE_TENANT_ID          — Azure AD tenant
+  #   DEV_DB_USER / DEV_DB_PASSWORD / DEV_DB_ADMIN_USER / DEV_DB_ADMIN_PASSWORD
+  #   DEV_JWT_SECRET / DEV_ADMIN_JWT_SECRET / DEV_CLIENT_JWT_SECRET
+  #   DEV_ADMIN_PASSWORD / DEV_AZURE_DIRECTORY_ID / DEV_AZURE_CLIENT_ID / DEV_AZURE_CLIENT_SECRET
+  # ──────────────────────────────────────────────────────
+
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   # 1. Security Scan + Guardrail Tests
@@ -27,7 +42,7 @@ jobs:
         env:
           POSTGRES_DB: auditgraph_test
           POSTGRES_USER: auditgraph
-          POSTGRES_PASSWORD: auditgraph_test
+          POSTGRES_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
         ports:
           - 5432:5432
         options: >-
@@ -37,6 +52,18 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate required CI secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.TEST_DB_PASSWORD }}" ] && MISSING="$MISSING TEST_DB_PASSWORD"
+          [ -z "${{ secrets.CI_JWT_SECRET }}" ] && MISSING="$MISSING CI_JWT_SECRET"
+          [ -z "${{ secrets.CI_ADMIN_JWT_SECRET }}" ] && MISSING="$MISSING CI_ADMIN_JWT_SECRET"
+          [ -z "${{ secrets.CI_CLIENT_JWT_SECRET }}" ] && MISSING="$MISSING CI_CLIENT_JWT_SECRET"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required secrets:$MISSING"
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -64,13 +91,13 @@ jobs:
           DB_PORT: '5432'
           DB_NAME: auditgraph_test
           DB_USER: auditgraph
-          DB_PASSWORD: auditgraph_test
+          DB_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           DB_ADMIN_USER: auditgraph
-          DB_ADMIN_PASSWORD: auditgraph_test
+          DB_ADMIN_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           DB_SSLMODE: disable
-          JWT_SECRET: ci-test-secret
-          ADMIN_JWT_SECRET: ci-admin-test
-          CLIENT_JWT_SECRET: ci-client-test
+          JWT_SECRET: ${{ secrets.CI_JWT_SECRET }}
+          ADMIN_JWT_SECRET: ${{ secrets.CI_ADMIN_JWT_SECRET }}
+          CLIENT_JWT_SECRET: ${{ secrets.CI_CLIENT_JWT_SECRET }}
           ENFORCE_ADMIN_GUARD: 'false'
         run: |
           PYTHONPATH=. python tests/test_production_guardrails.py

@@ -106,6 +106,36 @@ RISK_FACTOR_CATALOG: Dict[str, Dict] = {
         "points": 250,
         "category": "rbac_role",
     },
+    "SCOPED_CONTRIBUTOR": {
+        "description": "Scoped contributor role: Limited to specific service resources",
+        "severity": "low",
+        "points": 60,
+        "category": "rbac_role",
+    },
+    "SCOPED_DATA_CONTRIBUTOR": {
+        "description": "Data-plane contributor: Can read/write/delete data within specific service",
+        "severity": "medium",
+        "points": 100,
+        "category": "rbac_role",
+    },
+    "DB_CONTRIBUTOR": {
+        "description": "Database contributor: Can manage database resources",
+        "severity": "medium",
+        "points": 90,
+        "category": "rbac_role",
+    },
+    "NETWORK_CONTRIBUTOR": {
+        "description": "Network Contributor: Can manage network resources and security groups",
+        "severity": "medium",
+        "points": 120,
+        "category": "rbac_role",
+    },
+    "VM_CONTRIBUTOR": {
+        "description": "Virtual Machine Contributor: Can manage VMs but not access or networking",
+        "severity": "medium",
+        "points": 110,
+        "category": "rbac_role",
+    },
 
     # ── API permissions ────────────────────────────────────────────
     "DIRECTORY_RW_API": {

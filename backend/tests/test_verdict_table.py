@@ -13,7 +13,8 @@ import pytest
 from unittest.mock import patch, MagicMock, call
 
 os.environ.setdefault('FLASK_ENV', 'development')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET set by conftest.py pytest_configure — KeyError if missing
+_JWT = os.environ["JWT_SECRET"]
 os.environ.setdefault('DB_HOST', 'localhost')
 os.environ.setdefault('DB_PORT', '5432')
 os.environ.setdefault('DB_NAME', 'auditgraph')

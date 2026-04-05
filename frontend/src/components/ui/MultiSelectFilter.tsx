@@ -14,6 +14,7 @@ interface MultiSelectFilterProps {
   placeholder?: string;
   searchable?: boolean;
   showSelectAll?: boolean;
+  header?: string;
 }
 
 /**
@@ -34,6 +35,7 @@ export function MultiSelectFilter({
   placeholder = 'Search…',
   searchable = true,
   showSelectAll = true,
+  header,
 }: MultiSelectFilterProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -179,6 +181,13 @@ export function MultiSelectFilter({
               <span className="text-[10px] text-gray-400 tabular-nums">
                 {selected.length} of {options.length}
               </span>
+            </div>
+          )}
+
+          {/* Optional header */}
+          {header && (
+            <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50">
+              <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-wide">{header}</span>
             </div>
           )}
 

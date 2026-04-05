@@ -33,12 +33,13 @@ from app.engines.drift_events import DriftEventType, build_event
 
 logger = logging.getLogger(__name__)
 
-# Critical roles for privilege escalation detection
-CRITICAL_ROLES = {
-    'Global Administrator', 'Privileged Role Administrator',
-    'Owner', 'User Access Administrator', 'Contributor',
-    'Application Administrator', 'Cloud Application Administrator',
-}
+# Critical roles for privilege escalation detection — derived from SSOT
+from app.constants.roles import EntraRole, RBACRole
+CRITICAL_ROLES: frozenset[str] = frozenset({
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.APPLICATION_ADMIN, EntraRole.CLOUD_APP_ADMIN,
+    RBACRole.OWNER, RBACRole.USER_ACCESS_ADMIN, RBACRole.CONTRIBUTOR,
+})
 
 
 class DriftDetector:

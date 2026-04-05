@@ -15,7 +15,8 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 os.environ.setdefault('FLASK_ENV', 'development')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET set by conftest.py pytest_configure — KeyError if missing
+_JWT = os.environ["JWT_SECRET"]
 os.environ.setdefault('DB_HOST', 'localhost')
 os.environ.setdefault('DB_PORT', '5432')
 os.environ.setdefault('DB_NAME', 'auditgraph')
@@ -189,7 +190,9 @@ class TestSPNDiscoveryMicrosoftFiltering:
 class TestSPNDiscoveryManagedIdentities:
     """Verify SAMI exclusion and UAMI inclusion."""
 
-    def test_system_assigned_mi_excluded(self):
+    def test_system_assigned_mi_included_for_lineage(self):
+        """SAMIs are now included (not excluded) for lineage mapping.
+        They should be categorized as managed_identity_system."""
         engine = _build_engine()
 
         sami = _make_sp(
@@ -204,7 +207,9 @@ class TestSPNDiscoveryManagedIdentities:
                 engine._discover_service_principals()
             )
 
-        assert len(result) == 0
+        assert len(result) == 1
+        assert result[0]['identity_category'] == 'managed_identity_system'
+        assert result[0]['is_microsoft_system'] is False
 
     def test_user_assigned_mi_included(self):
         engine = _build_engine()

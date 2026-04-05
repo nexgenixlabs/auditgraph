@@ -224,7 +224,7 @@ See [Section 7](#7-post-deploy-onboarding-a-client).
 | `JWT_SECRET` | `<secret>` | JWT signing secret (client portal) |
 | `ADMIN_JWT_SECRET` | `<secret>` | Admin portal JWT secret |
 | `CLIENT_JWT_SECRET` | `<secret>` | Client portal JWT secret |
-| `CORS_ORIGINS` | `https://qa.app.auditgraph.ai,...` | Comma-separated allowed origins |
+| `ALLOWED_ORIGINS` | `https://qa.app.auditgraph.ai,...` | Comma-separated allowed origins |
 | `ADMIN_PASSWORD` | `<secret>` | Platform admin password (synced on startup) |
 
 ### Optional — Azure Discovery (for auto-seeding dev connections)
@@ -593,7 +593,7 @@ InsufficientPrivilege: must be owner of table compliance_controls
 | `APP_ENV` | `dev` | `qa` | `stg` | `prod` |
 | `DB_SSLMODE` | `require` | `require` | `require` | `require` |
 | `DB_POOL_MAX` | 8 | 10 | 15 | 20 |
-| `CORS_ORIGINS` | `dev.app.*,demo.*` | `qa.app.*,qa.admin.*` | `stg.app.*,stg.admin.*` | `app.*,admin.*` |
+| `ALLOWED_ORIGINS` | `dev.app.*,demo.*` | `qa.app.*,qa.admin.*` | `stg.app.*,stg.admin.*` | `app.*,admin.*` |
 | Demo Data | Yes (auto-seeded) | Optional | No | No |
 | Dev Tenant | Yes (azadmin) | No | No | No |
 | `ALLOW_DEMO` | `true` | `true` | `false` | `false` |
@@ -726,7 +726,7 @@ Never share JWT secrets between environments. If dev and QA share the same `JWT_
 - [ ] Database created: `auditgraph_{env}`
 - [ ] Admin role created: `auditgraph_{env}_admin` (BYPASSRLS)
 - [ ] App role created: `auditgraph_{env}_app` (NOBYPASSRLS)
-- [ ] Environment variables set (DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_ADMIN_USER, DB_ADMIN_PASSWORD, DB_SSLMODE, JWT_SECRET, ADMIN_JWT_SECRET, CLIENT_JWT_SECRET, CORS_ORIGINS, APP_ENV)
+- [ ] Environment variables set (DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_ADMIN_USER, DB_ADMIN_PASSWORD, DB_SSLMODE, JWT_SECRET, ADMIN_JWT_SECRET, CLIENT_JWT_SECRET, ALLOWED_ORIGINS, APP_ENV)
 - [ ] Container deployed with `--preload` flag
 - [ ] Health check passes: `GET /health` → `{"status": "ready"}`
 - [ ] Admin portal accessible

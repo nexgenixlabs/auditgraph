@@ -150,6 +150,275 @@ function AKSDeepScanSection({ isAdmin, setError, setSuccess }: {
   );
 }
 
+interface DatabricksWorkspace {
+  id: number;
+  workspace_name: string;
+  workspace_url: string;
+  layer2_scan_enabled: boolean;
+}
+
+function DatabricksConnectorSection({ isAdmin, setError, setSuccess }: {
+  isAdmin: boolean;
+  setError: (v: string | null) => void;
+  setSuccess: (v: string | null) => void;
+}) {
+  const [workspaces, setWorkspaces] = useState<DatabricksWorkspace[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [wsUrl, setWsUrl] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [selectedWsId, setSelectedWsId] = useState<number | null>(null);
+
+  const fetchWorkspaces = useCallback(async () => {
+    try {
+      const res = await fetch('/api/analytics-workspaces?page_size=100');
+      if (res.ok) {
+        const data = await res.json();
+        setWorkspaces(data.workspaces || []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchWorkspaces(); }, [fetchWorkspaces]);
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/analytics/databricks/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_url: wsUrl, client_id: clientId, client_secret: clientSecret }),
+      });
+      const data = await res.json();
+      setTestResult(data);
+    } catch { setTestResult({ success: false, error: 'Connection failed' }); }
+    setTesting(false);
+  };
+
+  const handleSave = async () => {
+    if (!selectedWsId) { setError('Select a workspace first'); return; }
+    setSaving(true);
+    try {
+      const res = await fetch('/api/analytics/databricks/connector', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_id: selectedWsId, client_id: clientId, client_secret: clientSecret }),
+      });
+      if (res.ok) {
+        setSuccess('Layer 2 enabled — activates on next discovery run');
+        setShowModal(false);
+        setWsUrl(''); setClientId(''); setClientSecret(''); setTestResult(null); setSelectedWsId(null);
+        fetchWorkspaces();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Failed to save connector');
+      }
+    } catch { setError('Failed to save connector'); }
+    setSaving(false);
+  };
+
+  if (workspaces.length === 0) return null;
+
+  return (
+    <>
+      <div className="bg-white rounded-xl border shadow-sm p-6">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-blue-600 transition w-full"
+        >
+          <span className={`transition-transform ${expanded ? 'rotate-90' : ''}`}>&#9654;</span>
+          Databricks Workspaces
+          <span className="text-xs text-gray-400 ml-1">({workspaces.length} workspace{workspaces.length !== 1 ? 's' : ''})</span>
+        </button>
+        {expanded && (
+          <div className="mt-3 space-y-2">
+            <p className="text-xs text-gray-500">Connect a service principal to enable PAT inventory and admin user scanning.</p>
+            {workspaces.map(w => (
+              <div key={w.id} className="flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50">
+                <div>
+                  <span className="text-sm font-medium text-gray-800">{w.workspace_name}</span>
+                  <span className="text-xs text-gray-400 ml-2">{w.workspace_url}</span>
+                </div>
+                <span className={`px-3 py-1 text-xs font-medium rounded-full ${
+                  w.layer2_scan_enabled ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'
+                }`}>
+                  {w.layer2_scan_enabled ? 'Layer 2 ON' : 'Layer 2 OFF'}
+                </span>
+              </div>
+            ))}
+            {isAdmin && (
+              <button
+                onClick={() => setShowModal(true)}
+                className="mt-2 px-4 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100 transition"
+              >
+                + Add Databricks Connector
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900">Connect Databricks Workspace</h3>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Workspace</label>
+              <select
+                value={selectedWsId ?? ''}
+                onChange={e => { setSelectedWsId(Number(e.target.value)); const ws = workspaces.find(w => w.id === Number(e.target.value)); if (ws) setWsUrl(ws.workspace_url); }}
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              >
+                <option value="">Select workspace...</option>
+                {workspaces.filter(w => !w.layer2_scan_enabled).map(w => (
+                  <option key={w.id} value={w.id}>{w.workspace_name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+              <input type="text" value={clientId} onChange={e => setClientId(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="Application (client) ID" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+              <input type="password" value={clientSecret} onChange={e => setClientSecret(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="Client secret value" />
+            </div>
+            {testResult && (
+              <div className={`text-sm px-3 py-2 rounded-lg ${testResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {testResult.success ? testResult.message : testResult.error}
+              </div>
+            )}
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => { setShowModal(false); setTestResult(null); }}
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={handleTest} disabled={!wsUrl || !clientId || !clientSecret || testing}
+                className="px-4 py-2 text-sm font-medium bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50">
+                {testing ? 'Testing...' : 'Test Connection'}
+              </button>
+              <button onClick={handleSave} disabled={!testResult?.success || saving}
+                className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ADOConnectorSection({ isAdmin, setError, setSuccess }: {
+  isAdmin: boolean;
+  setError: (v: string | null) => void;
+  setSuccess: (v: string | null) => void;
+}) {
+  const [showModal, setShowModal] = useState(false);
+  const [orgUrl, setOrgUrl] = useState('');
+  const [pat, setPat] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; org_name?: string; project_count?: number; service_connection_count?: number; error?: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/devops/ado/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ organization_url: orgUrl, pat }),
+      });
+      const data = await res.json();
+      setTestResult(data);
+    } catch { setTestResult({ success: false, error: 'Connection failed' }); }
+    setTesting(false);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/devops/ado/connector', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ organization_url: orgUrl, pat }),
+      });
+      if (res.ok) {
+        setSuccess('Azure DevOps connected — service connections will be scanned on next run');
+        setShowModal(false);
+        setOrgUrl(''); setPat(''); setTestResult(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || 'Failed to save connector');
+      }
+    } catch { setError('Failed to save connector'); }
+    setSaving(false);
+  };
+
+  if (!isAdmin) return null;
+
+  return (
+    <>
+      <div className="bg-white rounded-xl border shadow-sm p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h4 className="text-sm font-medium text-gray-700">Azure DevOps</h4>
+            <p className="text-xs text-gray-400">Connect to scan service connections and PATs</p>
+          </div>
+          <button
+            onClick={() => setShowModal(true)}
+            className="px-4 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100 transition"
+          >
+            + Connect Azure DevOps
+          </button>
+        </div>
+      </div>
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900">Connect Azure DevOps</h3>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Organization URL</label>
+              <input type="text" value={orgUrl} onChange={e => setOrgUrl(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="https://dev.azure.com/mycompany" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Personal Access Token</label>
+              <input type="password" value={pat} onChange={e => setPat(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="PAT value" />
+              <p className="text-xs text-gray-400 mt-1">Required: Service Connections (Read). Optional: Tokens (Read) for PAT inventory.</p>
+            </div>
+            {testResult && (
+              <div className={`text-sm px-3 py-2 rounded-lg ${testResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {testResult.success
+                  ? `Connected to ${testResult.org_name} — ${testResult.project_count} projects, ${testResult.service_connection_count} service connections`
+                  : testResult.error}
+              </div>
+            )}
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => { setShowModal(false); setTestResult(null); }}
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={handleTest} disabled={!orgUrl || !pat || testing}
+                className="px-4 py-2 text-sm font-medium bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50">
+                {testing ? 'Testing...' : 'Test Connection'}
+              </button>
+              <button onClick={handleSave} disabled={!testResult?.success || saving}
+                className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function ConnectionsTab({
   settings,
   status,
@@ -218,9 +487,34 @@ export function ConnectionsTab({
   const [modalConnId, setModalConnId] = useState<number | null>(null);
   const modalConn = modalConnId ? cloudConnections.find(c => c.id === modalConnId) : null;
 
+  // Purge data state for auth_failed connections
+  const [purgingConnId, setPurgingConnId] = useState<number | null>(null);
+
   function handleScanWithModal(connId: number) {
     handleRunScan(connId);
     setModalConnId(connId);
+  }
+
+  async function handlePurgeData(connId: number) {
+    if (!window.confirm('Clear all stale discovery data for this connection? The connection will remain so you can re-authenticate and re-scan.')) return;
+    setPurgingConnId(connId);
+    try {
+      const res = await fetch(`/api/client/connections/${connId}/purge-data`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (res.ok && data.purged) {
+        setSuccess?.(`Cleared ${data.data_removed?.total_deleted || 0} rows of stale data`);
+        fetchConnections();
+      } else {
+        setError?.(data.error || 'Purge failed');
+      }
+    } catch {
+      setError?.('Network error during data purge');
+    } finally {
+      setPurgingConnId(null);
+    }
   }
 
   return (
@@ -284,10 +578,12 @@ export function ConnectionsTab({
                 <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
                   isCrossTenant ? (
                     conn.status === 'connected' ? 'border-l-4 border-l-purple-400 border-green-200 bg-green-50/30' :
+                    conn.status === 'auth_failed' ? 'border-l-4 border-l-purple-400 border-red-300 bg-red-50/40' :
                     conn.status === 'failed' ? 'border-l-4 border-l-purple-400 border-red-200 bg-red-50/30' :
                     'border-l-4 border-l-purple-400 border-purple-200 bg-purple-50/20'
                   ) : (
                     conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
+                    conn.status === 'auth_failed' ? 'border-red-300 bg-red-50/40' :
                     conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
                     'border-gray-200 bg-gray-50/30'
                   )
@@ -327,17 +623,34 @@ export function ConnectionsTab({
                     <div className="flex items-center gap-2">
                       <span className={`flex items-center gap-1 text-[10px] font-semibold ${
                         conn.status === 'connected' ? 'text-green-600' :
+                        conn.status === 'auth_failed' ? 'text-red-600' :
                         conn.status === 'failed' ? 'text-red-600' :
                         'text-gray-400'
                       }`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${
                           conn.status === 'connected' ? 'bg-green-500' :
+                          conn.status === 'auth_failed' ? 'bg-red-500 animate-pulse' :
                           conn.status === 'failed' ? 'bg-red-500' :
                           'bg-gray-400'
                         }`} />
                         {conn.status === 'connected' ? 'Connected' :
+                         conn.status === 'auth_failed' ? 'Credential Expired' :
                          conn.status === 'failed' ? 'Failed' : 'Pending'}
                       </span>
+                      {isAdmin && conn.status === 'auth_failed' && (
+                        <>
+                          <span className="text-[10px] text-red-600 font-semibold">
+                            Update secret below & re-test
+                          </span>
+                          <button
+                            onClick={() => handlePurgeData(conn.id)}
+                            disabled={purgingConnId === conn.id}
+                            className="text-[10px] text-amber-600 hover:text-amber-800 font-medium disabled:opacity-50"
+                          >
+                            {purgingConnId === conn.id ? 'Clearing...' : 'Clear Stale Data'}
+                          </button>
+                        </>
+                      )}
                       {isAdmin && conn.status === 'connected' && (
                         <button
                           onClick={() => handleScanWithModal(conn.id)}
@@ -435,7 +748,7 @@ export function ConnectionsTab({
                         <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                       </svg>
                       <span>{conn.discovered_count} subscription(s) discovered — </span>
-                      <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
+                      <a href="/subscriptions" className="font-semibold hover:text-amber-800 hover:opacity-80">activate on Subscriptions page</a>
                     </div>
                   )}
                 </div>
@@ -1117,6 +1430,10 @@ export function ConnectionsTab({
           </div>
           {/* Section 4: AKS Deep Scan (Layer 2) */}
           <AKSDeepScanSection isAdmin={isAdmin} setError={setError} setSuccess={setSuccess} />
+          {/* Section 5: Databricks Connector (Layer 2) */}
+          <DatabricksConnectorSection isAdmin={isAdmin} setError={setError} setSuccess={setSuccess} />
+          {/* Section 6: Azure DevOps Connector */}
+          <ADOConnectorSection isAdmin={isAdmin} setError={setError} setSuccess={setSuccess} />
       {/* Discovery Progress Modal */}
       {modalConnId && modalConn && (
         <DiscoveryProgressModal

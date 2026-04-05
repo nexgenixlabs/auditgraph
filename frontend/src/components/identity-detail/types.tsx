@@ -9,6 +9,10 @@ import {
 export type { IdentityCategory, RiskLevel };
 export { RISK_BADGE, DATA_EXPLANATIONS, DORMANT_LABELS, safeLower, normalizeCategoryFromBackend, getCategoryLabel, getDormantStatus };
 
+// Re-export verdict SSOT — single definition lives in constants/verdicts.ts
+export type { LineageVerdict } from '../../constants/verdicts';
+export { verdictBadgeClasses, verdictLabel } from '../../constants/verdicts';
+
 // ─── Interfaces ─────────────────────────────────────────────────────
 
 export interface Owner {
@@ -82,6 +86,11 @@ export interface IdentityDetailsResponse {
     // Effective last used (MAX of observed + Azure sign-in)
     effective_last_used?: string | null;
     effective_last_used_source?: 'auditgraph' | 'azure_signin' | 'inferred_federated' | null;
+
+    // Sign-in authentication provenance
+    last_signin_at?: string | null;
+    last_signin_ip?: string | null;
+    auth_source?: 'entra_signin_log' | 'aad_audit' | 'static_analysis_only';
 
     object_id?: string | null;
     app_id?: string | null;
@@ -281,12 +290,20 @@ export function riskBadge(level?: string) {
   return <span className={`${base} ${RISK_BADGE[v] || 'bg-gray-100 text-gray-700'}`}>{(v || 'unknown').toUpperCase()}</span>;
 }
 
-export function usageStatusBadge(status?: string, redundantWith?: string) {
+export function usageStatusBadge(status?: string, redundantWith?: string, identityHasActivity?: boolean) {
   const v = safeLower(status);
   const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
 
-  if (v === 'orphaned') return <span className={`${base} bg-red-100 text-red-700`}>Orphaned</span>;
-  if (v === 'never_used' || v === 'definitely_unused') return <span className={`${base} bg-red-100 text-red-700`}>Never Used</span>;
+  if (v === 'orphaned') return <span className={`${base} bg-red-100 text-red-700`} title="This specific role has never been exercised by this identity. The identity itself may be active.">Role Unused</span>;
+  if (v === 'never_used' || v === 'definitely_unused') {
+    // When the identity itself authenticated recently but this specific
+    // role has no role-scoped activity, show amber "No Role Activity"
+    // instead of the misleading red "Never Used".
+    if (identityHasActivity) {
+      return <span className={`${base} bg-amber-100 text-amber-700`}>No Role Activity</span>;
+    }
+    return <span className={`${base} bg-red-100 text-red-700`}>Never Used</span>;
+  }
   if (v === 'dormant' || v === 'likely_unused') return <span className={`${base} bg-orange-100 text-orange-700`}>Dormant</span>;
   if (v === 'stale') return <span className={`${base} bg-yellow-100 text-yellow-700`}>Stale</span>;
   if (v === 'possibly_overprivileged') {
@@ -300,9 +317,10 @@ export function usageStatusBadge(status?: string, redundantWith?: string) {
   return <span className={`${base} bg-gray-100 text-gray-500`}>Unknown</span>;
 }
 
-export function lastUsedBadge(lastUsedDisplay?: string, usageStatus?: string) {
+export function lastUsedBadge(lastUsedDisplay?: string, usageStatus?: string, lastUsedSource?: string) {
   if (!lastUsedDisplay) return null;
   const v = safeLower(usageStatus);
+  const isNoActivity = lastUsedDisplay === 'No activity on record';
   let color = 'text-gray-500';
   let dotColor = 'bg-gray-400';
   if (v === 'active' || v === 'assumed_active') {
@@ -315,13 +333,27 @@ export function lastUsedBadge(lastUsedDisplay?: string, usageStatus?: string) {
     color = 'text-orange-700';
     dotColor = 'bg-orange-500';
   } else if (v === 'never_used' || v === 'definitely_unused') {
-    color = 'text-red-700';
-    dotColor = 'bg-red-500';
+    // Amber when "No activity on record" (identity was active but this
+    // role wasn't), red only when the identity itself never signed in.
+    if (isNoActivity) {
+      color = 'text-amber-700';
+      dotColor = 'bg-amber-500';
+    } else {
+      color = 'text-red-700';
+      dotColor = 'bg-red-500';
+    }
   }
   return (
-    <span className={`inline-flex items-center gap-1 text-xs ${color}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-      {lastUsedDisplay}
+    <span className="inline-flex flex-col gap-0.5">
+      <span className={`inline-flex items-center gap-1 text-xs ${color}`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+        {lastUsedDisplay}
+      </span>
+      {!!lastUsedSource && (
+        <span className="text-[10px] text-gray-400 pl-3">
+          source: {lastUsedSource}
+        </span>
+      )}
     </span>
   );
 }

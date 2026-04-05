@@ -518,7 +518,7 @@ function ControlTableRow({ ctrl, meta, sevColor, isCtrlExpanded, hasEvidence, la
             onClick={e => { e.stopPropagation(); onExport(); }}
             style={{
               fontSize: 10, fontFamily: mono, color: C.accentBlue, background: 'none',
-              border: 'none', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: 2,
+              border: 'none', cursor: 'pointer',
               padding: 0,
             }}
           >Export</button>

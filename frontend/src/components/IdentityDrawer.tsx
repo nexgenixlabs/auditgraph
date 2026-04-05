@@ -457,7 +457,7 @@ function AgentRiskSection({ agentInfo, identityId }: {
               <p className="text-gray-500">Blast radius unavailable — data will refresh on next scan</p>
               <button
                 onClick={fetchBlastRadius}
-                className="text-xs text-gray-500 hover:text-gray-700 underline"
+                className="text-xs text-gray-500 hover:text-gray-700 hover:opacity-80 cursor-pointer"
                 data-testid="blast-radius-retry"
               >
                 Retry

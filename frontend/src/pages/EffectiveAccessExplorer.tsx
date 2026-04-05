@@ -157,7 +157,7 @@ export default function EffectiveAccessExplorer() {
               </div>
               <span
                 onClick={() => navigate(`/identities?privilege_tier=${tier.replace('T', '')}`)}
-                style={{ fontSize: 13, fontWeight: 700, fontFamily: G.mono, color: G.text, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dashed', textUnderlineOffset: 3 }}
+                style={{ fontSize: 13, fontWeight: 700, fontFamily: G.mono, color: G.text, cursor: 'pointer' }}
               >{count}</span>
             </div>
           ))}

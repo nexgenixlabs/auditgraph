@@ -124,7 +124,7 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups' | 'attack_paths';
 
 interface EffectiveAccessEntry {
   role_name: string;
@@ -364,6 +364,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'lifecycle' as TabId, label: 'Lifecycle', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'sensitive_access' as TabId, label: 'Sensitive Access', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
     { id: 'simulate' as TabId, label: 'What If', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+    { id: 'attack_paths' as TabId, label: 'Attack Paths', icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z' },
     { id: 'timeline' as TabId, label: 'Timeline', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
@@ -734,6 +735,7 @@ export default function IdentityDetail() {
     entra_groups: identity?.group_count ?? 0,
     sensitive_access: 0,
     simulate: 0,
+    attack_paths: 0,
     timeline: 0,
   };
 
@@ -1112,6 +1114,9 @@ export default function IdentityDetail() {
               {/* ═══ SENSITIVE ACCESS TAB ═══ */}
               {activeTab === 'sensitive_access' && <SensitiveAccessTab identityId={id!} />}
 
+              {/* ═══ ATTACK PATHS TAB ═══ */}
+              {activeTab === 'attack_paths' && <AttackPathsTab identityId={id!} />}
+
               {/* ═══ TIMELINE TAB ═══ */}
               {activeTab === 'timeline' && <TimelineTab identityId={id!} />}
 
@@ -1174,7 +1179,7 @@ function SensitiveAccessTab({ identityId }: { identityId: string }) {
         <div className="text-gray-500 text-sm">
           This identity does not have RBAC access to any classified resources.
           <br />
-          <button onClick={() => navigate('/data-security')} className="text-blue-500 underline mt-2 text-sm">
+          <button onClick={() => navigate('/data-security')} className="text-blue-500 mt-2 text-sm cursor-pointer hover:opacity-80">
             Classify resources in Data Security
           </button>
         </div>
@@ -1421,6 +1426,86 @@ function TimelineTab({ identityId }: { identityId: string }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ═══ Attack Paths Tab Component ═══ */
+
+const AP_TIER_BADGE: Record<string, string> = {
+  CRITICAL: 'bg-red-100 text-red-700',
+  HIGH: 'bg-orange-100 text-orange-700',
+  MEDIUM: 'bg-yellow-100 text-yellow-700',
+  LOW: 'bg-blue-100 text-blue-700',
+};
+
+function AttackPathsTab({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
+  const navigate = useNavigate();
+  const [paths, setPaths] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/api/identities/${identityId}/persisted-attack-paths?${withConnection('')}`)
+      .then(r => r.ok ? r.json() : { attack_paths: [] })
+      .then(d => setPaths(d.attack_paths || []))
+      .finally(() => setLoading(false));
+  }, [identityId, withConnection]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full" />
+      </div>
+    );
+  }
+
+  if (paths.length === 0) {
+    return (
+      <div className="text-center py-16 text-sm text-gray-500">
+        No attack paths found for this identity.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-gray-900">{paths.length} Attack Path{paths.length !== 1 ? 's' : ''}</h3>
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b text-left">
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Role</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Scope</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Tier</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Score</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Flags</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paths.map((p: any) => (
+            <tr key={p.id} onClick={() => navigate(`/attack-paths/${p.id}`)}
+              className="border-b cursor-pointer hover:bg-gray-50 transition-colors">
+              <td className="px-4 py-3 text-gray-900">{p.highest_role}</td>
+              <td className="px-4 py-3 text-gray-600">{p.highest_scope_level}</td>
+              <td className="px-4 py-3">
+                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${AP_TIER_BADGE[p.path_risk_tier] || 'bg-gray-100 text-gray-600'}`}>
+                  {p.path_risk_tier}
+                </span>
+              </td>
+              <td className="px-4 py-3 font-mono text-xs">{p.path_risk_score}</td>
+              <td className="px-4 py-3">
+                <div className="flex gap-1">
+                  {p.has_subscription_scope && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">Sub</span>}
+                  {p.has_keyvault_access && <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-700">KV</span>}
+                  {p.has_no_owner && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">No Owner</span>}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

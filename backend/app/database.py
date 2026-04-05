@@ -540,7 +540,8 @@ class Database:
             cursor.execute(
                 "SELECT current_setting('app.current_organization_id', true)"
             )
-            actual = cursor.fetchone()[0]
+            row = cursor.fetchone()
+            actual = row[0] if row is not None else None
             cursor.close()
             if actual != str(organization_id):
                 raise SecurityViolationError(
@@ -598,7 +599,8 @@ class Database:
         cursor.execute(
             "SELECT current_setting('app.current_organization_id', true)"
         )
-        val = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        val = row[0] if row is not None else None
         cursor.close()
 
         if val is None or val == '':
@@ -836,12 +838,18 @@ class Database:
 
             # Reassign ownership of tables we don't own so ALTER TABLE works
             cursor.execute("SELECT current_user")
-            current_user = cursor.fetchone()[0]
+            row = cursor.fetchone()
+            current_user = row[0] if row is not None else 'auditgraph_admin'
             for table_name, _ in tables:
                 try:
+                    cursor.execute(f'SAVEPOINT own_{table_name[:20]}')
                     cursor.execute(f'ALTER TABLE "{table_name}" OWNER TO {current_user}')
+                    cursor.execute(f'RELEASE SAVEPOINT own_{table_name[:20]}')
                 except Exception:
-                    admin_conn.rollback()  # reset transaction after error
+                    try:
+                        cursor.execute(f'ROLLBACK TO SAVEPOINT own_{table_name[:20]}')
+                    except Exception:
+                        pass
 
             # Re-query after ownership fix (transaction may have been reset)
             cursor.execute("""
@@ -1585,9 +1593,10 @@ class Database:
                 'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
                 'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
             ]
-            prefix_conditions = " OR ".join([
-                f"LOWER(display_name) LIKE '{p}%%'" for p in customer_prefixes
-            ])
+            prefix_conditions = " OR ".join(
+                ["LOWER(display_name) LIKE %s"] * len(customer_prefixes)
+            )
+            prefix_params = [f"{p}%" for p in customer_prefixes]
 
             # Pass 0: Discovery connectors are NEVER Microsoft
             cursor.execute("""
@@ -1605,7 +1614,7 @@ class Database:
                 WHERE identity_category = 'service_principal'
                   AND COALESCE(is_microsoft_system, true) = true
                   AND ({prefix_conditions})
-            """)
+            """, prefix_params)
             customer_count = cursor.rowcount
 
             # All known Microsoft tenant IDs
@@ -1795,6 +1804,25 @@ class Database:
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_origin VARCHAR(500)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS workload_origin_source VARCHAR(50)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS recommended_action VARCHAR(20)")
+            # Widen recommended_action to fit FEDERATED_MISCONFIGURED (24 chars)
+            cursor.execute("SAVEPOINT widen_rec_action")
+            try:
+                cursor.execute("SELECT character_maximum_length FROM information_schema.columns WHERE table_name='identities' AND column_name='recommended_action'")
+                _w = cursor.fetchone()
+                if _w and _w[0] and _w[0] < 32:
+                    cursor.execute("DROP VIEW IF EXISTS v_critical_identities CASCADE")
+                    cursor.execute("DROP VIEW IF EXISTS v_latest_identities CASCADE")
+                    cursor.execute("ALTER TABLE identities ALTER COLUMN recommended_action TYPE VARCHAR(32)")
+                    cursor.execute("""CREATE OR REPLACE VIEW v_latest_identities AS
+                        SELECT i.* FROM identities i
+                        INNER JOIN (SELECT MAX(id) as run_id FROM discovery_runs WHERE status = 'completed') latest
+                        ON i.discovery_run_id = latest.run_id""")
+                    cursor.execute("""CREATE OR REPLACE VIEW v_critical_identities AS
+                        SELECT * FROM v_latest_identities WHERE risk_level = 'critical'""")
+                cursor.execute("RELEASE SAVEPOINT widen_rec_action")
+            except Exception as _e:
+                _log.warning("recommended_action widen migration: %s", _e)
+                cursor.execute("ROLLBACK TO SAVEPOINT widen_rec_action")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_action_text TEXT")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_signals JSONB")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verdict_risk_summary JSONB")
@@ -1860,9 +1888,10 @@ class Database:
                 'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
                 'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
             ]
-            prefix_conditions = " OR ".join([
-                f"LOWER(display_name) LIKE '{p}%%'" for p in customer_prefixes
-            ])
+            prefix_conditions = " OR ".join(
+                ["LOWER(display_name) LIKE %s"] * len(customer_prefixes)
+            )
+            prefix_params = [f"{p}%" for p in customer_prefixes]
 
             # All known Microsoft tenant IDs
             ms_tenant_ids = (
@@ -1882,7 +1911,7 @@ class Database:
                   AND COALESCE(is_microsoft_system, false) = false
                   AND NOT ({prefix_conditions})
                   AND (app_owner_org_id IS NULL OR app_owner_org_id IN %s)
-            """, (run_id, ms_tenant_ids))
+            """, [run_id] + prefix_params + [ms_tenant_ids])
             swept = cursor.rowcount
             self._commit()
             if swept > 0:
@@ -6244,7 +6273,12 @@ class Database:
             )
             existing = cursor.fetchone()
 
-            password = os.getenv('DEV_TENANT_PASSWORD', 'changeme')
+            password = os.getenv('DEV_TENANT_PASSWORD')
+            if not password:
+                raise ValueError(
+                    "DEV_TENANT_PASSWORD must be set. "
+                    "No fallback password is allowed. Add it to backend/.env.dev."
+                )
             password_hash = bcrypt_lib.hashpw(
                 password.encode('utf-8'), bcrypt_lib.gensalt()
             ).decode('utf-8')
@@ -6381,25 +6415,40 @@ class Database:
                 'org_name': 'AuditGraph Demo',
             }, organization_id=demo_org_id)
 
-            # Define demo users
+            # Define demo users — passwords from environment variables
+            _demo_admin_pw = os.getenv('DEMO_ADMIN_PASSWORD')
+            _demo_analyst_pw = os.getenv('DEMO_ANALYST_PASSWORD')
+            _demo_viewer_pw = os.getenv('DEMO_VIEWER_PASSWORD')
+            _missing = [
+                name for name, val in [
+                    ('DEMO_ADMIN_PASSWORD', _demo_admin_pw),
+                    ('DEMO_ANALYST_PASSWORD', _demo_analyst_pw),
+                    ('DEMO_VIEWER_PASSWORD', _demo_viewer_pw),
+                ] if not val
+            ]
+            if _missing:
+                raise ValueError(
+                    f"Demo user passwords not configured. Set environment variables: {', '.join(_missing)}"
+                )
+
             demo_users = [
                 {
                     'username': 'demo@auditgraph.ai',
                     'display_name': 'Demo Admin',
                     'role': 'admin',
-                    'password': 'DemoAdmin@2026',
+                    'password': _demo_admin_pw,
                 },
                 {
                     'username': 'analyst@auditgraph.ai',
                     'display_name': 'Security Analyst',
                     'role': 'security_admin',
-                    'password': 'DemoAnalyst@2026',
+                    'password': _demo_analyst_pw,
                 },
                 {
                     'username': 'viewer@auditgraph.ai',
                     'display_name': 'Read-Only Viewer',
                     'role': 'reader',
-                    'password': 'DemoViewer@2026',
+                    'password': _demo_viewer_pw,
                 },
             ]
 
@@ -6420,8 +6469,8 @@ class Database:
                     INSERT INTO users (
                         username, password_hash, display_name, role,
                         organization_id, is_superadmin, auth_provider,
-                        email, enabled
-                    ) VALUES (%s, %s, %s, %s, %s, false, 'local', %s, true)
+                        email, enabled, force_password_change
+                    ) VALUES (%s, %s, %s, %s, %s, false, 'local', %s, true, true)
                 """, (
                     u['username'], password_hash, u['display_name'], u['role'],
                     demo_org_id, u['username'],
@@ -7282,575 +7331,6 @@ class Database:
             return result
         finally:
             cursor.close()
-
-    # ─── Phase 52: Azure Resource Discovery ──────────────────────────
-
-    def _ensure_azure_storage_accounts_table(self):
-        """Create azure_storage_accounts table if it doesn't exist."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS azure_storage_accounts (
-                id SERIAL PRIMARY KEY,
-                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                resource_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                location TEXT,
-                resource_group TEXT,
-                subscription_id TEXT,
-                subscription_name TEXT,
-                sku TEXT,
-                kind TEXT,
-                access_tier TEXT,
-                public_blob_access BOOLEAN DEFAULT FALSE,
-                https_only BOOLEAN DEFAULT TRUE,
-                minimum_tls_version TEXT DEFAULT 'TLS1_2',
-                shared_key_access BOOLEAN DEFAULT TRUE,
-                allow_cross_tenant_replication BOOLEAN DEFAULT FALSE,
-                default_network_action TEXT DEFAULT 'Allow',
-                ip_rules_count INTEGER DEFAULT 0,
-                vnet_rules_count INTEGER DEFAULT 0,
-                private_endpoint_count INTEGER DEFAULT 0,
-                bypass_settings TEXT,
-                network_rules JSONB DEFAULT '{}',
-                infrastructure_encryption BOOLEAN DEFAULT FALSE,
-                customer_managed_keys BOOLEAN DEFAULT FALSE,
-                key_vault_uri TEXT,
-                encryption_details JSONB DEFAULT '{}',
-                key1_created_at TIMESTAMPTZ,
-                key2_created_at TIMESTAMPTZ,
-                key_rotation_stale BOOLEAN DEFAULT FALSE,
-                sas_policy_enabled BOOLEAN,
-                sas_expiration_period TEXT,
-                risk_level TEXT DEFAULT 'info',
-                risk_score INTEGER DEFAULT 0,
-                risk_reasons JSONB DEFAULT '[]',
-                tags JSONB DEFAULT '{}',
-                organization_id INTEGER,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(discovery_run_id, resource_id)
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_run ON azure_storage_accounts(discovery_run_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sa_risk ON azure_storage_accounts(risk_level)")
-        self._commit()
-        # Add columns if upgrading from older schema
-        for col, defn in [
-            ('sas_policy_enabled', 'BOOLEAN'),
-            ('sas_expiration_period', 'TEXT'),
-            ('diagnostic_logging_enabled', 'BOOLEAN'),
-            ('logging_destinations', 'JSONB DEFAULT \'[]\''),
-            ('risk_components', 'JSONB DEFAULT \'{}\''),
-            ('blast_radius_score', 'INTEGER DEFAULT 0'),
-            ('critical_overrides', 'JSONB DEFAULT \'[]\''),
-            ('data_classification', 'VARCHAR(20)'),
-            ('classification_source', 'VARCHAR(20)'),
-            ('classification_confidence', 'VARCHAR(10)'),
-            ('classified_by', 'VARCHAR(100)'),
-            ('classified_at', 'TIMESTAMPTZ'),
-            ('classification_notes', 'TEXT'),
-        ]:
-            try:
-                cursor.execute(f"ALTER TABLE azure_storage_accounts ADD COLUMN IF NOT EXISTS {col} {defn}")
-                self._commit()
-            except Exception:
-                self._rollback()
-        cursor.close()
-
-    def _ensure_azure_key_vaults_table(self):
-        """Create azure_key_vaults table if it doesn't exist."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS azure_key_vaults (
-                id SERIAL PRIMARY KEY,
-                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                resource_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                location TEXT,
-                resource_group TEXT,
-                subscription_id TEXT,
-                subscription_name TEXT,
-                sku TEXT,
-                soft_delete_enabled BOOLEAN DEFAULT FALSE,
-                soft_delete_retention_days INTEGER DEFAULT 0,
-                purge_protection BOOLEAN DEFAULT FALSE,
-                enable_rbac_authorization BOOLEAN DEFAULT FALSE,
-                public_network_access TEXT DEFAULT 'Enabled',
-                default_network_action TEXT DEFAULT 'Allow',
-                ip_rules_count INTEGER DEFAULT 0,
-                vnet_rules_count INTEGER DEFAULT 0,
-                private_endpoint_count INTEGER DEFAULT 0,
-                network_rules JSONB DEFAULT '{}',
-                secrets_total INTEGER DEFAULT 0,
-                secrets_expired INTEGER DEFAULT 0,
-                secrets_expiring_soon INTEGER DEFAULT 0,
-                keys_total INTEGER DEFAULT 0,
-                keys_expired INTEGER DEFAULT 0,
-                keys_expiring_soon INTEGER DEFAULT 0,
-                certs_total INTEGER DEFAULT 0,
-                certs_expired INTEGER DEFAULT 0,
-                certs_expiring_soon INTEGER DEFAULT 0,
-                access_policy_count INTEGER DEFAULT 0,
-                access_policies JSONB DEFAULT '[]',
-                secrets_detail JSONB DEFAULT '[]',
-                keys_detail JSONB DEFAULT '[]',
-                certs_detail JSONB DEFAULT '[]',
-                risk_level TEXT DEFAULT 'info',
-                risk_score INTEGER DEFAULT 0,
-                risk_reasons JSONB DEFAULT '[]',
-                tags JSONB DEFAULT '{}',
-                organization_id INTEGER,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(discovery_run_id, resource_id)
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_kv_run ON azure_key_vaults(discovery_run_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_kv_risk ON azure_key_vaults(risk_level)")
-        self._commit()
-        # Add columns if upgrading from older schema
-        for col, defn in [
-            ('secrets_detail', 'JSONB DEFAULT \'[]\''),
-            ('keys_detail', 'JSONB DEFAULT \'[]\''),
-            ('certs_detail', 'JSONB DEFAULT \'[]\''),
-            ('risk_components', 'JSONB DEFAULT \'{}\''),
-            ('blast_radius_score', 'INTEGER DEFAULT 0'),
-            ('critical_overrides', 'JSONB DEFAULT \'[]\''),
-            ('data_classification', 'VARCHAR(20)'),
-            ('classification_source', 'VARCHAR(20)'),
-            ('classification_confidence', 'VARCHAR(10)'),
-            ('classified_by', 'VARCHAR(100)'),
-            ('classified_at', 'TIMESTAMPTZ'),
-            ('classification_notes', 'TEXT'),
-        ]:
-            try:
-                cursor.execute(f"ALTER TABLE azure_key_vaults ADD COLUMN IF NOT EXISTS {col} {defn}")
-                self._commit()
-            except Exception:
-                self._rollback()
-        cursor.close()
-
-    def save_storage_account(self, run_id, data):
-        """Save or update a storage account (UPSERT)."""
-        self._ensure_azure_storage_accounts_table()
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO azure_storage_accounts (
-                discovery_run_id, resource_id, name, location, resource_group,
-                subscription_id, subscription_name, sku, kind, access_tier,
-                public_blob_access, https_only, minimum_tls_version,
-                shared_key_access, allow_cross_tenant_replication,
-                default_network_action, ip_rules_count, vnet_rules_count,
-                private_endpoint_count, bypass_settings, network_rules,
-                infrastructure_encryption, customer_managed_keys, key_vault_uri,
-                encryption_details, key1_created_at, key2_created_at,
-                key_rotation_stale, sas_policy_enabled, sas_expiration_period,
-                risk_level, risk_score, risk_reasons,
-                risk_components, blast_radius_score, critical_overrides,
-                tags, organization_id
-            ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s
-            )
-            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
-                name=EXCLUDED.name, location=EXCLUDED.location,
-                resource_group=EXCLUDED.resource_group,
-                subscription_id=EXCLUDED.subscription_id,
-                subscription_name=EXCLUDED.subscription_name,
-                sku=EXCLUDED.sku, kind=EXCLUDED.kind, access_tier=EXCLUDED.access_tier,
-                public_blob_access=EXCLUDED.public_blob_access,
-                https_only=EXCLUDED.https_only,
-                minimum_tls_version=EXCLUDED.minimum_tls_version,
-                shared_key_access=EXCLUDED.shared_key_access,
-                allow_cross_tenant_replication=EXCLUDED.allow_cross_tenant_replication,
-                default_network_action=EXCLUDED.default_network_action,
-                ip_rules_count=EXCLUDED.ip_rules_count,
-                vnet_rules_count=EXCLUDED.vnet_rules_count,
-                private_endpoint_count=EXCLUDED.private_endpoint_count,
-                bypass_settings=EXCLUDED.bypass_settings,
-                network_rules=EXCLUDED.network_rules,
-                infrastructure_encryption=EXCLUDED.infrastructure_encryption,
-                customer_managed_keys=EXCLUDED.customer_managed_keys,
-                key_vault_uri=EXCLUDED.key_vault_uri,
-                encryption_details=EXCLUDED.encryption_details,
-                key1_created_at=EXCLUDED.key1_created_at,
-                key2_created_at=EXCLUDED.key2_created_at,
-                key_rotation_stale=EXCLUDED.key_rotation_stale,
-                sas_policy_enabled=EXCLUDED.sas_policy_enabled,
-                sas_expiration_period=EXCLUDED.sas_expiration_period,
-                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons,
-                risk_components=EXCLUDED.risk_components,
-                blast_radius_score=EXCLUDED.blast_radius_score,
-                critical_overrides=EXCLUDED.critical_overrides,
-                tags=EXCLUDED.tags,
-                created_at=NOW()
-            RETURNING id
-        """, (
-            run_id, data.get('resource_id'), data.get('name'), data.get('location'),
-            data.get('resource_group'), data.get('subscription_id'),
-            data.get('subscription_name'), data.get('sku'), data.get('kind'),
-            data.get('access_tier'), data.get('public_blob_access', False),
-            data.get('https_only', True), data.get('minimum_tls_version', 'TLS1_2'),
-            data.get('shared_key_access', True),
-            data.get('allow_cross_tenant_replication', False),
-            data.get('default_network_action', 'Allow'),
-            data.get('ip_rules_count', 0), data.get('vnet_rules_count', 0),
-            data.get('private_endpoint_count', 0), data.get('bypass_settings'),
-            json.dumps(data.get('network_rules', {})),
-            data.get('infrastructure_encryption', False),
-            data.get('customer_managed_keys', False), data.get('key_vault_uri'),
-            json.dumps(data.get('encryption_details', {})),
-            data.get('key1_created_at'), data.get('key2_created_at'),
-            data.get('key_rotation_stale', False),
-            data.get('sas_policy_enabled'),
-            data.get('sas_expiration_period'),
-            data.get('risk_level', 'info'), data.get('risk_score', 0),
-            json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('risk_components', {})),
-            data.get('blast_radius_score', 0),
-            json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})), data.get('organization_id') or self._organization_id
-        ))
-        db_id = cursor.fetchone()[0]
-        self._commit()
-        cursor.close()
-        return db_id
-
-    def save_key_vault(self, run_id, data):
-        """Save or update a key vault (UPSERT)."""
-        self._ensure_azure_key_vaults_table()
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO azure_key_vaults (
-                discovery_run_id, resource_id, name, location, resource_group,
-                subscription_id, subscription_name, sku,
-                soft_delete_enabled, soft_delete_retention_days,
-                purge_protection, enable_rbac_authorization,
-                public_network_access, default_network_action,
-                ip_rules_count, vnet_rules_count, private_endpoint_count,
-                network_rules, secrets_total, secrets_expired, secrets_expiring_soon,
-                keys_total, keys_expired, keys_expiring_soon,
-                certs_total, certs_expired, certs_expiring_soon,
-                access_policy_count, access_policies,
-                secrets_detail, keys_detail, certs_detail,
-                risk_level, risk_score, risk_reasons,
-                risk_components, blast_radius_score, critical_overrides,
-                tags, organization_id
-            ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s
-            )
-            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
-                name=EXCLUDED.name, location=EXCLUDED.location,
-                resource_group=EXCLUDED.resource_group,
-                subscription_id=EXCLUDED.subscription_id,
-                subscription_name=EXCLUDED.subscription_name, sku=EXCLUDED.sku,
-                soft_delete_enabled=EXCLUDED.soft_delete_enabled,
-                soft_delete_retention_days=EXCLUDED.soft_delete_retention_days,
-                purge_protection=EXCLUDED.purge_protection,
-                enable_rbac_authorization=EXCLUDED.enable_rbac_authorization,
-                public_network_access=EXCLUDED.public_network_access,
-                default_network_action=EXCLUDED.default_network_action,
-                ip_rules_count=EXCLUDED.ip_rules_count,
-                vnet_rules_count=EXCLUDED.vnet_rules_count,
-                private_endpoint_count=EXCLUDED.private_endpoint_count,
-                network_rules=EXCLUDED.network_rules,
-                secrets_total=EXCLUDED.secrets_total,
-                secrets_expired=EXCLUDED.secrets_expired,
-                secrets_expiring_soon=EXCLUDED.secrets_expiring_soon,
-                keys_total=EXCLUDED.keys_total, keys_expired=EXCLUDED.keys_expired,
-                keys_expiring_soon=EXCLUDED.keys_expiring_soon,
-                certs_total=EXCLUDED.certs_total, certs_expired=EXCLUDED.certs_expired,
-                certs_expiring_soon=EXCLUDED.certs_expiring_soon,
-                access_policy_count=EXCLUDED.access_policy_count,
-                access_policies=EXCLUDED.access_policies,
-                secrets_detail=EXCLUDED.secrets_detail,
-                keys_detail=EXCLUDED.keys_detail,
-                certs_detail=EXCLUDED.certs_detail,
-                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons,
-                risk_components=EXCLUDED.risk_components,
-                blast_radius_score=EXCLUDED.blast_radius_score,
-                critical_overrides=EXCLUDED.critical_overrides,
-                tags=EXCLUDED.tags,
-                created_at=NOW()
-            RETURNING id
-        """, (
-            run_id, data.get('resource_id'), data.get('name'), data.get('location'),
-            data.get('resource_group'), data.get('subscription_id'),
-            data.get('subscription_name'), data.get('sku'),
-            data.get('soft_delete_enabled', False),
-            data.get('soft_delete_retention_days', 0),
-            data.get('purge_protection', False),
-            data.get('enable_rbac_authorization', False),
-            data.get('public_network_access', 'Enabled'),
-            data.get('default_network_action', 'Allow'),
-            data.get('ip_rules_count', 0), data.get('vnet_rules_count', 0),
-            data.get('private_endpoint_count', 0),
-            json.dumps(data.get('network_rules', {})),
-            data.get('secrets_total', 0), data.get('secrets_expired', 0),
-            data.get('secrets_expiring_soon', 0),
-            data.get('keys_total', 0), data.get('keys_expired', 0),
-            data.get('keys_expiring_soon', 0),
-            data.get('certs_total', 0), data.get('certs_expired', 0),
-            data.get('certs_expiring_soon', 0),
-            data.get('access_policy_count', 0),
-            json.dumps(data.get('access_policies', [])),
-            json.dumps(data.get('secrets_detail', [])),
-            json.dumps(data.get('keys_detail', [])),
-            json.dumps(data.get('certs_detail', [])),
-            data.get('risk_level', 'info'), data.get('risk_score', 0),
-            json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('risk_components', {})),
-            data.get('blast_radius_score', 0),
-            json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})), data.get('organization_id') or self._organization_id
-        ))
-        db_id = cursor.fetchone()[0]
-        self._commit()
-        cursor.close()
-        return db_id
-
-    # ──────────────────────────────────────────────────────────
-    # Resource Risk History (Phase 89)
-    # ──────────────────────────────────────────────────────────
-
-    def _ensure_resource_risk_history_table(self):
-        """Create resource_risk_history table for trend tracking."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS resource_risk_history (
-                id SERIAL PRIMARY KEY,
-                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                resource_id TEXT NOT NULL,
-                resource_type VARCHAR(30) NOT NULL,
-                risk_score INTEGER NOT NULL DEFAULT 0,
-                risk_level VARCHAR(20) NOT NULL DEFAULT 'info',
-                risk_components JSONB DEFAULT '{}',
-                critical_overrides JSONB DEFAULT '[]',
-                blast_radius_score INTEGER DEFAULT 0,
-                privileged_identity_count INTEGER DEFAULT 0,
-                dependency_count INTEGER DEFAULT 0,
-                network_exposure_score INTEGER DEFAULT 0,
-                organization_id INTEGER,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE(discovery_run_id, resource_id)
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rrh_resource ON resource_risk_history(resource_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rrh_run ON resource_risk_history(discovery_run_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rrh_created ON resource_risk_history(created_at DESC)")
-        self._commit()
-        cursor.close()
-
-    def save_resource_risk_history(self, run_id: int, resource_id: str, resource_type: str, data: dict) -> int:
-        """Upsert a resource risk snapshot for a discovery run."""
-        self._ensure_resource_risk_history_table()
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO resource_risk_history
-                (discovery_run_id, resource_id, resource_type, risk_score, risk_level,
-                 risk_components, critical_overrides, blast_radius_score,
-                 privileged_identity_count, dependency_count, network_exposure_score, organization_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (discovery_run_id, resource_id)
-            DO UPDATE SET risk_score = EXCLUDED.risk_score,
-                         risk_level = EXCLUDED.risk_level,
-                         risk_components = EXCLUDED.risk_components,
-                         critical_overrides = EXCLUDED.critical_overrides,
-                         blast_radius_score = EXCLUDED.blast_radius_score,
-                         privileged_identity_count = EXCLUDED.privileged_identity_count,
-                         dependency_count = EXCLUDED.dependency_count,
-                         network_exposure_score = EXCLUDED.network_exposure_score
-            RETURNING id
-        """, (
-            run_id, resource_id, resource_type,
-            data.get('risk_score', 0), data.get('risk_level', 'info'),
-            json.dumps(data.get('risk_components', {})),
-            json.dumps(data.get('critical_overrides', [])),
-            data.get('blast_radius_score', 0),
-            data.get('privileged_identity_count', 0),
-            data.get('dependency_count', 0),
-            data.get('network_exposure_score', 0),
-            self._organization_id,
-        ))
-        db_id = cursor.fetchone()[0]
-        self._commit()
-        cursor.close()
-        return db_id
-
-    def update_resource_risk_scores(self, run_id: int, resource_id: str, resource_type: str, data: dict):
-        """Write enhanced risk scores back to the main resource table so list/detail views are consistent."""
-        table = 'azure_storage_accounts' if resource_type == 'storage_account' else 'azure_key_vaults'
-        cursor = self.conn.cursor()
-        cursor.execute(f"""
-            UPDATE {table}
-            SET risk_score = %s,
-                risk_level = %s,
-                risk_components = %s,
-                blast_radius_score = %s,
-                critical_overrides = %s
-            WHERE discovery_run_id = %s AND resource_id = %s
-        """, (
-            data.get('risk_score', 0),
-            data.get('risk_level', 'info'),
-            json.dumps(data.get('risk_components', {})),
-            data.get('blast_radius_score', 0),
-            json.dumps(data.get('critical_overrides', [])),
-            run_id,
-            resource_id,
-        ))
-        self._commit()
-        cursor.close()
-
-    # ──────────────────────────────────────────────────────────
-    # Resource Findings Table
-    # ──────────────────────────────────────────────────────────
-
-    _resource_findings_ensured = False
-
-    def _ensure_resource_findings_table(self):
-        """Create resource_findings table for queryable per-driver findings."""
-        if Database._resource_findings_ensured:
-            return
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS resource_findings (
-                id SERIAL PRIMARY KEY,
-                discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                resource_id TEXT NOT NULL,
-                resource_type VARCHAR(30) NOT NULL,
-                component VARCHAR(50) NOT NULL,
-                finding_key VARCHAR(200) NOT NULL,
-                finding_title TEXT NOT NULL,
-                points INTEGER NOT NULL DEFAULT 0,
-                severity VARCHAR(20) NOT NULL DEFAULT 'low',
-                is_critical_override BOOLEAN NOT NULL DEFAULT false,
-                metadata JSONB DEFAULT '{}',
-                organization_id INTEGER,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE(discovery_run_id, resource_id, finding_key)
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_resource ON resource_findings(resource_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_run ON resource_findings(discovery_run_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_severity ON resource_findings(severity)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rf_component ON resource_findings(component)")
-        self._commit()
-        cursor.close()
-        Database._resource_findings_ensured = True
-
-    def save_resource_findings(self, run_id: int, resource_id: str, resource_type: str,
-                                findings: list, organization_id: int = None):
-        """Upsert findings extracted from risk_components for a resource."""
-        self._ensure_resource_findings_table()
-        if not findings:
-            return
-        cursor = self.conn.cursor()
-        tid = organization_id or self._organization_id
-        for f in findings:
-            cursor.execute("""
-                INSERT INTO resource_findings
-                    (discovery_run_id, resource_id, resource_type, component,
-                     finding_key, finding_title, points, severity,
-                     is_critical_override, metadata, organization_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (discovery_run_id, resource_id, finding_key)
-                DO UPDATE SET points = EXCLUDED.points,
-                             severity = EXCLUDED.severity,
-                             finding_title = EXCLUDED.finding_title,
-                             is_critical_override = EXCLUDED.is_critical_override,
-                             metadata = EXCLUDED.metadata
-            """, (
-                run_id, resource_id, resource_type, f['component'],
-                f['finding_key'], f['finding_title'], f['points'], f['severity'],
-                f['is_critical_override'], json.dumps(f.get('metadata', {})), tid,
-            ))
-        self._commit()
-        cursor.close()
-
-    def get_resource_findings(self, resource_id: str, run_ids: list = None):
-        """Get findings for a resource, optionally filtered by run IDs."""
-        self._ensure_resource_findings_table()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        if run_ids:
-            cursor.execute("""
-                SELECT * FROM resource_findings
-                WHERE resource_id = %s AND discovery_run_id = ANY(%s)
-                ORDER BY points DESC, component
-            """, (resource_id, run_ids))
-        else:
-            cursor.execute("""
-                SELECT * FROM resource_findings
-                WHERE resource_id = %s
-                ORDER BY created_at DESC, points DESC
-                LIMIT 100
-            """, (resource_id,))
-        rows = [dict(r) for r in cursor.fetchall()]
-        cursor.close()
-        for r in rows:
-            if r.get('created_at'):
-                r['created_at'] = r['created_at'].isoformat()
-        return rows
-
-    def get_resource_risk_trend(self, resource_id: str, limit: int = 10) -> list:
-        """Get risk history for a resource, most recent first."""
-        self._ensure_resource_risk_history_table()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT rrh.id, rrh.discovery_run_id, rrh.resource_id, rrh.resource_type,
-                   rrh.risk_score, rrh.risk_level, rrh.risk_components, rrh.critical_overrides,
-                   rrh.blast_radius_score, rrh.privileged_identity_count,
-                   rrh.dependency_count, rrh.network_exposure_score,
-                   rrh.created_at, dr.started_at AS run_date
-            FROM resource_risk_history rrh
-            LEFT JOIN discovery_runs dr ON dr.id = rrh.discovery_run_id
-            WHERE rrh.resource_id = %s
-            ORDER BY rrh.created_at DESC
-            LIMIT %s
-        """, (resource_id, limit))
-        rows = [dict(r) for r in cursor.fetchall()]
-        cursor.close()
-        for r in rows:
-            for ts in ('created_at', 'run_date'):
-                if r.get(ts):
-                    r[ts] = r[ts].isoformat()
-        return rows
-
-    def get_resource_risk_trend_batch(self, resource_ids: list, limit_per_resource: int = 2) -> dict:
-        """Get risk trend for multiple resources (for list view). Returns dict keyed by resource_id."""
-        self._ensure_resource_risk_history_table()
-        if not resource_ids:
-            return {}
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT resource_id, risk_score, risk_level, created_at
-            FROM (
-                SELECT resource_id, risk_score, risk_level, created_at,
-                       ROW_NUMBER() OVER (PARTITION BY resource_id ORDER BY created_at DESC) AS rn
-                FROM resource_risk_history
-                WHERE resource_id = ANY(%s)
-            ) ranked
-            WHERE rn <= %s
-            ORDER BY resource_id, created_at DESC
-        """, (resource_ids, limit_per_resource))
-        rows = cursor.fetchall()
-        cursor.close()
-        result = {}
-        for r in rows:
-            rid = r['resource_id']
-            result.setdefault(rid, []).append({
-                'risk_score': r['risk_score'],
-                'risk_level': r['risk_level'],
-            })
-        return result
-
-    # ──────────────────────────────────────────────────────────
-    # App Registrations (Phase 74)
-    # ──────────────────────────────────────────────────────────
 
     def _ensure_app_registrations_table(self):
         """Create app_registrations table if it doesn't exist."""
@@ -10563,8 +10043,7 @@ class Database:
             'access_review_campaigns', 'campaign_reviews', 'campaign_audit_log',
             'identity_groups', 'identity_group_members', 'anomalies', 'api_keys',
             'soar_playbooks', 'soar_actions', 'dashboard_preferences',
-            'compliance_snapshots', 'agirs_scores', 'azure_storage_accounts',
-            'azure_key_vaults', 'resource_risk_history', 'resource_findings',
+            'compliance_snapshots', 'agirs_scores',
             'app_registrations', 'copilot_conversations', 'cloud_connections',
             'cloud_subscriptions', 'billing_events', 'invoices',
             'identity_subscription_access', 'sa_attestations', 'governance_decisions',
@@ -14778,28 +14257,6 @@ class Database:
         cursor.close()
         return [dict(r) for r in rows]
 
-    def get_resource_identity_access(self, resource_external_id):
-        """Get identities that have access to a resource via graph traversal.
-
-        Follows: resource <-[grants_access]- role <-[assigned_role]- identity
-        """
-        from psycopg2.extras import RealDictCursor
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT DISTINCT ident.external_id, ident.display_name, ident.metadata,
-                   role_node.display_name AS role_name
-            FROM graph_nodes res
-            JOIN graph_edges e2 ON e2.target_node_id = res.id AND e2.edge_type = 'grants_access'
-            JOIN graph_nodes role_node ON role_node.id = e2.source_node_id
-            JOIN graph_edges e1 ON e1.target_node_id = role_node.id AND e1.edge_type = 'assigned_role'
-            JOIN graph_nodes ident ON ident.id = e1.source_node_id AND ident.node_type = 'identity'
-            WHERE res.node_type = 'resource'
-              AND res.external_id = %s
-        """, (resource_external_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        return [dict(r) for r in rows]
-
     def get_escalation_findings(self, identity_external_id=None):
         """Get escalation-type risk findings, optionally filtered by identity."""
         from psycopg2.extras import RealDictCursor
@@ -17462,7 +16919,6 @@ class Database:
             'ca_policies', 'drift_reports',
             'remediation_actions', 'anomalies',
             'compliance_snapshots',
-            'azure_storage_accounts', 'azure_key_vaults',
             'app_registrations',
             # additional run-scoped tables
             'graph_snapshots', 'discovery_stage_log',
@@ -18431,6 +17887,13 @@ class Database:
                 cursor.execute("RELEASE SAVEPOINT add_col")
             except Exception:
                 cursor.execute("ROLLBACK TO SAVEPOINT add_col")
+        # Migration: add has_p2_license column
+        cursor.execute("SAVEPOINT add_p2_col")
+        try:
+            cursor.execute("ALTER TABLE cloud_connections ADD COLUMN has_p2_license BOOLEAN DEFAULT NULL")
+            cursor.execute("RELEASE SAVEPOINT add_p2_col")
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT add_p2_col")
         # RLS policies for organization isolation (idempotent)
         cursor.execute("ALTER TABLE cloud_connections ENABLE ROW LEVEL SECURITY")
         cursor.execute("ALTER TABLE cloud_connections FORCE ROW LEVEL SECURITY")
@@ -19983,6 +19446,7 @@ class Database:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_org ON workload_signin_events(organization_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_db ON workload_signin_events(identity_db_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_status_time ON workload_signin_events(identity_db_id, status, created_datetime DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_created ON workload_signin_events(created_datetime)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_id ON workload_signin_events(identity_id)")
 
@@ -20109,11 +19573,7 @@ class Database:
     _entra_group_tables_ensured = False
 
     def _ensure_entra_group_tables(self):
-        """Create entra_groups and entra_group_memberships tables.
-
-        # TODO: Convert to Alembic migration before production deployment
-        # Running DDL at startup causes table lock contention under load
-        """
+        """Create entra_groups and entra_group_memberships tables."""
         if Database._entra_group_tables_ensured:
             return
         cursor = self.conn.cursor()
@@ -20330,7 +19790,11 @@ class Database:
             cursor.close()
 
     def get_identity_entra_groups(self, identity_object_id: str, run_ids: list) -> list:
-        """Get all Entra groups where the given identity is a member (direct or nested)."""
+        """Get all Entra groups where the given identity is a member (direct or nested).
+
+        Joins on azure_object_id (Graph object ID), not identity_id (app_id for SPNs).
+        Filters both tables by discovery_run_id to prevent stale data leakage.
+        """
         self._ensure_entra_group_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         try:
@@ -20341,183 +19805,15 @@ class Database:
                        egm.is_nested, egm.depth, egm.member_type
                 FROM entra_group_memberships egm
                 JOIN entra_groups eg ON eg.id = egm.group_db_id
+                  AND eg.discovery_run_id = egm.discovery_run_id
                 WHERE egm.member_object_id = %s
-                  AND eg.discovery_run_id = ANY(%s)
+                  AND egm.discovery_run_id = ANY(%s)
                 ORDER BY eg.is_privileged DESC, egm.depth ASC, eg.display_name
             """, (identity_object_id, run_ids))
             groups = [dict(r) for r in cursor.fetchall()]
             return groups
         finally:
             cursor.close()
-
-    # ─── Resource Identity Links (SAMI cross-link inverse lookup) ──────
-
-    _resource_identity_links_ensured = False
-
-    def _ensure_resource_identity_links_table(self):
-        """Create resource_identity_links table for SAMI→resource inverse lookup."""
-        if Database._resource_identity_links_ensured:
-            return
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS resource_identity_links (
-                    id SERIAL PRIMARY KEY,
-                    resource_id VARCHAR(500) NOT NULL,
-                    resource_type VARCHAR(100) NOT NULL,
-                    resource_name VARCHAR(500),
-                    resource_group VARCHAR(255),
-                    subscription_id VARCHAR(100),
-                    identity_db_id INTEGER NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
-                    identity_id VARCHAR(255) NOT NULL,
-                    identity_display_name VARCHAR(512),
-                    link_type VARCHAR(50) NOT NULL DEFAULT 'system_assigned',
-                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(discovery_run_id, resource_id, identity_id)
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ril_resource_id ON resource_identity_links(resource_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ril_identity_id ON resource_identity_links(identity_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ril_identity_db_id ON resource_identity_links(identity_db_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ril_run_id ON resource_identity_links(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ril_resource_type ON resource_identity_links(resource_type)")
-
-            # RLS policies
-            cursor.execute("ALTER TABLE resource_identity_links ENABLE ROW LEVEL SECURITY")
-            cursor.execute("ALTER TABLE resource_identity_links FORCE ROW LEVEL SECURITY")
-            for policy_stmt in [
-                "CREATE POLICY org_strict_sel ON resource_identity_links FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                "CREATE POLICY org_strict_ins ON resource_identity_links FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                "CREATE POLICY org_strict_upd ON resource_identity_links FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                "CREATE POLICY org_strict_del ON resource_identity_links FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-            ]:
-                cursor.execute("SAVEPOINT ril_rls")
-                try:
-                    cursor.execute(policy_stmt)
-                    cursor.execute("RELEASE SAVEPOINT ril_rls")
-                except Exception:
-                    cursor.execute("ROLLBACK TO SAVEPOINT ril_rls")
-
-            self._commit()
-            Database._resource_identity_links_ensured = True
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("resource_identity_links table error: %s", e)
-        finally:
-            cursor.close()
-
-    def save_resource_identity_link(self, run_id: int, link_data: dict):
-        """Save a resource→identity link record (SAMI cross-link)."""
-        self._ensure_resource_identity_links_table()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO resource_identity_links (
-                    resource_id, resource_type, resource_name,
-                    resource_group, subscription_id,
-                    identity_db_id, identity_id, identity_display_name,
-                    link_type, discovery_run_id, organization_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (discovery_run_id, resource_id, identity_id) DO UPDATE SET
-                    resource_type = EXCLUDED.resource_type,
-                    resource_name = EXCLUDED.resource_name,
-                    resource_group = EXCLUDED.resource_group,
-                    subscription_id = EXCLUDED.subscription_id,
-                    identity_db_id = EXCLUDED.identity_db_id,
-                    identity_display_name = EXCLUDED.identity_display_name,
-                    link_type = EXCLUDED.link_type
-            """, (
-                link_data.get('resource_id'),
-                link_data.get('resource_type'),
-                link_data.get('resource_name'),
-                link_data.get('resource_group'),
-                link_data.get('subscription_id'),
-                link_data.get('identity_db_id'),
-                link_data.get('identity_id'),
-                link_data.get('identity_display_name'),
-                link_data.get('link_type', 'system_assigned'),
-                run_id,
-                self._organization_id,
-            ))
-            self._commit()
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.error("save_resource_identity_link failed: %s", e)
-        finally:
-            cursor.close()
-
-    def get_resource_identity_links(self, run_ids: list, filters: dict = None) -> tuple:
-        """Get resource→identity links with optional filters. Returns (links, total)."""
-        self._ensure_resource_identity_links_table()
-        filters = filters or {}
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            where = ["ril.discovery_run_id = ANY(%s)"]
-            params = [run_ids]
-
-            if filters.get('resource_type'):
-                where.append("ril.resource_type = %s")
-                params.append(filters['resource_type'])
-            if filters.get('subscription_id'):
-                where.append("ril.subscription_id = %s")
-                params.append(filters['subscription_id'])
-            if filters.get('search'):
-                where.append("(LOWER(ril.resource_name) LIKE %s OR LOWER(ril.identity_display_name) LIKE %s)")
-                like = f"%{filters['search'].lower()}%"
-                params.extend([like, like])
-
-            where_sql = " AND ".join(where)
-            limit = min(filters.get('limit', 50), 200)
-            offset = filters.get('offset', 0)
-
-            cursor.execute(f"SELECT COUNT(*) FROM resource_identity_links ril WHERE {where_sql}", params)
-            total = cursor.fetchone()['count']
-
-            cursor.execute(f"""
-                SELECT ril.id, ril.resource_id, ril.resource_type, ril.resource_name,
-                       ril.resource_group, ril.subscription_id,
-                       ril.identity_db_id, ril.identity_id, ril.identity_display_name,
-                       ril.link_type, ril.created_at
-                FROM resource_identity_links ril
-                WHERE {where_sql}
-                ORDER BY ril.resource_type, ril.resource_name
-                LIMIT %s OFFSET %s
-            """, params + [limit, offset])
-            links = [dict(r) for r in cursor.fetchall()]
-
-            for lnk in links:
-                if lnk.get('created_at') and hasattr(lnk['created_at'], 'isoformat'):
-                    lnk['created_at'] = lnk['created_at'].isoformat()
-
-            return links, total
-        finally:
-            cursor.close()
-
-    def get_resource_identity_links_for_identity(self, identity_id: str, run_ids: list) -> list:
-        """Get resource links for a specific identity (by identity_id/object_id)."""
-        self._ensure_resource_identity_links_table()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("""
-                SELECT resource_id, resource_type, resource_name,
-                       resource_group, subscription_id, link_type
-                FROM resource_identity_links
-                WHERE identity_id = %s AND discovery_run_id = ANY(%s)
-                ORDER BY resource_type, resource_name
-            """, (identity_id, run_ids))
-            return [dict(r) for r in cursor.fetchall()]
-        finally:
-            cursor.close()
-
-    # ─── Lineage Verdicts (historical verdict tracking) ─────────────────
-
-    _lineage_verdicts_ensured = False
 
     def _ensure_lineage_verdicts_table(self):
         """Create lineage_verdicts table for historical verdict tracking."""
@@ -20686,1627 +19982,6 @@ class Database:
             }
         finally:
             cursor.close()
-
-    # ─── Compute Resource Tables (App Services, Functions, VMs, Logic Apps) ──
-
-    _compute_tables_ensured = False
-
-    def _ensure_compute_tables(self):
-        """Create compute_resources, compute_env_secrets, compute_role_assignments tables.
-
-        # TODO: Convert to Alembic migration before production deployment
-        """
-        if Database._compute_tables_ensured:
-            return
-        cursor = self.conn.cursor()
-        try:
-            # Table 1: compute_resources
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS compute_resources (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    resource_type VARCHAR(100) NOT NULL,
-                    resource_name VARCHAR(500) NOT NULL,
-                    resource_group VARCHAR(255),
-                    subscription_id VARCHAR(100),
-                    azure_resource_id VARCHAR(1000),
-                    location VARCHAR(100),
-                    system_msi_principal_id VARCHAR(255),
-                    system_msi_identity_id BIGINT REFERENCES identities(id) ON DELETE SET NULL,
-                    user_msi_resource_ids JSONB,
-                    jit_enabled BOOLEAN,
-                    has_public_access BOOLEAN DEFAULT FALSE,
-                    os_type VARCHAR(50),
-                    logic_app_kind VARCHAR(50),
-                    sku_name VARCHAR(100),
-                    state VARCHAR(50),
-                    tags JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_resources_run ON compute_resources(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_resources_org ON compute_resources(organization_id, discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_resources_type ON compute_resources(resource_type, discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_resources_msi ON compute_resources(system_msi_principal_id, discovery_run_id) WHERE system_msi_principal_id IS NOT NULL")
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_compute_resources_azure_id ON compute_resources(azure_resource_id, discovery_run_id) WHERE azure_resource_id IS NOT NULL")
-
-            # Table 2: compute_env_secrets
-            # NOTE: We NEVER store the env var VALUE, only the name and pattern matched.
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS compute_env_secrets (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    compute_resource_id BIGINT NOT NULL REFERENCES compute_resources(id) ON DELETE CASCADE,
-                    env_var_name VARCHAR(500) NOT NULL,
-                    pattern_matched VARCHAR(100) NOT NULL,
-                    is_keyvault_reference BOOLEAN DEFAULT FALSE,
-                    severity VARCHAR(20) DEFAULT 'HIGH',
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_env_secrets_resource ON compute_env_secrets(compute_resource_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_env_secrets_run ON compute_env_secrets(discovery_run_id)")
-
-            # Table 3: compute_role_assignments
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS compute_role_assignments (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    compute_resource_id BIGINT REFERENCES compute_resources(id) ON DELETE SET NULL,
-                    principal_azure_object_id VARCHAR(255) NOT NULL,
-                    identity_id BIGINT REFERENCES identities(id) ON DELETE SET NULL,
-                    role_name VARCHAR(255) NOT NULL,
-                    scope VARCHAR(1000) NOT NULL,
-                    scope_level VARCHAR(50) NOT NULL,
-                    is_high_privilege BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_role_assignments_run ON compute_role_assignments(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_role_assignments_principal ON compute_role_assignments(principal_azure_object_id, discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_compute_role_assignments_resource ON compute_role_assignments(compute_resource_id) WHERE compute_resource_id IS NOT NULL")
-
-            # RLS policies for all three tables
-            for tbl in ('compute_resources', 'compute_env_secrets', 'compute_role_assignments'):
-                cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
-                cursor.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
-                for policy_stmt in [
-                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                ]:
-                    cursor.execute("SAVEPOINT compute_rls")
-                    try:
-                        cursor.execute(policy_stmt)
-                        cursor.execute("RELEASE SAVEPOINT compute_rls")
-                    except Exception:
-                        cursor.execute("ROLLBACK TO SAVEPOINT compute_rls")
-
-            self._commit()
-            Database._compute_tables_ensured = True
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("compute tables error: %s", e)
-        finally:
-            cursor.close()
-
-    def save_compute_resource(self, run_id: int, data: dict) -> int:
-        """Save or update a compute resource (UPSERT). Returns db id."""
-        self._ensure_compute_tables()
-        cursor = self.conn.cursor()
-        try:
-            import json as _json
-            user_msi = data.get('user_msi_resource_ids')
-            if user_msi and not isinstance(user_msi, str):
-                user_msi = _json.dumps(user_msi)
-            tags = data.get('tags')
-            if tags and not isinstance(tags, str):
-                tags = _json.dumps(tags)
-            cursor.execute("""
-                INSERT INTO compute_resources (
-                    discovery_run_id, organization_id, resource_type,
-                    resource_name, resource_group, subscription_id,
-                    azure_resource_id, location, system_msi_principal_id,
-                    user_msi_resource_ids, jit_enabled, has_public_access,
-                    os_type, logic_app_kind, sku_name, state, tags
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (azure_resource_id, discovery_run_id)
-                WHERE azure_resource_id IS NOT NULL
-                DO UPDATE SET
-                    resource_name = EXCLUDED.resource_name,
-                    resource_group = EXCLUDED.resource_group,
-                    system_msi_principal_id = EXCLUDED.system_msi_principal_id,
-                    user_msi_resource_ids = EXCLUDED.user_msi_resource_ids,
-                    has_public_access = EXCLUDED.has_public_access,
-                    state = EXCLUDED.state, tags = EXCLUDED.tags
-                RETURNING id
-            """, (
-                run_id, self._organization_id, data.get('resource_type'),
-                data.get('resource_name'), data.get('resource_group'),
-                data.get('subscription_id'), data.get('azure_resource_id'),
-                data.get('location'), data.get('system_msi_principal_id'),
-                user_msi, data.get('jit_enabled'),
-                data.get('has_public_access', False),
-                data.get('os_type'), data.get('logic_app_kind'),
-                data.get('sku_name'), data.get('state'), tags,
-            ))
-            row = cursor.fetchone()
-            db_id = row[0] if row else None
-            self._commit()
-            return db_id
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_compute_resource failed: %s", e)
-            return None
-        finally:
-            cursor.close()
-
-    def save_compute_env_secret(self, run_id: int, compute_resource_id: int, data: dict):
-        """Save a detected env var secret pattern (never stores the value)."""
-        self._ensure_compute_tables()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO compute_env_secrets (
-                    discovery_run_id, organization_id, compute_resource_id,
-                    env_var_name, pattern_matched, is_keyvault_reference, severity
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (
-                run_id, self._organization_id, compute_resource_id,
-                data.get('env_var_name'), data.get('pattern_matched'),
-                data.get('is_keyvault_reference', False),
-                data.get('severity', 'HIGH'),
-            ))
-            self._commit()
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_compute_env_secret failed: %s", e)
-        finally:
-            cursor.close()
-
-    def save_compute_role_assignment(self, run_id: int, data: dict):
-        """Save a compute-scoped role assignment.
-
-        Also cross-writes to the canonical role_assignments table when an
-        identity_db_id is known, so that blast radius scoring and the
-        identity detail page see these assignments.
-        """
-        self._ensure_compute_tables()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO compute_role_assignments (
-                    discovery_run_id, organization_id, compute_resource_id,
-                    principal_azure_object_id, identity_id, role_name,
-                    scope, scope_level, is_high_privilege
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                run_id, self._organization_id, data.get('compute_resource_id'),
-                data.get('principal_azure_object_id'), data.get('identity_id'),
-                data.get('role_name'), data.get('scope'),
-                data.get('scope_level'), data.get('is_high_privilege', False),
-            ))
-
-            # FIX 3: Cross-write to canonical role_assignments (deduped)
-            identity_db_id = data.get('identity_id')
-            if identity_db_id and data.get('role_name') and data.get('scope'):
-                cursor.execute("""
-                    INSERT INTO role_assignments (
-                        identity_db_id, role_name, scope, scope_type,
-                        principal_id, role_type, resource_type, resource_name,
-                        organization_id, principal_type
-                    )
-                    SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM role_assignments
-                        WHERE identity_db_id = %s AND role_name = %s AND scope = %s
-                    )
-                """, (
-                    identity_db_id, data.get('role_name'), data.get('scope'),
-                    data.get('scope_level', 'resource'),
-                    data.get('principal_azure_object_id'),
-                    'azure', 'compute', None,
-                    self._organization_id, 'compute',
-                    # WHERE NOT EXISTS params
-                    identity_db_id, data.get('role_name'), data.get('scope'),
-                ))
-
-            self._commit()
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_compute_role_assignment failed: %s", e)
-        finally:
-            cursor.close()
-
-    def get_compute_resources(self, run_ids: list, filters: dict = None) -> tuple:
-        """Get compute resources with optional filters. Returns (resources, total)."""
-        self._ensure_compute_tables()
-        filters = filters or {}
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            where = ["cr.discovery_run_id = ANY(%s)"]
-            params = [run_ids]
-
-            if filters.get('resource_type'):
-                where.append("cr.resource_type = %s")
-                params.append(filters['resource_type'])
-            if filters.get('has_msi') is not None:
-                if filters['has_msi']:
-                    where.append("cr.system_msi_principal_id IS NOT NULL")
-                else:
-                    where.append("cr.system_msi_principal_id IS NULL")
-            if filters.get('has_env_secrets'):
-                where.append("""EXISTS (
-                    SELECT 1 FROM compute_env_secrets ces
-                    WHERE ces.compute_resource_id = cr.id AND ces.severity = 'HIGH'
-                )""")
-            if filters.get('jit_enabled') is not None:
-                if filters['jit_enabled'] == 'null':
-                    where.append("cr.jit_enabled IS NULL")
-                else:
-                    where.append("cr.jit_enabled = %s")
-                    params.append(filters['jit_enabled'] == 'true')
-
-            where_sql = " AND ".join(where)
-            page = max(1, filters.get('page', 1))
-            page_size = min(filters.get('page_size', 50), 200)
-            offset = (page - 1) * page_size
-
-            cursor.execute(f"SELECT COUNT(*) FROM compute_resources cr WHERE {where_sql}", params)
-            total = cursor.fetchone()['count']
-
-            cursor.execute(f"""
-                SELECT cr.id, cr.resource_type, cr.resource_name, cr.resource_group,
-                       cr.subscription_id, cr.azure_resource_id, cr.location,
-                       cr.system_msi_principal_id, cr.system_msi_identity_id,
-                       cr.user_msi_resource_ids, cr.jit_enabled,
-                       cr.has_public_access, cr.os_type, cr.logic_app_kind,
-                       cr.sku_name, cr.state, cr.tags,
-                       (SELECT COUNT(*) FROM compute_env_secrets ces
-                        WHERE ces.compute_resource_id = cr.id AND ces.severity = 'HIGH') AS env_secret_count,
-                       (SELECT COUNT(*) FROM compute_role_assignments cra
-                        WHERE cra.compute_resource_id = cr.id AND cra.is_high_privilege = TRUE) AS high_privilege_role_count
-                FROM compute_resources cr
-                WHERE {where_sql}
-                ORDER BY cr.resource_type, cr.resource_name
-                LIMIT %s OFFSET %s
-            """, params + [page_size, offset])
-            resources = [dict(r) for r in cursor.fetchall()]
-
-            return resources, total
-        finally:
-            cursor.close()
-
-    def get_compute_resource_detail(self, resource_id: int) -> dict:
-        """Get full compute resource detail including secrets and role assignments."""
-        self._ensure_compute_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("""
-                SELECT cr.*, i.display_name AS msi_display_name,
-                       i.risk_level AS msi_risk_level, i.risk_score AS msi_risk_score
-                FROM compute_resources cr
-                LEFT JOIN identities i ON i.id = cr.system_msi_identity_id
-                WHERE cr.id = %s
-            """, (resource_id,))
-            resource = cursor.fetchone()
-            if not resource:
-                return None
-            resource = dict(resource)
-
-            # Env secrets (names and patterns only, no values)
-            cursor.execute("""
-                SELECT id, env_var_name, pattern_matched, is_keyvault_reference, severity
-                FROM compute_env_secrets
-                WHERE compute_resource_id = %s
-                ORDER BY severity DESC, env_var_name
-            """, (resource_id,))
-            resource['env_secrets'] = [dict(r) for r in cursor.fetchall()]
-
-            # Role assignments
-            cursor.execute("""
-                SELECT cra.id, cra.principal_azure_object_id, cra.role_name,
-                       cra.scope, cra.scope_level, cra.is_high_privilege,
-                       i.display_name AS identity_display_name,
-                       i.identity_category
-                FROM compute_role_assignments cra
-                LEFT JOIN identities i ON i.id = cra.identity_id
-                WHERE cra.compute_resource_id = %s
-                ORDER BY cra.is_high_privilege DESC, cra.role_name
-            """, (resource_id,))
-            resource['role_assignments'] = [dict(r) for r in cursor.fetchall()]
-
-            return resource
-        finally:
-            cursor.close()
-
-    def get_compute_identity_risk_summary(self, run_ids: list) -> dict:
-        """Get compute identity risk summary for dashboard posture."""
-        self._ensure_compute_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("""
-                SELECT COUNT(*) AS total_compute_resources,
-                       COUNT(*) FILTER (WHERE system_msi_principal_id IS NOT NULL) AS resources_with_msi
-                FROM compute_resources WHERE discovery_run_id = ANY(%s)
-            """, (run_ids,))
-            base = dict(cursor.fetchone())
-
-            cursor.execute("""
-                SELECT COUNT(DISTINCT cra.identity_id) AS high_privilege_msi_count
-                FROM compute_role_assignments cra
-                WHERE cra.discovery_run_id = ANY(%s) AND cra.is_high_privilege = TRUE
-            """, (run_ids,))
-            base['high_privilege_msi_count'] = cursor.fetchone()['high_privilege_msi_count']
-
-            cursor.execute("""
-                SELECT COUNT(*) AS env_secret_findings
-                FROM compute_env_secrets
-                WHERE discovery_run_id = ANY(%s) AND severity = 'HIGH'
-            """, (run_ids,))
-            base['env_secret_findings'] = cursor.fetchone()['env_secret_findings']
-
-            cursor.execute("""
-                SELECT COUNT(*) AS ghost_msi_count
-                FROM lineage_verdicts
-                WHERE discovery_run_id = ANY(%s) AND verdict = 'GHOST_MSI'
-            """, (run_ids,))
-            base['ghost_msi_count'] = cursor.fetchone()['ghost_msi_count']
-
-            cursor.execute("""
-                SELECT COUNT(*) AS vm_without_jit
-                FROM compute_resources
-                WHERE discovery_run_id = ANY(%s)
-                  AND resource_type = 'virtual_machine'
-                  AND (jit_enabled = FALSE OR jit_enabled IS NULL)
-            """, (run_ids,))
-            base['vm_without_jit'] = cursor.fetchone()['vm_without_jit']
-
-            return base
-        except Exception:
-            return {
-                'total_compute_resources': 0, 'resources_with_msi': 0,
-                'high_privilege_msi_count': 0, 'env_secret_findings': 0,
-                'ghost_msi_count': 0, 'vm_without_jit': 0,
-            }
-        finally:
-            cursor.close()
-
-    # ─── Phase 2B: Container / AKS / ACR Tables ────────────────────────
-
-    _container_tables_ensured = False
-
-    def _ensure_container_tables(self):
-        """Create AKS cluster, federated credential, RBAC binding, and ACR registry tables.
-
-        All four tables use organization_id INTEGER (codebase convention).
-        """
-        if Database._container_tables_ensured:
-            return
-        cursor = self.conn.cursor()
-        try:
-            # Table 1: aks_clusters
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aks_clusters (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    cluster_name VARCHAR(500) NOT NULL,
-                    resource_group VARCHAR(255),
-                    subscription_id VARCHAR(100),
-                    azure_resource_id VARCHAR(1000),
-                    location VARCHAR(100),
-                    kubernetes_version VARCHAR(50),
-                    node_count INTEGER DEFAULT 0,
-                    oidc_issuer_url VARCHAR(1000),
-                    workload_identity_enabled BOOLEAN DEFAULT FALSE,
-                    layer2_scan_enabled BOOLEAN DEFAULT FALSE,
-                    system_msi_principal_id VARCHAR(255),
-                    network_profile JSONB,
-                    tags JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_aks_clusters_azure_id ON aks_clusters(azure_resource_id, discovery_run_id) WHERE azure_resource_id IS NOT NULL")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_clusters_run ON aks_clusters(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_clusters_org ON aks_clusters(organization_id)")
-
-            # Table 2: aks_federated_credentials
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aks_federated_credentials (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    identity_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
-                    aks_cluster_id BIGINT REFERENCES aks_clusters(id) ON DELETE CASCADE,
-                    credential_name VARCHAR(500),
-                    issuer_url VARCHAR(1000) NOT NULL,
-                    subject VARCHAR(1000) NOT NULL,
-                    audiences JSONB,
-                    issuer_type VARCHAR(50) DEFAULT 'other',
-                    namespace VARCHAR(255),
-                    service_account VARCHAR(255),
-                    is_wildcard BOOLEAN DEFAULT FALSE,
-                    wildcard_reason VARCHAR(500),
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_fed_creds_run ON aks_federated_credentials(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_fed_creds_identity ON aks_federated_credentials(identity_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_fed_creds_cluster ON aks_federated_credentials(aks_cluster_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_fed_creds_wildcard ON aks_federated_credentials(is_wildcard) WHERE is_wildcard = TRUE")
-
-            # Table 3: aks_rbac_bindings (Layer 2 — K8s API RBAC)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aks_rbac_bindings (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    aks_cluster_id BIGINT NOT NULL REFERENCES aks_clusters(id) ON DELETE CASCADE,
-                    binding_type VARCHAR(50) NOT NULL,
-                    binding_name VARCHAR(500),
-                    namespace VARCHAR(255),
-                    role_name VARCHAR(500),
-                    role_kind VARCHAR(50),
-                    subject_kind VARCHAR(50),
-                    subject_name VARCHAR(500),
-                    subject_namespace VARCHAR(255),
-                    is_cluster_admin BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_rbac_run ON aks_rbac_bindings(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_rbac_cluster ON aks_rbac_bindings(aks_cluster_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_aks_rbac_admin ON aks_rbac_bindings(is_cluster_admin) WHERE is_cluster_admin = TRUE")
-
-            # Table 4: acr_registries
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS acr_registries (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    registry_name VARCHAR(500) NOT NULL,
-                    resource_group VARCHAR(255),
-                    subscription_id VARCHAR(100),
-                    azure_resource_id VARCHAR(1000),
-                    location VARCHAR(100),
-                    sku_name VARCHAR(50),
-                    login_server VARCHAR(500),
-                    admin_enabled BOOLEAN DEFAULT FALSE,
-                    admin_identity_id BIGINT REFERENCES identities(id) ON DELETE SET NULL,
-                    public_network_access BOOLEAN DEFAULT TRUE,
-                    encryption_enabled BOOLEAN DEFAULT FALSE,
-                    image_count INTEGER DEFAULT 0,
-                    tags JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_acr_registries_azure_id ON acr_registries(azure_resource_id, discovery_run_id) WHERE azure_resource_id IS NOT NULL")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_acr_registries_run ON acr_registries(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_acr_registries_org ON acr_registries(organization_id)")
-
-            # RLS policies for all four tables
-            for tbl in ('aks_clusters', 'aks_federated_credentials', 'aks_rbac_bindings', 'acr_registries'):
-                cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
-                cursor.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
-                for policy_stmt in [
-                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                ]:
-                    cursor.execute("SAVEPOINT container_rls")
-                    try:
-                        cursor.execute(policy_stmt)
-                        cursor.execute("RELEASE SAVEPOINT container_rls")
-                    except Exception:
-                        cursor.execute("ROLLBACK TO SAVEPOINT container_rls")
-
-            self._commit()
-            Database._container_tables_ensured = True
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("container tables error: %s", e)
-        finally:
-            cursor.close()
-
-    # ── Container Table CRUD ──
-
-    def save_aks_cluster(self, run_id: int, data: dict) -> int:
-        """Save or update an AKS cluster (UPSERT). Returns db id."""
-        self._ensure_container_tables()
-        cursor = self.conn.cursor()
-        try:
-            import json as _json
-            network = data.get('network_profile')
-            if network and not isinstance(network, str):
-                network = _json.dumps(network)
-            tags = data.get('tags')
-            if tags and not isinstance(tags, str):
-                tags = _json.dumps(tags)
-            cursor.execute("""
-                INSERT INTO aks_clusters (
-                    discovery_run_id, organization_id, cluster_name,
-                    resource_group, subscription_id, azure_resource_id,
-                    location, kubernetes_version, node_count,
-                    oidc_issuer_url, workload_identity_enabled, layer2_scan_enabled,
-                    system_msi_principal_id, network_profile, tags
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (azure_resource_id, discovery_run_id)
-                WHERE azure_resource_id IS NOT NULL
-                DO UPDATE SET
-                    cluster_name = EXCLUDED.cluster_name,
-                    kubernetes_version = EXCLUDED.kubernetes_version,
-                    node_count = EXCLUDED.node_count,
-                    oidc_issuer_url = EXCLUDED.oidc_issuer_url,
-                    workload_identity_enabled = EXCLUDED.workload_identity_enabled,
-                    system_msi_principal_id = EXCLUDED.system_msi_principal_id,
-                    network_profile = EXCLUDED.network_profile,
-                    tags = EXCLUDED.tags
-                RETURNING id
-            """, (
-                run_id, self._organization_id, data.get('cluster_name'),
-                data.get('resource_group'), data.get('subscription_id'),
-                data.get('azure_resource_id'), data.get('location'),
-                data.get('kubernetes_version'), data.get('node_count', 0),
-                data.get('oidc_issuer_url'), data.get('workload_identity_enabled', False),
-                data.get('layer2_scan_enabled', False),
-                data.get('system_msi_principal_id'), network, tags,
-            ))
-            result = cursor.fetchone()
-            self._commit()
-            return result[0] if result else None
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_aks_cluster failed: %s", e)
-            return None
-        finally:
-            cursor.close()
-
-    def save_aks_federated_credential(self, run_id: int, data: dict) -> int:
-        """Save a federated identity credential."""
-        self._ensure_container_tables()
-        cursor = self.conn.cursor()
-        try:
-            import json as _json
-            audiences = data.get('audiences')
-            if audiences and not isinstance(audiences, str):
-                audiences = _json.dumps(audiences)
-            cursor.execute("""
-                INSERT INTO aks_federated_credentials (
-                    discovery_run_id, organization_id, identity_id,
-                    aks_cluster_id, credential_name, issuer_url,
-                    subject, audiences, issuer_type,
-                    namespace, service_account,
-                    is_wildcard, wildcard_reason
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                run_id, self._organization_id, data.get('identity_id'),
-                data.get('aks_cluster_id'), data.get('credential_name'),
-                data.get('issuer_url'), data.get('subject'),
-                audiences, data.get('issuer_type', 'other'),
-                data.get('namespace'), data.get('service_account'),
-                data.get('is_wildcard', False), data.get('wildcard_reason'),
-            ))
-            result = cursor.fetchone()
-            self._commit()
-            return result[0] if result else None
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_aks_federated_credential failed: %s", e)
-            return None
-        finally:
-            cursor.close()
-
-    def save_aks_rbac_binding(self, run_id: int, data: dict):
-        """Save a K8s RBAC binding (Layer 2)."""
-        self._ensure_container_tables()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO aks_rbac_bindings (
-                    discovery_run_id, organization_id, aks_cluster_id,
-                    binding_type, binding_name, namespace,
-                    role_name, role_kind, subject_kind,
-                    subject_name, subject_namespace, is_cluster_admin
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                run_id, self._organization_id, data.get('aks_cluster_id'),
-                data.get('binding_type'), data.get('binding_name'),
-                data.get('namespace'), data.get('role_name'),
-                data.get('role_kind'), data.get('subject_kind'),
-                data.get('subject_name'), data.get('subject_namespace'),
-                data.get('is_cluster_admin', False),
-            ))
-            self._commit()
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_aks_rbac_binding failed: %s", e)
-        finally:
-            cursor.close()
-
-    def save_acr_registry(self, run_id: int, data: dict) -> int:
-        """Save or update an ACR registry (UPSERT). Returns db id."""
-        self._ensure_container_tables()
-        cursor = self.conn.cursor()
-        try:
-            import json as _json
-            tags = data.get('tags')
-            if tags and not isinstance(tags, str):
-                tags = _json.dumps(tags)
-            cursor.execute("""
-                INSERT INTO acr_registries (
-                    discovery_run_id, organization_id, registry_name,
-                    resource_group, subscription_id, azure_resource_id,
-                    location, sku_name, login_server,
-                    admin_enabled, admin_identity_id,
-                    public_network_access, encryption_enabled,
-                    image_count, tags
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (azure_resource_id, discovery_run_id)
-                WHERE azure_resource_id IS NOT NULL
-                DO UPDATE SET
-                    registry_name = EXCLUDED.registry_name,
-                    sku_name = EXCLUDED.sku_name,
-                    login_server = EXCLUDED.login_server,
-                    admin_enabled = EXCLUDED.admin_enabled,
-                    admin_identity_id = EXCLUDED.admin_identity_id,
-                    public_network_access = EXCLUDED.public_network_access,
-                    encryption_enabled = EXCLUDED.encryption_enabled,
-                    image_count = EXCLUDED.image_count,
-                    tags = EXCLUDED.tags
-                RETURNING id
-            """, (
-                run_id, self._organization_id, data.get('registry_name'),
-                data.get('resource_group'), data.get('subscription_id'),
-                data.get('azure_resource_id'), data.get('location'),
-                data.get('sku_name'), data.get('login_server'),
-                data.get('admin_enabled', False), data.get('admin_identity_id'),
-                data.get('public_network_access', True),
-                data.get('encryption_enabled', False),
-                data.get('image_count', 0), tags,
-            ))
-            result = cursor.fetchone()
-            self._commit()
-            return result[0] if result else None
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("save_acr_registry failed: %s", e)
-            return None
-        finally:
-            cursor.close()
-
-    def get_aks_clusters(self, run_ids: list, filters: dict = None) -> tuple:
-        """Get AKS clusters with optional filters. Returns (clusters, total)."""
-        self._ensure_container_tables()
-        filters = filters or {}
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            where = ["ak.discovery_run_id = ANY(%s)"]
-            params = [run_ids]
-            if filters.get('workload_identity'):
-                where.append("ak.workload_identity_enabled = TRUE")
-            if filters.get('search'):
-                where.append("ak.cluster_name ILIKE %s")
-                params.append(f"%{filters['search']}%")
-
-            where_sql = ' AND '.join(where)
-            cursor.execute(f"""
-                SELECT ak.*,
-                    (SELECT COUNT(*) FROM aks_federated_credentials afc
-                     WHERE afc.aks_cluster_id = ak.id) AS federated_credential_count,
-                    (SELECT COUNT(*) FROM aks_federated_credentials afc
-                     WHERE afc.aks_cluster_id = ak.id AND afc.is_wildcard = TRUE) AS wildcard_count,
-                    (SELECT COUNT(*) FROM aks_rbac_bindings arb
-                     WHERE arb.aks_cluster_id = ak.id) AS rbac_binding_count
-                FROM aks_clusters ak
-                WHERE {where_sql}
-                ORDER BY ak.cluster_name
-            """, params)
-            rows = cursor.fetchall()
-            return [dict(r) for r in rows], len(rows)
-        finally:
-            cursor.close()
-
-    def get_container_risk_summary(self, run_ids: list) -> dict:
-        """Get container identity risk summary for dashboard."""
-        self._ensure_container_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("""
-                SELECT COUNT(*) AS total_clusters,
-                       COUNT(*) FILTER (WHERE workload_identity_enabled) AS wi_enabled,
-                       COUNT(*) FILTER (WHERE layer2_scan_enabled) AS layer2_enabled
-                FROM aks_clusters WHERE discovery_run_id = ANY(%s)
-            """, (run_ids,))
-            base = dict(cursor.fetchone())
-
-            cursor.execute("""
-                SELECT COUNT(*) AS total_fed_creds,
-                       COUNT(*) FILTER (WHERE is_wildcard) AS wildcard_creds
-                FROM aks_federated_credentials WHERE discovery_run_id = ANY(%s)
-            """, (run_ids,))
-            fed = dict(cursor.fetchone())
-            base.update(fed)
-
-            cursor.execute("""
-                SELECT COUNT(*) AS total_acr,
-                       COUNT(*) FILTER (WHERE admin_enabled) AS admin_enabled_count
-                FROM acr_registries WHERE discovery_run_id = ANY(%s)
-            """, (run_ids,))
-            acr = dict(cursor.fetchone())
-            base.update(acr)
-
-            cursor.execute("""
-                SELECT COUNT(*) AS federated_misconfigured_count
-                FROM lineage_verdicts
-                WHERE discovery_run_id = ANY(%s) AND verdict = %s
-            """, (run_ids, Verdict.FEDERATED_MISCONFIGURED))
-            base['federated_misconfigured_count'] = cursor.fetchone()['federated_misconfigured_count']
-
-            return base
-        except Exception:
-            return {
-                'total_clusters': 0, 'wi_enabled': 0, 'layer2_enabled': 0,
-                'total_fed_creds': 0, 'wildcard_creds': 0,
-                'total_acr': 0, 'admin_enabled_count': 0,
-                'federated_misconfigured_count': 0,
-            }
-        finally:
-            cursor.close()
-
-    # ─── Database Server Tables (Azure SQL, PostgreSQL, MySQL, CosmosDB) ──
-
-    _database_tables_ensured = False
-
-    def _ensure_database_tables(self):
-        """Create database_servers, database_firewall_rules, database_aad_admins tables."""
-        if Database._database_tables_ensured:
-            return
-        cursor = self.conn.cursor()
-        try:
-            # Table 1: database_servers
-            sp = 'sp_db_servers'
-            cursor.execute(f"SAVEPOINT {sp}")
-            try:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS database_servers (
-                        id BIGSERIAL PRIMARY KEY,
-                        discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                        organization_id INTEGER NOT NULL,
-                        server_type VARCHAR(50) NOT NULL,
-                        server_name VARCHAR(500) NOT NULL,
-                        resource_group VARCHAR(255),
-                        subscription_id VARCHAR(100),
-                        azure_resource_id VARCHAR(1000),
-                        location VARCHAR(100),
-                        mixed_auth_enabled BOOLEAN,
-                        aad_only_auth_enforced BOOLEAN,
-                        local_auth_disabled BOOLEAN,
-                        public_network_access VARCHAR(50),
-                        tls_version VARCHAR(20),
-                        tls_enforced BOOLEAN,
-                        aad_admin_principal_id VARCHAR(255),
-                        aad_admin_identity_id BIGINT REFERENCES identities(id) ON DELETE SET NULL,
-                        aad_admin_login VARCHAR(500),
-                        aad_admin_type VARCHAR(50),
-                        has_open_firewall BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                    )
-                """)
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_database_servers_run ON database_servers(discovery_run_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_database_servers_org ON database_servers(organization_id, discovery_run_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_database_servers_type ON database_servers(server_type, discovery_run_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_database_servers_mixed_auth ON database_servers(mixed_auth_enabled, discovery_run_id) WHERE mixed_auth_enabled = TRUE")
-                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_database_servers_azure_id ON database_servers(azure_resource_id, discovery_run_id) WHERE azure_resource_id IS NOT NULL")
-                cursor.execute(f"RELEASE SAVEPOINT {sp}")
-            except Exception:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-
-            # Table 2: database_firewall_rules
-            sp = 'sp_db_firewall'
-            cursor.execute(f"SAVEPOINT {sp}")
-            try:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS database_firewall_rules (
-                        id BIGSERIAL PRIMARY KEY,
-                        discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                        organization_id INTEGER NOT NULL,
-                        server_id BIGINT NOT NULL REFERENCES database_servers(id) ON DELETE CASCADE,
-                        rule_name VARCHAR(500),
-                        start_ip VARCHAR(50),
-                        end_ip VARCHAR(50),
-                        is_allow_all BOOLEAN DEFAULT FALSE,
-                        is_azure_services BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                    )
-                """)
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_db_firewall_server ON database_firewall_rules(server_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_db_firewall_allow_all ON database_firewall_rules(is_allow_all, discovery_run_id) WHERE is_allow_all = TRUE")
-                cursor.execute(f"RELEASE SAVEPOINT {sp}")
-            except Exception:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-
-            # Table 3: database_aad_admins
-            sp = 'sp_db_aad_admins'
-            cursor.execute(f"SAVEPOINT {sp}")
-            try:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS database_aad_admins (
-                        id BIGSERIAL PRIMARY KEY,
-                        discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                        organization_id INTEGER NOT NULL,
-                        server_id BIGINT NOT NULL REFERENCES database_servers(id) ON DELETE CASCADE,
-                        principal_id VARCHAR(255),
-                        principal_type VARCHAR(50),
-                        admin_login VARCHAR(500),
-                        identity_id BIGINT REFERENCES identities(id) ON DELETE SET NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                    )
-                """)
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_db_aad_admins_server ON database_aad_admins(server_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_db_aad_admins_identity ON database_aad_admins(identity_id) WHERE identity_id IS NOT NULL")
-                cursor.execute(f"RELEASE SAVEPOINT {sp}")
-            except Exception:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-
-            # RLS policies for all 3 tables
-            for table in ['database_servers', 'database_firewall_rules', 'database_aad_admins']:
-                sp = f'sp_rls_{table}'
-                cursor.execute(f"SAVEPOINT {sp}")
-                try:
-                    cursor.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-                    cursor.execute(f"""
-                        CREATE POLICY org_strict_sel ON {table} FOR SELECT
-                        USING (organization_id = current_setting('app.current_organization_id', true)::integer)
-                    """)
-                    cursor.execute(f"""
-                        CREATE POLICY org_strict_ins ON {table} FOR INSERT
-                        WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)
-                    """)
-                    cursor.execute(f"""
-                        CREATE POLICY org_strict_upd ON {table} FOR UPDATE
-                        USING (organization_id = current_setting('app.current_organization_id', true)::integer)
-                    """)
-                    cursor.execute(f"""
-                        CREATE POLICY org_strict_del ON {table} FOR DELETE
-                        USING (organization_id = current_setting('app.current_organization_id', true)::integer)
-                    """)
-                    cursor.execute(f"RELEASE SAVEPOINT {sp}")
-                except Exception:
-                    cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-
-            self._commit()
-            Database._database_tables_ensured = True
-        except Exception as e:
-            self._rollback()
-            logger.debug("Failed to create database tables: %s", e)
-        finally:
-            cursor.close()
-
-    def save_database_server(self, run_id: int, server_data: dict) -> int:
-        """Save a database server record. Returns the server id."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO database_servers (
-                    discovery_run_id, organization_id, server_type, server_name,
-                    resource_group, subscription_id, azure_resource_id, location,
-                    mixed_auth_enabled, aad_only_auth_enforced, local_auth_disabled,
-                    public_network_access, tls_version, tls_enforced,
-                    aad_admin_principal_id, aad_admin_login, aad_admin_type,
-                    has_open_firewall
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (azure_resource_id, discovery_run_id)
-                WHERE azure_resource_id IS NOT NULL
-                DO UPDATE SET
-                    mixed_auth_enabled = EXCLUDED.mixed_auth_enabled,
-                    aad_only_auth_enforced = EXCLUDED.aad_only_auth_enforced,
-                    local_auth_disabled = EXCLUDED.local_auth_disabled,
-                    public_network_access = EXCLUDED.public_network_access,
-                    tls_version = EXCLUDED.tls_version,
-                    tls_enforced = EXCLUDED.tls_enforced,
-                    aad_admin_principal_id = EXCLUDED.aad_admin_principal_id,
-                    aad_admin_login = EXCLUDED.aad_admin_login,
-                    aad_admin_type = EXCLUDED.aad_admin_type,
-                    has_open_firewall = EXCLUDED.has_open_firewall
-                RETURNING id
-            """, (
-                run_id, self._organization_id,
-                server_data.get('server_type'),
-                server_data.get('server_name'),
-                server_data.get('resource_group'),
-                server_data.get('subscription_id'),
-                server_data.get('azure_resource_id'),
-                server_data.get('location'),
-                server_data.get('mixed_auth_enabled'),
-                server_data.get('aad_only_auth_enforced'),
-                server_data.get('local_auth_disabled'),
-                server_data.get('public_network_access'),
-                server_data.get('tls_version'),
-                server_data.get('tls_enforced'),
-                server_data.get('aad_admin_principal_id'),
-                server_data.get('aad_admin_login'),
-                server_data.get('aad_admin_type'),
-                server_data.get('has_open_firewall', False),
-            ))
-            result = cursor.fetchone()
-            self._commit()
-            return result[0] if result else 0
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.debug("Failed to save database_server: %s", e)
-            return 0
-        finally:
-            cursor.close()
-
-    def save_database_firewall_rule(self, run_id: int, server_id: int, rule_data: dict):
-        """Save a firewall rule for a database server."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO database_firewall_rules (
-                    discovery_run_id, organization_id, server_id,
-                    rule_name, start_ip, end_ip, is_allow_all, is_azure_services
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                run_id, self._organization_id, server_id,
-                rule_data.get('rule_name'),
-                rule_data.get('start_ip'),
-                rule_data.get('end_ip'),
-                rule_data.get('is_allow_all', False),
-                rule_data.get('is_azure_services', False),
-            ))
-            self._commit()
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.debug("Failed to save firewall rule: %s", e)
-        finally:
-            cursor.close()
-
-    def save_database_aad_admin(self, run_id: int, server_id: int, admin_data: dict) -> int:
-        """Save an AAD admin record for a database server. Returns the id."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO database_aad_admins (
-                    discovery_run_id, organization_id, server_id,
-                    principal_id, principal_type, admin_login
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                run_id, self._organization_id, server_id,
-                admin_data.get('principal_id'),
-                admin_data.get('principal_type'),
-                admin_data.get('admin_login'),
-            ))
-            result = cursor.fetchone()
-            self._commit()
-            return result[0] if result else 0
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.debug("Failed to save AAD admin: %s", e)
-            return 0
-        finally:
-            cursor.close()
-
-    def resolve_database_aad_admins(self, run_id: int):
-        """Resolve AAD admin identity_ids by matching principal_id to identities.azure_object_id."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor()
-        try:
-            # Resolve admin → identity link
-            cursor.execute("""
-                UPDATE database_aad_admins daa
-                SET identity_id = i.id
-                FROM identities i
-                WHERE i.azure_object_id = daa.principal_id
-                  AND i.discovery_run_id = daa.discovery_run_id
-                  AND daa.discovery_run_id = %s
-                  AND daa.identity_id IS NULL
-            """, (run_id,))
-            # Back-fill server with admin info
-            cursor.execute("""
-                UPDATE database_servers ds
-                SET aad_admin_identity_id = daa.identity_id,
-                    aad_admin_principal_id = daa.principal_id,
-                    aad_admin_login = daa.admin_login,
-                    aad_admin_type = daa.principal_type
-                FROM database_aad_admins daa
-                WHERE daa.server_id = ds.id
-                  AND daa.identity_id IS NOT NULL
-                  AND ds.discovery_run_id = %s
-            """, (run_id,))
-            self._commit()
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.debug("Failed to resolve AAD admins: %s", e)
-        finally:
-            cursor.close()
-
-    def get_database_servers(self, run_ids: list, filters: dict = None, page: int = 1, page_size: int = 50) -> tuple:
-        """Get database servers with optional filters. Returns (servers, total)."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            where_parts = ["ds.discovery_run_id = ANY(%s)"]
-            params = [run_ids]
-
-            if filters:
-                if filters.get('server_type'):
-                    where_parts.append("ds.server_type = %s")
-                    params.append(filters['server_type'])
-                if filters.get('mixed_auth') is not None:
-                    where_parts.append("ds.mixed_auth_enabled = %s")
-                    params.append(filters['mixed_auth'] == 'true' or filters['mixed_auth'] is True)
-                if filters.get('has_open_firewall') is not None:
-                    where_parts.append("ds.has_open_firewall = %s")
-                    params.append(filters['has_open_firewall'] == 'true' or filters['has_open_firewall'] is True)
-                if filters.get('has_aad_admin') is not None:
-                    if filters['has_aad_admin'] == 'true' or filters['has_aad_admin'] is True:
-                        where_parts.append("ds.aad_admin_principal_id IS NOT NULL")
-                    else:
-                        where_parts.append("ds.aad_admin_principal_id IS NULL")
-
-            where_clause = " AND ".join(where_parts)
-
-            # Count
-            cursor.execute(f"SELECT COUNT(*) FROM database_servers ds WHERE {where_clause}", params)
-            total = cursor.fetchone()['count']
-
-            # Fetch page
-            offset = (page - 1) * page_size
-            cursor.execute(f"""
-                SELECT ds.*,
-                    (SELECT COUNT(*) FROM database_firewall_rules dfr WHERE dfr.server_id = ds.id) as firewall_rule_count
-                FROM database_servers ds
-                WHERE {where_clause}
-                ORDER BY ds.id DESC
-                LIMIT %s OFFSET %s
-            """, params + [page_size, offset])
-            servers = []
-            for row in cursor.fetchall():
-                srv = dict(row)
-                # Compute risk_level
-                if srv.get('mixed_auth_enabled') and srv.get('has_open_firewall'):
-                    srv['risk_level'] = 'critical'
-                elif srv.get('mixed_auth_enabled'):
-                    srv['risk_level'] = 'high'
-                elif not srv.get('aad_admin_principal_id'):
-                    srv['risk_level'] = 'medium'
-                else:
-                    srv['risk_level'] = 'low'
-                # AAD admin sub-object
-                if srv.get('aad_admin_principal_id'):
-                    srv['aad_admin'] = {
-                        'login': srv.get('aad_admin_login'),
-                        'type': srv.get('aad_admin_type'),
-                        'identity_id': srv.get('aad_admin_identity_id'),
-                    }
-                else:
-                    srv['aad_admin'] = None
-                servers.append(srv)
-
-            return servers, total
-        except Exception:
-            return [], 0
-        finally:
-            cursor.close()
-
-    def get_database_server_detail(self, server_id: int) -> dict:
-        """Get full database server detail with firewall rules and AAD admins."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("SELECT * FROM database_servers WHERE id = %s", (server_id,))
-            server = cursor.fetchone()
-            if not server:
-                return None
-            server = dict(server)
-
-            cursor.execute("SELECT * FROM database_firewall_rules WHERE server_id = %s ORDER BY id", (server_id,))
-            server['firewall_rules'] = [dict(r) for r in cursor.fetchall()]
-
-            cursor.execute("SELECT * FROM database_aad_admins WHERE server_id = %s ORDER BY id", (server_id,))
-            server['aad_admins'] = [dict(r) for r in cursor.fetchall()]
-
-            return server
-        except Exception:
-            return None
-        finally:
-            cursor.close()
-
-    def get_data_identity_risk_summary(self, run_ids: list) -> dict:
-        """Get data plane identity risk summary for dashboard posture."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("""
-                SELECT COUNT(*) AS total_database_servers,
-                       COUNT(*) FILTER (WHERE mixed_auth_enabled) AS mixed_auth_count,
-                       COUNT(*) FILTER (WHERE has_open_firewall) AS open_firewall_count,
-                       COUNT(*) FILTER (WHERE aad_admin_principal_id IS NULL) AS no_aad_admin_count
-                FROM database_servers WHERE discovery_run_id = ANY(%s)
-            """, (run_ids,))
-            base = dict(cursor.fetchone())
-
-            cursor.execute("""
-                SELECT server_type, COUNT(*) AS cnt
-                FROM database_servers WHERE discovery_run_id = ANY(%s)
-                GROUP BY server_type
-            """, (run_ids,))
-            base['by_type'] = {row['server_type']: row['cnt'] for row in cursor.fetchall()}
-
-            return base
-        except Exception:
-            return {
-                'total_database_servers': 0, 'mixed_auth_count': 0,
-                'open_firewall_count': 0, 'no_aad_admin_count': 0,
-                'by_type': {},
-            }
-        finally:
-            cursor.close()
-
-    def get_identity_database_admin_context(self, identity_db_id: int) -> list:
-        """Get database servers this identity is AAD admin of."""
-        self._ensure_database_tables()
-        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute("""
-                SELECT ds.id as server_id, ds.server_name, ds.server_type,
-                       ds.mixed_auth_enabled, ds.has_open_firewall,
-                       CASE
-                           WHEN ds.mixed_auth_enabled AND ds.has_open_firewall THEN 'critical'
-                           WHEN ds.mixed_auth_enabled THEN 'high'
-                           ELSE 'low'
-                       END as risk_level
-                FROM database_aad_admins daa
-                JOIN database_servers ds ON ds.id = daa.server_id
-                WHERE daa.identity_id = %s
-                LIMIT 10
-            """, (identity_db_id,))
-            return [dict(r) for r in cursor.fetchall()]
-        except Exception:
-            return []
-        finally:
-            cursor.close()
-
-    # ─── AWS Resource Tables (S3, KMS, Lambda, CloudTrail) ─────────────
-
-    _aws_resource_tables_ensured = False
-
-    def _ensure_aws_s3_buckets_table(self):
-        """Create aws_s3_buckets table if it doesn't exist."""
-        if Database._aws_resource_tables_ensured:
-            return
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aws_s3_buckets (
-                    id SERIAL PRIMARY KEY,
-                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    resource_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    region TEXT,
-                    aws_account_id TEXT NOT NULL,
-                    cloud_connection_id INTEGER NOT NULL,
-                    public_access_block_enabled BOOLEAN DEFAULT FALSE,
-                    block_public_acls BOOLEAN DEFAULT FALSE,
-                    block_public_policy BOOLEAN DEFAULT FALSE,
-                    policy_status_is_public BOOLEAN DEFAULT FALSE,
-                    acl_grants_public BOOLEAN DEFAULT FALSE,
-                    encryption_enabled BOOLEAN DEFAULT FALSE,
-                    encryption_algorithm TEXT,
-                    kms_key_id TEXT,
-                    bucket_key_enabled BOOLEAN DEFAULT FALSE,
-                    versioning_enabled BOOLEAN DEFAULT FALSE,
-                    mfa_delete BOOLEAN DEFAULT FALSE,
-                    logging_enabled BOOLEAN DEFAULT FALSE,
-                    logging_target_bucket TEXT,
-                    lifecycle_rules_count INTEGER DEFAULT 0,
-                    bucket_policy JSONB DEFAULT '{}',
-                    risk_level TEXT DEFAULT 'info',
-                    risk_score INTEGER DEFAULT 0,
-                    risk_reasons JSONB DEFAULT '[]',
-                    risk_components JSONB DEFAULT '{}',
-                    blast_radius_score INTEGER DEFAULT 0,
-                    critical_overrides JSONB DEFAULT '[]',
-                    tags JSONB DEFAULT '{}',
-                    organization_id INTEGER NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(discovery_run_id, resource_id)
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_run ON aws_s3_buckets(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_risk ON aws_s3_buckets(risk_level)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_org ON aws_s3_buckets(organization_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_s3b_account ON aws_s3_buckets(aws_account_id)")
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aws_kms_keys (
-                    id SERIAL PRIMARY KEY,
-                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    resource_id TEXT NOT NULL,
-                    name TEXT,
-                    key_id TEXT NOT NULL,
-                    region TEXT,
-                    aws_account_id TEXT NOT NULL,
-                    cloud_connection_id INTEGER NOT NULL,
-                    key_state TEXT,
-                    key_usage TEXT,
-                    key_spec TEXT,
-                    key_manager TEXT,
-                    origin TEXT,
-                    rotation_enabled BOOLEAN DEFAULT FALSE,
-                    key_policy JSONB DEFAULT '{}',
-                    grants_count INTEGER DEFAULT 0,
-                    multi_region BOOLEAN DEFAULT FALSE,
-                    multi_region_config JSONB DEFAULT '{}',
-                    risk_level TEXT DEFAULT 'info',
-                    risk_score INTEGER DEFAULT 0,
-                    risk_reasons JSONB DEFAULT '[]',
-                    risk_components JSONB DEFAULT '{}',
-                    blast_radius_score INTEGER DEFAULT 0,
-                    critical_overrides JSONB DEFAULT '[]',
-                    tags JSONB DEFAULT '{}',
-                    organization_id INTEGER NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(discovery_run_id, resource_id)
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_run ON aws_kms_keys(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_risk ON aws_kms_keys(risk_level)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_org ON aws_kms_keys(organization_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_kms_account ON aws_kms_keys(aws_account_id)")
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aws_lambda_functions (
-                    id SERIAL PRIMARY KEY,
-                    discovery_run_id INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    resource_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    region TEXT,
-                    aws_account_id TEXT NOT NULL,
-                    cloud_connection_id INTEGER NOT NULL,
-                    runtime TEXT,
-                    handler TEXT,
-                    timeout INTEGER DEFAULT 3,
-                    memory_size INTEGER DEFAULT 128,
-                    code_size BIGINT DEFAULT 0,
-                    last_modified TEXT,
-                    execution_role_arn TEXT,
-                    execution_role_name TEXT,
-                    vpc_id TEXT,
-                    subnet_ids JSONB DEFAULT '[]',
-                    security_group_ids JSONB DEFAULT '[]',
-                    resource_policy JSONB DEFAULT '{}',
-                    resource_policy_is_public BOOLEAN DEFAULT FALSE,
-                    environment_variables_count INTEGER DEFAULT 0,
-                    has_secrets_in_env BOOLEAN DEFAULT FALSE,
-                    kms_key_arn TEXT,
-                    dead_letter_config JSONB,
-                    risk_level TEXT DEFAULT 'info',
-                    risk_score INTEGER DEFAULT 0,
-                    risk_reasons JSONB DEFAULT '[]',
-                    risk_components JSONB DEFAULT '{}',
-                    blast_radius_score INTEGER DEFAULT 0,
-                    critical_overrides JSONB DEFAULT '[]',
-                    tags JSONB DEFAULT '{}',
-                    organization_id INTEGER NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(discovery_run_id, resource_id)
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_run ON aws_lambda_functions(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_risk ON aws_lambda_functions(risk_level)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_org ON aws_lambda_functions(organization_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lam_account ON aws_lambda_functions(aws_account_id)")
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS aws_cloudtrail_events (
-                    id BIGSERIAL PRIMARY KEY,
-                    organization_id INTEGER NOT NULL,
-                    identity_db_id BIGINT REFERENCES identities(id) ON DELETE CASCADE,
-                    identity_id TEXT,
-                    event_id TEXT,
-                    event_name TEXT,
-                    event_source TEXT,
-                    event_time TIMESTAMPTZ,
-                    aws_region TEXT,
-                    source_ip_address TEXT,
-                    user_agent TEXT,
-                    error_code TEXT,
-                    error_message TEXT,
-                    request_parameters JSONB DEFAULT '{}',
-                    response_elements JSONB DEFAULT '{}',
-                    resources JSONB DEFAULT '[]',
-                    read_only BOOLEAN DEFAULT FALSE,
-                    management_event BOOLEAN DEFAULT TRUE,
-                    event_category TEXT DEFAULT 'Management',
-                    discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    aws_account_id TEXT NOT NULL,
-                    cloud_connection_id INTEGER NOT NULL,
-                    ingested_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_org ON aws_cloudtrail_events(organization_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_identity ON aws_cloudtrail_events(identity_db_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_time ON aws_cloudtrail_events(event_time)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_event ON aws_cloudtrail_events(event_name)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_account ON aws_cloudtrail_events(aws_account_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ct_run ON aws_cloudtrail_events(discovery_run_id)")
-
-            # RLS policies for organization isolation on all 4 AWS tables
-            for tbl in ('aws_s3_buckets', 'aws_kms_keys', 'aws_lambda_functions', 'aws_cloudtrail_events'):
-                cursor.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
-                cursor.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
-                for policy_stmt in [
-                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                ]:
-                    cursor.execute("SAVEPOINT rls_policy")
-                    try:
-                        cursor.execute(policy_stmt)
-                        cursor.execute("RELEASE SAVEPOINT rls_policy")
-                    except Exception:
-                        cursor.execute("ROLLBACK TO SAVEPOINT rls_policy")
-
-            self._commit()
-            Database._aws_resource_tables_ensured = True
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("AWS resource tables error: %s", e)
-        finally:
-            cursor.close()
-
-    def save_s3_bucket(self, run_id, data):
-        """Save or update an S3 bucket (UPSERT). Returns DB id."""
-        self._ensure_aws_s3_buckets_table()
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO aws_s3_buckets (
-                discovery_run_id, resource_id, name, region, aws_account_id,
-                cloud_connection_id, public_access_block_enabled, block_public_acls,
-                block_public_policy, policy_status_is_public, acl_grants_public,
-                encryption_enabled, encryption_algorithm, kms_key_id, bucket_key_enabled,
-                versioning_enabled, mfa_delete, logging_enabled, logging_target_bucket,
-                lifecycle_rules_count, bucket_policy,
-                risk_level, risk_score, risk_reasons, risk_components,
-                blast_radius_score, critical_overrides, tags, organization_id
-            ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s
-            )
-            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
-                name=EXCLUDED.name, region=EXCLUDED.region,
-                aws_account_id=EXCLUDED.aws_account_id,
-                cloud_connection_id=EXCLUDED.cloud_connection_id,
-                public_access_block_enabled=EXCLUDED.public_access_block_enabled,
-                block_public_acls=EXCLUDED.block_public_acls,
-                block_public_policy=EXCLUDED.block_public_policy,
-                policy_status_is_public=EXCLUDED.policy_status_is_public,
-                acl_grants_public=EXCLUDED.acl_grants_public,
-                encryption_enabled=EXCLUDED.encryption_enabled,
-                encryption_algorithm=EXCLUDED.encryption_algorithm,
-                kms_key_id=EXCLUDED.kms_key_id,
-                bucket_key_enabled=EXCLUDED.bucket_key_enabled,
-                versioning_enabled=EXCLUDED.versioning_enabled,
-                mfa_delete=EXCLUDED.mfa_delete,
-                logging_enabled=EXCLUDED.logging_enabled,
-                logging_target_bucket=EXCLUDED.logging_target_bucket,
-                lifecycle_rules_count=EXCLUDED.lifecycle_rules_count,
-                bucket_policy=EXCLUDED.bucket_policy,
-                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons,
-                risk_components=EXCLUDED.risk_components,
-                blast_radius_score=EXCLUDED.blast_radius_score,
-                critical_overrides=EXCLUDED.critical_overrides,
-                tags=EXCLUDED.tags, created_at=NOW()
-            RETURNING id
-        """, (
-            run_id, data.get('resource_id'), data.get('name'), data.get('region'),
-            data.get('aws_account_id'), data.get('cloud_connection_id'),
-            data.get('public_access_block_enabled', False),
-            data.get('block_public_acls', False),
-            data.get('block_public_policy', False),
-            data.get('policy_status_is_public', False),
-            data.get('acl_grants_public', False),
-            data.get('encryption_enabled', False),
-            data.get('encryption_algorithm'),
-            data.get('kms_key_id'),
-            data.get('bucket_key_enabled', False),
-            data.get('versioning_enabled', False),
-            data.get('mfa_delete', False),
-            data.get('logging_enabled', False),
-            data.get('logging_target_bucket'),
-            data.get('lifecycle_rules_count', 0),
-            json.dumps(data.get('bucket_policy', {})),
-            data.get('risk_level', 'info'), data.get('risk_score', 0),
-            json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('risk_components', {})),
-            data.get('blast_radius_score', 0),
-            json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})),
-            data.get('organization_id') or self._organization_id,
-        ))
-        db_id = cursor.fetchone()[0]
-        self._commit()
-        cursor.close()
-        return db_id
-
-    def save_kms_key(self, run_id, data):
-        """Save or update a KMS key (UPSERT). Returns DB id."""
-        self._ensure_aws_s3_buckets_table()  # ensures all 4 tables
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO aws_kms_keys (
-                discovery_run_id, resource_id, name, key_id, region,
-                aws_account_id, cloud_connection_id,
-                key_state, key_usage, key_spec, key_manager, origin,
-                rotation_enabled, key_policy, grants_count,
-                multi_region, multi_region_config,
-                risk_level, risk_score, risk_reasons, risk_components,
-                blast_radius_score, critical_overrides, tags, organization_id
-            ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s
-            )
-            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
-                name=EXCLUDED.name, key_id=EXCLUDED.key_id, region=EXCLUDED.region,
-                aws_account_id=EXCLUDED.aws_account_id,
-                cloud_connection_id=EXCLUDED.cloud_connection_id,
-                key_state=EXCLUDED.key_state, key_usage=EXCLUDED.key_usage,
-                key_spec=EXCLUDED.key_spec, key_manager=EXCLUDED.key_manager,
-                origin=EXCLUDED.origin,
-                rotation_enabled=EXCLUDED.rotation_enabled,
-                key_policy=EXCLUDED.key_policy, grants_count=EXCLUDED.grants_count,
-                multi_region=EXCLUDED.multi_region,
-                multi_region_config=EXCLUDED.multi_region_config,
-                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons,
-                risk_components=EXCLUDED.risk_components,
-                blast_radius_score=EXCLUDED.blast_radius_score,
-                critical_overrides=EXCLUDED.critical_overrides,
-                tags=EXCLUDED.tags, created_at=NOW()
-            RETURNING id
-        """, (
-            run_id, data.get('resource_id'), data.get('name'), data.get('key_id'),
-            data.get('region'), data.get('aws_account_id'), data.get('cloud_connection_id'),
-            data.get('key_state'), data.get('key_usage'), data.get('key_spec'),
-            data.get('key_manager'), data.get('origin'),
-            data.get('rotation_enabled', False),
-            json.dumps(data.get('key_policy', {})),
-            data.get('grants_count', 0),
-            data.get('multi_region', False),
-            json.dumps(data.get('multi_region_config', {})),
-            data.get('risk_level', 'info'), data.get('risk_score', 0),
-            json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('risk_components', {})),
-            data.get('blast_radius_score', 0),
-            json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})),
-            data.get('organization_id') or self._organization_id,
-        ))
-        db_id = cursor.fetchone()[0]
-        self._commit()
-        cursor.close()
-        return db_id
-
-    def save_lambda_function(self, run_id, data):
-        """Save or update a Lambda function (UPSERT). Returns DB id."""
-        self._ensure_aws_s3_buckets_table()  # ensures all 4 tables
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO aws_lambda_functions (
-                discovery_run_id, resource_id, name, region, aws_account_id,
-                cloud_connection_id,
-                runtime, handler, timeout, memory_size, code_size, last_modified,
-                execution_role_arn, execution_role_name,
-                vpc_id, subnet_ids, security_group_ids,
-                resource_policy, resource_policy_is_public,
-                environment_variables_count, has_secrets_in_env, kms_key_arn,
-                dead_letter_config,
-                risk_level, risk_score, risk_reasons, risk_components,
-                blast_radius_score, critical_overrides, tags, organization_id
-            ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
-            )
-            ON CONFLICT (discovery_run_id, resource_id) DO UPDATE SET
-                name=EXCLUDED.name, region=EXCLUDED.region,
-                aws_account_id=EXCLUDED.aws_account_id,
-                cloud_connection_id=EXCLUDED.cloud_connection_id,
-                runtime=EXCLUDED.runtime, handler=EXCLUDED.handler,
-                timeout=EXCLUDED.timeout, memory_size=EXCLUDED.memory_size,
-                code_size=EXCLUDED.code_size, last_modified=EXCLUDED.last_modified,
-                execution_role_arn=EXCLUDED.execution_role_arn,
-                execution_role_name=EXCLUDED.execution_role_name,
-                vpc_id=EXCLUDED.vpc_id, subnet_ids=EXCLUDED.subnet_ids,
-                security_group_ids=EXCLUDED.security_group_ids,
-                resource_policy=EXCLUDED.resource_policy,
-                resource_policy_is_public=EXCLUDED.resource_policy_is_public,
-                environment_variables_count=EXCLUDED.environment_variables_count,
-                has_secrets_in_env=EXCLUDED.has_secrets_in_env,
-                kms_key_arn=EXCLUDED.kms_key_arn,
-                dead_letter_config=EXCLUDED.dead_letter_config,
-                risk_level=EXCLUDED.risk_level, risk_score=EXCLUDED.risk_score,
-                risk_reasons=EXCLUDED.risk_reasons,
-                risk_components=EXCLUDED.risk_components,
-                blast_radius_score=EXCLUDED.blast_radius_score,
-                critical_overrides=EXCLUDED.critical_overrides,
-                tags=EXCLUDED.tags, created_at=NOW()
-            RETURNING id
-        """, (
-            run_id, data.get('resource_id'), data.get('name'), data.get('region'),
-            data.get('aws_account_id'), data.get('cloud_connection_id'),
-            data.get('runtime'), data.get('handler'),
-            data.get('timeout', 3), data.get('memory_size', 128),
-            data.get('code_size', 0), data.get('last_modified'),
-            data.get('execution_role_arn'), data.get('execution_role_name'),
-            data.get('vpc_id'),
-            json.dumps(data.get('subnet_ids', [])),
-            json.dumps(data.get('security_group_ids', [])),
-            json.dumps(data.get('resource_policy', {})),
-            data.get('resource_policy_is_public', False),
-            data.get('environment_variables_count', 0),
-            data.get('has_secrets_in_env', False),
-            data.get('kms_key_arn'),
-            json.dumps(data.get('dead_letter_config')) if data.get('dead_letter_config') else None,
-            data.get('risk_level', 'info'), data.get('risk_score', 0),
-            json.dumps(data.get('risk_reasons', [])),
-            json.dumps(data.get('risk_components', {})),
-            data.get('blast_radius_score', 0),
-            json.dumps(data.get('critical_overrides', [])),
-            json.dumps(data.get('tags', {})),
-            data.get('organization_id') or self._organization_id,
-        ))
-        db_id = cursor.fetchone()[0]
-        self._commit()
-        cursor.close()
-        return db_id
-
-    # ─── ICE: Identity Correlation CRUD ──────────────────────────────────
 
     def save_human_identity(self, organization_id, display_name, employee_id=None,
                             department=None, manager_id=None):
@@ -23537,6 +21212,63 @@ class Database:
             self._commit()
         except Exception:
             self._rollback()
+        # ── v1 attack path data model (role-assignment → blast-radius chains) ──
+        v1_cols = [
+            ('connection_id', 'INTEGER REFERENCES cloud_connections(id) ON DELETE CASCADE'),
+            ('identity_id', 'INTEGER REFERENCES identities(id) ON DELETE CASCADE'),
+            ('highest_role', 'VARCHAR(128)'),
+            ('highest_scope_level', 'VARCHAR(32)'),
+            ('path_risk_score', 'INTEGER DEFAULT 0'),
+            ('path_risk_tier', 'VARCHAR(16)'),
+            ('has_keyvault_access', 'BOOLEAN DEFAULT FALSE'),
+            ('has_subscription_scope', 'BOOLEAN DEFAULT FALSE'),
+            ('has_expired_credentials', 'BOOLEAN DEFAULT FALSE'),
+            ('has_no_owner', 'BOOLEAN DEFAULT FALSE'),
+            ('keyvault_critical_items', 'INTEGER DEFAULT 0'),
+            ('discovered_at', 'TIMESTAMPTZ DEFAULT NOW()'),
+            ('identity_verdict', 'VARCHAR(32)'),
+            ('identity_agirs_score', 'INTEGER'),
+        ]
+        for col, defn in v1_cols:
+            try:
+                cursor.execute(f"ALTER TABLE attack_paths ADD COLUMN IF NOT EXISTS {col} {defn}")
+                self._commit()
+            except Exception:
+                self._rollback()
+
+        # v1 indexes
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_attack_paths_connection ON attack_paths(connection_id)",
+            "CREATE INDEX IF NOT EXISTS idx_attack_paths_identity ON attack_paths(identity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_attack_paths_risk_tier ON attack_paths(connection_id, path_risk_tier)",
+            """CREATE INDEX IF NOT EXISTS idx_attack_paths_subscription
+               ON attack_paths(connection_id, has_subscription_scope)
+               WHERE has_subscription_scope = TRUE""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_attack_paths_v1_uq
+               ON attack_paths(connection_id, identity_id, highest_role, highest_scope_level)""",
+        ]:
+            try:
+                cursor.execute(idx_sql)
+                self._commit()
+            except Exception:
+                self._rollback()
+
+        # RLS policies (idempotent via savepoint)
+        cursor.execute("ALTER TABLE attack_paths ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE attack_paths FORCE ROW LEVEL SECURITY")
+        for stmt in [
+            "CREATE POLICY ap_org_sel ON attack_paths FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY ap_org_ins ON attack_paths FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY ap_org_upd ON attack_paths FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            "CREATE POLICY ap_org_del ON attack_paths FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+        ]:
+            cursor.execute("SAVEPOINT rls_ap")
+            try:
+                cursor.execute(stmt)
+                cursor.execute("RELEASE SAVEPOINT rls_ap")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT rls_ap")
+
         self._commit()
         cursor.close()
         Database._attack_paths_ensured = True
@@ -23666,7 +21398,7 @@ class Database:
         """Normalize an attack_paths row dict for JSON response."""
         if r.get('path_id'):
             r['path_id'] = str(r['path_id'])
-        for ts in ('created_at', 'first_detected_at', 'last_detected_at'):
+        for ts in ('created_at', 'first_detected_at', 'last_detected_at', 'discovered_at'):
             if r.get(ts):
                 r[ts] = r[ts].isoformat()
         if r.get('path_nodes') and isinstance(r['path_nodes'], str):
@@ -23831,6 +21563,220 @@ class Database:
             'by_severity': by_severity,
             'by_type': by_type,
         }
+
+    # ── v1 attack path methods (role-assignment → blast-radius chains) ──
+
+    def save_attack_path(self, path_dict: dict) -> dict:
+        """Upsert a v1 attack path (identity→role→scope→blast chain).
+
+        Conflict key: (connection_id, identity_id, highest_role, highest_scope_level).
+        Returns the upserted row as a dict.
+        """
+        self._ensure_attack_paths_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Map v1 tier to legacy severity column
+        risk_tier = path_dict.get('path_risk_tier', 'LOW')
+        severity_map = {
+            'CRITICAL': 'critical', 'HIGH': 'high',
+            'MEDIUM': 'medium', 'LOW': 'low',
+        }
+        severity = severity_map.get(risk_tier, 'low')
+
+        description = path_dict.get('description', '')
+        if not description:
+            role = path_dict.get('highest_role', 'Unknown')
+            scope = path_dict.get('highest_scope_level', 'resource')
+            description = f"{role} at {scope} scope"
+
+        cursor.execute("""
+            INSERT INTO attack_paths (
+                organization_id, connection_id, identity_id,
+                path_nodes, path_length,
+                highest_role, highest_scope_level,
+                path_risk_score, path_risk_tier,
+                has_keyvault_access, has_subscription_scope,
+                has_expired_credentials, has_no_owner,
+                keyvault_critical_items, discovered_at,
+                identity_verdict, identity_agirs_score,
+                source_entity_id, path_type, risk_score, severity, description
+            ) VALUES (
+                %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, NOW(),
+                %s, %s,
+                %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (connection_id, identity_id, highest_role, highest_scope_level)
+            DO UPDATE SET
+                path_nodes = EXCLUDED.path_nodes,
+                path_length = EXCLUDED.path_length,
+                path_risk_score = EXCLUDED.path_risk_score,
+                path_risk_tier = EXCLUDED.path_risk_tier,
+                has_keyvault_access = EXCLUDED.has_keyvault_access,
+                has_subscription_scope = EXCLUDED.has_subscription_scope,
+                has_expired_credentials = EXCLUDED.has_expired_credentials,
+                has_no_owner = EXCLUDED.has_no_owner,
+                keyvault_critical_items = EXCLUDED.keyvault_critical_items,
+                discovered_at = NOW(),
+                identity_verdict = EXCLUDED.identity_verdict,
+                identity_agirs_score = EXCLUDED.identity_agirs_score,
+                risk_score = EXCLUDED.risk_score,
+                severity = EXCLUDED.severity
+            RETURNING *
+        """, (
+            self._organization_id,
+            path_dict['connection_id'],
+            path_dict['identity_id'],
+            json.dumps(path_dict.get('path_nodes', [])),
+            path_dict.get('path_length', 0),
+            path_dict.get('highest_role'),
+            path_dict.get('highest_scope_level'),
+            path_dict.get('path_risk_score', 0),
+            risk_tier,
+            path_dict.get('has_keyvault_access', False),
+            path_dict.get('has_subscription_scope', False),
+            path_dict.get('has_expired_credentials', False),
+            path_dict.get('has_no_owner', False),
+            path_dict.get('keyvault_critical_items', 0),
+            path_dict.get('identity_verdict'),
+            path_dict.get('identity_agirs_score'),
+            # Legacy NOT NULL columns
+            path_dict.get('source_entity_id', str(path_dict['identity_id'])),
+            'blast_radius_chain',
+            path_dict.get('path_risk_score', 0),
+            severity,
+            description,
+        ))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._format_attack_path_row(dict(row)) if row else {}
+
+    def get_attack_paths_for_identity(self, identity_id: int) -> list:
+        """Get all v1 attack paths for a specific identity (DB id).
+
+        Ordered by path_risk_score DESC.
+        """
+        self._ensure_attack_paths_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = self._organization_id
+        if org_id is not None:
+            cursor.execute("""
+                SELECT * FROM attack_paths
+                WHERE identity_id = %s AND organization_id = %s
+                ORDER BY path_risk_score DESC
+            """, (identity_id, org_id))
+        else:
+            cursor.execute("""
+                SELECT * FROM attack_paths
+                WHERE identity_id = %s
+                ORDER BY path_risk_score DESC
+            """, (identity_id,))
+        rows = [self._format_attack_path_row(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_top_attack_paths(self, connection_id: int, limit: int = 20) -> list:
+        """Get highest-risk attack paths for a connection.
+
+        JOINs identities for display_name. Ordered by path_risk_score DESC.
+        """
+        self._ensure_attack_paths_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = self._organization_id
+        if org_id is not None:
+            cursor.execute("""
+                SELECT ap.*,
+                       i.display_name AS identity_name,
+                       i.identity_category
+                FROM attack_paths ap
+                LEFT JOIN identities i ON i.id = ap.identity_id
+                WHERE ap.connection_id = %s AND ap.organization_id = %s
+                ORDER BY ap.path_risk_score DESC
+                LIMIT %s
+            """, (connection_id, org_id, limit))
+        else:
+            cursor.execute("""
+                SELECT ap.*,
+                       i.display_name AS identity_name,
+                       i.identity_category
+                FROM attack_paths ap
+                LEFT JOIN identities i ON i.id = ap.identity_id
+                WHERE ap.connection_id = %s
+                ORDER BY ap.path_risk_score DESC
+                LIMIT %s
+            """, (connection_id, limit))
+        rows = [self._format_attack_path_row(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_identities_for_path_building(self, connection_id: int) -> list:
+        """Return identities with verdict + scoring data for path building.
+
+        Finds identities from the latest completed run for this connection,
+        joins lineage_verdicts for verdict and risk_summary for AGIRS score.
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT MAX(id) AS id FROM discovery_runs
+            WHERE status = 'completed' AND cloud_connection_id = %s
+        """, (connection_id,))
+        row = cursor.fetchone()
+        run_id = row['id'] if row and row.get('id') else None
+        if not run_id:
+            cursor.close()
+            return []
+
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_type,
+                   i.identity_category, COALESCE(i.owner_count, 0) AS owner_count,
+                   i.credential_status,
+                   i.risk_score,
+                   lv.verdict,
+                   rs.agirs_score
+            FROM identities i
+            LEFT JOIN LATERAL (
+                SELECT verdict FROM lineage_verdicts
+                WHERE identity_id = i.id
+                ORDER BY scored_at DESC LIMIT 1
+            ) lv ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT identity_risk_score AS agirs_score FROM risk_summary
+                WHERE identity_id = i.id
+                ORDER BY id DESC LIMIT 1
+            ) rs ON TRUE
+            WHERE i.discovery_run_id = %s
+        """, (run_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+
+        # Derive credentials_expired from credential_status
+        for row in rows:
+            status = (row.get('credential_status') or '').lower()
+            row['credentials_expired'] = 'expired' in status
+        return rows
+
+    def get_role_assignments_for_identity(self, identity_db_id: int) -> list:
+        """Return ARM role assignments for an identity (by DB id).
+
+        Returns dicts with role_name, role_definition_name, scope,
+        scope_type fields needed by classify_role_privilege_tier().
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT role_name, role_name AS role_definition_name,
+                   scope, scope_type
+            FROM role_assignments
+            WHERE identity_db_id = %s
+        """, (identity_db_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
 
     # ================================================================
     # Phase 4: Fix Recommendations
@@ -26327,32 +24273,46 @@ class Database:
             cursor.close()
 
     def get_privileged_identities(self, org_id: int, limit: int = 50) -> list:
-        """Get identities with privileged roles (Owner, Contributor, Global Admin, etc.)."""
+        """Get identities with privileged roles (T0/T1 Entra + T2 RBAC).
+
+        Uses the same role constants as risk_summary_engine and AGIRS P1.
+        """
         from psycopg2.extras import RealDictCursor
+        from app.constants.roles import T0_ENTRA_ROLES_LOWER, T1_ENTRA_ROLES_LOWER, T2_RBAC_ROLES_LOWER
+        priv_entra = list(T0_ENTRA_ROLES_LOWER | T1_ENTRA_ROLES_LOWER)
+        priv_rbac = list(T2_RBAC_ROLES_LOWER)
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("""
                 SELECT DISTINCT i.id as identity_id, i.display_name, i.identity_category,
                        i.risk_level, i.risk_score, i.activity_status,
-                       array_agg(DISTINCT ra.role_name) as privileged_roles,
-                       COUNT(DISTINCT ra.role_name) as role_count
+                       COALESCE(
+                         array_agg(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL),
+                         '{}'
+                       ) || COALESCE(
+                         array_agg(DISTINCT era.role_name) FILTER (WHERE era.role_name IS NOT NULL),
+                         '{}'
+                       ) as privileged_roles,
+                       COUNT(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL)
+                         + COUNT(DISTINCT era.role_name) FILTER (WHERE era.role_name IS NOT NULL)
+                         as role_count
                 FROM identities i
-                JOIN role_assignments ra ON ra.identity_id = i.id
-                  AND ra.discovery_run_id = i.discovery_run_id
                 JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                LEFT JOIN role_assignments ra ON ra.identity_db_id = i.id
+                  AND LOWER(ra.role_name) = ANY(%s)
+                LEFT JOIN entra_role_assignments era ON era.identity_db_id = i.id
+                  AND LOWER(era.role_name) = ANY(%s)
                 WHERE dr.organization_id = %s
-                  AND dr.id = (SELECT MAX(id) FROM discovery_runs
-                               WHERE organization_id = %s AND status = 'completed')
-                  AND ra.role_name IN ('Owner', 'Contributor',
-                       'Global Administrator', 'User Access Administrator',
-                       'Privileged Role Administrator', 'Application Administrator',
-                       'Cloud Application Administrator', 'Exchange Administrator',
-                       'Security Administrator', 'Conditional Access Administrator')
+                  AND dr.id IN (SELECT id FROM discovery_runs
+                               WHERE organization_id = %s AND status = 'completed'
+                               ORDER BY id DESC LIMIT 2)
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND (ra.id IS NOT NULL OR era.id IS NOT NULL)
                 GROUP BY i.id, i.display_name, i.identity_category,
                          i.risk_level, i.risk_score, i.activity_status
                 ORDER BY i.risk_score DESC NULLS LAST
                 LIMIT %s
-            """, (org_id, org_id, limit))
+            """, (priv_rbac, priv_entra, org_id, org_id, limit))
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -27161,63 +25121,6 @@ class Database:
             self._rollback()
             raise
 
-    def get_resource_investigation_context(self, resource_id: str) -> dict:
-        """Gather resource data for AI investigation."""
-        from psycopg2.extras import RealDictCursor
-        ctx = {}
-        try:
-            cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            # Normalize resource_id
-            if not resource_id.startswith('/'):
-                resource_id = '/' + resource_id
-
-            # Try storage accounts first
-            cursor.execute("""
-                SELECT * FROM azure_storage_accounts WHERE resource_id = %s LIMIT 1
-            """, (resource_id,))
-            row = cursor.fetchone()
-            if row:
-                ctx['resource'] = dict(row)
-                ctx['resource']['resource_type'] = 'storage_account'
-            else:
-                # Try key vaults
-                cursor.execute("""
-                    SELECT * FROM azure_key_vaults WHERE resource_id = %s LIMIT 1
-                """, (resource_id,))
-                row = cursor.fetchone()
-                if row:
-                    ctx['resource'] = dict(row)
-                    ctx['resource']['resource_type'] = 'key_vault'
-
-            if not ctx.get('resource'):
-                cursor.close()
-                return {}
-
-            # Access mappings — identities with RBAC access
-            run_id = ctx['resource'].get('discovery_run_id')
-            if run_id:
-                cursor.execute("""
-                    SELECT i.display_name, i.identity_id, i.risk_level,
-                           ir.role_name AS rbac_role, ir.scope_type
-                    FROM identity_roles ir
-                    JOIN identities i ON ir.identity_db_id = i.id
-                    WHERE i.discovery_run_id = %s
-                      AND ir.scope LIKE %s
-                    LIMIT 20
-                """, (run_id, f"%{resource_id}%"))
-                ctx['access'] = [dict(r) for r in cursor.fetchall()]
-            else:
-                ctx['access'] = []
-
-            # Compliance — basic check
-            ctx['compliance'] = {}
-
-            cursor.close()
-            return ctx
-        except Exception:
-            self._rollback()
-            raise
-
     def get_posture_analysis_context(self) -> dict:
         """Gather tenant-wide posture data for AI analysis."""
         from psycopg2.extras import RealDictCursor
@@ -27393,6 +25296,8 @@ class Database:
                 raise ValueError('An account with this email already exists')
 
             # Create admin user
+            if not email or '@' not in email:
+                raise ValueError('Valid email address is required')
             display_name = email.split('@')[0].replace('.', ' ').title()
             cursor.execute("""
                 INSERT INTO users (username, password_hash, display_name, role, organization_id,
@@ -27687,7 +25592,7 @@ class Database:
             for table in ['risk_scores', 'anomalies', 'drift_reports',
                           'identity_subscription_access', 'pim_eligible_assignments',
                           'pim_activations', 'role_assignments', 'entra_role_assignments',
-                          'app_registrations', 'azure_storage_accounts', 'azure_key_vaults']:
+                          'app_registrations']:
                 try:
                     cursor.execute(f"""
                         DELETE FROM {table}
@@ -28515,6 +26420,156 @@ class Database:
                 pass
             cursor.close()
             raise e
+
+    # ── Key Vault Metadata ─────────────────────────────────────────────
+
+    _keyvault_metadata_ensured = False
+
+    def _ensure_keyvault_metadata_table(self):
+        """Create keyvault_metadata table for vault item expiry tracking."""
+        if Database._keyvault_metadata_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS keyvault_metadata (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    organization_id INTEGER NOT NULL,
+                    connection_id INTEGER NOT NULL
+                        REFERENCES cloud_connections(id) ON DELETE CASCADE,
+                    vault_name VARCHAR(255) NOT NULL,
+                    vault_resource_id TEXT NOT NULL,
+                    item_type VARCHAR(20) NOT NULL
+                        CHECK (item_type IN ('key', 'secret', 'certificate')),
+                    item_name VARCHAR(255) NOT NULL,
+                    enabled BOOLEAN DEFAULT TRUE,
+                    expires_on TIMESTAMPTZ,
+                    created_on TIMESTAMPTZ,
+                    last_updated TIMESTAMPTZ,
+                    days_until_expiry INTEGER,
+                    expiry_risk_tier VARCHAR(20)
+                        CHECK (expiry_risk_tier IN
+                               ('CRITICAL', 'WARNING', 'INFO', 'HEALTHY', 'NONE')),
+                    discovered_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(connection_id, vault_resource_id, item_type, item_name)
+                )
+            """)
+            for idx_stmt in [
+                "CREATE INDEX IF NOT EXISTS idx_kvm_org ON keyvault_metadata(organization_id)",
+                "CREATE INDEX IF NOT EXISTS idx_kvm_conn ON keyvault_metadata(connection_id)",
+                "CREATE INDEX IF NOT EXISTS idx_kvm_vault ON keyvault_metadata(vault_resource_id)",
+                "CREATE INDEX IF NOT EXISTS idx_kvm_expiry ON keyvault_metadata(expiry_risk_tier)",
+            ]:
+                cursor.execute(idx_stmt)
+
+            # RLS
+            cursor.execute("ALTER TABLE keyvault_metadata ENABLE ROW LEVEL SECURITY")
+            cursor.execute("ALTER TABLE keyvault_metadata FORCE ROW LEVEL SECURITY")
+            for policy_stmt in [
+                "CREATE POLICY kvm_sel ON keyvault_metadata FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                "CREATE POLICY kvm_ins ON keyvault_metadata FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                "CREATE POLICY kvm_upd ON keyvault_metadata FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                "CREATE POLICY kvm_del ON keyvault_metadata FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+            ]:
+                cursor.execute("SAVEPOINT kvm_rls")
+                try:
+                    cursor.execute(policy_stmt)
+                    cursor.execute("RELEASE SAVEPOINT kvm_rls")
+                except Exception:
+                    cursor.execute("ROLLBACK TO SAVEPOINT kvm_rls")
+
+            self._commit()
+            Database._keyvault_metadata_ensured = True
+        except Exception as e:
+            self._rollback()
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
+            logger.warning("keyvault_metadata table error: %s", e)
+        finally:
+            cursor.close()
+
+    def save_keyvault_metadata_item(self, item: dict):
+        """Upsert a single key/secret/certificate metadata record."""
+        self._ensure_keyvault_metadata_table()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO keyvault_metadata (
+                    organization_id, connection_id, vault_name, vault_resource_id,
+                    item_type, item_name, enabled, expires_on, created_on,
+                    last_updated, days_until_expiry, expiry_risk_tier
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (connection_id, vault_resource_id, item_type, item_name)
+                DO UPDATE SET
+                    enabled = EXCLUDED.enabled,
+                    expires_on = EXCLUDED.expires_on,
+                    last_updated = EXCLUDED.last_updated,
+                    days_until_expiry = EXCLUDED.days_until_expiry,
+                    expiry_risk_tier = EXCLUDED.expiry_risk_tier,
+                    discovered_at = NOW()
+            """, (
+                self._organization_id,
+                item.get('connection_id'),
+                item.get('vault_name'),
+                item.get('vault_resource_id'),
+                item.get('item_type'),
+                item.get('item_name'),
+                item.get('enabled', True),
+                item.get('expires_on'),
+                item.get('created_on'),
+                item.get('last_updated'),
+                item.get('days_until_expiry'),
+                item.get('expiry_risk_tier', 'NONE'),
+            ))
+            self._commit()
+        except Exception as e:
+            self._rollback()
+            if self._organization_id:
+                self.set_organization_context(self._organization_id)
+            logger.warning("save_keyvault_metadata_item failed: %s", e)
+        finally:
+            cursor.close()
+
+    def get_keyvault_items_for_vault(self, vault_resource_id: str) -> list:
+        """Return all metadata items for a given vault."""
+        self._ensure_keyvault_metadata_table()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT item_type, item_name, enabled, expires_on,
+                       days_until_expiry, expiry_risk_tier
+                FROM keyvault_metadata
+                WHERE vault_resource_id = %s
+                ORDER BY days_until_expiry ASC NULLS LAST
+            """, (vault_resource_id,))
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.warning("get_keyvault_items_for_vault failed: %s", e)
+            return []
+        finally:
+            cursor.close()
+
+    def get_keyvault_items_by_scope(self, scope_prefix: str) -> list:
+        """Return expiry items for vaults whose resource_id starts with scope_prefix."""
+        self._ensure_keyvault_metadata_table()
+        from psycopg2.extras import RealDictCursor
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT vault_name, vault_resource_id, item_type, item_name,
+                       enabled, expires_on, days_until_expiry, expiry_risk_tier
+                FROM keyvault_metadata
+                WHERE vault_resource_id LIKE %s
+                  AND expiry_risk_tier IN ('CRITICAL', 'WARNING')
+                ORDER BY days_until_expiry ASC NULLS LAST
+            """, (scope_prefix + '%',))
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.warning("get_keyvault_items_by_scope failed: %s", e)
+            return []
+        finally:
+            cursor.close()
 
 
 # ─── Access Review V2 Helper Functions ────────────────────────────────

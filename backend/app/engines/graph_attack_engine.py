@@ -59,17 +59,18 @@ ALL_EDGE_TYPES = (
 )
 
 # Privileged roles (targets for escalation) — multi-cloud
+from app.constants.roles import EntraRole, RBACRole
 PRIVILEGED_ROLES = {
-    # Azure
-    'Global Administrator': 95,
-    'Privileged Role Administrator': 90,
-    'Owner': 85,
-    'User Access Administrator': 80,
-    'Application Administrator': 75,
-    'Cloud Application Administrator': 70,
-    'Contributor': 60,
-    'Key Vault Administrator': 65,
-    'Key Vault Secrets Officer': 60,
+    # Azure (derived from SSOT enums)
+    EntraRole.GLOBAL_ADMIN: 95,
+    EntraRole.PRIVILEGED_ROLE_ADMIN: 90,
+    RBACRole.OWNER: 85,
+    RBACRole.USER_ACCESS_ADMIN: 80,
+    EntraRole.APPLICATION_ADMIN: 75,
+    EntraRole.CLOUD_APP_ADMIN: 70,
+    RBACRole.CONTRIBUTOR: 60,
+    RBACRole.KEY_VAULT_ADMIN: 65,
+    RBACRole.KEY_VAULT_SECRETS_OFFICER: 60,
     # AWS managed policies (stored as role_name in role_assignments)
     'AdministratorAccess': 95,
     'IAMFullAccess': 90,
@@ -602,11 +603,12 @@ class GraphAttackEngine:
             if n.node_type in (NODE_USER, NODE_SERVICE_PRINCIPAL, NODE_MANAGED_IDENTITY)
         ]
 
-        # BFS: low-priv → privileged roles
+        # BFS: low-priv → privileged roles (min_depth=1 to catch direct escalation)
         for src_id in source_ids:
             src_paths = self._bfs_to_targets(
                 src_id, lambda n: n.node_type == NODE_ROLE and n.metadata.get('privileged'),
                 FINDING_PRIVILEGE_ESCALATION,
+                min_depth=1,
             )
             paths.extend(src_paths)
             if len(paths) >= MAX_TOTAL_PATHS:

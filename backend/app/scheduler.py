@@ -599,6 +599,18 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
                     )
                 except Exception:
                     pass
+                # Update connection status on credential/auth failures
+                if error_type in ('invalid_credentials', 'auth_failure'):
+                    try:
+                        fdb.update_cloud_connection(conn_id,
+                            status='auth_failed',
+                            last_test_status='failed',
+                            last_test_at=datetime.utcnow())
+                        logger.warning(
+                            "CONNECTION_STATUS_DEGRADED connection_id=%d status=auth_failed error_type=%s",
+                            conn_id, error_type)
+                    except Exception:
+                        pass
                 fdb.close()
             except Exception as fe:
                 logger.warning("DISCOVERY_FAIL_TRACK_ERROR job=%s error=%s", job_id, str(fe)[:200])

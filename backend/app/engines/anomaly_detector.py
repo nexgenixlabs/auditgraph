@@ -20,24 +20,25 @@ Usage:
 import logging
 from typing import Dict, List, Optional
 from app.database import Database
+from app.constants.roles import EntraRole, RBACRole
 
 logger = logging.getLogger(__name__)
 
 # Roles considered critical for escalation detection
-CRITICAL_ROLES = {
-    'Global Administrator', 'Privileged Role Administrator',
-    'Privileged Authentication Administrator', 'Exchange Administrator',
-    'SharePoint Administrator', 'User Access Administrator',
-    'Application Administrator', 'Cloud Application Administrator',
-    'Owner', 'Contributor',
-}
+CRITICAL_ROLES: frozenset[str] = frozenset({
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.PRIVILEGED_AUTH_ADMIN, EntraRole.EXCHANGE_ADMIN,
+    EntraRole.SHAREPOINT_ADMIN, EntraRole.APPLICATION_ADMIN,
+    EntraRole.CLOUD_APP_ADMIN,
+    RBACRole.USER_ACCESS_ADMIN, RBACRole.OWNER, RBACRole.CONTRIBUTOR,
+})
 
-HIGH_RISK_ROLES = {
-    'Security Administrator', 'Compliance Administrator',
-    'Conditional Access Administrator', 'Authentication Administrator',
-    'Groups Administrator', 'Directory Writers',
-    'Intune Administrator', 'Azure Information Protection Administrator',
-}
+HIGH_RISK_ROLES: frozenset[str] = frozenset({
+    EntraRole.SECURITY_ADMIN, EntraRole.COMPLIANCE_ADMIN,
+    EntraRole.CONDITIONAL_ACCESS_ADMIN, EntraRole.AUTH_ADMIN,
+    EntraRole.GROUPS_ADMIN, EntraRole.DIRECTORY_WRITERS,
+    EntraRole.INTUNE_ADMIN, EntraRole.AZURE_INFO_PROTECTION_ADMIN,
+})
 
 RISK_LEVEL_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0}
 

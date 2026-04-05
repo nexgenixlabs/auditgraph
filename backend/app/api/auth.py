@@ -60,6 +60,8 @@ PUBLIC_PATHS = {
     '/api/auth/verify-email',
     '/api/auth/accept-invitation',
     '/api/auth/validate-invitation',
+    '/api/tenant/config',
+    '/api/tenants/validate-slug',
 }
 
 
@@ -214,6 +216,65 @@ def hash_refresh_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
+# ── Phase S1: httpOnly cookie auth ──
+
+COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', None)  # .auditgraph.ai in prod, None for localhost
+_IS_SECURE_COOKIE = os.getenv('FLASK_ENV') != 'development'
+
+
+def _cookie_name(portal: str, token_type: str) -> str:
+    """Portal-specific cookie name: ag_admin_access, ag_client_refresh, etc."""
+    return f'ag_{portal}_{token_type}'
+
+
+def set_auth_cookies(response, access_token: str, refresh_token: str, portal: str):
+    """Set httpOnly auth cookies + CSRF double-submit cookie on a Flask response."""
+    access_ttl = int(ADMIN_TOKEN_EXPIRY.total_seconds()) if portal == 'admin' else int(CLIENT_TOKEN_EXPIRY.total_seconds())
+    response.set_cookie(
+        _cookie_name(portal, 'access'),
+        value=access_token,
+        httponly=True,
+        secure=_IS_SECURE_COOKIE,
+        samesite='Lax',
+        max_age=access_ttl,
+        path='/',
+        domain=COOKIE_DOMAIN,
+    )
+    response.set_cookie(
+        _cookie_name(portal, 'refresh'),
+        value=refresh_token,
+        httponly=True,
+        secure=_IS_SECURE_COOKIE,
+        samesite='Lax',
+        max_age=int(REFRESH_TOKEN_EXPIRY.total_seconds()),
+        path='/api/auth/',
+        domain=COOKIE_DOMAIN,
+    )
+    # CSRF double-submit cookie (readable by JS — NOT httpOnly)
+    csrf = secrets.token_urlsafe(32)
+    response.set_cookie(
+        'csrf_token',
+        value=csrf,
+        httponly=False,
+        secure=_IS_SECURE_COOKIE,
+        samesite='Lax',
+        max_age=int(REFRESH_TOKEN_EXPIRY.total_seconds()),
+        path='/',
+        domain=COOKIE_DOMAIN,
+    )
+
+
+def clear_auth_cookies(response, portal: str):
+    """Clear auth cookies on logout."""
+    for token_type in ('access', 'refresh'):
+        response.delete_cookie(
+            _cookie_name(portal, token_type),
+            path='/' if token_type == 'access' else '/api/auth/',
+            domain=COOKIE_DOMAIN,
+        )
+    response.delete_cookie('csrf_token', path='/', domain=COOKIE_DOMAIN)
+
+
 def _authenticate_api_key(raw_key: str):
     """Validate an API key and set g.current_user. Returns None on success, error tuple on failure."""
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
@@ -293,6 +354,20 @@ def auth_middleware():
     # Also detect API key in Bearer header (ag_ prefix)
     if not api_key and auth_header.startswith('Bearer ag_'):
         api_key = auth_header[7:]
+
+    # Phase S1: Fall back to httpOnly cookie if no Authorization header and no API key
+    _cookie_auth = False
+    if not api_key and not auth_header:
+        cookie_token = request.cookies.get(_cookie_name(portal, 'access'))
+        if cookie_token:
+            auth_header = f'Bearer {cookie_token}'
+            _cookie_auth = True
+            # CSRF double-submit validation for cookie-based auth on mutating methods
+            if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+                csrf_header = request.headers.get('X-CSRF-Token', '')
+                csrf_cookie = request.cookies.get('csrf_token', '')
+                if not csrf_header or not csrf_cookie or csrf_header != csrf_cookie:
+                    return jsonify({'error': 'CSRF token mismatch'}), 403
 
     if api_key:
         result = _authenticate_api_key(api_key)

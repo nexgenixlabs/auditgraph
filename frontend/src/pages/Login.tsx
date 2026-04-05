@@ -371,7 +371,25 @@ export default function Login() {
                     try {
                       const res = await fetch(`/api/auth/oidc/login?org_slug=${encodeURIComponent(slug)}`);
                       const data = await res.json();
-                      if (data.redirect_url) window.location.href = data.redirect_url;
+                      if (data.redirect_url) {
+                        // Validate redirect URL: only allow relative paths starting with /
+                        // Reject absolute URLs and cross-origin targets to prevent open redirect
+                        const url = data.redirect_url;
+                        if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//')) {
+                          window.location.href = url;
+                        } else if (typeof url === 'string') {
+                          try {
+                            const parsed = new URL(url);
+                            if (parsed.origin === window.location.origin) {
+                              window.location.href = url;
+                            } else {
+                              window.location.href = '/dashboard';
+                            }
+                          } catch {
+                            window.location.href = '/dashboard';
+                          }
+                        }
+                      }
                     } catch { /* ignore */ }
                   }}
                   className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-indigo-600 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2"

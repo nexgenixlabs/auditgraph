@@ -7,6 +7,7 @@ governance actions to remediate violations.
 
 import logging
 from datetime import datetime, timezone
+from app.constants.roles import EntraRole, RBACRole
 
 logger = logging.getLogger(__name__)
 
@@ -16,17 +17,17 @@ CREDENTIAL_AGE_THRESHOLD_DAYS = 180
 PRIVILEGED_ROLE_AGE_THRESHOLD_DAYS = 365
 
 # Roles considered privileged
-PRIVILEGED_ROLES = {
-    'Owner', 'Contributor', 'User Access Administrator',
-    'Global Administrator', 'Privileged Role Administrator',
-    'Security Administrator', 'Application Administrator',
-}
+PRIVILEGED_ROLES: frozenset[str] = frozenset({
+    RBACRole.OWNER, RBACRole.CONTRIBUTOR, RBACRole.USER_ACCESS_ADMIN,
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.SECURITY_ADMIN, EntraRole.APPLICATION_ADMIN,
+})
 
 # Roles that guests should not hold
-GUEST_RESTRICTED_ROLES = {
-    'Owner', 'Contributor', 'User Access Administrator',
-    'Global Administrator', 'Privileged Role Administrator',
-}
+GUEST_RESTRICTED_ROLES: frozenset[str] = frozenset({
+    RBACRole.OWNER, RBACRole.CONTRIBUTOR, RBACRole.USER_ACCESS_ADMIN,
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+})
 
 
 class IdentityGovernanceEngine:

@@ -86,9 +86,10 @@ Write-Host "Removed ${r.role_name} from ${identityName}" -ForegroundColor Green
 Write-Host "Run a new AuditGraph scan to verify."`;
 }
 
-function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScript }: {
+function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScript, identityHasActivity }: {
   r: any; intel?: RoleIntelligence; setActiveTab: (tab: TabId) => void;
   identityName: string; identityId: string; onShowScript: (script: string) => void;
+  identityHasActivity: boolean;
 }) {
   return (
     <div className={`border rounded-xl p-4 ${r.is_removable ? 'border-orange-200 bg-orange-50/30' : ''}`}>
@@ -104,13 +105,13 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
               PS1
             </button>
           )}
-          {usageStatusBadge(r.usage_status, r.redundant_with)}
+          {usageStatusBadge(r.usage_status, r.redundant_with, identityHasActivity)}
           {riskBadge(r.risk_level)}
         </div>
       </div>
       <div className="text-xs text-gray-500 mt-1 break-all">{r.scope}</div>
       <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-gray-500">
-        {lastUsedBadge(r.last_used_display, r.usage_status)}
+        {lastUsedBadge(r.last_used_display, r.usage_status, r.last_used_source)}
         {r.days_since_assigned != null && (
           <span>· Assigned {r.days_since_assigned}d ago</span>
         )}
@@ -152,6 +153,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
   const [roleScript, setRoleScript] = useState<string | null>(null);
   const [roleScriptCopied, setRoleScriptCopied] = useState(false);
 
+  const identityHasActivity = !!identity.effective_last_used;
   const allRoles = useMemo(() => [...groupedRoles.azure, ...groupedRoles.entra], [groupedRoles]);
   const removableCount = useMemo(() => allRoles.filter((r: any) => r.is_removable).length, [allRoles]);
 
@@ -213,7 +215,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               {groupedRoles.azure.map((r: any, idx: number) => (
                 <RoleCard key={idx} r={r} intel={intelByRole[r.role_name]} setActiveTab={setActiveTab}
                   identityName={identity.display_name || ''} identityId={identity.identity_id || ''}
-                  onShowScript={setRoleScript} />
+                  onShowScript={setRoleScript} identityHasActivity={identityHasActivity} />
               ))}
             </div>
           )}
@@ -239,7 +241,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               {groupedRoles.entra.map((r: any, idx: number) => (
                 <RoleCard key={idx} r={r} intel={intelByRole[r.role_name]} setActiveTab={setActiveTab}
                   identityName={identity.display_name || ''} identityId={identity.identity_id || ''}
-                  onShowScript={setRoleScript} />
+                  onShowScript={setRoleScript} identityHasActivity={identityHasActivity} />
               ))}
             </div>
           )}

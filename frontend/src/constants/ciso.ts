@@ -162,6 +162,7 @@ export interface Pillar {
   weight: number;       // pillar weight in the formula
   detail: string;
   identityCount: number;  // affected_count
+  dormantPrivileged?: number;  // stale/never_used identities with T0/T1 roles
   subMetrics: { name: string; value: number; max: number }[];
   _scoreImpact?: number;  // backend-computed: -(risk_pct/100) × weight
   _severity?: string;     // backend-computed: critical/high/medium/low

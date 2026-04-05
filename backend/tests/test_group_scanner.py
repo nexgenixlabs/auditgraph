@@ -22,7 +22,8 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 os.environ.setdefault('FLASK_ENV', 'development')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET set by conftest.py pytest_configure — KeyError if missing
+_JWT = os.environ["JWT_SECRET"]
 os.environ.setdefault('DB_HOST', 'localhost')
 os.environ.setdefault('DB_PORT', '5432')
 os.environ.setdefault('DB_NAME', 'auditgraph')
@@ -448,3 +449,145 @@ def test_rls_isolation_table_structure():
     assert 'org_strict_sel' in source
     assert 'org_strict_ins' in source
     assert 'current_setting' in source
+
+
+# ── Test 13: Group discovery wired into pipeline ─────────────────
+
+def test_group_discovery_wired_into_pipeline():
+    """Test 13: _discover_groups and _discover_group_memberships are called
+    in the main async discovery pipeline."""
+    import inspect
+    from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+    source = inspect.getsource(AzureDiscoveryEngine._async_run_discovery)
+    assert '_discover_groups' in source
+    assert '_discover_group_memberships' in source
+    assert '_save_entra_groups' in source
+
+
+# ── Test 14: 403 on members endpoint produces clear error log ────
+
+def test_403_on_members_produces_error_log():
+    """Test 14: A 403 from the members endpoint logs a clear error
+    mentioning GroupMember.Read.All, not a silent skip."""
+    engine = _build_engine()
+
+    groups = [{'group_id': 'g-test', 'display_name': 'Test Group'}]
+    forbidden_resp = MockResponse({'error': {'code': 'Authorization_RequestDenied'}}, status=403)
+    session = MockSession([forbidden_resp])
+
+    with patch('aiohttp.ClientSession', return_value=session), \
+         patch('app.engines.discovery.azure_discovery.logger') as mock_logger:
+        result = asyncio.get_event_loop().run_until_complete(
+            engine._discover_group_memberships(groups)
+        )
+
+    # Should have called logger.error with GroupMember.Read.All message
+    assert mock_logger.error.called
+    error_msg = mock_logger.error.call_args[0][0]
+    assert 'GroupMember.Read.All' in error_msg or 'Directory.Read.All' in error_msg
+
+    # Result should be empty — not a crash
+    members = result.get('g-test', [])
+    assert members == []
+
+
+# ── Test 15: member_object_id stored as raw Graph ID (lowercase) ─
+
+def test_member_object_id_stored_as_graph_id():
+    """Test 15: member_object_id comes from Graph API m['id'] which is always
+    a lowercase GUID. Verify the code stores it without transformation."""
+    engine = _build_engine()
+
+    groups = [{'group_id': 'g1', 'display_name': 'Group 1'}]
+    lowercase_id = 'abcd1234-ef56-7890-ab12-cd34ef567890'
+    members_page = {
+        'value': [_make_member(lowercase_id, 'User One', '#microsoft.graph.user')],
+    }
+    session = MockSession([MockResponse(members_page)])
+
+    with patch('aiohttp.ClientSession', return_value=session):
+        result = asyncio.get_event_loop().run_until_complete(
+            engine._discover_group_memberships(groups)
+        )
+
+    members = result.get('g1', [])
+    assert len(members) == 1
+    assert members[0]['member_object_id'] == lowercase_id
+
+
+# ── Test 16: get_identity_entra_groups uses azure_object_id ──────
+
+def test_get_identity_entra_groups_uses_object_id():
+    """Test 16: get_identity_entra_groups queries on member_object_id which
+    is the azure_object_id (Graph object_id), not identity_id (app_id)."""
+    import inspect
+    from app.database import Database
+    source = inspect.getsource(Database.get_identity_entra_groups)
+    # The parameter should be identity_object_id
+    assert 'identity_object_id' in source
+    # The query should match on member_object_id
+    assert 'egm.member_object_id = %s' in source
+    # Both tables should be filtered by discovery_run_id
+    assert 'egm.discovery_run_id = ANY(%s)' in source
+    assert 'eg.discovery_run_id = egm.discovery_run_id' in source
+
+
+# ── Test 17: Handler resolves azure_object_id for SPN lookup ─────
+
+def test_handler_resolves_azure_object_id():
+    """Test 17: The handler queries azure_object_id from identities table
+    (not identity_id) before passing to get_identity_entra_groups.
+    This is critical for SPNs where identity_id = app_id != azure_object_id."""
+    import inspect
+    from app.api import handlers
+    source = inspect.getsource(handlers.get_identity_entra_groups)
+    # Must query object_id column, not identity_id column
+    assert 'SELECT object_id FROM identities' in source
+    # Must pass azure_object_id to the DB method
+    assert 'azure_object_id' in source
+    # Must handle None gracefully
+    assert "not row or not row[0]" in source or "not row" in source
+
+
+# ── Test 18: Nested group membership (depth=1) returned ──────────
+
+def test_nested_membership_depth_1_returned():
+    """Test 18: Members at depth=1 (from a nested group) are included in results
+    with is_nested=True and depth=1."""
+    engine = _build_engine()
+
+    groups = [{'group_id': 'g-parent', 'display_name': 'Parent Group'}]
+
+    # Parent has a nested group and a direct user
+    parent_members = {
+        'value': [
+            _make_member('user-direct', 'Direct User', '#microsoft.graph.user'),
+            _make_member('g-child', 'Child Group', '#microsoft.graph.group'),
+        ],
+    }
+    # Child group has a user
+    child_members = {
+        'value': [
+            _make_member('user-nested', 'Nested User', '#microsoft.graph.user'),
+        ],
+    }
+
+    session = MockSession([MockResponse(parent_members), MockResponse(child_members)])
+
+    with patch('aiohttp.ClientSession', return_value=session):
+        result = asyncio.get_event_loop().run_until_complete(
+            engine._discover_group_memberships(groups)
+        )
+
+    members = result.get('g-parent', [])
+    nested_users = [m for m in members if m['member_object_id'] == 'user-nested']
+    assert len(nested_users) == 1
+    assert nested_users[0]['is_nested'] is True
+    assert nested_users[0]['depth'] == 1
+    assert nested_users[0]['member_type'] == 'user'
+
+    # Direct user should be depth 0
+    direct_users = [m for m in members if m['member_object_id'] == 'user-direct']
+    assert len(direct_users) == 1
+    assert direct_users[0]['depth'] == 0
+    assert direct_users[0]['is_nested'] is False

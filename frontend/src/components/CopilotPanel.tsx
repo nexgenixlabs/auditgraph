@@ -220,7 +220,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
       const processed = line
         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
         .replace(/`(.*?)`/g, '<code class="px-1 py-0.5 bg-gray-200 dark:bg-slate-600 rounded text-xs">$1</code>');
-      const sanitize = (html: string) => DOMPurify.sanitize(html, { ALLOWED_TAGS: ['strong', 'code', 'em', 'br'], ALLOWED_ATTR: ['class'] });
+      const sanitize = (html: string) => DOMPurify.sanitize(html, { ALLOWED_TAGS: ['strong', 'code', 'em', 'br'], ALLOWED_ATTR: [] });
       if (line.startsWith('- ') || line.startsWith('* ')) {
         return <li key={i} className="ml-4 list-disc text-sm" dangerouslySetInnerHTML={{ __html: sanitize(processed.slice(2)) }} />;
       }

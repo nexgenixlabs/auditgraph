@@ -74,10 +74,8 @@ export default function AcceptInvitation() {
         return;
       }
 
-      // Auto-login: store tokens
+      // Phase S1: Cookies set by server response — no localStorage needed
       if (data.access_token) {
-        localStorage.setItem('access_token', data.access_token);
-        localStorage.setItem('refresh_token', data.refresh_token);
         navigate('/');
         window.location.reload();
       }

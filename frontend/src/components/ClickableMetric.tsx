@@ -31,9 +31,7 @@ export function ClickableMetric({ value, route, label, className, style, severit
       className={className}
       style={{
         cursor: 'pointer',
-        textDecorationLine: 'underline',
-        textDecorationStyle: 'dotted',
-        textUnderlineOffset: 3,
+        opacity: 0.9,
         color: color || undefined,
         ...style,
       }}

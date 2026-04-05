@@ -241,11 +241,28 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
         })}
       </div>
 
-      {/* Score Analysis — from backend (dynamic) */}
+      {/* Score Analysis — per-pillar breakdown (distinct from AI Posture Analysis summary) */}
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.border}` }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui, marginBottom: 6 }}>Score Analysis</div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui, marginBottom: 6 }}>Pillar Impact Breakdown</div>
         <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, lineHeight: 1.6 }}>
-          {scoreAnalysis || 'No significant risk factors detected.'}
+          {(() => {
+            const impactful = [...pillars].filter(p => (p._scoreImpact ?? 0) < 0).sort((a, b) => (a._scoreImpact ?? 0) - (b._scoreImpact ?? 0));
+            if (impactful.length === 0) return 'All pillars are within acceptable thresholds.';
+            return impactful.map(p => (
+              <div key={p.name} style={{ marginBottom: 4 }}>
+                <span style={{ fontWeight: 600, color: COLORS.text }}>{PILLAR_ICONS[p.name] || '\u25CF'} {p.name}</span>
+                {' \u2014 '}
+                <span style={{ color: COLORS.danger, fontWeight: 600, fontFamily: FONT.mono }}>{p._scoreImpact?.toFixed(1)} pts</span>
+                {p.identityCount ? ` (${p.identityCount} ${p.identityCount === 1 ? 'identity' : 'identities'} affected)` : ''}
+                {p._severity ? <span style={{
+                  marginLeft: 6, fontSize: 8, padding: '1px 4px', borderRadius: 3,
+                  background: p._severity === 'critical' ? `${COLORS.danger}18` : p._severity === 'high' ? `${COLORS.elevated}18` : `${COLORS.warning}18`,
+                  color: p._severity === 'critical' ? COLORS.danger : p._severity === 'high' ? COLORS.elevated : COLORS.warning,
+                  fontWeight: 600, fontFamily: FONT.mono, textTransform: 'uppercase',
+                }}>{p._severity}</span> : null}
+              </div>
+            ));
+          })()}
         </div>
       </div>
 

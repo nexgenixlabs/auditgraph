@@ -88,7 +88,7 @@ export function SecurityTab({
         {apiKeyError && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
             {apiKeyError}
-            <button onClick={() => setApiKeyError(null)} className="ml-2 font-medium underline">Dismiss</button>
+            <button onClick={() => setApiKeyError(null)} className="ml-2 font-medium hover:opacity-80 cursor-pointer">Dismiss</button>
           </div>
         )}
 

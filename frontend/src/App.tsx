@@ -42,11 +42,7 @@ import ResetPassword from './pages/ResetPassword';
 import LockedDashboard from './pages/LockedDashboard';
 import CrossTenantAnalytics from './pages/CrossTenantAnalytics';
 import OnboardingWizard from './pages/OnboardingWizard';
-import Resources from './pages/Resources';
-import ResourceDetail from './pages/ResourceDetail';
 import DataSecurity from './pages/DataSecurity';
-import KeyVaultSecurity from './pages/KeyVaultSecurity';
-import StorageSecurity from './pages/StorageSecurity';
 import AdminConsole from './pages/AdminConsole';
 import SsoCallback from './pages/SsoCallback';
 import ServiceAccountGovernance from './pages/ServiceAccountGovernance';
@@ -54,6 +50,7 @@ import SPNDashboard from './pages/SPNDashboard';
 import AppRegistrations from './pages/AppRegistrations';
 import IdentityCorrelation from './pages/IdentityCorrelation';
 import WorkloadIdentities from './pages/WorkloadIdentities';
+import AIAgents from './pages/AIAgents';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import ClientBilling from './pages/ClientBilling';
@@ -70,6 +67,10 @@ import IdentityGraph from './pages/IdentityGraph';
 import IdentityExposures from './pages/IdentityExposures';
 import PrivilegeDrift from './pages/PrivilegeDrift';
 import AttackSimulator from './pages/AttackSimulator';
+import AttackPaths from './pages/AttackPaths';
+import AttackPathDetailPage from './pages/AttackPathDetail';
+import RemediationQueue from './pages/RemediationQueue';
+import RemediationDetailPage from './pages/RemediationDetail';
 import ComplianceDashboard from './pages/ComplianceDashboard';
 import AcceptInvitation from './pages/AcceptInvitation';
 import OrganizationUsers from './pages/OrganizationUsers';
@@ -88,6 +89,7 @@ import { OrganizationProvider, useOrganization } from './contexts/TenantContext'
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { CopilotProvider, useCopilot } from './contexts/CopilotContext';
+import { FeatureFlagProvider } from './contexts/FeatureFlagContext';
 import { isAdminHost } from './utils/hostDetection';
 // ConnectionSwitcher removed — scope selection now in TopBar
 
@@ -304,10 +306,15 @@ function AppContent() {
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identity-exposures" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExposures /></ErrorBoundary>} />
                   <Route path="/privilege-drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PrivilegeDrift /></ErrorBoundary>} />
+                  <Route path="/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPaths /></ErrorBoundary>} />
+                  <Route path="/attack-paths/:pathId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPathDetailPage /></ErrorBoundary>} />
+                  <Route path="/remediation-queue" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationQueue /></ErrorBoundary>} />
+                  <Route path="/remediation-queue/:itemId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationDetailPage /></ErrorBoundary>} />
                   <Route path="/attack-simulator" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackSimulator /></ErrorBoundary>} />
                   <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
+                  <Route path="/ai-agents" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAgents /></ErrorBoundary>} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
                   <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />
@@ -329,10 +336,6 @@ function AppContent() {
                   {/* Legacy redirects for consolidated routes */}
                   <Route path="/rbac-hygiene" element={<Navigate to="/effective-access" replace />} />
                   <Route path="/data-security" element={<Navigate to="/sensitive-access" replace />} />
-                  <Route path="/resources" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Resources /></ErrorBoundary>} />
-                  <Route path="/resources/detail" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ResourceDetail /></ErrorBoundary>} />
-                  <Route path="/key-vaults" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><KeyVaultSecurity /></ErrorBoundary>} />
-                  <Route path="/storage-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><StorageSecurity /></ErrorBoundary>} />
                   <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
                   <Route path="/billing" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ClientBilling /></ErrorBoundary>} />
                   <Route path="/settings" element={
@@ -366,9 +369,11 @@ function App() {
         <OrganizationProvider>
           <AuthProvider>
             <ConnectionProvider>
-              <CopilotProvider>
-                <AppContent />
-              </CopilotProvider>
+              <FeatureFlagProvider>
+                <CopilotProvider>
+                  <AppContent />
+                </CopilotProvider>
+              </FeatureFlagProvider>
             </ConnectionProvider>
           </AuthProvider>
         </OrganizationProvider>

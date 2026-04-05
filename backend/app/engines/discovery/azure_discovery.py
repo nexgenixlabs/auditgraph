@@ -60,23 +60,15 @@ from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.resource import SubscriptionClient
-from azure.mgmt.storage import StorageManagementClient
-from azure.mgmt.keyvault import KeyVaultManagementClient
-try:
-    from azure.mgmt.monitor import MonitorManagementClient
-except ImportError:
-    MonitorManagementClient = None
 try:
     from azure.mgmt.resourcegraph import ResourceGraphClient
     from azure.mgmt.resourcegraph.models import QueryRequest
 except ImportError:
     ResourceGraphClient = None
     QueryRequest = None
-from azure.keyvault.secrets import SecretClient
-from azure.keyvault.keys import KeyClient
-from azure.keyvault.certificates import CertificateClient
 from app.database import Database
 from app.constants import Verdict, IdentityCategory
+from app.constants.agirs import WORKLOAD_CONFIDENCE_DEFAULT, WORKLOAD_CONFIDENCE_THRESHOLD
 from .models import DiscoveryResult
 import json
 
@@ -96,6 +88,44 @@ HIGH_RISK_PERMISSION_GUIDS = {
 
 # Microsoft Graph service principal resource ID (for requiredResourceAccess matching)
 MS_GRAPH_RESOURCE_ID = '00000003-0000-0000-c000-000000000000'
+
+# Confirmed workload types — hard evidence of active management (module-level)
+_CONFIRMED_WORKLOAD_TYPES: frozenset[str] = frozenset({
+    'audit_connector', 'cicd_pipeline', 'monitoring_agent',
+    'data_pipeline', 'container_workload', 'storage_workload',
+    'lab_workload',
+})
+
+
+def load_tenant_lab_patterns(db, tenant_id) -> tuple:
+    """Load lab name patterns: tenant settings > platform_settings > empty tuple.
+
+    Never raises — returns () if config is missing so discovery continues.
+    """
+    try:
+        # Priority 1: per-tenant setting  (settings table, org-scoped)
+        val = db.get_setting('lab_name_patterns', organization_id=tenant_id)
+        if val:
+            import json as _json
+            parsed = _json.loads(val)
+            if isinstance(parsed, list) and parsed:
+                return tuple(parsed)
+
+        # Priority 2: platform-wide default  (platform_settings table)
+        cursor = db.conn.cursor()
+        cursor.execute(
+            "SELECT value FROM platform_settings WHERE key = 'lab_name_patterns'"
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row and row[0]:
+            import json as _json
+            parsed = _json.loads(row[0])
+            if isinstance(parsed, list) and parsed:
+                return tuple(parsed)
+    except Exception:
+        pass  # fail open — never block discovery over config lookup failure
+    return ()
 
 class AzureDiscoveryEngine:
     """
@@ -349,6 +379,13 @@ class AzureDiscoveryEngine:
         role_assignments = self._discover_role_assignments()
         logger.info("Found %s role assignments", len(role_assignments))
 
+        # Step 1.5: Enrich Key Vault metadata from role assignment scopes
+        try:
+            self._enrich_keyvault_metadata(role_assignments)
+        except Exception as e:
+            logger.warning("Key Vault metadata enrichment error: %s", e)
+            self.db._rollback()
+
         # Step 2: Extract principal IDs that have roles
         principal_ids_with_roles = set(ra['principal_id'] for ra in role_assignments)
         logger.info("Found %s unique principals with roles", len(principal_ids_with_roles))
@@ -439,10 +476,11 @@ class AzureDiscoveryEngine:
 
         # Step 5c: Compute member/nested counts (rbac_roles populated at save time
         # from the canonical role_assignments list to avoid JSONB drift — FIX A)
+        from app.constants.roles import RBACRole
         PRIVILEGED_ROLES = {
-            'Owner', 'Contributor', 'User Access Administrator',
-            'Role Based Access Control Administrator',
-            'Key Vault Administrator', 'Storage Account Contributor',
+            RBACRole.OWNER, RBACRole.CONTRIBUTOR, RBACRole.USER_ACCESS_ADMIN,
+            RBACRole.RBAC_ADMIN,
+            RBACRole.KEY_VAULT_ADMIN, RBACRole.STORAGE_ACCOUNT_CONTRIBUTOR,
         }
         # Build group_id→roles index from the canonical ARM role_assignments list
         group_id_set = {g['group_id'] for g in groups}
@@ -488,10 +526,12 @@ class AzureDiscoveryEngine:
 
         # Step 8.5: Infer workload type from role topology
         logger.info("Inferring workload types from role topology...")
+        # Load lab patterns once per discovery run (not per identity)
+        lab_patterns = load_tenant_lab_patterns(self.db, self.db_org_id)
         inferred_count = 0
         for identity in final_identities:
             if identity.get('identity_category') in ('service_principal', 'managed_identity_user', 'managed_identity_system'):
-                result = self._infer_workload_from_roles(identity)
+                result = self._infer_workload_from_roles(identity, lab_patterns=lab_patterns)
                 existing_flags = identity.get('workload_risk_flags') or []
                 new_flags = result.get('workload_risk_flags') or []
                 result['workload_risk_flags'] = list(
@@ -587,95 +627,8 @@ class AzureDiscoveryEngine:
             logger.warning("Behavioral anomaly detection error: %s", e)
             self.db._rollback()
 
-        # Step 9b: Discover Azure Resources (Storage Accounts & Key Vaults)
-        logger.info("Discovering Azure Resources...")
-        storage_accounts = []
-        key_vaults = []
+        # Step 9b: Discover App Registrations
         org_id_val = getattr(self, '_organization_id', None) or self.db_org_id
-        try:
-            storage_accounts = self._discover_storage_accounts()
-            logger.info("Found %s storage accounts", len(storage_accounts))
-            key_vaults = self._discover_key_vaults()
-            logger.info("Found %s key vaults", len(key_vaults))
-
-            # Save resources to database
-            for sa in storage_accounts:
-                sa['organization_id'] = org_id_val
-                try:
-                    self.db.save_storage_account(run_id, sa)
-                except Exception as e:
-                    logger.warning("save_storage_account error: %s", e)
-                    self.db._rollback()
-            for kv in key_vaults:
-                kv['organization_id'] = org_id_val
-                try:
-                    self.db.save_key_vault(run_id, kv)
-                except Exception as e:
-                    logger.warning("save_key_vault error: %s", e)
-                    self.db._rollback()
-            logger.info("Saved %s storage accounts, %s key vaults", len(storage_accounts), len(key_vaults))
-            self._update_job_metrics(
-                identities=getattr(self, '_identities_saved_count', 0),
-                resources=len(storage_accounts) + len(key_vaults),
-                subscriptions=len(self.subscriptions),
-            )
-        except Exception as e:
-            logger.error("Resource discovery error: %s", e)
-            self.db._rollback()
-
-        # Step 9b-2: Identity exposure enhancement + risk history persistence
-        try:
-            self._enhance_resources_with_identity_exposure(run_id, storage_accounts, key_vaults)
-        except Exception as e:
-            logger.warning("Identity exposure enhancement error: %s", e)
-            self.db._rollback()
-
-        # Step 9b-3: Compute Identity Plane (App Services, Functions, VMs, Logic Apps)
-        self._update_job_progress('discovering_compute', 75)
-        logger.info("Discovering Compute Identity Plane...")
-        try:
-            from app.engines.discovery.compute_scanner import ComputeScanner
-            compute_scanner = ComputeScanner(
-                self.credential, self.db, self.subscriptions, org_id_val,
-            )
-            compute_stats = compute_scanner.scan(run_id)
-            logger.info(
-                "Compute scan complete: %s resources, %s MSI linked, %s env secrets",
-                compute_stats.get('resources_found', 0),
-                compute_stats.get('msi_linked', 0),
-                compute_stats.get('env_secrets_found', 0),
-            )
-        except Exception as e:
-            logger.error("Compute identity plane error: %s", e)
-            try:
-                self.db._rollback()
-            except Exception:
-                pass
-
-        # Step 9b-4: Container Identity Plane (AKS + ACR)
-        self._update_job_progress('discovering_containers', 78)
-        logger.info("Discovering Container Identity Plane...")
-        try:
-            from app.engines.discovery.container_scanner import ContainerScanner
-            container_scanner = ContainerScanner(
-                self.credential, self.db, self.subscriptions, org_id_val,
-            )
-            container_stats = container_scanner.scan(run_id)
-            logger.info(
-                "Container scan complete: %s AKS, %s fed creds (%s wildcard), %s ACR",
-                container_stats.get('aks_clusters_found', 0),
-                container_stats.get('federated_credentials', 0),
-                container_stats.get('wildcard_credentials', 0),
-                container_stats.get('acr_registries', 0),
-            )
-        except Exception as e:
-            logger.error("Container identity plane error: %s", e)
-            try:
-                self.db._rollback()
-            except Exception:
-                pass
-
-        # Step 9c: Discover App Registrations
         self._update_job_progress('discovering_apps', 80)
         logger.info("Discovering App Registrations...")
         try:
@@ -705,30 +658,8 @@ class AzureDiscoveryEngine:
             logger.error("App registration discovery error: %s", e, exc_info=True)
             self.db._rollback()
 
-        # Step 9b-5: Data Plane Identity Scanner (Azure SQL, PostgreSQL, MySQL, CosmosDB)
-        self._update_job_progress('discovering_databases', 84)
-        logger.info("Discovering Data Plane Identities...")
-        try:
-            from app.engines.discovery.database_scanner import DatabaseScanner
-            database_scanner = DatabaseScanner(
-                self.credential, self.db, self.subscriptions, org_id_val,
-            )
-            db_stats = database_scanner.scan(run_id)
-            logger.info(
-                "Database scan complete: %s servers (%s mixed auth, %s open firewall)",
-                db_stats.get('total_servers', 0),
-                db_stats.get('mixed_auth_count', 0),
-                db_stats.get('open_firewall_count', 0),
-            )
-        except Exception as e:
-            logger.error("Data plane identity scan error: %s", e)
-            try:
-                self.db._rollback()
-            except Exception:
-                pass
-
-        # Step 9d: ARM Resource Graph — find resources referencing SPN appIds
-        self._update_job_progress('scanning_resources', 88)
+        # Step 9c: ARM Resource Graph — find resources referencing SPN appIds
+        self._update_job_progress('scanning_resources', 90)
         try:
             arm_map = self._fetch_arm_resource_associations(service_principals)
             if arm_map:
@@ -1034,11 +965,7 @@ class AzureDiscoveryEngine:
             logger.warning("Auto groups seed warning: %s", e)
             self.db._rollback()
 
-        # Create result object
-        # result = self._create_result(final_identities, role_assignments, run_id)
-        # self._save_results_to_json(result)
-        
-        return None  # result
+        return None
     
     async def _discover_service_principals(self) -> List[Dict[str, Any]]:
         """Discover ALL service principals via direct HTTP with pagination.
@@ -1207,6 +1134,18 @@ class AzureDiscoveryEngine:
 
             logger.info("Discovered %s service principals across %s page(s) (signInActivity=%s)",
                         len(identities), page, sign_in_available)
+            # Persist P2 license availability on the cloud connection
+            try:
+                cur = self.db.conn.cursor()
+                cur.execute(
+                    "UPDATE cloud_connections SET has_p2_license = %s WHERE id = %s",
+                    (sign_in_available, self.cloud_connection_id)
+                )
+                self.db.conn.commit()
+                cur.close()
+                logger.info("Persisted has_p2_license=%s for connection %s", sign_in_available, self.cloud_connection_id)
+            except Exception as e:
+                logger.warning("Failed to persist has_p2_license: %s", e)
             return identities
         except Exception as e:
             logger.error("Error discovering service principals: %s", e)
@@ -1698,7 +1637,8 @@ class AzureDiscoveryEngine:
         },
     ]
 
-    def _infer_workload_from_roles(self, identity: Dict[str, Any]) -> Dict[str, Any]:
+    def _infer_workload_from_roles(self, identity: Dict[str, Any],
+                                       lab_patterns: tuple = ()) -> Dict[str, Any]:
         """Infer workload type from an identity's RBAC + Entra role assignments.
 
         Matching logic:
@@ -1779,6 +1719,16 @@ class AzureDiscoveryEngine:
                 'workload_confidence': confidence,
                 'role_pattern_matched': pattern['type'],
                 'workload_risk_flags': pattern.get('risk_flags', []),
+            }
+
+        # Fallback: name-based lab/test pattern detection
+        display_name = (identity.get('display_name') or '').lower()
+        if lab_patterns and any(p in display_name for p in lab_patterns):
+            return {
+                'workload_type': 'lab_workload',
+                'workload_confidence': WORKLOAD_CONFIDENCE_DEFAULT,
+                'role_pattern_matched': 'name_pattern_lab',
+                'workload_risk_flags': ['lab_identity', 'review_cleanup'],
             }
 
         # Fallback: unknown workload
@@ -2056,7 +2006,7 @@ class AzureDiscoveryEngine:
         workload_type = identity.get('workload_type') or 'unknown'
         workload_conf = identity.get('workload_confidence') or 0
 
-        if workload_type != 'unknown' and workload_conf >= 60:
+        if workload_type != 'unknown' and workload_conf >= WORKLOAD_CONFIDENCE_THRESHOLD:
             signals.append({'source': 'role_topology', 'weight': 30,
                             'detail': f'Classified as {workload_type} (conf {workload_conf}%)'})
             score += 30
@@ -2234,6 +2184,76 @@ class AzureDiscoveryEngine:
                             'detail': f'Owns {owned_count} object(s) in directory'})
             score += 10
 
+        # ── Signal 11: Tier-aware inactivity ─────────────────────────
+        # Compute the highest privilege tier across all role assignments
+        # to generate tier-specific inactivity signals.
+        from app.engines.risk.agirs_engine import classify_role_privilege_tier
+        _TIER_RANK = {'KEY_VAULT': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+        role_tiers = [classify_role_privilege_tier(r) for r in all_roles] if all_roles else []
+        highest_tier = max(role_tiers, key=lambda t: _TIER_RANK.get(t, 0), default='LOW')
+        is_high_kv = highest_tier in ('HIGH', 'KEY_VAULT')
+        is_medium = highest_tier == 'MEDIUM'
+
+        inactivity_signal = None
+        if is_high_kv and (signin_pattern == 'never_used' or (days_since is None and not last_sign_in)):
+            inactivity_signal = 'high_privilege_never_used'
+            signals.append({'source': 'inactivity_tier', 'weight': -15,
+                            'detail': f'{highest_tier} privilege identity never authenticated'})
+            score = max(0, score - 15)
+        elif is_high_kv and days_since is not None and days_since > 90:
+            inactivity_signal = 'high_privilege_long_inactive'
+            signals.append({'source': 'inactivity_tier', 'weight': -12,
+                            'detail': f'{highest_tier} privilege identity inactive for {days_since} days'})
+            score = max(0, score - 12)
+        elif is_high_kv and days_since is not None and 31 <= days_since <= 90:
+            inactivity_signal = 'high_privilege_short_inactive'
+            signals.append({'source': 'inactivity_tier', 'weight': -5,
+                            'detail': f'{highest_tier} privilege identity inactive for {days_since} days'})
+            score = max(0, score - 5)
+        elif is_medium and days_since is not None and days_since > 31:
+            inactivity_signal = 'medium_privilege_inactive'
+            signals.append({'source': 'inactivity_tier', 'weight': -3,
+                            'detail': f'MEDIUM privilege identity inactive for {days_since} days'})
+            score = max(0, score - 3)
+
+        # ── Signal 12: Key Vault item expiry ─────────────────────────
+        kv_critical_count = 0
+        kv_warning_count = 0
+        kv_critical_names = []
+        if highest_tier == 'KEY_VAULT' and hasattr(self, 'db') and self.db:
+            # Collect unique vault scopes from KV-scoped roles
+            kv_scopes = set()
+            for r in all_roles:
+                scope_val = r.get('scope') or r.get('directory_scope') or ''
+                if 'Microsoft.KeyVault/vaults' in scope_val:
+                    # Extract vault-level scope (strip sub-paths like /keys/mykey)
+                    parts = scope_val.split('/providers/Microsoft.KeyVault/vaults/')
+                    if len(parts) == 2:
+                        vault_path = parts[1].split('/')[0]
+                        kv_scopes.add(parts[0] + '/providers/Microsoft.KeyVault/vaults/' + vault_path)
+
+            for kv_scope in kv_scopes:
+                try:
+                    kv_items = self.db.get_keyvault_items_by_scope(kv_scope)
+                    for item in kv_items:
+                        tier = item.get('expiry_risk_tier', '')
+                        if tier == 'CRITICAL':
+                            kv_critical_count += 1
+                            kv_critical_names.append(item.get('item_name', '?'))
+                        elif tier == 'WARNING':
+                            kv_warning_count += 1
+                except Exception:
+                    pass  # keyvault_metadata table may not exist
+
+        if kv_critical_count > 0:
+            signals.append({'source': 'keyvault_expiry_critical', 'weight': -15,
+                            'detail': f'{kv_critical_count} vault item(s) expiring within 14 days: {", ".join(kv_critical_names[:5])}'})
+            score = max(0, score - 15)
+        if kv_warning_count > 0:
+            signals.append({'source': 'keyvault_expiry_warning', 'weight': -8,
+                            'detail': f'{kv_warning_count} vault item(s) expiring within 30 days'})
+            score = max(0, score - 8)
+
         # ── Clamp score ──────────────────────────────────────────────
         score = max(0, min(100, score))
 
@@ -2251,7 +2271,7 @@ class AzureDiscoveryEngine:
             confidence = 'medium'
         elif audit_created_by:
             confidence = 'medium'
-        elif workload_type != 'unknown' and workload_conf >= 60:
+        elif workload_type != 'unknown' and workload_conf >= WORKLOAD_CONFIDENCE_THRESHOLD:
             confidence = 'medium'
         else:
             confidence = 'low'
@@ -2303,18 +2323,36 @@ class AzureDiscoveryEngine:
         risk_flags = identity.get('workload_risk_flags') or []
         risk_summary = list(risk_flags)  # copy
 
+        # Dependency impact: resources that depend on this identity.
+        # INVARIANT: UNUSED verdict must NEVER coexist with dependency entries.
+        dep_impact = identity.get('dependency_impact_resources') or []
+        if isinstance(dep_impact, str):
+            try:
+                dep_impact = json.loads(dep_impact)
+            except Exception:
+                dep_impact = []
+        has_deps = isinstance(dep_impact, list) and len(dep_impact) > 0
+
         # never_used is a negative orphan signal — identity has never authenticated
         if signin_pattern == 'never_used':
             risk_summary.append('never_authenticated')
 
         # Confirmed signal = hard evidence that the identity is actively managed
         # or bound to infrastructure. These override ORPHANED verdict.
+        # Workload classification with medium+ confidence counts as confirmed:
+        # if the role-inference engine identified a known workload type,
+        # that IS a confirmed signal (no P2 telemetry needed).
+        has_workload_classification = (
+            workload_type in _CONFIRMED_WORKLOAD_TYPES
+            and workload_conf >= WORKLOAD_CONFIDENCE_THRESHOLD
+        )
         has_confirmed_signal = (
             has_arm_binding
             or bool(fed_wt)
             or bool(app_reg_owner)
             or (signin_pattern and signin_pattern not in ('unknown', 'none', 'never_used'))
             or bool(last_sign_in)
+            or has_workload_classification
         )
 
         # Strong signal = any lineage evidence (confirmed OR inferred).
@@ -2324,22 +2362,45 @@ class AzureDiscoveryEngine:
             or bool(heuristic)
             or bool(likely_service)
             or bool(reply_urls)
-            or (workload_type != 'unknown' and workload_conf >= 60)
+            or (workload_type != 'unknown' and workload_conf >= WORKLOAD_CONFIDENCE_THRESHOLD)
             or bool(audit_created_by)
             or bool(is_platform)
             or (api_usage and api_usage != 'none')
+        )
+
+        # An identity active within the last 90 days must NEVER be ORPHANED.
+        # It may be ungoverned (no owner) but it is not orphaned.
+        _ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+        _recently_active = (
+            (effective_last_used is not None and effective_last_used > _ninety_days_ago)
+            or (last_sign_in is not None and _parse_ts(last_sign_in) is not None
+                and _parse_ts(last_sign_in) > _ninety_days_ago)
         )
 
         if is_connector:
             action = 'HEALTHY'
             action_text = 'AuditGraph connector — no action required.'
         elif has_roles and not app_reg_owner and not last_sign_in and not has_confirmed_signal:
-            action = 'ORPHANED'
-            action_text = 'Has active roles but no owner and no sign-in history. Assign an owner or disable.'
-            risk_summary.append('Ownerless identity with active permissions')
-        elif not has_roles and not last_sign_in:
+            if _recently_active:
+                # Active (via non-interactive sign-in or observed usage) but no owner
+                action = 'AT_RISK'
+                action_text = 'Active identity with roles but no owner. Assign an owner to reduce governance risk.'
+                risk_summary.append('Active but ungoverned — needs an owner')
+            else:
+                action = 'ORPHANED'
+                action_text = 'Has active roles but no owner and no sign-in history. Assign an owner or disable.'
+                risk_summary.append('Ownerless identity with active permissions')
+        elif has_deps and not last_sign_in:
+            # Priority: deps + no auth → AT_RISK (never UNUSED).
+            # Deleting this identity could break dependent resources.
+            action = 'AT_RISK'
+            dep_count = len(dep_impact)
+            action_text = (f'Never authenticated but {dep_count} resource(s) depend on this identity. '
+                           f'Deletion could break dependent workloads.')
+            risk_summary.append('Has dependents but never authenticated — deletion risk')
+        elif not has_roles and not last_sign_in and not has_deps:
             action = 'UNUSED'
-            action_text = 'No roles and no sign-in activity detected. Consider removing.'
+            action_text = 'No roles, no sign-in activity, and no dependents detected. Consider removing.'
             risk_summary.append('No permissions or activity detected')
         elif identity.get('identity_category') == IdentityCategory.MANAGED_IDENTITY_SYSTEM \
              and identity.get('associated_resource_id') is None and has_roles:
@@ -2350,10 +2411,22 @@ class AzureDiscoveryEngine:
             action = 'AT_RISK'
             action_text = 'Shared identity or credential detected. Review access and rotate credentials.'
             risk_summary.append('Shared identity/credential risk')
+        elif inactivity_signal in ('high_privilege_never_used', 'high_privilege_long_inactive') and has_roles:
+            action = 'AT_RISK'
+            if inactivity_signal == 'high_privilege_never_used':
+                action_text = f'{highest_tier} privilege identity never authenticated. Review necessity or disable.'
+                risk_summary.append(f'{highest_tier} privilege never authenticated')
+            else:
+                action_text = f'{highest_tier} privilege identity inactive for {days_since} days. Rotate credentials or disable.'
+                risk_summary.append(f'{highest_tier} privilege inactive {days_since}d')
         elif days_since is not None and days_since > 365 and has_roles:
             action = 'STALE'
             action_text = f'Last sign-in was {days_since} days ago but still has active roles. Review necessity.'
             risk_summary.append(f'Stale: no sign-in for {days_since} days')
+        elif inactivity_signal in ('high_privilege_short_inactive', 'medium_privilege_inactive') and has_roles:
+            action = 'STALE'
+            action_text = f'{highest_tier} privilege identity inactive for {days_since} days. Monitor for further inactivity.'
+            risk_summary.append(f'{highest_tier} privilege inactive {days_since}d')
         elif has_strong_signal:
             action = 'HEALTHY'
             if score >= 60:
@@ -2514,6 +2587,35 @@ class AzureDiscoveryEngine:
                 'type': 'PLATFORM', 'label': 'Platform',
                 'value': f'Owns {evidence.get("owned_app_count", 0)} apps, created {evidence.get("created_app_count", 0)} apps',
                 'confidence': 'high',
+            })
+
+        # Key Vault expiry signal
+        if kv_critical_count > 0:
+            lineage_signals.append({
+                'type': 'ALERT', 'label': 'KV Expiry',
+                'value': f'{kv_critical_count} vault item(s) expiring within 14 days: {", ".join(kv_critical_names[:5])}',
+                'confidence': 'high',
+            })
+            risk_summary.append(f'{kv_critical_count} vault item(s) critically expiring')
+        if kv_warning_count > 0:
+            lineage_signals.append({
+                'type': 'ALERT', 'label': 'KV Expiry',
+                'value': f'{kv_warning_count} vault item(s) expiring within 30 days',
+                'confidence': 'medium',
+            })
+
+        # Inactivity tier signal
+        if inactivity_signal:
+            _inactivity_labels = {
+                'high_privilege_never_used': f'{highest_tier} privilege — never authenticated',
+                'high_privilege_long_inactive': f'{highest_tier} privilege — inactive {days_since}d',
+                'high_privilege_short_inactive': f'{highest_tier} privilege — inactive {days_since}d',
+                'medium_privilege_inactive': f'MEDIUM privilege — inactive {days_since}d',
+            }
+            lineage_signals.append({
+                'type': 'INACTIVITY', 'label': 'Inactivity',
+                'value': _inactivity_labels.get(inactivity_signal, inactivity_signal),
+                'confidence': 'high' if 'never' in inactivity_signal else 'medium',
             })
 
         # High sign-in failure alert (M4)
@@ -4451,6 +4553,19 @@ class AzureDiscoveryEngine:
                     url = data.get('@odata.nextLink')
 
             logger.info("Fetched %s users across %s page(s) (signInActivity=%s)", len(all_users), page, sign_in_available)
+            # Persist P2 license availability on the cloud connection (only upgrade, never downgrade)
+            if sign_in_available:
+                try:
+                    cur = self.db.conn.cursor()
+                    cur.execute(
+                        "UPDATE cloud_connections SET has_p2_license = %s WHERE id = %s",
+                        (True, self.cloud_connection_id)
+                    )
+                    self.db.conn.commit()
+                    cur.close()
+                    logger.info("Persisted has_p2_license=True for connection %s (users)", self.cloud_connection_id)
+                except Exception as e:
+                    logger.warning("Failed to persist has_p2_license (users): %s", e)
 
             # Fetch manager info only for users that have roles (optimisation)
             manager_map: dict[str, dict] = {}
@@ -4685,53 +4800,119 @@ class AzureDiscoveryEngine:
         logger.info("Total: %s role assignments across %s subscription(s)", len(role_assignments), len(self.subscriptions))
         return role_assignments
 
+    # Exact-match role risk map: role_name_lower → { scope_type → (risk_level, description) }
+    # Roles not in this map fall through to suffix-based defaults.
+    _ROLE_RISK_EXACT = {
+        'owner': {
+            'subscription': ('critical', 'Owner on Subscription: Full control including IAM - violates SOC2 least privilege, PCI-DSS 7.1, HIPAA §164.312(a)(1) access controls'),
+            'resource_group': ('high', 'Owner on Resource Group: Full control over all resources - review for SOC2 least privilege, consider scope reduction'),
+            '_default': ('medium', 'Owner on resource: Full control - verify business justification per SOC2 access review requirements'),
+        },
+        'user access administrator': {
+            '_default': ('critical', 'User Access Administrator: Can grant any role - privilege escalation risk, violates SOC2 separation of duties, PCI-DSS 7.1'),
+        },
+        'contributor': {
+            'subscription': ('high', 'Contributor on Subscription: Can create/modify/delete all resources - violates SOC2 least privilege, PCI-DSS 7.2 access restrictions'),
+            'resource_group': ('medium', 'Contributor on Resource Group: Broad modification access - review for SOC2 least privilege compliance'),
+            '_default': ('low', 'Contributor on resource: Scoped access - verify business justification'),
+        },
+        # Scoped contributor roles — exact matches prevent inheriting full Contributor blast radius
+        'log analytics contributor': {
+            '_default': ('low', 'Log Analytics Contributor: Can manage Log Analytics workspaces and solutions'),
+        },
+        'storage blob data contributor': {
+            '_default': ('medium', 'Storage Blob Data Contributor: Can read/write/delete blob containers and data'),
+        },
+        'storage blob data owner': {
+            '_default': ('medium', 'Storage Blob Data Owner: Full control over blob storage data including RBAC'),
+        },
+        'monitoring contributor': {
+            '_default': ('low', 'Monitoring Contributor: Can manage monitoring settings and alerts'),
+        },
+        'network contributor': {
+            '_default': ('medium', 'Network Contributor: Can modify network security - SOC2 network security controls, review firewall/NSG changes'),
+        },
+        'sql db contributor': {
+            '_default': ('medium', 'SQL DB Contributor: Can manage SQL databases but not access data directly'),
+        },
+        'sql server contributor': {
+            '_default': ('medium', 'SQL Server Contributor: Can manage SQL servers and databases'),
+        },
+        'cosmos db account reader role': {
+            '_default': ('low', 'Cosmos DB Account Reader: Read-only access to Cosmos DB metadata'),
+        },
+        'documentdb account contributor': {
+            '_default': ('medium', 'DocumentDB Account Contributor: Can manage Cosmos DB accounts'),
+        },
+        'backup contributor': {
+            '_default': ('low', 'Backup Contributor: Can manage backup services and items'),
+        },
+        'site recovery contributor': {
+            '_default': ('low', 'Site Recovery Contributor: Can manage Azure Site Recovery operations'),
+        },
+        'virtual machine contributor': {
+            '_default': ('medium', 'Virtual Machine Contributor: Can manage VMs but not access or networking - SOC2 system access controls'),
+        },
+        'web plan contributor': {
+            '_default': ('low', 'Web Plan Contributor: Can manage App Service plans'),
+        },
+        'website contributor': {
+            '_default': ('medium', 'Website Contributor: Can manage App Service web apps'),
+        },
+        'key vault administrator': {
+            '_default': ('high', 'Key Vault Administrator: Full access to secrets/keys/certificates - HIPAA encryption controls, PCI-DSS 3.5 key management'),
+        },
+        'key vault secrets officer': {
+            '_default': ('high', 'Key Vault Secrets Officer: Can manage all secret operations - HIPAA encryption controls'),
+        },
+        'key vault crypto officer': {
+            '_default': ('high', 'Key Vault Crypto Officer: Can manage all key operations - PCI-DSS 3.5 key management'),
+        },
+        'key vault certificates officer': {
+            '_default': ('medium', 'Key Vault Certificates Officer: Can manage certificate operations'),
+        },
+        'key vault reader': {
+            '_default': ('low', 'Key Vault Reader: Read-only access to Key Vault metadata'),
+        },
+        'key vault secrets user': {
+            '_default': ('medium', 'Key Vault Secrets User: Can read secret contents'),
+        },
+        'key vault crypto user': {
+            '_default': ('medium', 'Key Vault Crypto User: Can perform cryptographic operations'),
+        },
+        'data factory contributor': {
+            '_default': ('medium', 'Data Factory Contributor: Can manage Data Factory pipelines and datasets'),
+        },
+        'logic app contributor': {
+            '_default': ('low', 'Logic App Contributor: Can manage Logic Apps'),
+        },
+        'automation contributor': {
+            '_default': ('medium', 'Automation Contributor: Can manage Automation runbooks and schedules'),
+        },
+    }
+
     def _calculate_role_risk(self, role_name: str, scope_type: str) -> tuple:
-        """Calculate risk level and explanation for a role assignment with compliance context"""
-        role_lower = role_name.lower()
+        """Calculate risk level and explanation for a role assignment with compliance context.
 
-        # Critical roles
-        if 'owner' in role_lower:
-            if scope_type == 'subscription':
-                return ('critical', 'Owner on Subscription: Full control including IAM - violates SOC2 least privilege, PCI-DSS 7.1, HIPAA §164.312(a)(1) access controls')
-            elif scope_type == 'resource_group':
-                return ('high', 'Owner on Resource Group: Full control over all resources - review for SOC2 least privilege, consider scope reduction')
-            return ('medium', 'Owner on resource: Full control - verify business justification per SOC2 access review requirements')
+        Uses exact-match lookup first, then suffix-based defaults for unknown roles.
+        """
+        role_lower = role_name.lower().strip()
 
-        if 'user access administrator' in role_lower:
-            return ('critical', 'User Access Administrator: Can grant any role - privilege escalation risk, violates SOC2 separation of duties, PCI-DSS 7.1')
+        # 1. Exact match against the role risk map
+        if role_lower in self._ROLE_RISK_EXACT:
+            scope_map = self._ROLE_RISK_EXACT[role_lower]
+            return scope_map.get(scope_type, scope_map['_default'])
 
-        if 'contributor' in role_lower:
-            if scope_type == 'subscription':
-                return ('high', 'Contributor on Subscription: Can modify all resources - violates SOC2 least privilege, PCI-DSS 7.2 access restrictions')
-            elif scope_type == 'resource_group':
-                return ('medium', 'Contributor on Resource Group: Broad modification access - review for SOC2 least privilege compliance')
-            return ('low', 'Contributor on resource: Scoped access - verify business justification')
-
-        # Key Vault privileged roles
-        if 'key vault' in role_lower:
-            if any(x in role_lower for x in ['administrator', 'officer', 'crypto']):
-                return ('high', 'Key Vault Admin/Officer: Access to secrets/keys/certificates - HIPAA encryption controls (§164.312(a)(2)(iv)), PCI-DSS 3.5 key management')
-
-        # Storage privileged roles
-        if 'storage' in role_lower:
-            if 'owner' in role_lower or 'contributor' in role_lower:
-                return ('medium', 'Storage access: Can read/modify data - potential PII/PHI exposure, review for HIPAA/GDPR data access controls')
-
-        # SQL/Database roles
-        if 'sql' in role_lower or 'cosmos' in role_lower or 'database' in role_lower:
-            if 'contributor' in role_lower or 'admin' in role_lower:
-                return ('high', 'Database Admin: Access to sensitive data stores - HIPAA ePHI risk, PCI-DSS cardholder data controls, GDPR Art. 32')
-
-        # Network security roles
-        if 'network' in role_lower and 'contributor' in role_lower:
-            return ('medium', 'Network Contributor: Can modify network security - SOC2 network security controls, review firewall/NSG changes')
-
-        # Virtual Machine roles
-        if 'virtual machine' in role_lower and ('contributor' in role_lower or 'admin' in role_lower):
-            return ('medium', 'VM Admin: Can access compute resources - potential data exposure, SOC2 system access controls')
-
-        # Reader roles are low risk
-        if 'reader' in role_lower:
+        # 2. Suffix-based defaults for unrecognized roles
+        if role_lower.endswith('contributor'):
+            return ('low', f'{role_name}: Scoped contributor access - review blast radius')
+        if role_lower.endswith('owner'):
+            return ('medium', f'{role_name}: Owner-level access on scoped resource - verify business justification')
+        if role_lower.endswith('administrator') or role_lower.endswith('admin'):
+            return ('medium', f'{role_name}: Administrative access - review scope and privileges')
+        if role_lower.endswith('operator'):
+            return ('low', f'{role_name}: Operator access - limited to operational actions')
+        if role_lower.endswith('reader') or role_lower.endswith('read'):
             return ('low', 'Read-only access: Limited risk but review for data sensitivity per SOC2 access monitoring')
 
         return ('info', None)
@@ -4939,6 +5120,7 @@ class AzureDiscoveryEngine:
 
                 async def _fetch_members(group_id: str, depth: int, visited: set) -> List[Dict]:
                     """Recursively fetch members, resolving nested groups."""
+                    nonlocal first_error_logged
                     if depth > MAX_DEPTH or group_id in visited:
                         return []
                     visited.add(group_id)
@@ -4952,6 +5134,17 @@ class AzureDiscoveryEngine:
                     while url:
                         try:
                             async with session.get(url, headers=headers) as resp:
+                                if resp.status == 403:
+                                    if not first_error_logged:
+                                        logger.error(
+                                            "GROUP MEMBERSHIP FETCH FAILED: 403 Forbidden. "
+                                            "The AuditGraph service principal is missing "
+                                            "GroupMember.Read.All or Directory.Read.All permission. "
+                                            "Grant this permission in Azure Portal → App Registrations → "
+                                            "API Permissions, then re-run discovery."
+                                        )
+                                        first_error_logged = True
+                                    break
                                 if resp.status != 200:
                                     break
                                 data = await resp.json()
@@ -4986,7 +5179,6 @@ class AzureDiscoveryEngine:
 
                             url = data.get('@odata.nextLink')
                         except Exception as e:
-                            nonlocal first_error_logged
                             if not first_error_logged:
                                 logger.warning("Error fetching members for group %s: %s", group_id, e)
                                 first_error_logged = True
@@ -5040,6 +5232,134 @@ class AzureDiscoveryEngine:
 
         logger.info("Saved %s/%s Entra groups with memberships", saved, len(groups))
 
+    def _enrich_keyvault_metadata(self, role_assignments: List[Dict]) -> None:
+        """Fetch key/secret/certificate metadata for vaults found in role assignment scopes.
+
+        Uses the ARM management plane (KeyVaultManagementClient) to enumerate
+        vault items. Never reads secret values — management plane only returns
+        names, attributes, and expiry dates.
+        """
+        # Extract unique vault ARM resource IDs from role assignment scopes
+        vault_scopes: Set[str] = set()
+        for ra in role_assignments:
+            scope = ra.get('scope', '')
+            if 'Microsoft.KeyVault/vaults/' in scope:
+                parts = scope.split('/')
+                try:
+                    kv_idx = parts.index('vaults')
+                    vault_id = '/'.join(parts[:kv_idx + 2])
+                    vault_scopes.add(vault_id)
+                except ValueError:
+                    continue
+
+        if not vault_scopes:
+            return
+
+        logger.info("Key Vault metadata: found %s vault(s) in role scopes", len(vault_scopes))
+
+        try:
+            from azure.mgmt.keyvault import KeyVaultManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-keyvault not installed — skipping KV metadata enrichment")
+            return
+
+        from datetime import timezone
+        now_utc = datetime.now(timezone.utc)
+        total_items = 0
+
+        for vault_resource_id in vault_scopes:
+            # Parse subscription_id from resource ID
+            # Format: /subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults/{name}
+            rid_parts = vault_resource_id.split('/')
+            try:
+                sub_idx = rid_parts.index('subscriptions')
+                sub_id = rid_parts[sub_idx + 1]
+            except (ValueError, IndexError):
+                continue
+
+            vault_name = rid_parts[-1]
+
+            try:
+                kv_mgmt = KeyVaultManagementClient(self.credential, sub_id)
+            except Exception as e:
+                logger.warning("KV mgmt client error for sub %s: %s", sub_id[:8], e)
+                continue
+
+            # Fetch vault properties to get the vault URI
+            try:
+                rg_idx = rid_parts.index('resourceGroups')
+                rg_name = rid_parts[rg_idx + 1]
+                vault_info = kv_mgmt.vaults.get(rg_name, vault_name)
+            except Exception as e:
+                logger.warning("Could not fetch vault %s: %s", vault_name, e)
+                continue
+
+            vault_uri = getattr(vault_info.properties, 'vault_uri', '') or ''
+
+            # Use data-plane SDK to list items (requires vault URI)
+            for item_type_plural, item_type_singular in [
+                ('keys', 'key'), ('secrets', 'secret'), ('certificates', 'certificate')
+            ]:
+                try:
+                    if item_type_singular == 'key':
+                        from azure.keyvault.keys import KeyClient
+                        client = KeyClient(vault_url=vault_uri, credential=self.credential)
+                        items = client.list_properties_of_keys()
+                    elif item_type_singular == 'secret':
+                        from azure.keyvault.secrets import SecretClient
+                        client = SecretClient(vault_url=vault_uri, credential=self.credential)
+                        items = client.list_properties_of_secrets()
+                    else:
+                        from azure.keyvault.certificates import CertificateClient
+                        client = CertificateClient(vault_url=vault_uri, credential=self.credential)
+                        items = client.list_properties_of_certificates()
+
+                    for item in items:
+                        expires_on = getattr(item, 'expires_on', None)
+                        created_on = getattr(item, 'created_on', None)
+                        updated_on = getattr(item, 'updated_on', None)
+                        enabled = getattr(item, 'enabled', True)
+                        name = getattr(item, 'name', '') or ''
+
+                        days_until_expiry = None
+                        expiry_risk_tier = 'NONE'
+                        if expires_on:
+                            # Ensure timezone-aware comparison
+                            if expires_on.tzinfo is None:
+                                expires_on = expires_on.replace(tzinfo=timezone.utc)
+                            delta = (expires_on - now_utc).days
+                            days_until_expiry = delta
+                            if delta <= 14:
+                                expiry_risk_tier = 'CRITICAL'
+                            elif delta <= 30:
+                                expiry_risk_tier = 'WARNING'
+                            elif delta <= 90:
+                                expiry_risk_tier = 'INFO'
+                            else:
+                                expiry_risk_tier = 'HEALTHY'
+
+                        self.db.save_keyvault_metadata_item({
+                            'connection_id': self.cloud_connection_id,
+                            'vault_name': vault_name,
+                            'vault_resource_id': vault_resource_id,
+                            'item_type': item_type_singular,
+                            'item_name': name,
+                            'enabled': enabled if enabled is not None else True,
+                            'expires_on': expires_on,
+                            'created_on': created_on,
+                            'last_updated': updated_on,
+                            'days_until_expiry': days_until_expiry,
+                            'expiry_risk_tier': expiry_risk_tier,
+                        })
+                        total_items += 1
+
+                except Exception as e:
+                    logger.warning("KV %s/%s enumeration error: %s", vault_name, item_type_plural, e)
+                    self.db._rollback()
+
+        if total_items:
+            logger.info("Key Vault metadata: saved %s items across %s vault(s)", total_items, len(vault_scopes))
+
     async def _discover_entra_roles(self) -> List[Dict[str, Any]]:
         """Discover Entra ID directory role assignments for given principals"""
         try:
@@ -5087,423 +5407,6 @@ class AzureDiscoveryEngine:
             logger.error("Error discovering Entra roles: %s", e)
             return []
 
-
-    # ─── Phase 52: Azure Resource Discovery ──────────────────────────
-
-    def _discover_storage_accounts(self) -> list:
-        """Discover all storage accounts across all subscriptions with security audit."""
-        from datetime import datetime, timezone, timedelta
-        storage_accounts = []
-        for sub in self.subscriptions:
-            sub_id = sub['id']
-            sub_name = sub['name']
-            try:
-                storage_client = StorageManagementClient(self.credential, sub_id)
-                for account in storage_client.storage_accounts.list():
-                    resource_id = account.id
-                    name = account.name
-                    location = account.location
-                    rg = resource_id.split('/resourceGroups/')[1].split('/')[0] if '/resourceGroups/' in resource_id else None
-
-                    # Security settings
-                    public_blob = getattr(account, 'allow_blob_public_access', None)
-                    if public_blob is None:
-                        public_blob = getattr(account, 'allow_blob_public_access', False)
-                    https_only = getattr(account, 'enable_https_traffic_only', True)
-                    tls = str(getattr(account, 'minimum_tls_version', 'TLS1_2') or 'TLS1_2')
-                    shared_key = getattr(account, 'allow_shared_key_access', True)
-                    if shared_key is None:
-                        shared_key = True
-                    cross_tenant = getattr(account, 'allow_cross_tenant_replication', False)
-
-                    # Network rules
-                    net = account.network_rule_set
-                    default_action = str(net.default_action) if net and net.default_action else 'Allow'
-                    ip_count = len(net.ip_rules) if net and net.ip_rules else 0
-                    vnet_count = len(net.virtual_network_rules) if net and net.virtual_network_rules else 0
-                    pe_conns = getattr(account, 'private_endpoint_connections', None) or []
-                    pe_count = len(pe_conns)
-                    bypass = str(net.bypass) if net and net.bypass else 'AzureServices'
-
-                    # Encryption
-                    enc = account.encryption
-                    infra_enc = False
-                    cmk = False
-                    kv_uri = None
-                    if enc:
-                        infra_enc = getattr(enc, 'require_infrastructure_encryption', False) or False
-                        key_source = getattr(enc, 'key_source', None)
-                        cmk = str(key_source).lower().find('keyvault') >= 0 if key_source else False
-                        kv_props = getattr(enc, 'key_vault_properties', None)
-                        if kv_props:
-                            kv_uri = getattr(kv_props, 'key_vault_uri', None)
-
-                    # SAS policy
-                    sas_policy = getattr(account, 'sas_policy', None)
-                    sas_policy_enabled = sas_policy is not None and getattr(sas_policy, 'sas_expiration_period', None) is not None
-                    sas_expiration_period = str(getattr(sas_policy, 'sas_expiration_period', '')) if sas_policy else None
-
-                    # Key rotation check
-                    key1_created = None
-                    key2_created = None
-                    key_stale = False
-                    try:
-                        keys_result = storage_client.storage_accounts.list_keys(rg, name)
-                        for key in (keys_result.keys or []):
-                            created = getattr(key, 'creation_time', None)
-                            if key.key_name == 'key1':
-                                key1_created = created.isoformat() if created else None
-                            elif key.key_name == 'key2':
-                                key2_created = created.isoformat() if created else None
-                            if created and (datetime.now(timezone.utc) - created).days > 90:
-                                key_stale = True
-                    except Exception:
-                        pass  # listKeys may need elevated permissions
-
-                    # Diagnostic logging check (for SAS/key usage auditability)
-                    diag_enabled = False
-                    logging_destinations = []
-                    try:
-                        if MonitorManagementClient is not None:
-                            monitor_client = MonitorManagementClient(self.credential, sub_id)
-                            diag_settings = monitor_client.diagnostic_settings.list(resource_id)
-                            for ds in diag_settings.value if hasattr(diag_settings, 'value') else diag_settings:
-                                # Check if StorageRead/StorageWrite logs are captured
-                                has_storage_logs = False
-                                for log_setting in (getattr(ds, 'logs', None) or []):
-                                    cat = getattr(log_setting, 'category', '') or ''
-                                    enabled = getattr(log_setting, 'enabled', False)
-                                    if enabled and cat in ('StorageRead', 'StorageWrite', 'StorageDelete'):
-                                        has_storage_logs = True
-                                if has_storage_logs:
-                                    diag_enabled = True
-                                    dest = {}
-                                    if getattr(ds, 'workspace_id', None):
-                                        dest['type'] = 'log_analytics'
-                                        dest['target'] = ds.workspace_id
-                                    elif getattr(ds, 'storage_account_id', None):
-                                        dest['type'] = 'storage_account'
-                                        dest['target'] = ds.storage_account_id
-                                    elif getattr(ds, 'event_hub_authorization_rule_id', None):
-                                        dest['type'] = 'event_hub'
-                                    else:
-                                        dest['type'] = 'other'
-                                    logging_destinations.append(dest)
-                    except Exception:
-                        pass  # Monitor API may not be accessible
-
-                    # Build storage data dict for component scoring
-                    sa_data = {
-                        'resource_id': resource_id, 'name': name, 'location': location,
-                        'resource_group': rg, 'subscription_id': sub_id,
-                        'subscription_name': sub_name,
-                        'sku': account.sku.name if account.sku else None,
-                        'kind': str(account.kind) if account.kind else None,
-                        'access_tier': str(account.access_tier) if account.access_tier else None,
-                        'public_blob_access': bool(public_blob),
-                        'https_only': bool(https_only),
-                        'minimum_tls_version': tls,
-                        'shared_key_access': bool(shared_key),
-                        'allow_cross_tenant_replication': bool(cross_tenant),
-                        'default_network_action': default_action,
-                        'ip_rules_count': ip_count, 'vnet_rules_count': vnet_count,
-                        'private_endpoint_count': pe_count, 'bypass_settings': bypass,
-                        'network_rules': {'ip_count': ip_count, 'vnet_count': vnet_count, 'bypass': bypass},
-                        'infrastructure_encryption': infra_enc,
-                        'customer_managed_keys': cmk, 'key_vault_uri': kv_uri,
-                        'encryption_details': {'infra_enc': infra_enc, 'cmk': cmk, 'kv_uri': kv_uri},
-                        'key1_created_at': key1_created, 'key2_created_at': key2_created,
-                        'key_rotation_stale': key_stale,
-                        'sas_policy_enabled': sas_policy_enabled,
-                        'sas_expiration_period': sas_expiration_period,
-                        'diagnostic_logging_enabled': diag_enabled,
-                        'logging_destinations': logging_destinations,
-                        'tags': dict(account.tags or {}),
-                    }
-
-                    # Component-based scoring
-                    from app.engines.data_security import score_storage_account
-                    risk_score, risk_level, risk_components, critical_overrides, risk_reasons = score_storage_account(sa_data)
-
-                    sa_data['risk_score'] = risk_score
-                    sa_data['risk_level'] = risk_level
-                    sa_data['risk_reasons'] = risk_reasons
-                    sa_data['risk_components'] = risk_components
-                    sa_data['critical_overrides'] = critical_overrides
-                    sa_data['blast_radius_score'] = 0  # computed post-save via identity cross-link
-                    storage_accounts.append(sa_data)
-            except Exception as e:
-                logger.warning("Storage discovery failed for %s: %s", sub_name, e)
-                continue
-        return storage_accounts
-
-    def _discover_key_vaults(self) -> list:
-        """Discover all key vaults across all subscriptions with security audit."""
-        from datetime import datetime, timezone, timedelta
-        key_vaults = []
-        for sub in self.subscriptions:
-            sub_id = sub['id']
-            sub_name = sub['name']
-            try:
-                kv_mgmt = KeyVaultManagementClient(self.credential, sub_id)
-                for vault_item in kv_mgmt.vaults.list():
-                    resource_id = vault_item.id
-                    vault_name = vault_item.name
-                    location = getattr(vault_item, 'location', None)
-                    rg = resource_id.split('/resourceGroups/')[1].split('/')[0] if '/resourceGroups/' in resource_id else None
-
-                    # Get full vault details
-                    try:
-                        vault = kv_mgmt.vaults.get(rg, vault_name)
-                        props = vault.properties
-                    except Exception:
-                        props = None
-
-                    if not props:
-                        continue
-
-                    # Security settings
-                    soft_delete = getattr(props, 'enable_soft_delete', False) or False
-                    retention = getattr(props, 'soft_delete_retention_in_days', 0) or 0
-                    purge_prot = getattr(props, 'enable_purge_protection', False) or False
-                    rbac_auth = getattr(props, 'enable_rbac_authorization', False) or False
-
-                    # Network rules
-                    net = getattr(props, 'network_acls', None)
-                    public_access = str(getattr(props, 'public_network_access', 'Enabled') or 'Enabled')
-                    default_action = str(net.default_action) if net and net.default_action else 'Allow'
-                    ip_count = len(net.ip_rules) if net and net.ip_rules else 0
-                    vnet_count = len(net.virtual_network_rules) if net and net.virtual_network_rules else 0
-                    pe_conns = getattr(props, 'private_endpoint_connections', None) or []
-                    pe_count = len(pe_conns)
-
-                    # Access policies (non-RBAC mode)
-                    access_policies_list = []
-                    ap_count = 0
-                    if not rbac_auth:
-                        for ap in (getattr(props, 'access_policies', None) or []):
-                            ap_count += 1
-                            perms = getattr(ap, 'permissions', None)
-                            access_policies_list.append({
-                                'object_id': getattr(ap, 'object_id', ''),
-                                'azure_directory_id': getattr(ap, 'tenant_id', ''),
-                                'permissions': {
-                                    'keys': [str(p) for p in (perms.keys or [])] if perms else [],
-                                    'secrets': [str(p) for p in (perms.secrets or [])] if perms else [],
-                                    'certificates': [str(p) for p in (perms.certificates or [])] if perms else [],
-                                }
-                            })
-
-                    # Data plane: enumerate secrets/keys/certs (may lack permissions)
-                    vault_url = getattr(props, 'vault_uri', f'https://{vault_name}.vault.azure.net/')
-                    now = datetime.now(timezone.utc)
-                    thirty_days = timedelta(days=30)
-                    secrets_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
-                    keys_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
-                    certs_summary = {'total': 0, 'expired': 0, 'expiring_soon': 0}
-                    secrets_detail = []
-                    keys_detail = []
-                    certs_detail = []
-
-                    try:
-                        sc = SecretClient(vault_url=vault_url, credential=self.credential)
-                        for s in sc.list_properties_of_secrets():
-                            secrets_summary['total'] += 1
-                            if s.expires_on:
-                                if s.expires_on < now:
-                                    secrets_summary['expired'] += 1
-                                elif s.expires_on < now + thirty_days:
-                                    secrets_summary['expiring_soon'] += 1
-                            secrets_detail.append({
-                                'name': s.name,
-                                'enabled': s.enabled,
-                                'expires_on': s.expires_on.isoformat() if s.expires_on else None,
-                                'created_on': s.created_on.isoformat() if s.created_on else None,
-                                'content_type': getattr(s, 'content_type', None),
-                            })
-                    except Exception:
-                        pass
-
-                    try:
-                        kc = KeyClient(vault_url=vault_url, credential=self.credential)
-                        for k in kc.list_properties_of_keys():
-                            keys_summary['total'] += 1
-                            if k.expires_on:
-                                if k.expires_on < now:
-                                    keys_summary['expired'] += 1
-                                elif k.expires_on < now + thirty_days:
-                                    keys_summary['expiring_soon'] += 1
-                            keys_detail.append({
-                                'name': k.name,
-                                'enabled': k.enabled,
-                                'expires_on': k.expires_on.isoformat() if k.expires_on else None,
-                                'created_on': k.created_on.isoformat() if k.created_on else None,
-                                'key_type': str(k.key_type) if getattr(k, 'key_type', None) else None,
-                                'key_size': getattr(k, 'key_size', None),
-                            })
-                    except Exception:
-                        pass
-
-                    try:
-                        cc = CertificateClient(vault_url=vault_url, credential=self.credential)
-                        for c in cc.list_properties_of_certificates():
-                            certs_summary['total'] += 1
-                            if c.expires_on:
-                                if c.expires_on < now:
-                                    certs_summary['expired'] += 1
-                                elif c.expires_on < now + thirty_days:
-                                    certs_summary['expiring_soon'] += 1
-                            certs_detail.append({
-                                'name': c.name,
-                                'enabled': c.enabled,
-                                'expires_on': c.expires_on.isoformat() if c.expires_on else None,
-                                'created_on': c.created_on.isoformat() if c.created_on else None,
-                                'subject': getattr(c, 'subject', None),
-                                'thumbprint': c.thumbprint.hex() if getattr(c, 'thumbprint', None) else None,
-                            })
-                    except Exception:
-                        pass
-
-                    # Build vault data dict for component scoring
-                    kv_data = {
-                        'resource_id': resource_id, 'name': vault_name,
-                        'location': location, 'resource_group': rg,
-                        'subscription_id': sub_id, 'subscription_name': sub_name,
-                        'sku': str(getattr(props, 'sku', {}).name) if getattr(props, 'sku', None) else None,
-                        'soft_delete_enabled': soft_delete,
-                        'soft_delete_retention_days': retention,
-                        'purge_protection': purge_prot,
-                        'enable_rbac_authorization': rbac_auth,
-                        'public_network_access': public_access,
-                        'default_network_action': default_action,
-                        'ip_rules_count': ip_count, 'vnet_rules_count': vnet_count,
-                        'private_endpoint_count': pe_count,
-                        'network_rules': {'ip_count': ip_count, 'vnet_count': vnet_count},
-                        'secrets_total': secrets_summary['total'],
-                        'secrets_expired': secrets_summary['expired'],
-                        'secrets_expiring_soon': secrets_summary['expiring_soon'],
-                        'keys_total': keys_summary['total'],
-                        'keys_expired': keys_summary['expired'],
-                        'keys_expiring_soon': keys_summary['expiring_soon'],
-                        'certs_total': certs_summary['total'],
-                        'certs_expired': certs_summary['expired'],
-                        'certs_expiring_soon': certs_summary['expiring_soon'],
-                        'access_policy_count': ap_count,
-                        'access_policies': access_policies_list,
-                        'secrets_detail': secrets_detail,
-                        'keys_detail': keys_detail,
-                        'certs_detail': certs_detail,
-                        'tags': dict(getattr(vault, 'tags', None) or {}),
-                    }
-
-                    # Component-based scoring
-                    from app.engines.data_security import score_key_vault
-                    risk_score, risk_level, risk_components, critical_overrides, risk_reasons = score_key_vault(kv_data)
-
-                    kv_data['risk_score'] = risk_score
-                    kv_data['risk_level'] = risk_level
-                    kv_data['risk_reasons'] = risk_reasons
-                    kv_data['risk_components'] = risk_components
-                    kv_data['critical_overrides'] = critical_overrides
-                    kv_data['blast_radius_score'] = 0
-                    key_vaults.append(kv_data)
-            except Exception as e:
-                logger.warning("Key Vault discovery failed for %s: %s", sub_name, e)
-                continue
-        return key_vaults
-
-    def _enhance_resources_with_identity_exposure(self, run_id, storage_accounts, key_vaults):
-        """Count privileged identities per resource, enhance scores, persist risk history."""
-        from psycopg2.extras import RealDictCursor as RDC
-        from app.engines.data_security import enhance_risk_with_identity_exposure, compute_blast_radius, extract_findings
-
-        # Build a map of resource_id → privileged identity count from role_assignments
-        cursor = self.db.conn.cursor(cursor_factory=RDC)
-        cursor.execute("""
-            SELECT ra.scope, COUNT(DISTINCT i.id) AS priv_count
-            FROM role_assignments ra
-            JOIN identities i ON i.id = ra.identity_db_id
-            WHERE i.discovery_run_id = %s
-              AND ra.role_name IN ('Owner', 'Contributor', 'User Access Administrator',
-                                   'Key Vault Administrator', 'Key Vault Secrets Officer',
-                                   'Storage Account Contributor', 'Storage Blob Data Owner')
-            GROUP BY ra.scope
-        """, (run_id,))
-        scope_counts = {r['scope']: r['priv_count'] for r in cursor.fetchall()}
-        cursor.close()
-
-        def _count_privileged(resource_id):
-            """Count privileged identities at resource, RG, or subscription scope."""
-            count = scope_counts.get(resource_id, 0)
-            # Also count inherited from parent scopes
-            parts = resource_id.split('/')
-            # subscription scope: /subscriptions/{id}
-            if len(parts) >= 3:
-                sub_scope = '/'.join(parts[:3])
-                count += scope_counts.get(sub_scope, 0)
-            # RG scope: /subscriptions/{id}/resourceGroups/{name}
-            if '/resourceGroups/' in resource_id:
-                rg_scope = resource_id.split('/providers/')[0]
-                count += scope_counts.get(rg_scope, 0)
-            return count
-
-        all_resources = []
-        for sa in storage_accounts:
-            sa['resource_type'] = 'storage_account'
-            all_resources.append(sa)
-        for kv in key_vaults:
-            kv['resource_type'] = 'key_vault'
-            all_resources.append(kv)
-
-        for res in all_resources:
-            rid = res.get('resource_id', '')
-            priv_count = _count_privileged(rid)
-            net_score = res.get('risk_components', {}).get('network_exposure', {}).get('score', 0)
-
-            # Apply identity exposure enhancement
-            base_score = res.get('risk_score', 0)
-            components = dict(res.get('risk_components', {}))
-            adj_score, adj_level, updated_components = enhance_risk_with_identity_exposure(
-                base_score, components, res, priv_count, net_score
-            )
-
-            # Compute blast radius
-            blast = compute_blast_radius(priv_count, 0, net_score)
-
-            res['risk_score'] = adj_score
-            res['risk_level'] = adj_level
-            res['risk_components'] = updated_components
-            res['blast_radius_score'] = blast
-            res['privileged_identity_count'] = priv_count
-            res['network_exposure_score'] = net_score
-
-            enhanced_data = {
-                'risk_score': adj_score,
-                'risk_level': adj_level,
-                'risk_components': updated_components,
-                'critical_overrides': res.get('critical_overrides', []),
-                'blast_radius_score': blast,
-                'privileged_identity_count': priv_count,
-                'dependency_count': 0,
-                'network_exposure_score': net_score,
-            }
-
-            # Persist risk history
-            self.db.save_resource_risk_history(run_id, rid, res.get('resource_type', ''), enhanced_data)
-
-            # Write enhanced scores back to main table so list/detail views are consistent
-            self.db.update_resource_risk_scores(run_id, rid, res.get('resource_type', ''), enhanced_data)
-
-            # Extract and persist queryable findings
-            findings = extract_findings(
-                res.get('resource_type', ''),
-                updated_components,
-                res.get('critical_overrides', []),
-            )
-            if findings:
-                self.db.save_resource_findings(run_id, rid, res.get('resource_type', ''), findings)
-
-        logger.info("Identity exposure enhanced + risk history saved for %s resources", len(all_resources))
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
@@ -5930,26 +5833,35 @@ class AzureDiscoveryEngine:
             # ============================================================
             # 2. Azure RBAC Roles
             # ============================================================
-            for role in identity_roles:
-                role_name = role['role_name'].lower()
-                scope_type = role['scope_type']
+            # V2 exact-match map for RBAC role → risk factor code
+            _V2_RBAC_FACTOR = {
+                'owner': lambda st: "SUBSCRIPTION_OWNER" if st == 'subscription' else "RG_OWNER" if st == 'resource_group' else "RESOURCE_OWNER",
+                'contributor': lambda st: "SUBSCRIPTION_CONTRIBUTOR" if st == 'subscription' else "RG_CONTRIBUTOR" if st == 'resource_group' else "SCOPED_CONTRIBUTOR",
+                'user access administrator': lambda _: "UAA_ROLE",
+                'key vault administrator': lambda _: "KEYVAULT_FULL_ACCESS",
+                'key vault secrets officer': lambda _: "KEYVAULT_FULL_ACCESS",
+                'key vault crypto officer': lambda _: "KEYVAULT_FULL_ACCESS",
+                'storage blob data contributor': lambda _: "SCOPED_DATA_CONTRIBUTOR",
+                'storage blob data owner': lambda _: "SCOPED_DATA_CONTRIBUTOR",
+                'network contributor': lambda _: "NETWORK_CONTRIBUTOR",
+                'virtual machine contributor': lambda _: "VM_CONTRIBUTOR",
+                'sql db contributor': lambda _: "DB_CONTRIBUTOR",
+                'sql server contributor': lambda _: "DB_CONTRIBUTOR",
+                'documentdb account contributor': lambda _: "DB_CONTRIBUTOR",
+            }
 
-                if 'owner' in role_name:
-                    if scope_type == 'subscription':
-                        risk_factors.append(make_factor("SUBSCRIPTION_OWNER", f"rbac:{role['role_name']}@{scope_type}"))
-                    elif scope_type == 'resource_group':
-                        risk_factors.append(make_factor("RG_OWNER", f"rbac:{role['role_name']}@{scope_type}"))
-                    else:
-                        risk_factors.append(make_factor("RESOURCE_OWNER", f"rbac:{role['role_name']}@{scope_type}"))
-                elif 'contributor' in role_name:
-                    if scope_type == 'subscription':
-                        risk_factors.append(make_factor("SUBSCRIPTION_CONTRIBUTOR", f"rbac:{role['role_name']}@{scope_type}"))
-                    elif scope_type == 'resource_group':
-                        risk_factors.append(make_factor("RG_CONTRIBUTOR", f"rbac:{role['role_name']}@{scope_type}"))
-                elif 'user access administrator' in role_name:
-                    risk_factors.append(make_factor("UAA_ROLE", f"rbac:{role['role_name']}@{scope_type}"))
-                elif 'key vault' in role_name and ('administrator' in role_name or 'officer' in role_name):
-                    risk_factors.append(make_factor("KEYVAULT_FULL_ACCESS", f"rbac:{role['role_name']}@{scope_type}"))
+            for role in identity_roles:
+                role_name_lower = role['role_name'].lower().strip()
+                scope_type = role['scope_type']
+                source_label = f"rbac:{role['role_name']}@{scope_type}"
+
+                if role_name_lower in _V2_RBAC_FACTOR:
+                    factor_code = _V2_RBAC_FACTOR[role_name_lower](scope_type)
+                    risk_factors.append(make_factor(factor_code, source_label))
+                elif role_name_lower.endswith('contributor'):
+                    risk_factors.append(make_factor("SCOPED_CONTRIBUTOR", source_label))
+                elif role_name_lower.endswith('owner'):
+                    risk_factors.append(make_factor("RESOURCE_OWNER", source_label))
 
             # ============================================================
             # 3. API Permissions (Graph API)

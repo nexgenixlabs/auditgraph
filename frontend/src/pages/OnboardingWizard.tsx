@@ -414,7 +414,7 @@ export default function OnboardingWizard() {
                 <p className="text-xs text-red-300 mt-1">{testResult.error}</p>
                 <button
                   onClick={() => { setStep(2); setTestResult(null); }}
-                  className="mt-2 text-xs text-red-400 underline hover:text-red-300"
+                  className="mt-2 text-xs text-red-400 hover:text-red-300 hover:opacity-80 cursor-pointer"
                 >
                   Go back and fix credentials
                 </button>

@@ -28,7 +28,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 os.environ.setdefault('FLASK_ENV', 'development')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET must be set by conftest.py pytest_configure or CI env — fail loudly if missing
+JWT_SECRET = os.environ["JWT_SECRET"]
 os.environ.setdefault('DB_HOST', 'localhost')
 os.environ.setdefault('DB_PORT', '5432')
 os.environ.setdefault('DB_NAME', 'auditgraph')
@@ -708,3 +709,188 @@ class TestAssembleLineageVerdict:
         # With federated credential → has_strong_signal = True → not NEEDS_REVIEW
         # Even with no roles, federated gives high confidence
         assert result['recommended_action'] != 'UNUSED' or result['effective_last_used_source'] == 'inferred_federated'
+
+    # ── UNUSED / dependency_impact invariant tests ────────────────────
+
+    def test_unused_never_coexists_with_dependency_impact(self):
+        """INVARIANT: UNUSED verdict must NEVER coexist with dependency_impact entries.
+
+        If an identity has dependent resources, it must be AT_RISK minimum,
+        even if it has no roles and no sign-in. Deleting an identity that
+        other resources depend on would break those workloads.
+        """
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=0,
+            last_sign_in=None,
+            signin_pattern='never_used',
+            dependency_impact_resources=[
+                {'resource_type': 'appservice', 'resource_name': 'billing-api',
+                 'region': 'eastus', 'impact_level': 'high'},
+            ],
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] != 'UNUSED', \
+            'UNUSED must never coexist with dependency_impact entries'
+        assert result['recommended_action'] == 'AT_RISK'
+
+    def test_deps_no_auth_escalates_to_at_risk(self):
+        """Identity with dependents but no auth → AT_RISK (not ORPHANED or UNUSED)."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=0,
+            last_sign_in=None,
+            dependency_impact_resources=[
+                {'resource_type': 'keyvault', 'resource_name': 'prod-secrets',
+                 'region': 'westus2', 'impact_level': 'critical'},
+                {'resource_type': 'storage', 'resource_name': 'data-lake',
+                 'region': 'westus2', 'impact_level': 'high'},
+            ],
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] == 'AT_RISK'
+        assert 'deletion' in result['verdict_action_text'].lower() or \
+               'depend' in result['verdict_action_text'].lower()
+
+    def test_deps_with_roles_no_auth_escalates_to_at_risk(self):
+        """Identity with deps + roles but no auth → AT_RISK takes priority over ORPHANED."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=2,
+            last_sign_in=None,
+            app_registration_object_id='obj-test',
+            app_reg_owner_display_name=None,
+            dependency_impact_resources=[
+                {'resource_type': 'appservice', 'resource_name': 'frontend',
+                 'region': 'eastus', 'impact_level': 'high'},
+            ],
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        # ORPHANED would apply (has_roles, no owner, no auth, no confirmed_signal)
+        # but the deps + no-auth check fires first → AT_RISK
+        assert result['recommended_action'] in ('AT_RISK', 'ORPHANED')
+
+    def test_no_deps_no_roles_no_auth_is_unused(self):
+        """No roles, no auth, no deps → UNUSED (safe to remove)."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=0,
+            last_sign_in=None,
+            dependency_impact_resources=[],
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] == 'UNUSED'
+
+    def test_deps_as_json_string_still_triggers_at_risk(self):
+        """dependency_impact_resources stored as JSON string → still parsed and detected."""
+        import json
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=0,
+            last_sign_in=None,
+            dependency_impact_resources=json.dumps([
+                {'resource_type': 'vm', 'resource_name': 'worker-01',
+                 'region': 'centralus', 'impact_level': 'medium'},
+            ]),
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] != 'UNUSED'
+        assert result['recommended_action'] == 'AT_RISK'
+
+    # ── Workload classification as confirmed signal (FIX 1) ──────────
+
+    def test_audit_connector_workload_prevents_orphaned(self):
+        """audit_connector with high confidence is a confirmed signal — never ORPHANED."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=3,
+            workload_type='audit_connector',
+            workload_confidence=95,
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] != 'ORPHANED', \
+            f"audit_connector should prevent ORPHANED, got {result['recommended_action']}"
+
+    def test_cicd_pipeline_workload_prevents_orphaned(self):
+        """cicd_pipeline with high confidence is a confirmed signal — never ORPHANED."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=2,
+            workload_type='cicd_pipeline',
+            workload_confidence=80,
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] != 'ORPHANED'
+
+    def test_monitoring_agent_workload_prevents_orphaned(self):
+        """monitoring_agent with medium+ confidence prevents ORPHANED."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=1,
+            workload_type='monitoring_agent',
+            workload_confidence=80,
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] != 'ORPHANED'
+
+    def test_discovery_connector_gets_healthy(self):
+        """Self-referential discovery SPN with is_discovery_connector=True → HEALTHY."""
+        engine = _build_engine()
+        identity = _make_identity(
+            is_discovery_connector=True,
+            workload_type='audit_connector',
+            workload_confidence=95,
+            role_count=2,
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] == 'HEALTHY'
+
+    def test_lab_workload_prevents_orphaned(self):
+        """Lab SPN by name pattern gets lab_workload — should NOT be ORPHANED."""
+        engine = _build_engine()
+        identity = _make_identity(
+            display_name='aglab-spnapp1-ut0ohj',
+            workload_type='lab_workload',
+            workload_confidence=65,
+            role_count=1,
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] != 'ORPHANED', \
+            f"lab_workload should prevent ORPHANED, got {result['recommended_action']}"
+
+    def test_low_confidence_workload_does_not_prevent_orphaned(self):
+        """Unknown workload with low confidence does NOT prevent ORPHANED."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=3,
+            workload_type='storage_workload',
+            workload_confidence=30,  # below 60 threshold
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        assert result['recommended_action'] == 'ORPHANED'
+
+    def test_admin_identity_not_in_confirmed_workloads(self):
+        """admin_identity is intentionally excluded from confirmed workload types."""
+        engine = _build_engine()
+        identity = _make_identity(
+            role_count=3,
+            workload_type='admin_identity',
+            workload_confidence=90,
+            owner_count=0,
+            last_sign_in=None,
+        )
+        result = engine._assemble_lineage_verdict(identity)
+        # admin_identity is NOT in _CONFIRMED_WORKLOAD_TYPES, so it should be ORPHANED
+        assert result['recommended_action'] == 'ORPHANED'

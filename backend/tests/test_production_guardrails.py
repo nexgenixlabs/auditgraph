@@ -119,25 +119,20 @@ def test_rate_limit_billing_snapshot():
 
 def test_startup_validation_fails_missing():
     """_validate_startup_secrets raises RuntimeError when secrets are missing."""
+    from unittest.mock import patch
     from app.main import _validate_startup_secrets
 
-    # Simulate production (non-development)
-    old_env = os.environ.get('FLASK_ENV')
-    os.environ['FLASK_ENV'] = 'production'
     # Clear required secrets
     saved = {}
     for key in ['ADMIN_JWT_SECRET', 'CLIENT_JWT_SECRET', 'DB_HOST', 'DB_PASSWORD']:
         saved[key] = os.environ.pop(key, None)
 
     try:
-        with pytest.raises(RuntimeError, match='Missing.*required secret'):
-            _validate_startup_secrets()
+        # IS_DEV is computed at import time from APP_ENV, so patch it directly
+        with patch('app.main.IS_DEV', False):
+            with pytest.raises(RuntimeError, match='Missing.*required secret'):
+                _validate_startup_secrets()
     finally:
-        # Restore environment
-        if old_env is None:
-            os.environ.pop('FLASK_ENV', None)
-        else:
-            os.environ['FLASK_ENV'] = old_env
         for key, val in saved.items():
             if val is not None:
                 os.environ[key] = val

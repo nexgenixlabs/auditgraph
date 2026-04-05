@@ -129,7 +129,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'JWT_SECRET', secretRef: 'jwt-secret' }
             { name: 'ADMIN_JWT_SECRET', secretRef: 'admin-jwt-secret' }
             { name: 'CLIENT_JWT_SECRET', secretRef: 'client-jwt-secret' }
-            { name: 'CORS_ORIGINS', value: corsOrigins }
+            { name: 'ALLOWED_ORIGINS', value: corsOrigins }
             { name: 'ALLOW_DEMO', value: 'true' }
           ]
           probes: [

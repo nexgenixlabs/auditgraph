@@ -16,11 +16,12 @@ export function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
   const triggerScan = useCallback(() => {
     if (scanTriggered) return;
     setScanTriggered(true);
-    const body = selectedConnectionId ? JSON.stringify({ connection_id: selectedConnectionId }) : undefined;
+    const payload: Record<string, unknown> = {};
+    if (selectedConnectionId) payload.connection_id = selectedConnectionId;
     fetch(withConnection('/api/runs/trigger'), {
       method: 'POST',
-      headers: body ? { 'Content-Type': 'application/json' } : {},
-      body,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     })
       .then(r => { if (!r.ok) throw new Error('Failed'); })
       .catch(() => setScanTriggered(false));

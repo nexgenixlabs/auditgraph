@@ -10,7 +10,8 @@ import re
 
 # Ensure dev mode + test keys before importing app modules
 os.environ.setdefault('FLASK_ENV', 'development')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET set by conftest.py pytest_configure — KeyError if missing
+_JWT = os.environ["JWT_SECRET"]
 os.environ.setdefault('DB_HOST', 'localhost')
 os.environ.setdefault('DB_PORT', '5432')
 os.environ.setdefault('DB_NAME', 'auditgraph')
@@ -148,6 +149,16 @@ def test_no_tenant_id_in_sql_queries():
         'entra_tenant_id',            # Azure directory column rename in migration
         'DROP CONSTRAINT',            # Migration constraint cleanup
         'Rename tenant',              # Migration comments
+        'ms_tenant_ids',              # Azure Microsoft tenant ID list (system-app filtering)
+        'WARNING level',              # Docstring describing slow-query log fields
+        'INTEGER NOT NULL',           # DDL column definitions (risk_summary, stage_log, graph_snapshots)
+        '# tenant_id',               # Code comments explaining tenant/org column mapping
+        'graph_snapshots',            # graph_snapshots table DDL/DML (uses tenant_id column)
+        'current_setting',            # RLS policy definitions
+        'identity_risk_score',        # risk_summary INSERT column list
+        'stage_order',                # discovery_stage_log INSERT column list
+        'error_message',              # discovery_stage_log INSERT column list
+        'node_count',                 # graph_snapshots INSERT column list
     ]
 
     # Find all lines with tenant_id

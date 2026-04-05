@@ -439,7 +439,7 @@ export default function AdminTenants() {
         {canWrite && (
           <p className="text-xs text-gray-500">
             To create a new client, use the{' '}
-            <a href="/admin/onboarding" className="text-blue-600 hover:text-blue-700 underline">Onboarding</a> tab.
+            <a href="/admin/onboarding" className="text-blue-600 hover:text-blue-700 hover:opacity-80">Onboarding</a> tab.
           </p>
         )}
       </div>

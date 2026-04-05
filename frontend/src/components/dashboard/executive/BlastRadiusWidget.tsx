@@ -108,7 +108,10 @@ export function BlastRadiusWidget({ identities, blastRadius, subscriptionCount }
           return (
             <div
               key={id.id}
-              onClick={() => drawerCtx?.openIdentity(id.id)}
+              onClick={() => drawerCtx?.openIdentity(id.identity_id || id.id, {
+                display_name: id.display_name,
+                identity_category: id.identity_category,
+              })}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
                 padding: '10px', borderRadius: 6, cursor: 'pointer',
@@ -139,7 +142,6 @@ export function BlastRadiusWidget({ identities, blastRadius, subscriptionCount }
                   <span style={{
                     fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui,
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    textDecoration: 'underline', textDecorationStyle: 'dashed' as const, textUnderlineOffset: '3px',
                   }}>
                     {shortName}
                   </span>

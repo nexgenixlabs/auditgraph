@@ -43,10 +43,7 @@ export default function Signup() {
         return;
       }
 
-      // Store tokens and set user context
-      localStorage.setItem('access_token', data.access_token);
-      localStorage.setItem('refresh_token', data.refresh_token);
-
+      // Phase S1: Cookies set by server response — no localStorage needed
       // Log in the user (use the auth context)
       await login(email.trim().toLowerCase(), password);
 
@@ -196,9 +193,9 @@ export default function Signup() {
           {/* Terms */}
           <p className="mt-4 text-center text-[11px] text-slate-600">
             By signing up, you agree to the{' '}
-            <Link to="/terms" className="text-slate-500 hover:text-slate-400 underline">Terms of Service</Link>
+            <Link to="/terms" className="text-slate-500 hover:text-slate-400 hover:opacity-80">Terms of Service</Link>
             {' '}and{' '}
-            <Link to="/privacy" className="text-slate-500 hover:text-slate-400 underline">Privacy Policy</Link>
+            <Link to="/privacy" className="text-slate-500 hover:text-slate-400 hover:opacity-80">Privacy Policy</Link>
           </p>
         </div>
       </div>

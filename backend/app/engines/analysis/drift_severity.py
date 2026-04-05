@@ -4,30 +4,32 @@ DriftSeverityEngine — Rule-based severity classifier for drift events.
 Inspects each event's event_type and details to override the default severity
 when a more specific rule applies. Only upgrades severity, never downgrades.
 """
+from __future__ import annotations
 
 import logging
+from app.constants.roles import EntraRole, RBACRole, _lower
 
 logger = logging.getLogger(__name__)
 
 SEVERITY_RANK = {'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
 
 # Roles that always warrant critical severity when assigned
-CRITICAL_ROLES = {
-    'global administrator', 'company administrator',
-    'privileged role administrator', 'security administrator',
-}
+CRITICAL_ROLES = _lower(frozenset({
+    EntraRole.GLOBAL_ADMIN, EntraRole.COMPANY_ADMIN,
+    EntraRole.PRIVILEGED_ROLE_ADMIN, EntraRole.SECURITY_ADMIN,
+}))
 
 # Key Vault access roles that warrant critical severity
-KEY_VAULT_CRITICAL_ROLES = {
-    'key vault secrets officer', 'key vault secrets user',
-    'key vault administrator', 'key vault crypto officer',
-    'key vault certificates officer',
-}
+KEY_VAULT_CRITICAL_ROLES = _lower(frozenset({
+    RBACRole.KEY_VAULT_SECRETS_OFFICER, RBACRole.KEY_VAULT_SECRETS_USER,
+    RBACRole.KEY_VAULT_ADMIN, RBACRole.KEY_VAULT_CRYPTO_OFFICER,
+    RBACRole.KEY_VAULT_CERTS_OFFICER,
+}))
 
 # Roles that warrant high severity when assigned
-HIGH_ROLES = {
-    'contributor', 'user access administrator',
-}
+HIGH_ROLES = _lower(frozenset({
+    RBACRole.CONTRIBUTOR, RBACRole.USER_ACCESS_ADMIN,
+}))
 
 
 def _role_names_lower(details: dict, key: str) -> list:

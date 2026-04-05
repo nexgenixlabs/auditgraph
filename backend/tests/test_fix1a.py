@@ -74,27 +74,6 @@ def test_rbac_hygiene_combined_handler_exists():
     assert 'tier_distribution' in source
 
 
-# ── STEP 5: Sensitive Access (Data Security) ────────────────────────────────
-
-def test_data_security_base_endpoint_exists():
-    """GET /api/data-security base endpoint is registered."""
-    import app.main
-    source = inspect.getsource(app.main)
-    assert '"/api/data-security"' in source or "'/api/data-security'" in source
-
-
-def test_data_security_combined_handler_exists():
-    """get_data_security_combined handler returns SecurityData shape."""
-    import app.api.handlers
-    source = inspect.getsource(app.api.handlers.get_data_security_combined)
-    assert 'overall_score' in source
-    assert 'overall_grade' in source
-    assert 'total_resources' in source
-    assert 'components' in source
-    assert 'risk_distribution' in source
-    assert 'findings' in source
-
-
 # ── STEP 6: Billing Visibility ──────────────────────────────────────────────
 
 def test_billing_history_endpoint_exists():
@@ -155,7 +134,7 @@ def test_latest_run_ids_used_consistently():
     import app.api.handlers
     # Check key endpoints all call _latest_run_ids
     for fn_name in ['get_stats', 'get_dashboard_posture', 'get_identity_summary',
-                     'get_data_security_combined', 'get_sa_governance_stats']:
+                     'get_sa_governance_stats']:
         fn = getattr(app.api.handlers, fn_name)
         source = inspect.getsource(fn)
         assert '_latest_run_ids' in source, f'{fn_name} does not use _latest_run_ids'

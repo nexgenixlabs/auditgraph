@@ -17,19 +17,30 @@ import { FONT } from './ciso-shared';
 // ─── Filter label mapping ────────────────────────────────────────
 
 const FILTER_LABELS: Record<string, string> = {
+  // Canonical metric drill-downs (exact dashboard count match)
+  'metric=dormant': 'Dormant Identities',
+  'metric=ghost': 'Ghost Accounts',
+  'metric=unowned_nhi': 'Unowned Service Principals',
+  'metric=privileged': 'Privileged Identities',
+  'metric=high_risk': 'High Risk Identities',
+  'metric=critical': 'Critical Identities',
+  'metric=credential_expired': 'Expired Credentials',
+  // Pillar filters
   'pillar=effective-privilege': 'Effective Privilege Risk',
   'pillar=credential-risk': 'Credential Exposure',
   'pillar=credential-hygiene': 'Credential Hygiene',
   'pillar=external-exposure': 'External Exposure',
   'pillar=dormant-risk': 'Dormant Risk',
   'pillar=compliance-alignment': 'Compliance Alignment',
+  // Ad-hoc filters
   'risk_level=critical': 'Critical Risk Identities',
   'risk_level=high': 'High Risk Identities',
   'risk_level=medium': 'Medium Risk Identities',
+  'risk_level=low': 'Low Risk Identities',
   'privilege_tier=0': 'T0 Administrators',
   'privilege_tier=0,1': 'T0/T1 Privileged',
   'activity_status=dormant': 'Dormant Identities',
-  'activity_status=stale': 'Dormant Privileged Identities',
+  'activity_status=stale': 'Stale Identities',
   'identity_category=guest': 'Guest Identities',
   'identity_category=service_principal': 'Service Principals',
   'identity_category=human_user': 'Human Users',
@@ -40,6 +51,9 @@ const FILTER_LABELS: Record<string, string> = {
 
 // Maps filter query params to risk driver labels for drawer context header
 const DRIVER_LABELS: Record<string, string> = {
+  'metric=dormant': 'Dormant Privileged',
+  'metric=ghost': 'Ghost Accounts',
+  'metric=unowned_nhi': 'Unowned SPNs',
   'activity_status=stale': 'Dormant Privileged',
   'pillar=effective-privilege': 'Over-Privileged',
   'pillar=credential-risk': 'Credential Exposure',
@@ -164,10 +178,12 @@ export function IdentityContextDrawer() {
   const [detail, setDetail] = useState<IdentityDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   const open = ctx?.state.open ?? false;
   const filterUrl = ctx?.state.filterUrl ?? null;
   const selectedIdentityId = ctx?.state.selectedIdentityId ?? null;
+  const prefill = ctx?.state.prefill ?? null;
   const closeDrawer = ctx?.closeDrawer ?? (() => {});
   const selectIdentity = ctx?.selectIdentity ?? (() => {});
   const backToList = ctx?.backToList ?? (() => {});
@@ -206,21 +222,35 @@ export function IdentityContextDrawer() {
 
   // ─── Fetch identity detail when selected ─────────────────────
   useEffect(() => {
-    if (!selectedIdentityId) { setDetail(null); return; }
+    if (!selectedIdentityId) { setDetail(null); setDetailError(null); return; }
     setDetailLoading(true);
+    setDetailError(null);
+    // Show prefill immediately so name/type are visible while loading
+    setDetail(prefill ? { identity_id: String(selectedIdentityId), ...prefill } as unknown as IdentityDetail : null);
 
     // Find the identity_id (string) from the list
     const match = identities.find(i => (i.db_id ?? 0) === selectedIdentityId || i.identity_id === String(selectedIdentityId));
     const idParam = match?.identity_id || String(selectedIdentityId);
 
     fetch(withConnection(`/api/identities/${encodeURIComponent(idParam)}`))
-      .then(r => r.ok ? r.json() : null)
+      .then(r => {
+        if (r.status === 404) throw new Error('Identity not found. It may have been deleted or is not in this snapshot.');
+        if (!r.ok) throw new Error('Failed to load identity details.');
+        return r.json();
+      })
       .then(data => {
-        setDetail(data);
+        // Merge: API response wins, but prefill fills any blank fields
+        const merged = prefill ? {
+          ...data,
+          display_name: data.display_name || prefill.display_name || '',
+          identity_category: data.identity_category || prefill.identity_category || '',
+        } : data;
+        setDetail(merged);
         setDetailLoading(false);
       })
-      .catch(() => {
+      .catch((err) => {
         setDetail(null);
+        setDetailError(err?.message || 'Failed to load identity. Please try again.');
         setDetailLoading(false);
       });
   }, [selectedIdentityId, withConnection, identities]);
@@ -254,11 +284,12 @@ export function IdentityContextDrawer() {
         boxShadow: '-8px 0 32px rgba(0,0,0,0.3)',
         animation: 'identityDrawerSlideIn 0.25s ease',
       }}>
-        {selectedIdentityId && detail
+        {selectedIdentityId
           ? <DetailView
               detail={detail}
               loading={detailLoading}
-              onBack={backToList}
+              error={detailError}
+              onBack={filterUrl ? backToList : closeDrawer}
               onClose={closeDrawer}
               onOpenFull={(id) => { closeDrawer(); navigate(`/identities/${encodeURIComponent(id)}`); }}
               onNavigate={(path) => { closeDrawer(); navigate(path); }}
@@ -267,7 +298,7 @@ export function IdentityContextDrawer() {
               filterUrl={filterUrl || ''}
               identities={identities}
               loading={loading}
-              onSelect={(row) => selectIdentity(row.db_id ?? parseInt(row.identity_id, 10))}
+              onSelect={(row) => selectIdentity(row.db_id ?? row.identity_id)}
               onClose={closeDrawer}
               onOpenFullPage={() => { closeDrawer(); navigate(filterUrl || '/identities'); }}
             />
@@ -1380,15 +1411,16 @@ function RecentRiskChanges({ detail }: { detail: IdentityDetail }) {
 
 // ─── Detail View ─────────────────────────────────────────────────
 
-function DetailView({ detail, loading, onBack, onClose, onOpenFull, onNavigate }: {
-  detail: IdentityDetail;
+function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNavigate }: {
+  detail: IdentityDetail | null;
   loading: boolean;
+  error: string | null;
   onBack: () => void;
   onClose: () => void;
   onOpenFull: (identityId: string) => void;
   onNavigate: (path: string) => void;
 }) {
-  if (loading || !detail) {
+  if (loading && !detail) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1 }}>
         <div style={{
@@ -1396,6 +1428,38 @@ function DetailView({ detail, loading, onBack, onClose, onOpenFull, onNavigate }
           border: `3px solid ${COLORS.border}`, borderTopColor: COLORS.accent,
           animation: 'spin 1s linear infinite',
         }} />
+      </div>
+    );
+  }
+
+  if (error || !detail) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: 24, gap: 16 }}>
+        <div style={{ fontSize: 13, color: COLORS.textSecondary, fontFamily: FONT.ui, textAlign: 'center', maxWidth: 280 }}>
+          {error || 'Identity not found.'}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={onBack}
+            style={{
+              padding: '6px 16px', borderRadius: 6, fontSize: 12, fontWeight: 600, fontFamily: FONT.ui,
+              background: COLORS.accent + '18', border: `1px solid ${COLORS.accent}44`,
+              color: COLORS.accent, cursor: 'pointer',
+            }}
+          >
+            Back
+          </button>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '6px 16px', borderRadius: 6, fontSize: 12, fontWeight: 600, fontFamily: FONT.ui,
+              background: 'none', border: `1px solid ${COLORS.border}`,
+              color: COLORS.textSecondary, cursor: 'pointer',
+            }}
+          >
+            Close
+          </button>
+        </div>
       </div>
     );
   }

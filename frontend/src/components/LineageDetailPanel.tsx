@@ -2,13 +2,28 @@ import React, { useEffect, useState } from 'react';
 import { useConnection } from '../contexts/ConnectionContext';
 
 /* ────────────────────────────────────────────────────────────────────────────
- * LineageDetailPanel — Verdict-first identity lineage slide-out panel
+ * LineageDetailPanel — Redesigned identity lineage slide-out panel
  *
- * Fetches from GET /api/identities/{id}/lineage (unified endpoint).
- * Shows: Verdict header, Origin, Evidence signals, App Registration,
- * Connection Source, Sign-in Activity, Dependency Impact, Risk Flags,
- * Recommended Action.
+ * 320px right drawer with strict information hierarchy:
+ * 1. Identity Header  2. Verdict Bar  3. Verdict Detail (collapsible)
+ * 4. Auth History  5. Role Bindings  6. Ownership  7. Workload Origin
+ * 8. Dependency Impact  9. Analysis (collapsible)  10. Footer
+ *
+ * Brand colors: Navy #15306A, Teal #24A2A1, Orange #FF7216
  * ──────────────────────────────────────────────────────────────────────────── */
+
+// ── Brand palette ────────────────────────────────────────────────────────────
+
+const BRAND = {
+  navy:      '#15306A',
+  navyLight: '#1e407a',
+  teal:      '#24A2A1',
+  tealLight: '#2fb8b7',
+  orange:    '#FF7216',
+  orangeLight: '#ff8c3f',
+} as const;
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 interface Props {
   identity: { identity_id: string; display_name: string };
@@ -16,17 +31,26 @@ interface Props {
   onBackToDetail?: () => void;
 }
 
-// Unified lineage response subset needed by this panel
 interface LineageSignal {
-  type: 'ARM' | 'FEDERATED' | 'HEURISTIC' | 'ROLE' | 'SIGNIN' | 'OWNER' | 'OBSERVED' | 'INFERRED';
+  type: 'ARM' | 'FEDERATED' | 'HEURISTIC' | 'ROLE' | 'SIGNIN' | 'OWNER' | 'OBSERVED' | 'INFERRED' | 'API' | 'PROVENANCE' | 'PLATFORM' | 'ALERT';
   label: string;
   value: string;
   confidence: 'high' | 'medium' | 'low';
 }
 
+interface RoleAssignment {
+  role_name: string;
+  scope: string;
+  scope_type?: string;
+  resource_type?: string;
+  resource_name?: string;
+}
+
 interface LineageResponse {
   identity_id: string;
   display_name: string;
+  identity_category?: string;
+  cloud?: string;
   workload_origin: {
     origin: string;
     source: string;
@@ -42,7 +66,7 @@ interface LineageResponse {
   };
   dependency_impact: {
     level: string;
-    resources: Array<{ resource_name: string; resource_type: string; impact_level: string }>;
+    resources: Array<{ resource_name: string; resource_type: string; impact_level: string; region?: string }>;
     statement: string;
     total_bound: number;
   };
@@ -53,6 +77,12 @@ interface LineageResponse {
     risk_summary: string[];
     active_role_count: number;
   };
+  role_topology?: {
+    workload_type: string;
+    workload_confidence: number;
+    role_pattern_matched?: string;
+    role_assignments: RoleAssignment[];
+  } | null;
   app_registration: {
     object_id: string | null;
     display_name: string;
@@ -70,72 +100,120 @@ interface LineageResponse {
     pattern: string;
     dormancy_days: number;
     last_sign_in: string | null;
+    last_delegated?: string | null;
+    last_noninteractive?: string | null;
+    observed_last_used?: string | null;
   } | null;
-  // Effective last used (MAX of observed + Azure sign-in)
   effective_last_used?: string | null;
   effective_last_used_source?: 'auditgraph' | 'azure_signin' | 'inferred_federated' | null;
-  // Human-readable lineage (executive display)
+  auth_history?: Array<{
+    signed_in_at: string | null;
+    ip_address: string | null;
+    location: string | null;
+    app_used: string | null;
+  }>;
+  last_signin_at?: string | null;
+  last_signin_ip?: string | null;
+  auth_source?: 'entra_signin_log' | 'aad_audit' | 'static_analysis_only';
+  signal_conflicts?: Array<{
+    conflict_type: string;
+    description: string;
+    severity: 'critical' | 'warning' | 'info';
+    resolution: string;
+  }>;
   lineage_signals?: LineageSignal[];
   lineage_narrative?: string;
   lineage_warnings?: string[];
 }
 
-// ── Verdict badge config ─────────────────────────────────────────────────────
+// ── Verdict configuration ────────────────────────────────────────────────────
 
-const VERDICT_BADGE: Record<string, { label: string; cls: string; icon: string }> = {
-  ORPHANED:                { label: 'Orphaned',                cls: 'bg-red-100 text-red-700',       icon: '\u26a0\ufe0f' },
-  GHOST_MSI:               { label: 'Ghost MSI',               cls: 'bg-purple-100 text-purple-700', icon: '\ud83d\udc7b' },
-  FEDERATED_MISCONFIGURED: { label: 'Federated Misconfigured', cls: 'bg-orange-100 text-orange-700', icon: '\ud83d\udd17' },
-  AT_RISK:                 { label: 'At Risk',                 cls: 'bg-amber-100 text-amber-700',   icon: '\u26a0' },
-  STALE:                   { label: 'Stale',                   cls: 'bg-amber-100 text-amber-700',   icon: '\u23f3' },
-  UNUSED:                  { label: 'Unused',                  cls: 'bg-gray-100 text-gray-600',     icon: '\u2013' },
-  NEEDS_REVIEW:            { label: 'Needs Review',            cls: 'bg-blue-100 text-blue-700',     icon: '\ud83d\udd0d' },
-  HEALTHY:                 { label: 'Healthy',                 cls: 'bg-green-100 text-green-700',   icon: '\u2713' },
+type VerdictKey = 'ORPHANED' | 'GHOST_MSI' | 'FEDERATED_MISCONFIGURED' | 'PAT_GOVERNANCE_RISK' | 'AT_RISK' | 'STALE' | 'UNUSED' | 'NEEDS_REVIEW' | 'HEALTHY';
+
+const VERDICT_CONFIG: Record<string, { label: string; pillBg: string; pillText: string; group: 'red' | 'amber' | 'green' | 'blue' | 'purple' }> = {
+  ORPHANED:                { label: 'Orphaned',                pillBg: '#fde8e8', pillText: '#b91c1c', group: 'red' },
+  GHOST_MSI:               { label: 'Ghost MSI',               pillBg: '#f3e8ff', pillText: '#7c3aed', group: 'purple' },
+  FEDERATED_MISCONFIGURED: { label: 'Federated Misconfigured', pillBg: '#fff3e0', pillText: '#c2410c', group: 'amber' },
+  PAT_GOVERNANCE_RISK:     { label: 'PAT Governance Risk',     pillBg: '#fff3e0', pillText: '#c2410c', group: 'amber' },
+  AT_RISK:                 { label: 'At Risk',                 pillBg: '#fde8e8', pillText: '#b91c1c', group: 'red' },
+  STALE:                   { label: 'Stale',                   pillBg: '#fff3e0', pillText: '#92400e', group: 'amber' },
+  UNUSED:                  { label: 'Unused',                  pillBg: '#fff3e0', pillText: '#92400e', group: 'amber' },
+  NEEDS_REVIEW:            { label: 'Needs Review',            pillBg: '#dbeafe', pillText: '#1e40af', group: 'blue' },
+  HEALTHY:                 { label: 'Healthy',                 pillBg: '#dcfce7', pillText: '#166534', group: 'green' },
 };
 
-const CONFIDENCE_DOT: Record<string, string> = {
-  high:   'bg-green-500',
-  medium: 'bg-amber-500',
-  low:    'bg-red-400',
-};
+const CONFIDENCE_DOT: Record<string, string> = { high: '#22c55e', medium: '#f59e0b', low: '#ef4444' };
 
-const SIGNAL_TYPE_BADGE: Record<string, { icon: string; cls: string }> = {
-  ARM:       { icon: '\u2693',   cls: 'bg-blue-100 text-blue-700 border-blue-300' },
-  FEDERATED: { icon: '\ud83d\udd17', cls: 'bg-purple-100 text-purple-700 border-purple-300' },
-  HEURISTIC: { icon: '\ud83d\udd0d', cls: 'bg-indigo-100 text-indigo-700 border-indigo-300' },
-  ROLE:      { icon: '\ud83d\udee1\ufe0f', cls: 'bg-teal-100 text-teal-700 border-teal-300' },
-  SIGNIN:    { icon: '\ud83d\udcca', cls: 'bg-green-100 text-green-700 border-green-300' },
-  OWNER:     { icon: '\ud83d\udc64', cls: 'bg-gray-100 text-gray-600 border-gray-300' },
-  OBSERVED:  { icon: '\ud83d\udccd', cls: 'bg-emerald-100 text-emerald-700 border-emerald-300' },
-  INFERRED:  { icon: '\u2728', cls: 'bg-purple-100 text-purple-700 border-purple-300' },
-};
+// ── Signal flag descriptions ─────────────────────────────────────────────────
 
-const CONFIDENCE_LABEL: Record<string, { cls: string }> = {
-  high:   { cls: 'text-green-600' },
-  medium: { cls: 'text-amber-600' },
-  low:    { cls: 'text-gray-400' },
-};
-
-const SIGNIN_BADGE: Record<string, { label: string; cls: string }> = {
-  machine_only:                { label: 'Machine Only',                cls: 'bg-blue-100 text-blue-700' },
-  human_delegated_only:        { label: 'Human Delegated Only',        cls: 'bg-green-100 text-green-700' },
-  hybrid_concurrent:           { label: 'Hybrid Concurrent',           cls: 'bg-red-100 text-red-700' },
-  hybrid_delegated_recent:     { label: 'Hybrid — Delegated Recent',   cls: 'bg-amber-100 text-amber-700' },
-  hybrid_noninteractive_recent:{ label: 'Hybrid — Non-Interactive Recent', cls: 'bg-purple-100 text-purple-700' },
+const SIGNAL_FLAG_DESC: Record<string, string> = {
+  never_authenticated:     'no sign-in ever recorded',
+  has_active_roles:        'permissions exist without confirmed use',
+  shared_identity:         'identity may be shared across teams',
+  shared_credential:       'credential shared across services',
+  has_dependents:          'resources depend on this identity',
+  deletion_risk:           'deletion could break workloads',
+  no_permissions:          'no role assignments found',
+  no_dependents:           'no dependent resources detected',
+  workload_confirmed:      'confirmed workload binding',
+  authenticated:           'sign-in activity recorded',
+  has_roles:               'active role assignments present',
+  last_auth_stale:         'authentication data is stale',
+  no_confirmed_use:        'no evidence of active usage',
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function formatDate(iso: string): string {
-  try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); }
-  catch { return iso; }
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '\u2014';
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch {
+    return iso;
+  }
 }
 
-function Row({ label, value, valueClass }: { label: string; value: React.ReactNode; valueClass?: string }) {
+function fmtDateShort(iso: string | null | undefined): string {
+  if (!iso) return '\u2014';
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch {
+    return iso;
+  }
+}
+
+function extractSubscriptionName(roles: RoleAssignment[]): string | null {
+  for (const r of roles) {
+    const scope = r.scope || '';
+    const match = scope.match(/\/subscriptions\/([^/]+)/);
+    if (match) {
+      const subId = match[1];
+      return r.resource_name || subId.substring(0, 12) + '...';
+    }
+  }
+  return null;
+}
+
+// ── Collapsible section ──────────────────────────────────────────────────────
+
+function Section({ title, defaultOpen = false, children, titleStyle }: {
+  title: string; defaultOpen?: boolean; children: React.ReactNode; titleStyle?: React.CSSProperties;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="flex justify-between">
-      <span className="text-gray-500 text-xs">{label}</span>
-      <span className={`text-xs font-medium truncate max-w-[220px] ${valueClass || 'text-gray-700'}`}>{value}</span>
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between py-1.5 group"
+      >
+        <span className="text-[10px] font-bold uppercase tracking-wider" style={titleStyle || { color: '#6b7280' }}>
+          {title}
+        </span>
+        <span className="text-[10px] text-gray-400 group-hover:text-gray-600 transition-colors">
+          {open ? '\u25B2' : '\u25BC'}
+        </span>
+      </button>
+      {open && <div className="mt-1">{children}</div>}
     </div>
   );
 }
@@ -146,15 +224,14 @@ export default function LineageDetailPanel({ identity: identityProp, onClose, on
   const { withConnection } = useConnection();
   const [data, setData] = useState<LineageResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [rolesExpanded, setRolesExpanded] = useState(false);
 
-  // ESC to close
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  // Fetch from unified lineage endpoint
   useEffect(() => {
     if (!identityProp.identity_id) return;
     setLoading(true);
@@ -166,27 +243,33 @@ export default function LineageDetailPanel({ identity: identityProp, onClose, on
     return () => abort.abort();
   }, [identityProp.identity_id, withConnection]);
 
-  // Loading state
+  // ── Loading ────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="fixed inset-0 z-50 flex justify-end">
         <div className="absolute inset-0 bg-black/20" onClick={onClose} />
-        <div className="relative w-[420px] bg-white shadow-2xl border-l border-gray-200 flex items-center justify-center">
-          <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full" />
+        <div className="relative w-80 bg-white shadow-2xl border-l flex items-center justify-center"
+             style={{ borderColor: '#e5e7eb' }}>
+          <div className="animate-spin h-5 w-5 rounded-full border-2 border-t-transparent"
+               style={{ borderColor: BRAND.teal, borderTopColor: 'transparent' }} />
         </div>
       </div>
     );
   }
 
-  // Fallback if fetch failed
+  // ── Error fallback ─────────────────────────────────────────────────────
   if (!data) {
     return (
       <div className="fixed inset-0 z-50 flex justify-end">
         <div className="absolute inset-0 bg-black/20" onClick={onClose} />
-        <div className="relative w-[420px] bg-white shadow-2xl border-l border-gray-200 flex flex-col">
-          <div className="px-5 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
-            <h3 className="text-sm font-bold text-gray-900">{identityProp.display_name}</h3>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg font-bold p-1">{'\u00d7'}</button>
+        <div className="relative w-80 bg-white shadow-2xl border-l flex flex-col"
+             style={{ borderColor: '#e5e7eb' }}>
+          <div className="px-4 py-3 flex justify-between items-center"
+               style={{ background: BRAND.navy }}>
+            <span className="text-xs font-semibold text-white truncate max-w-[220px]">
+              {identityProp.display_name}
+            </span>
+            <button onClick={onClose} className="text-white/60 hover:text-white text-sm font-bold p-0.5">{'\u00d7'}</button>
           </div>
           <div className="flex-1 flex items-center justify-center">
             <p className="text-xs text-gray-400">No lineage data available.</p>
@@ -196,282 +279,371 @@ export default function LineageDetailPanel({ identity: identityProp, onClose, on
     );
   }
 
-  const action = data.recommended_action.action || 'NEEDS_REVIEW';
-  const badge = VERDICT_BADGE[action] || VERDICT_BADGE.NEEDS_REVIEW;
+  // ── Derived state ──────────────────────────────────────────────────────
+  const rawAction = data.recommended_action.action || 'NEEDS_REVIEW';
+  const depResources = data.dependency_impact.resources || [];
+  const hasDeps = depResources.length > 0;
+
+  // CRITICAL: if verdict is UNUSED but deps exist, override to AT_RISK
+  const hasConflict = rawAction === 'UNUSED' && hasDeps;
+  const action = hasConflict ? 'AT_RISK' : rawAction;
+  const verdict = VERDICT_CONFIG[action] || VERDICT_CONFIG.NEEDS_REVIEW;
+
   const confidence = data.confidence.level || 'low';
   const score = data.confidence.score ?? 0;
   const riskSummary = data.recommended_action.risk_summary || [];
+  const roleAssignments = data.role_topology?.role_assignments || [];
   const appReg = data.app_registration;
-  const lineageSignals = data.lineage_signals || [];
+  const owners = appReg?.owners || [];
   const lineageNarrative = data.lineage_narrative || '';
-  const lineageWarnings = data.lineage_warnings || [];
+  const authHistory = (data.auth_history || []).slice(0, 3);
+  const signalConflicts = data.signal_conflicts || [];
+  const subscriptionName = extractSubscriptionName(roleAssignments);
+
+  // Score bar color
+  const scoreBarColor = score >= 60 ? '#22c55e' : score >= 30 ? '#f59e0b' : '#ef4444';
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/20" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/25" onClick={onClose} />
 
       {/* Panel */}
-      <div className="relative w-[440px] bg-white shadow-2xl border-l border-gray-200 flex flex-col animate-slide-in-right overflow-y-auto">
+      <div className="relative w-80 bg-white shadow-2xl border-l flex flex-col animate-slide-in-right"
+           style={{ borderColor: '#e2e5ea' }}>
 
-        {/* ── Header: AuditGraph Identity Lineage ─────────────────── */}
-        <div className="px-5 py-4 border-b border-gray-200 bg-gradient-to-r from-gray-50 to-white shrink-0">
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center gap-2">
+        {/* ─── S1: IDENTITY HEADER ─────────────────────────────────── */}
+        <div className="shrink-0 px-4 py-3" style={{ background: `linear-gradient(135deg, ${BRAND.navy}, ${BRAND.navyLight})` }}>
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
               {onBackToDetail && (
-                <button onClick={onBackToDetail} className="text-gray-400 hover:text-blue-600 text-xs mr-1" title="Back to detail">
-                  {'\u2190'}
+                <button onClick={onBackToDetail}
+                  className="text-white/50 hover:text-white text-[10px] mb-1 flex items-center gap-1">
+                  {'\u2190'} Back
                 </button>
               )}
-              <div>
-                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">AuditGraph Identity Lineage</div>
-                <h3 className="text-sm font-bold text-gray-900 mt-0.5 truncate max-w-[320px]">{data.display_name}</h3>
-              </div>
+              <h3 className="text-sm font-bold text-white truncate" title={data.display_name}>
+                {data.display_name}
+              </h3>
+              <p className="text-[9px] font-mono text-white/40 mt-0.5 truncate" title={data.identity_id}>
+                {data.identity_id}
+              </p>
+              {!!subscriptionName && (
+                <span className="inline-block mt-1.5 px-2 py-0.5 rounded text-[9px] font-semibold text-white/90"
+                      style={{ background: 'rgba(255,255,255,0.15)' }}>
+                  {subscriptionName}
+                </span>
+              )}
             </div>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg font-bold p-1">{'\u00d7'}</button>
-          </div>
-
-          {/* Verdict badge + confidence + score */}
-          <div className="flex items-center gap-2 mt-2">
-            <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${badge.cls}`}>
-              <span>{badge.icon}</span> {badge.label}
-            </span>
-            <span className="flex items-center gap-1 text-[10px] text-gray-500">
-              <span className={`inline-block w-2 h-2 rounded-full ${CONFIDENCE_DOT[confidence] || CONFIDENCE_DOT.low}`} />
-              {confidence} confidence
-            </span>
-            <span className="text-[10px] font-bold text-gray-500 ml-auto">{score}/100</span>
-          </div>
-          <div className="mt-1.5 w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all ${score >= 60 ? 'bg-green-500' : score >= 30 ? 'bg-amber-500' : 'bg-red-400'}`}
-              style={{ width: `${score}%` }}
-            />
+            <button onClick={onClose}
+              className="text-white/50 hover:text-white text-base font-bold p-0.5 shrink-0 leading-none mt-0.5">
+              {'\u00d7'}
+            </button>
           </div>
         </div>
 
-        <div className="px-5 py-4 space-y-4 text-sm">
+        {/* ─── S2: VERDICT BAR ──────────────────────────────────────── */}
+        <div className="shrink-0 px-4 py-2.5 border-b" style={{ borderColor: '#e5e7eb' }}>
+          <div className="flex items-center gap-2">
+            {/* Verdict pill */}
+            <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold"
+                  style={{ background: verdict.pillBg, color: verdict.pillText }}>
+              {verdict.label}
+            </span>
+            {/* Confidence */}
+            <span className="flex items-center gap-1 text-[10px] text-gray-500">
+              <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: CONFIDENCE_DOT[confidence] || CONFIDENCE_DOT.low }} />
+              {confidence}
+            </span>
+            {/* Score */}
+            <span className="ml-auto text-[10px] font-bold" style={{ color: BRAND.navy }}>{score}/100</span>
+          </div>
+          {/* Score progress bar */}
+          <div className="mt-1.5 w-full h-1 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-500" style={{ width: `${score}%`, background: scoreBarColor }} />
+          </div>
+        </div>
 
-          {/* ── Section 1: Lineage Signals (CRITICAL — top of panel) ── */}
-          {lineageSignals.length > 0 && (
-            <div>
-              <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Lineage Signals</div>
-              <div className="space-y-2">
-                {lineageSignals.map((sig, idx) => {
-                  const typeBadge = SIGNAL_TYPE_BADGE[sig.type] || SIGNAL_TYPE_BADGE.ROLE;
-                  const confLabel = CONFIDENCE_LABEL[sig.confidence] || CONFIDENCE_LABEL.low;
-                  return (
-                    <div key={idx} className={`flex items-start gap-2.5 px-3 py-2 rounded-lg border ${typeBadge.cls}`}>
-                      <span className="text-sm mt-0.5 flex-shrink-0">{typeBadge.icon}</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[10px] font-bold uppercase tracking-wide">{sig.label}:</span>
-                          <span className={`text-[9px] font-medium ${confLabel.cls}`}>{sig.confidence}</span>
-                        </div>
-                        <div className="text-xs text-gray-700 mt-0.5 leading-relaxed" title={sig.value}>
-                          {sig.value}
+        {/* ─── SCROLLABLE BODY ──────────────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="px-4 py-3 space-y-3 text-xs">
+
+            {/* ─── S3: VERDICT DETAIL (collapsible, open by default) ── */}
+            <Section title="Verdict Detail" defaultOpen={true} titleStyle={{ color: BRAND.navy }}>
+              {/* Action text */}
+              <p className="text-[11px] text-gray-700 leading-relaxed mb-2">
+                {data.recommended_action.action_text}
+              </p>
+
+              {/* Signal conflicts (from backend conflict detection) */}
+              {signalConflicts.length > 0 && (
+                <div className="space-y-1.5 mb-2">
+                  {signalConflicts.map((c, idx) => {
+                    const sev = c.severity || 'info';
+                    const style = sev === 'critical'
+                      ? { bg: '#fde8e8', border: '#fca5a5', text: '#991b1b', dot: '#ef4444' }
+                      : sev === 'warning'
+                      ? { bg: '#fef9c3', border: '#fde047', text: '#854d0e', dot: '#f59e0b' }
+                      : { bg: '#eff6ff', border: '#bfdbfe', text: '#1e40af', dot: '#3b82f6' };
+                    return (
+                      <div key={idx} className="px-2.5 py-2 rounded border text-[10px] leading-relaxed"
+                           style={{ background: style.bg, borderColor: style.border, color: style.text }}>
+                        <div className="flex items-start gap-1.5">
+                          <span className="mt-[3px] shrink-0 inline-block w-1.5 h-1.5 rounded-full" style={{ background: style.dot }} />
+                          <div>
+                            <span className="font-bold">Signal conflict:</span>{' '}{c.description}
+                            <div className="mt-1 text-[9px] opacity-80">{c.resolution}</div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Signal flags */}
+              {riskSummary.length > 0 && (
+                <div className="space-y-1">
+                  {riskSummary.map((flag, idx) => {
+                    const key = flag.replace(/\s+/g, '_').toLowerCase().replace(/[^a-z_]/g, '');
+                    const desc = SIGNAL_FLAG_DESC[key];
+                    const dotColor = verdict.group === 'red' ? '#ef4444'
+                      : verdict.group === 'amber' ? '#f59e0b'
+                      : verdict.group === 'green' ? '#22c55e'
+                      : '#6b7280';
+                    return (
+                      <div key={idx} className="flex items-start gap-1.5 text-[10px] text-gray-600 leading-relaxed">
+                        <span className="mt-[3px] shrink-0 inline-block w-1.5 h-1.5 rounded-full" style={{ background: dotColor }} />
+                        <span>
+                          <span className="font-medium text-gray-700">{flag}</span>
+                          {!!desc && <span className="text-gray-400"> {'\u2014'} {desc}</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Section>
+
+            {/* ─── S4: AUTHENTICATION HISTORY ──────────────────────── */}
+            <div className="border-t pt-2.5" style={{ borderColor: '#f0f0f0' }}>
+              <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: BRAND.navy }}>
+                Authentication
               </div>
-            </div>
-          )}
+              <div className="space-y-1.5">
+                {/* Last sign-in */}
+                <div className="flex justify-between">
+                  <span className="text-gray-400 text-[10px]">Last sign-in</span>
+                  {data.last_signin_at ? (
+                    <span className="text-[10px] font-medium text-gray-700">{fmtDate(data.last_signin_at)}</span>
+                  ) : (
+                    <span className="text-[10px] font-semibold" style={{ color: '#dc2626' }}>Never authenticated</span>
+                  )}
+                </div>
+                {/* Last IP */}
+                <div className="flex justify-between">
+                  <span className="text-gray-400 text-[10px]">Last IP</span>
+                  {data.last_signin_ip ? (
+                    <span className="text-[10px] font-mono text-gray-600">{data.last_signin_ip}</span>
+                  ) : (
+                    <span className="text-[10px] text-gray-300">No IP on record</span>
+                  )}
+                </div>
+                {/* Auth source */}
+                <div className="flex justify-between">
+                  <span className="text-gray-400 text-[10px]">Source</span>
+                  <span className="text-[10px] font-medium" style={{
+                    color: data.auth_source === 'entra_signin_log' ? BRAND.teal
+                      : data.auth_source === 'aad_audit' ? '#3b82f6'
+                      : '#9ca3af'
+                  }}>
+                    {data.auth_source === 'entra_signin_log' ? 'Entra ID sign-in log'
+                      : data.auth_source === 'aad_audit' ? 'AAD audit log'
+                      : 'Static analysis only'}
+                  </span>
+                </div>
+              </div>
 
-          {/* ── Section 2: Warning Badges ────────────────────────── */}
-          {lineageWarnings.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {lineageWarnings.map((w, idx) => (
-                <span key={idx} className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
-                  <span className="text-red-500">[!]</span> {w}
-                </span>
-              ))}
+              {/* Mini timeline (last 3 events) */}
+              {authHistory.length > 0 && (
+                <div className="mt-2.5 pl-2 border-l-2" style={{ borderColor: BRAND.teal + '40' }}>
+                  {authHistory.map((evt, i) => (
+                    <div key={i} className="relative flex items-start gap-2 pb-2 last:pb-0">
+                      <span className="absolute -left-[9px] top-[3px] w-2 h-2 rounded-full border-2 bg-white"
+                            style={{ borderColor: BRAND.teal }} />
+                      <div className="pl-2 min-w-0">
+                        <div className="text-[10px] text-gray-600 truncate">
+                          <span className="font-medium text-gray-700">{fmtDateShort(evt.signed_in_at)}</span>
+                          {!!evt.ip_address && <span className="ml-1.5 font-mono text-gray-400">{evt.ip_address}</span>}
+                        </div>
+                        {!!evt.app_used && (
+                          <div className="text-[9px] text-gray-400 truncate">{evt.app_used}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
 
-          {/* ── Section 3: Narrative ──────────────────────────────── */}
-          {!!lineageNarrative && (
-            <div className="px-3 py-3 rounded-lg bg-slate-50 border border-slate-200">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Analysis</div>
-              <p className="text-xs text-slate-700 leading-relaxed">{lineageNarrative}</p>
-            </div>
-          )}
+            {/* ─── S5: ACTIVE ROLE BINDINGS ─────────────────────────── */}
+            {roleAssignments.length > 0 && (
+              <div className="border-t pt-2.5" style={{ borderColor: '#f0f0f0' }}>
+                <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: BRAND.navy }}>
+                  Active Roles
+                  <span className="ml-1.5 font-normal text-gray-400">({roleAssignments.length})</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(rolesExpanded ? roleAssignments : roleAssignments.slice(0, 3)).map((r, idx) => {
+                    const scopeShort = r.resource_name || r.scope_type || r.scope?.split('/').pop() || '';
+                    return (
+                      <span key={idx}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] border max-w-full"
+                        style={{ background: '#f0f9ff', borderColor: '#bae6fd', color: BRAND.navy }}
+                        title={`${r.role_name} \u2192 ${r.scope || 'unknown scope'}`}>
+                        <span className="font-semibold truncate max-w-[100px]">{r.role_name}</span>
+                        {!!scopeShort && (
+                          <span className="text-[9px] text-gray-400 truncate max-w-[80px]">{scopeShort}</span>
+                        )}
+                      </span>
+                    );
+                  })}
+                  {!rolesExpanded && roleAssignments.length > 3 && (
+                    <button
+                      onClick={() => setRolesExpanded(true)}
+                      className="px-2 py-1 rounded text-[10px] font-semibold border border-dashed"
+                      style={{ borderColor: BRAND.teal, color: BRAND.teal }}>
+                      +{roleAssignments.length - 3} more
+                    </button>
+                  )}
+                  {rolesExpanded && roleAssignments.length > 3 && (
+                    <button
+                      onClick={() => setRolesExpanded(false)}
+                      className="px-2 py-1 rounded text-[10px] font-semibold border border-dashed text-gray-400 border-gray-300">
+                      Show less
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
 
-          {/* ── Section 4: Verdict Block ─────────────────────────── */}
-          <div className={`px-3 py-3 rounded-lg border-2 ${
-            action === 'ORPHANED' ? 'bg-red-50 border-red-300' :
-            action === 'AT_RISK'  ? 'bg-amber-50 border-amber-300' :
-            action === 'STALE'    ? 'bg-amber-50 border-amber-300' :
-            action === 'UNUSED'   ? 'bg-gray-50 border-gray-300' :
-            action === 'HEALTHY'  ? 'bg-green-50 border-green-300' :
-                                    'bg-blue-50 border-blue-300'
-          }`}>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-xs font-bold uppercase">{action}</span>
-              <span className="text-[10px] text-gray-500">{'\u2014'}</span>
-              <span className={`text-[10px] font-medium ${
-                action === 'ORPHANED' ? 'text-red-700' :
-                action === 'AT_RISK'  ? 'text-amber-700' :
-                action === 'STALE'    ? 'text-amber-700' :
-                action === 'HEALTHY'  ? 'text-green-700' :
-                                        'text-blue-700'
-              }`}>
-                {data.recommended_action.action_text}
-              </span>
-            </div>
-            {riskSummary.length > 0 && (
-              <div className="mt-1.5 space-y-0.5">
-                {riskSummary.map((flag, idx) => (
-                  <div key={idx} className="flex items-start gap-1.5 text-[10px] text-gray-600">
-                    <span className="text-red-400 mt-px">{'\u25cf'}</span>
-                    <span>{flag}</span>
+            {/* ─── S6: OWNERSHIP ──────────────────────────────────────── */}
+            {owners.length > 0 && (
+              <div className="border-t pt-2.5" style={{ borderColor: '#f0f0f0' }}>
+                <div className="text-[10px] font-bold uppercase tracking-wider mb-1.5" style={{ color: BRAND.navy }}>
+                  Ownership
+                </div>
+                {owners.map((o, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-white shrink-0"
+                          style={{ background: BRAND.teal }}>
+                      {(o.display_name || '?')[0].toUpperCase()}
+                    </span>
+                    <div>
+                      <span className="text-[11px] font-medium text-gray-800">{o.display_name}</span>
+                      <span className="ml-1.5 text-[9px] text-gray-400">direct</span>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
-          </div>
 
-          {/* ── Section 5: Origin (if not already shown in signals) ── */}
-          {!!data.workload_origin.origin && data.workload_origin.origin !== 'Unknown' && lineageSignals.length === 0 && (
-            <div className="px-3 py-2.5 rounded-lg bg-teal-50 border border-teal-200">
-              <div className="text-[10px] font-bold text-teal-800 uppercase tracking-wider">Workload Origin</div>
-              <div className="text-xs font-semibold text-teal-900 mt-0.5">
-                {data.workload_origin.origin}
-                {!!data.workload_origin.source && data.workload_origin.source !== 'none' && (
-                  <span className="ml-1.5 text-[10px] font-normal text-teal-600">
-                    (via {data.workload_origin.source.replace(/_/g, ' ')})
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ── Section 6: Dependency Impact ────────────────────────── */}
-          {data.dependency_impact.level !== 'none_detected' && (
-            <div className="border-t border-gray-200 pt-3">
-              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Dependency Impact</div>
-              <div className={`px-3 py-2 rounded border ${
-                data.dependency_impact.level === 'high' ? 'bg-red-50 border-red-200' :
-                data.dependency_impact.level === 'medium' ? 'bg-amber-50 border-amber-200' :
-                'bg-gray-50 border-gray-200'
-              }`}>
-                <p className={`text-[10px] whitespace-pre-line ${
-                  data.dependency_impact.level === 'high' ? 'text-red-700' :
-                  data.dependency_impact.level === 'medium' ? 'text-amber-700' :
-                  'text-gray-600'
-                }`}>
-                  {data.dependency_impact.statement}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* ── Section 7: App Registration (collapsed detail) ───── */}
-          {!!appReg && (
-            <div className="border-t border-gray-200 pt-3">
-              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">App Registration</div>
-              <div className="space-y-1.5">
-                <Row label="Name" value={appReg.display_name || '\u2014'} />
-                <Row
-                  label="Owner"
-                  value={appReg.owners.length > 0 ? appReg.owners[0].display_name : 'None assigned'}
-                  valueClass={appReg.owners.length > 0 ? 'text-gray-700' : 'text-red-500'}
-                />
-                {!!appReg.likely_service && <Row label="Service" value={appReg.likely_service} />}
-                {!!appReg.publisher_domain && <Row label="Publisher" value={appReg.publisher_domain} />}
-                {!!appReg.is_external && (
-                  <div className="px-2 py-1 rounded bg-orange-50 border border-orange-200">
-                    <span className="text-[10px] font-bold text-orange-700">External App</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ── Section 8: Connection Source ──────────────────────── */}
-          {!!data.workload_origin.is_discovery_connector && (
-            <div className="border-t border-gray-200 pt-3">
-              <div className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider mb-2">Connection Source</div>
-              <div className="space-y-1.5 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-                <Row label="Connected as" value="AuditGraph Discovery Connector" />
-                <Row label="Method" value="OAuth 2.0 Client Credentials" />
-                <p className="text-[10px] text-amber-700 mt-1 leading-relaxed">
-                  This SPN was created when you registered AuditGraph in your Azure AD tenant.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* ── Section 9: Sign-in Activity ──────────────────────── */}
-          {!!data.sign_in && data.sign_in.pattern !== 'never_used' && (
-            <div className="border-t border-gray-200 pt-3">
-              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Sign-in Activity</div>
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-2">
-                  {(() => {
-                    const sb = SIGNIN_BADGE[data.sign_in!.pattern];
-                    return sb ? (
-                      <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${sb.cls}`}>{sb.label}</span>
-                    ) : null;
-                  })()}
+            {/* ─── S7: WORKLOAD ORIGIN ────────────────────────────────── */}
+            {!!data.workload_origin.origin && data.workload_origin.origin !== 'Unknown' && (
+              <div className="border-t pt-2.5" style={{ borderColor: '#f0f0f0' }}>
+                <div className="text-[10px] font-bold uppercase tracking-wider mb-1.5" style={{ color: BRAND.teal }}>
+                  Workload Origin
                 </div>
-                {data.sign_in.dormancy_days >= 0 && (
-                  <Row label="Last seen" value={data.sign_in.dormancy_days === 0 ? 'Today' : `${data.sign_in.dormancy_days}d ago`} />
-                )}
-                {data.sign_in.pattern === 'hybrid_concurrent' && (
-                  <div className="px-2 py-1 bg-red-50 border border-red-200 rounded">
-                    <p className="text-[10px] text-red-600">Both human and machine sign-ins within 7 days — possible shared credential.</p>
+                <div className="px-2.5 py-2 rounded border" style={{ background: '#f0fdfa', borderColor: '#99f6e4' }}>
+                  <div className="text-[11px] font-semibold" style={{ color: BRAND.navy }}>
+                    {data.workload_origin.origin}
                   </div>
-                )}
+                  {!!data.workload_origin.source && data.workload_origin.source !== 'none' && (
+                    <div className="text-[9px] mt-0.5" style={{ color: BRAND.teal }}>
+                      via {data.workload_origin.source.replace(/_/g, ' ')}
+                      {!!data.workload_origin.workload_type && data.workload_origin.workload_type !== 'unknown' && (
+                        <span className="ml-1 text-gray-400">
+                          ({data.workload_origin.workload_type.replace(/_/g, ' ')})
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* ── Section 9b: Effective Last Used ──────────────────── */}
-          {!!data.effective_last_used && (
-            <div className="border-t border-gray-200 pt-3">
-              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Last Used</div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-900 font-medium">
-                  {(() => {
-                    if (data.effective_last_used_source === 'inferred_federated') return 'Likely active';
-                    const d = new Date(data.effective_last_used!);
-                    const now = new Date();
-                    const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
-                    if (diffDays === 0) return 'Today';
-                    if (diffDays === 1) return 'Yesterday';
-                    return `${diffDays}d ago`;
-                  })()}
-                </span>
-                <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold ${
-                  data.effective_last_used_source === 'auditgraph'
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : data.effective_last_used_source === 'inferred_federated'
-                    ? 'bg-purple-100 text-purple-700'
-                    : 'bg-blue-100 text-blue-700'
-                }`}>
-                  {data.effective_last_used_source === 'auditgraph' ? 'via AuditGraph'
-                    : data.effective_last_used_source === 'inferred_federated' ? 'Inferred'
-                    : 'via Azure'}
-                </span>
+            {/* ─── S8: DEPENDENCY IMPACT ──────────────────────────────── */}
+            {hasDeps && (
+              <div className="border-t pt-2.5" style={{ borderColor: '#f0f0f0' }}>
+                <div className="text-[10px] font-bold uppercase tracking-wider mb-1.5" style={{ color: BRAND.orange }}>
+                  Dependency Impact
+                </div>
+                <div className="px-2.5 py-2 rounded border"
+                     style={{
+                       background: data.dependency_impact.level === 'high' ? '#fff7ed' : '#fffbeb',
+                       borderColor: data.dependency_impact.level === 'high' ? BRAND.orange + '60' : '#fde68a',
+                     }}>
+                  <p className="text-[10px] font-semibold mb-1.5" style={{ color: '#92400e' }}>
+                    If deleted, this will impact:
+                  </p>
+                  <div className="space-y-1">
+                    {depResources.map((r, idx) => (
+                      <div key={idx} className="flex items-center gap-1.5 text-[10px]">
+                        <span className="w-1 h-1 rounded-full shrink-0"
+                              style={{
+                                background: r.impact_level === 'high' ? '#ef4444'
+                                  : r.impact_level === 'critical' ? '#dc2626'
+                                  : r.impact_level === 'medium' ? '#f59e0b'
+                                  : '#9ca3af'
+                              }} />
+                        <span className="font-medium text-gray-700 truncate">{r.resource_name}</span>
+                        <span className="text-gray-400 text-[9px] shrink-0">{r.resource_type}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Azure Portal link */}
-          {!!appReg?.object_id && (
-            <div className="border-t border-gray-200 pt-3">
+            {/* ─── S9: ANALYSIS (collapsible) ─────────────────────────── */}
+            {!!lineageNarrative && (
+              <div className="border-t pt-2.5" style={{ borderColor: '#f0f0f0' }}>
+                <Section title="Analysis" defaultOpen={false}>
+                  <div className="px-2.5 py-2 rounded" style={{ background: '#f8fafc' }}>
+                    <p className="text-[11px] text-gray-600 leading-relaxed">{lineageNarrative}</p>
+                  </div>
+                </Section>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ─── S10: FOOTER ──────────────────────────────────────────── */}
+        <div className="shrink-0 px-4 py-3 border-t flex flex-col gap-2" style={{ borderColor: '#e5e7eb', background: '#fafbfc' }}>
+          <div className="flex gap-2">
+            {/* Azure Portal link */}
+            {!!appReg?.object_id && (
               <a
                 href={`https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/Overview/appId/${appReg.object_id}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 transition"
-              >
+                className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded text-[10px] font-semibold text-white transition-colors"
+                style={{ background: BRAND.navy }}
+                onMouseEnter={e => (e.currentTarget.style.background = BRAND.navyLight)}
+                onMouseLeave={e => (e.currentTarget.style.background = BRAND.navy)}>
                 View in Azure Portal {'\u2197'}
               </a>
-            </div>
-          )}
+            )}
+            {/* Add to Remediation */}
+            <button
+              className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded text-[10px] font-semibold transition-colors"
+              style={{ background: BRAND.teal, color: 'white' }}
+              onMouseEnter={e => (e.currentTarget.style.background = BRAND.tealLight)}
+              onMouseLeave={e => (e.currentTarget.style.background = BRAND.teal)}
+              title="Add identity to remediation plan">
+              + Remediation
+            </button>
+          </div>
         </div>
       </div>
     </div>

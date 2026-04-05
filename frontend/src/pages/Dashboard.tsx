@@ -8,7 +8,7 @@
  *   4. Identity Risk Heat Map + Distribution (side-by-side)
  *   5. Snapshot Drift Analysis (RecentChanges)
  *   6. Machine Identity Exposure (inline)
- *   7. Credential Intelligence (CredentialHealth + ExpiryTracker + CredentialIntelligence)
+ *   7. Credential Intelligence (CredentialHealth + CredentialIntelligence)
  *
  * No tabs. No metric overlap with / (Executive Posture).
  * All data from 8 API calls — no compliance, governance, or AGIRS data.
@@ -29,8 +29,9 @@ import {
 } from '../components/dashboard';
 import { COLORS as CISO_COLORS, getScoreColor, getTierColor } from '../constants/ciso';
 import { FONT, Sparkline, CISOBadge } from '../components/dashboard/ciso-shared';
-import ExpiryTracker from '../components/dashboard/ExpiryTracker';
 import CredentialIntelligence from '../components/dashboard/CredentialIntelligence';
+import AttackSurfaceTile from '../components/dashboard/AttackSurfaceTile';
+import RemediationTile from '../components/dashboard/RemediationTile';
 import StaleDataBanner from '../components/StaleDataBanner';
 import AudienceBadge from '../components/AudienceBadge';
 import { useToast } from '../components/ToastProvider';
@@ -273,11 +274,12 @@ export default function Dashboard() {
     setSnapshotRunning(true);
     try {
       const connId = selectedConnectionId || undefined;
-      const body = connId ? JSON.stringify({ connection_id: connId }) : undefined;
+      const payload: Record<string, unknown> = {};
+      if (connId) payload.connection_id = connId;
       const res = await fetch('/api/runs/trigger', {
         method: 'POST',
-        headers: body ? { 'Content-Type': 'application/json' } : {},
-        body,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
       if (!res.ok && res.status !== 409) throw new Error('Trigger failed');
     } catch (e: any) {
@@ -409,6 +411,12 @@ export default function Dashboard() {
             permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
             credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
 
+          {/* Section 5b: Attack Surface + Remediation */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <AttackSurfaceTile />
+            <RemediationTile />
+          </div>
+
           {/* Section 6: Machine Identity Exposure */}
           {stats?.workload_exposure && stats.workload_exposure.total > 0 && (
             <div className="bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
@@ -443,7 +451,6 @@ export default function Dashboard() {
                 <CredentialHealth expired={posture.credential_health.expired} expiringSoon={posture.credential_health.expiring_soon}
                   healthy={posture.credential_health.healthy} noCredentials={posture.credential_health.no_credentials} />
               )}
-              <ExpiryTracker />
             </div>
             <CredentialIntelligence />
           </div>

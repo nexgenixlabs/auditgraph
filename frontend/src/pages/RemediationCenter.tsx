@@ -592,7 +592,7 @@ export default function RemediationCenter() {
                           {a.identity_id ? (
                             <span
                               onClick={(e) => { e.stopPropagation(); navigate(`/identities/${a.identity_id}`); }}
-                              style={{ color: '#60A5FA', cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}
+                              style={{ color: '#60A5FA', cursor: 'pointer', opacity: 0.9 }}
                               title="View identity details"
                             >
                               {a.identity_name}
@@ -687,7 +687,7 @@ export default function RemediationCenter() {
                   Identity:{' '}
                   <span
                     onClick={() => navigate(`/identities/${selectedAction.identity_id}`)}
-                    style={{ color: R.accent, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' as const, textUnderlineOffset: 3 }}
+                    style={{ color: R.accent, cursor: 'pointer', opacity: 0.9 }}
                   >
                     {selectedAction.identity_name}
                   </span>

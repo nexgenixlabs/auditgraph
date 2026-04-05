@@ -5,7 +5,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { COLORS, getScoreColor, getGrade } from '../../constants/ciso';
-import { useIdentityDrawer } from '../../contexts/IdentityDrawerContext';
+import { useIdentityDrawer, type IdentityPrefill } from '../../contexts/IdentityDrawerContext';
 
 // ─── Typography Helpers ──────────────────────────────────────────
 
@@ -139,7 +139,11 @@ export function CISOCard({ children, style }: { children: React.ReactNode; style
 
 // ─── DrillableNumber (v3.1.0: every number clickable) ────────────
 
-export function DN({ children, navigateTo, tooltip }: { children: React.ReactNode; navigateTo?: string; tooltip?: string }) {
+export function DN({ children, navigateTo, tooltip, prefill }: {
+  children: React.ReactNode; navigateTo?: string; tooltip?: string;
+  /** Pre-populated identity metadata shown immediately while detail loads. */
+  prefill?: IdentityPrefill;
+}) {
   const navigate = useNavigate();
   const drawerCtx = useIdentityDrawer();
   if (!navigateTo) {
@@ -150,16 +154,13 @@ export function DN({ children, navigateTo, tooltip }: { children: React.ReactNod
       onClick={(e) => {
         e.stopPropagation();
         if (drawerCtx && navigateTo.startsWith('/identities')) {
-          // Direct identity link: /identities/123 → open detail view directly
+          // Direct identity link: /identities/123 or /identities/uuid → open detail view
           const idMatch = navigateTo.match(/^\/identities\/([^?/]+)$/);
           if (idMatch) {
-            const idVal = parseInt(idMatch[1], 10);
-            if (!isNaN(idVal)) {
-              drawerCtx.openIdentity(idVal);
-            } else {
-              // Non-numeric ID (e.g., UUID) — navigate to full page
-              navigate(navigateTo);
-            }
+            const raw = idMatch[1];
+            const numVal = parseInt(raw, 10);
+            // Accept both numeric DB ids and UUID identity_ids
+            drawerCtx.openIdentity(!isNaN(numVal) && String(numVal) === raw ? numVal : raw, prefill);
           } else {
             // Filtered list: /identities?filter=X → open list view
             drawerCtx.openDrawer(navigateTo);
@@ -170,8 +171,7 @@ export function DN({ children, navigateTo, tooltip }: { children: React.ReactNod
       }}
       title={tooltip || `Click to view details`}
       style={{
-        textDecoration: 'underline', textDecorationStyle: 'dashed' as const,
-        textUnderlineOffset: '3px', cursor: 'pointer',
+        cursor: 'pointer',
       }}
     >
       {children}

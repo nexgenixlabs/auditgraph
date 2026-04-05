@@ -16,7 +16,8 @@ import pytest
 # Environment setup for testing (must be before app imports)
 os.environ.setdefault('FLASK_ENV', 'development')
 os.environ.setdefault('APP_ENV', 'local')
-os.environ.setdefault('JWT_SECRET', 'test-secret-for-ci')
+# JWT_SECRET set by conftest.py pytest_configure — KeyError if missing
+_JWT = os.environ["JWT_SECRET"]
 os.environ.setdefault('ADMIN_JWT_SECRET', 'admin-test-key')
 os.environ.setdefault('CLIENT_JWT_SECRET', 'client-test-key')
 

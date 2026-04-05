@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useFeatureFlag } from '../contexts/FeatureFlagContext';
 import QueryBuilder from '../components/QueryBuilder';
 import type { AdvancedQuery, QueryFieldDefinition } from '../types';
 import { queryIdentities, getQueryFields } from '../services/api';
@@ -25,7 +26,7 @@ import {
   PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, EFFECTIVE_SCOPE_ORDER, CREDENTIAL_HEALTH_CONFIG,
   SCOPE_LABELS, CATEGORY_LABELS_MULTI, IDENTITY_CATEGORIES,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
-  getCategoriesForClouds, IDENTITY_PLANE_OPTIONS,
+  getCategoriesForClouds, MANAGED_IDENTITY_GROUP,
 } from '../constants/metrics';
 
 interface IdentityRow {
@@ -118,6 +119,10 @@ interface IdentityRow {
   dependency_impact?: string | null;
   // Observed usage tracking
   observed_last_used?: string | null;
+  // Sign-in authentication provenance
+  last_signin_at?: string | null;
+  last_signin_ip?: string | null;
+  auth_source?: string | null;
 }
 
 interface SavedView {
@@ -163,7 +168,10 @@ type SortField =
   | 'effective_scope'
   | 'credential_health'
   | 'status'
-  | 'owner_display_name';
+  | 'owner_display_name'
+  | 'last_signin_at'
+  | 'last_signin_ip'
+  | 'recommended_action';
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -376,7 +384,13 @@ export default function IdentitiesPage() {
   const [caFilter, setCaFilter] = useState<'all' | 'covered' | 'not_covered'>('all');
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>('all');
   const [multiSubscriptionFilter, setMultiSubscriptionFilter] = useState<string[]>([]);
-  const [allSubscriptions, setAllSubscriptions] = useState<{subscription_id: string; subscription_name: string}[]>([]);
+  const [allSubscriptions, setAllSubscriptions] = useState<{subscription_id: string; subscription_name: string; monitored?: boolean; status?: string}[]>([]);
+  // Defense-in-depth: only show activated (monitored) subscriptions in dropdown,
+  // even if the API response includes non-monitored ones (e.g. fallback path).
+  const activatedSubscriptions = useMemo(
+    () => allSubscriptions.filter(s => s.monitored !== false),
+    [allSubscriptions]
+  );
   const [groupFilter, setGroupFilter] = useState<number | 'all'>('all');
   const [multiGroupFilter, setMultiGroupFilter] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -387,18 +401,16 @@ export default function IdentitiesPage() {
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
-  // Identity Plane filter (Phase 2A: compute resource type association)
-  const [identityPlaneFilter, setIdentityPlaneFilter] = useState<string[]>([]);
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // AI Agent Governance filter state (additive, gated by feature flag)
-  const [agentFilterEnabled, setAgentFilterEnabled] = useState(false); // feature flag
+  const agentFilterEnabled = useFeatureFlag('ai_agent_governance');
   const [agentFilter, setAgentFilter] = useState(false);              // filter active
   const [agentCount, setAgentCount] = useState(0);                    // badge count
   const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
-  const [sortField, setSortField] = useState<SortField>('display_name');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [sortField, setSortField] = useState<SortField>('recommended_action');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const [bulkLoading, setBulkLoading] = useState(false);
@@ -436,6 +448,9 @@ export default function IdentitiesPage() {
   const [enabledClouds, setEnabledClouds] = useState<string[]>([]);
   const [cloudFilter, setCloudFilter] = useState<string>('all');
 
+  // Subscription scope summary for tenant scope bar
+  const [scopeSummary, setScopeSummary] = useState<{ activated: number; discovered: number; tenant_name: string } | null>(null);
+
   // Phase 7: Snapshot selector state
   const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
 
@@ -453,13 +468,22 @@ export default function IdentitiesPage() {
     return `Subscription ${suffix}`;
   }
 
-  // Build category filter options from enabled clouds only
+  // Build category filter options from enabled clouds only, with "Managed Identities" group
+  const MI_GROUP_KEY = '__managed_identities__';
   const categoryOptions = useMemo(() => {
     const cats = getCategoriesForClouds(enabledClouds);
-    return [
-      { value: 'all' as const, label: 'All Categories' },
-      ...cats.map(key => ({ value: key, label: IDENTITY_CATEGORIES[key].label })),
+    const hasBothMI = MANAGED_IDENTITY_GROUP.every(c => cats.includes(c));
+    const opts: { value: string; label: string }[] = [
+      { value: 'all', label: 'All Categories' },
     ];
+    for (const key of cats) {
+      // Insert the group option before the first individual MI option
+      if (key === MANAGED_IDENTITY_GROUP[0] && hasBothMI) {
+        opts.push({ value: MI_GROUP_KEY, label: 'Managed Identities' });
+      }
+      opts.push({ value: key, label: IDENTITY_CATEGORIES[key].label });
+    }
+    return opts;
   }, [enabledClouds]);
 
   // URL param sync — supports both legacy param names and CISO Dashboard param names
@@ -478,10 +502,14 @@ export default function IdentitiesPage() {
     const catParam = params.get('identity_category') || params.get('category');
     const CISO_CAT_MAP: Record<string, string> = {
       'Human': 'human_user', 'ServicePrincipal': 'service_principal',
-      'ManagedIdentity': 'managed_identity_system', 'Guest': 'guest',
+      'ManagedIdentity': 'managed_identity', 'Guest': 'guest',
     };
     const mappedCat = catParam ? (CISO_CAT_MAP[catParam] || catParam) : null;
-    if (mappedCat && CATEGORY_FILTER_OPTIONS.find(o => o.value === mappedCat)) {
+    if (mappedCat === 'managed_identity') {
+      // "Managed Identities" group — select both MI types
+      setMultiCategoryFilter([...MANAGED_IDENTITY_GROUP]);
+      setCategoryFilter('all');
+    } else if (mappedCat && CATEGORY_FILTER_OPTIONS.find(o => o.value === mappedCat)) {
       setCategoryFilter(mappedCat as IdentityCategory);
       setMultiCategoryFilter([]);
     } else {
@@ -672,6 +700,9 @@ export default function IdentitiesPage() {
             last_noninteractive_signin: raw.last_noninteractive_signin || null,
             days_since_last_signin: raw.days_since_last_signin ?? null,
             observed_last_used: raw.observed_last_used || null,
+            last_signin_at: raw.last_signin_at || null,
+            last_signin_ip: raw.last_signin_ip || null,
+            auth_source: raw.auth_source || null,
           }));
           if (!cancelled) setIdentities(rows);
           return;
@@ -679,10 +710,18 @@ export default function IdentitiesPage() {
 
         const params = new URLSearchParams();
         params.set('hide_microsoft', String(!showMicrosoft));
+        params.set('activated_only', 'true');
         if (contributingPillar) params.set('contributing_pillar', contributingPillar);
         if (agirsFactor) params.set('agirs_factor', agirsFactor);
         if (showDeleted) params.set('show_deleted', 'true');
         if (connectionParam) params.append(...connectionParam.split('=') as [string, string]);
+        // Wire filters to backend — server-side filtering for correct pagination
+        if (multiRiskFilter.length === 1) params.set('risk_level', multiRiskFilter[0]);
+        else if (riskFilter !== 'all') params.set('risk_level', riskFilter);
+        if (multiCategoryFilter.length === 1) params.set('identity_category', multiCategoryFilter[0]);
+        else if (categoryFilter !== 'all') params.set('identity_category', categoryFilter);
+        if (cloudFilter !== 'all') params.set('cloud', cloudFilter);
+        if (search) params.set('search', search);
         const resp = await fetch(`/api/identities?${params}`);
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
@@ -758,6 +797,9 @@ export default function IdentitiesPage() {
           federated_workload_name: raw.federated_workload_name || null,
           dependency_impact: raw.dependency_impact || null,
           observed_last_used: raw.observed_last_used || null,
+          last_signin_at: raw.last_signin_at || null,
+          last_signin_ip: raw.last_signin_ip || null,
+          auth_source: raw.auth_source || null,
         }));
         if (!cancelled) setIdentities(rows);
       } catch (e: any) {
@@ -768,7 +810,8 @@ export default function IdentitiesPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, [showMicrosoft, selectedConnectionId, contributingPillar, agirsFactor, showDeleted, activeOrgId, agentFilter]);
+  }, [showMicrosoft, selectedConnectionId, contributingPillar, agirsFactor, showDeleted, activeOrgId, agentFilter,
+      riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, cloudFilter, search]);
 
   // ─── Batch risk histories for sparkline column ─────────────────
   useEffect(() => {
@@ -804,13 +847,21 @@ export default function IdentitiesPage() {
 
   useEffect(() => { loadViews(); }, [loadViews]);
 
-  // Load distinct subscriptions for filter (refetch on org/connection switch)
+  // Load distinct subscriptions for filter — only activated (monitored) ones
   useEffect(() => {
     setSubscriptionFilter('all');
-    fetch(withConnection('/api/subscriptions/distinct'))
+    fetch(withConnection('/api/subscriptions/distinct?activated_only=true'))
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => setAllSubscriptions(d.subscriptions || []))
       .catch(() => setAllSubscriptions([]));
+  }, [activeOrgId, selectedConnectionId, withConnection]);
+
+  // Load subscription scope summary for tenant scope bar
+  useEffect(() => {
+    fetch(withConnection('/api/subscriptions/scope-summary'))
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setScopeSummary(d))
+      .catch(() => setScopeSummary(null));
   }, [activeOrgId, selectedConnectionId, withConnection]);
 
   // Load enabled cloud providers for category filter
@@ -820,18 +871,18 @@ export default function IdentitiesPage() {
       .then(cfg => {
         const clouds = ['azure', 'aws', 'gcp'].filter(k => cfg?.cloud_providers?.[k]?.enabled);
         setEnabledClouds(clouds);
-        // AI Agent Governance feature flag
-        const agentGovEnabled = !!cfg?.feature_flags?.ai_agent_governance;
-        setAgentFilterEnabled(agentGovEnabled);
-        if (agentGovEnabled) {
-          fetch('/api/agent-identities/count')
-            .then(r => r.ok ? r.json() : null)
-            .then(data => { if (data) setAgentCount(data.ai_agent || 0); })
-            .catch(() => {});
-        }
       })
       .catch(() => setEnabledClouds([]));
   }, [activeOrgId]);
+
+  // Fetch agent count when feature flag is enabled
+  useEffect(() => {
+    if (!agentFilterEnabled) return;
+    fetch('/api/agent-identities/count')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setAgentCount(data.ai_agent || 0); })
+      .catch(() => {});
+  }, [agentFilterEnabled]);
 
   // Load groups for filter (refetch on org/connection switch, deduplicate by name)
   useEffect(() => {
@@ -1212,6 +1263,23 @@ export default function IdentitiesPage() {
             const stOrder: Record<string, number> = { deleted: 4, disabled: 3, unknown: 2, active: 1 };
             aVal = stOrder[a.status || 'active'] || 0; bVal = stOrder[b.status || 'active'] || 0; break;
           }
+          case 'last_signin_at':
+            aVal = a.last_signin_at ? new Date(a.last_signin_at).getTime() : 0;
+            bVal = b.last_signin_at ? new Date(b.last_signin_at).getTime() : 0;
+            break;
+          case 'last_signin_ip':
+            aVal = safeLower(a.last_signin_ip); bVal = safeLower(b.last_signin_ip); break;
+          case 'recommended_action': {
+            const vOrd: Record<string, number> = { ORPHANED: 5, AT_RISK: 4, UNUSED: 3, STALE: 2, NEEDS_REVIEW: 1, HEALTHY: 0 };
+            aVal = vOrd[a.recommended_action || ''] ?? -1; bVal = vOrd[b.recommended_action || ''] ?? -1;
+            if (aVal === bVal) {
+              // Tiebreak: longest-unseen first (asc by last_signin_at)
+              const aTime = a.last_signin_at ? new Date(a.last_signin_at).getTime() : 0;
+              const bTime = b.last_signin_at ? new Date(b.last_signin_at).getTime() : 0;
+              return aTime - bTime;
+            }
+            break;
+          }
           case 'risk_level':
           default:
             aVal = RISK_ORDER[safeLower(a.risk_level)] || 0;
@@ -1226,6 +1294,18 @@ export default function IdentitiesPage() {
 
     // Simple filter mode (existing logic)
     let result = [...identities];
+
+    // Client-side safety net: exclude identities from non-activated subscriptions
+    if (allSubscriptions.length > 0) {
+      const activatedSubIds = new Set(allSubscriptions.filter(s => s.monitored).map(s => s.subscription_id));
+      if (activatedSubIds.size > 0) {
+        result = result.filter(i => {
+          const subId = i.primary_subscription_id || i.subscription_id;
+          return !subId || activatedSubIds.has(subId);
+        });
+      }
+    }
+
     const s = safeLower(search);
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
     if (cloudFilter !== 'all') result = result.filter(i => safeLower(i.cloud) === cloudFilter);
@@ -1240,12 +1320,6 @@ export default function IdentitiesPage() {
       result = result.filter(i => i.identity_category === categoryFilter);
     }
     if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
-    if (identityPlaneFilter.length > 0) {
-      result = result.filter(i => {
-        const wt = safeLower(i.workload_type);
-        return identityPlaneFilter.some(f => wt.includes(f));
-      });
-    }
     if (multiSubscriptionFilter.length > 0) {
       result = result.filter(i => multiSubscriptionFilter.includes(i.subscription_id || '') || multiSubscriptionFilter.includes(i.primary_subscription_id || ''));
     } else if (subscriptionFilter !== 'all') {
@@ -1338,6 +1412,22 @@ export default function IdentitiesPage() {
           const stOrd: Record<string, number> = { deleted: 4, disabled: 3, unknown: 2, active: 1 };
           aVal = stOrd[a.status || 'active'] || 0; bVal = stOrd[b.status || 'active'] || 0; break;
         }
+        case 'last_signin_at':
+          aVal = a.last_signin_at ? new Date(a.last_signin_at).getTime() : 0;
+          bVal = b.last_signin_at ? new Date(b.last_signin_at).getTime() : 0;
+          break;
+        case 'last_signin_ip':
+          aVal = safeLower(a.last_signin_ip); bVal = safeLower(b.last_signin_ip); break;
+        case 'recommended_action': {
+          const vOrd2: Record<string, number> = { ORPHANED: 5, AT_RISK: 4, UNUSED: 3, STALE: 2, NEEDS_REVIEW: 1, HEALTHY: 0 };
+          aVal = vOrd2[a.recommended_action || ''] ?? -1; bVal = vOrd2[b.recommended_action || ''] ?? -1;
+          if (aVal === bVal) {
+            const aTime2 = a.last_signin_at ? new Date(a.last_signin_at).getTime() : 0;
+            const bTime2 = b.last_signin_at ? new Date(b.last_signin_at).getTime() : 0;
+            return aTime2 - bTime2;
+          }
+          break;
+        }
         case 'risk_level':
         default:
           aVal = RISK_ORDER[safeLower(a.risk_level)] || 0;
@@ -1348,13 +1438,13 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
     else {
       setSortField(field);
-      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health', 'status'].includes(field) ? 'desc' : 'asc');
+      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health', 'status', 'recommended_action'].includes(field) ? 'desc' : 'asc');
     }
   }
 
@@ -1476,7 +1566,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 10; // checkbox + 8 primary columns + lineage
+  const colSpan = 13; // checkbox + 11 primary columns + lineage
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1607,6 +1697,22 @@ export default function IdentitiesPage() {
           )}
         </div>
       </div>
+
+      {/* Tenant Scope Bar */}
+      {scopeSummary && scopeSummary.discovered > 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-800">
+          <svg className="w-4 h-4 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>
+            Tenant-scoped view: Showing identities from <strong>{scopeSummary.activated}</strong> activated subscriptions only.{' '}
+            <Link to="/subscriptions" className="font-semibold hover:opacity-80">
+              {scopeSummary.discovered} discovered subscription{scopeSummary.discovered !== 1 ? 's' : ''}
+            </Link>{' '}
+            {scopeSummary.discovered === 1 ? 'is' : 'are'} excluded until activated.
+          </span>
+        </div>
+      )}
 
       {/* Export Metadata Strip */}
       {snapshots.length > 0 && (
@@ -1821,7 +1927,7 @@ export default function IdentitiesPage() {
         </div>
 
         {queryMode === 'simple' ? (
-        <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
           <input value={search} onChange={e => { setSearch(e.target.value); clearActiveView(); }} placeholder="Search name, ID, owner…"
             className="border rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 md:col-span-2" />
           <MultiSelectFilter
@@ -1833,18 +1939,12 @@ export default function IdentitiesPage() {
             searchable={false}
           />
           <MultiSelectFilter
-            options={categoryOptions.filter(o => o.value !== 'all').map(o => ({ value: o.value, label: o.label }))}
-            selected={multiCategoryFilter}
-            onChange={(vals) => { setMultiCategoryFilter(vals); setCategoryFilter('all'); clearActiveView(); }}
-            label="Category"
-            placeholder="Search categories…"
-          />
-          <MultiSelectFilter
-            options={allSubscriptions.map(s => ({ value: s.subscription_id, label: s.subscription_name || s.subscription_id }))}
+            options={activatedSubscriptions.map(s => ({ value: s.subscription_id, label: s.subscription_name || s.subscription_id }))}
             selected={multiSubscriptionFilter}
             onChange={(vals) => { setMultiSubscriptionFilter(vals); setSubscriptionFilter('all'); clearActiveView(); }}
             label={accountLabel('Name')}
             placeholder={`Search ${accountLabel('Name').toLowerCase()}s…`}
+            header={`Showing ${activatedSubscriptions.length} activated subscription${activatedSubscriptions.length !== 1 ? 's' : ''}`}
           />
           <MultiSelectFilter
             options={allGroups.map(g => ({ value: String(g.id), label: `${g.name} (${g.member_count})` }))}
@@ -1852,14 +1952,6 @@ export default function IdentitiesPage() {
             onChange={(vals) => { setMultiGroupFilter(vals); setGroupFilter('all'); clearActiveView(); }}
             label="Group"
             placeholder="Search groups…"
-          />
-          <MultiSelectFilter
-            options={IDENTITY_PLANE_OPTIONS}
-            selected={identityPlaneFilter}
-            onChange={(vals) => { setIdentityPlaneFilter(vals); clearActiveView(); }}
-            label="Identity Plane"
-            placeholder="Resource type…"
-            searchable={false}
           />
           <div className="flex items-center gap-2">
             <MultiSelectFilter
@@ -1880,7 +1972,7 @@ export default function IdentitiesPage() {
               setWorkloadFilter(false); setSubscriptionFilter('all'); setMultiSubscriptionFilter([]);
               setOwnerFilter('all'); setActivityFilter('all'); setTierFilter('all'); setCredentialFilter('all');
               setCaFilter('all'); setGroupFilter('all'); setMultiGroupFilter([]); setStatusFilter('all'); setMultiStatusFilter([]);
-              setHasRolesFilter(false); setIdentityPlaneFilter([]); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true });
+              setHasRolesFilter(false); setContextBanner(null); setActiveViewId(null); navigate('/identities', { replace: true });
             }}
               className="px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 whitespace-nowrap">
               Clear
@@ -2022,25 +2114,35 @@ export default function IdentitiesPage() {
       {!loading && identities.length > 0 && (
         <div className="flex items-center gap-1.5 mb-3">
           {[
-            { key: 'all' as const, label: 'All Identities' },
-            { key: 'human_user' as const, label: 'Human Users' },
-            { key: 'service_principal' as const, label: 'Service Principals' },
-            { key: 'managed_identity_system' as const, label: 'Managed IDs' },
-            { key: 'guest' as const, label: 'Guest' },
+            { key: 'all', label: 'All Identities', multi: [] as string[] },
+            { key: 'human_user', label: 'Human Users', multi: [] as string[] },
+            { key: 'service_principal', label: 'Service Principals', multi: [] as string[] },
+            { key: 'managed_ids', label: 'Managed IDs', multi: [...MANAGED_IDENTITY_GROUP] },
+            { key: 'guest', label: 'Guest', multi: [] as string[] },
           ].map(tab => {
-            const isActive = !workloadFilter && multiCategoryFilter.length === 0 && categoryFilter === tab.key;
+            const isActive = !workloadFilter && (
+              tab.multi.length > 0
+                ? tab.multi.every(c => multiCategoryFilter.includes(c)) && multiCategoryFilter.length === tab.multi.length
+                : multiCategoryFilter.length === 0 && categoryFilter === tab.key
+            );
             return (
               <button
                 key={tab.key}
                 onClick={() => {
                   setWorkloadFilter(false);
-                  setMultiCategoryFilter([]);
-                  setCategoryFilter(tab.key as any);
                   clearActiveView();
-                  if (tab.key === 'all') {
-                    navigate('/identities', { replace: true });
+                  if (tab.multi.length > 0) {
+                    setMultiCategoryFilter(tab.multi);
+                    setCategoryFilter('all');
+                    navigate('/identities?identity_category=managed_identity', { replace: true });
                   } else {
-                    navigate(`/identities?identity_category=${tab.key}`, { replace: true });
+                    setMultiCategoryFilter([]);
+                    setCategoryFilter(tab.key as any);
+                    if (tab.key === 'all') {
+                      navigate('/identities', { replace: true });
+                    } else {
+                      navigate(`/identities?identity_category=${tab.key}`, { replace: true });
+                    }
                   }
                 }}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
@@ -2140,6 +2242,9 @@ export default function IdentitiesPage() {
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Owner" field="owner_display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Last Auth" field="last_signin_at" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Last Auth IP" field="last_signin_ip" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Effective Access" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Sensitive Access" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Seen" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
@@ -2202,6 +2307,56 @@ export default function IdentitiesPage() {
                     {/* Status */}
                     <td className="px-2 py-2">
                       <StatusBadge status={i.status} />
+                    </td>
+
+                    {/* Risk Level */}
+                    <td className="px-2 py-2">
+                      <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[i.risk_level || 'info'] || RISK_BADGE.info}`}>
+                        {i.risk_level || 'info'}
+                      </span>
+                    </td>
+
+                    {/* Last Auth */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {(() => {
+                        if (!i.last_signin_at) {
+                          return <span className="text-red-600 text-xs font-medium">Never</span>;
+                        }
+                        const diff = Date.now() - new Date(i.last_signin_at).getTime();
+                        const days = Math.floor(diff / 86400000);
+                        const relText = days === 0 ? 'Today' : days === 1 ? '1d ago' : `${days}d ago`;
+                        return (
+                          <span className="flex items-center gap-1">
+                            <span
+                              className={`text-xs ${days > 90 ? 'text-red-600' : days > 30 ? 'text-amber-600' : 'text-gray-700'}`}
+                              title={new Date(i.last_signin_at).toLocaleString()}
+                            >
+                              {relText}
+                            </span>
+                            {i.auth_source === 'static_analysis_only' && (
+                              <span className="text-gray-400 text-[10px] cursor-help" title="No diagnostic logs — static analysis only">&#9432;</span>
+                            )}
+                          </span>
+                        );
+                      })()}
+                    </td>
+
+                    {/* Last Auth IP */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {(() => {
+                        if (!i.last_signin_ip) {
+                          return <span className="text-gray-400 text-xs">&mdash;</span>;
+                        }
+                        const ip = i.last_signin_ip;
+                        const isInternal = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(ip);
+                        const isMsRange = /^(20\.|40\.|52\.)/.test(ip);
+                        return (
+                          <span className="flex items-center gap-1" title={isMsRange ? 'Microsoft-owned IP range' : undefined}>
+                            <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${isInternal ? 'bg-green-500' : 'bg-blue-500'}`} />
+                            <span className="font-mono text-[11px] text-gray-700">{ip}</span>
+                          </span>
+                        );
+                      })()}
                     </td>
 
                     {/* Effective Access Level (Privilege Tier) */}

@@ -11,12 +11,22 @@ Also computes per-identity Blast Radius Danger Score.
 import json
 import logging
 from typing import Dict, List, Optional
+from app.constants import CredentialRiskSQL
+from app.constants.roles import (
+    EntraRole, RBACRole,
+    T0_ENTRA_ROLES_LOWER, T1_ENTRA_ROLES_LOWER, T2_RBAC_ROLES_LOWER,
+)
 
 logger = logging.getLogger(__name__)
 
 # ── HIRI deduction weights ────────────────────────────────────────
 H1_GHOST_WEIGHT = 3
-H2_DORMANT_PRIV_WEIGHT = 5
+# H2: Tier-aware dormant privileged sub-factors (replaces flat H2=5)
+H2A_HIGH_NEVER_WEIGHT = 8       # HIGH/KEY_VAULT + never authenticated
+H2B_HIGH_INACTIVE_90_WEIGHT = 7  # HIGH/KEY_VAULT + inactive >90 days
+H2C_HIGH_INACTIVE_31_90_WEIGHT = 4  # HIGH/KEY_VAULT + inactive 31-90 days
+H2D_MEDIUM_INACTIVE_90_WEIGHT = 3   # MEDIUM + inactive >90 days
+H2E_MEDIUM_INACTIVE_31_90_WEIGHT = 1  # MEDIUM + inactive 31-90 days
 H3_OVER_PRIV_WEIGHT = 4
 H4_EXT_GUEST_WEIGHT = 6
 H5_ZOMBIE_WEIGHT = 7
@@ -42,21 +52,10 @@ TIER_WEIGHT = {'T0': 10, 'T1': 7, 'T2': 4, 'T3': 1}
 SCOPE_BR = {'tenant': 3.0, 'subscription': 2.0, 'resource_group': 1.5, 'resource': 1.0}
 DORMANCY_MULT = {'stale': 2.0, 'never_used': 2.5, 'inactive': 1.5}
 
-# ── Privileged Entra roles (T0/T1) ───────────────────────────────
-T0_ENTRA_ROLES = {
-    'global administrator', 'privileged role administrator',
-    'privileged authentication administrator',
-    'application administrator', 'cloud application administrator',
-    'hybrid identity administrator', 'domain name administrator',
-    'external identity provider administrator',
-}
-T1_ENTRA_ROLES = {
-    'user administrator', 'exchange administrator',
-    'sharepoint administrator', 'teams administrator',
-    'security administrator', 'conditional access administrator',
-    'authentication administrator', 'helpdesk administrator',
-}
-T2_RBAC_ROLES = {'owner', 'contributor', 'user access administrator'}
+# ── Privileged Entra roles (T0/T1) — imported from constants.roles SSOT ──
+T0_ENTRA_ROLES = T0_ENTRA_ROLES_LOWER
+T1_ENTRA_ROLES = T1_ENTRA_ROLES_LOWER
+T2_RBAC_ROLES = T2_RBAC_ROLES_LOWER
 
 
 class AGIRSEngine:
@@ -104,11 +103,69 @@ class AGIRSEngine:
             nhiri = self._compute_nhiri(cursor, run_ids)
             gei = self._compute_gei(cursor, run_ids)
 
+            # Recalibration check 3: GEI floor at 25 — prevent GEI from collapsing
+            # to 0 due to penalties when governance frameworks are partially deployed
+            if gei['score'] < 25:
+                gei['score'] = 25.0
+                gei['gei_floor_applied'] = True
+
             agirs_score = round(0.40 * hiri['score'] + 0.40 * nhiri['score'] + 0.20 * gei['score'], 2)
 
             # Compute + persist blast radius scores on identities
             self._update_blast_radius_scores(cursor, run_ids)
+
+            # Recalibration check 1: Critical inflation cap at 30%
+            # If >30% of identities are CRITICAL, scores are inflated
+            critical_cap_applied = False
+            try:
+                rid_tuple = tuple(run_ids)
+                cursor.execute("""
+                    SELECT COUNT(*) as total,
+                           COUNT(*) FILTER (WHERE risk_level = 'CRITICAL') as critical
+                    FROM identities
+                    WHERE discovery_run_id IN %s
+                      AND NOT COALESCE(is_microsoft_system, false)
+                      AND deleted_at IS NULL
+                """, (rid_tuple,))
+                row = cursor.fetchone()
+                total, critical = (row[0] or 0), (row[1] or 0)
+                if total > 0 and critical / total > 0.30:
+                    critical_cap_applied = True
+                    logger.warning(
+                        "AGIRS: Critical inflation detected: %d/%d (%.0f%%) identities are CRITICAL. "
+                        "Review blast radius scoring weights.",
+                        critical, total, critical / total * 100,
+                    )
+            except Exception:
+                pass
+
+            # Recalibration check 2: HEALTHY/AGIRS contradiction
+            # If AGIRS > 80, no identities should be CRITICAL
+            agirs_contradiction = False
+            if agirs_score > 80:
+                try:
+                    rid_tuple = tuple(run_ids)
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM identities
+                        WHERE discovery_run_id IN %s
+                          AND risk_level = 'CRITICAL'
+                          AND NOT COALESCE(is_microsoft_system, false)
+                          AND deleted_at IS NULL
+                    """, (rid_tuple,))
+                    crit_count = cursor.fetchone()[0] or 0
+                    if crit_count > 0:
+                        agirs_contradiction = True
+                        logger.warning(
+                            "AGIRS contradiction: AGIRS=%.1f (healthy) but %d CRITICAL identities exist",
+                            agirs_score, crit_count,
+                        )
+                except Exception:
+                    pass
+
             self.db._commit()
+
+            # Recalibration check 4: Confidence score based on data quality
+            confidence = self._compute_confidence(cursor, run_ids, hiri, nhiri, gei)
 
             # Get top dangerous identities
             dangerous = self._get_top_dangerous(cursor, run_ids, n=5)
@@ -124,6 +181,10 @@ class AGIRSEngine:
                 'dangerous_identities': dangerous,
                 'human_count': hiri['human_count'],
                 'nhi_count': nhiri['nhi_count'],
+                'confidence': confidence,
+                'critical_cap_applied': critical_cap_applied,
+                'agirs_contradiction': agirs_contradiction,
+                'gei_floor_applied': gei.get('gei_floor_applied', False),
             }
 
         except Exception as e:
@@ -188,8 +249,12 @@ class AGIRSEngine:
 
         if human_count == 0:
             return {'score': 100.0, 'human_count': 0,
-                    'h1_ghost': 0, 'h2_dormant_priv': 0, 'h3_over_priv': 0,
-                    'h4_ext_guest': 0, 'h5_zombie': 0, 'deduction_details': []}
+                    'h1_ghost': 0, 'h2_dormant_priv': 0,
+                    'h2a_high_never': 0, 'h2b_high_inactive_90': 0,
+                    'h2c_high_inactive_31_90': 0, 'h2d_medium_inactive_90': 0,
+                    'h2e_medium_inactive_31_90': 0,
+                    'h3_over_priv': 0, 'h4_ext_guest': 0, 'h5_zombie': 0,
+                    'deduction_details': []}
 
         # H1: Ghost humans (disabled/deleted but still has roles)
         cursor.execute("""
@@ -204,19 +269,92 @@ class AGIRSEngine:
         """, (rid_tuple,))
         h1_ghost = cursor.fetchone()[0] or 0
 
-        # H2: Dormant privileged (stale >90d + has T0/T1/T2 role)
-        cursor.execute("""
+        # H2: Tier-aware dormant privileged sub-factors
+        # SQL fragments for role tier classification
+        _HIGH_KV_EXISTS = """(
+            EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+            OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                AND (
+                    ra.scope LIKE '%%Microsoft.KeyVault/vaults%%'
+                    OR LOWER(ra.role_name) IN (
+                        'owner', 'contributor', 'user access administrator',
+                        'global administrator', 'application administrator',
+                        'cloud application administrator', 'privileged role administrator',
+                        'security administrator', 'exchange administrator',
+                        'sharepoint administrator', 'intune administrator',
+                        'dynamics 365 administrator', 'power bi administrator',
+                        'key vault administrator', 'key vault secrets officer',
+                        'key vault certificates officer', 'key vault crypto officer',
+                        'storage account key operator service role',
+                        'virtual machine contributor', 'network contributor',
+                        'sql server contributor', 'acrpush'
+                    )
+                )
+            )
+        )"""
+        _MEDIUM_ONLY_EXISTS = f"""(
+            NOT {_HIGH_KV_EXISTS}
+            AND EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                AND LOWER(ra.role_name) IN (
+                    'reader', 'monitoring contributor', 'backup operator',
+                    'website contributor', 'logic app contributor',
+                    'automation operator', 'devtest labs user',
+                    'key vault crypto user', 'key vault reader',
+                    'sql db reader', 'monitoring reader',
+                    'log analytics reader', 'security reader'
+                )
+            )
+        )"""
+
+        _HUMAN_BASE = """
             SELECT COUNT(*) FROM identities i
             WHERE i.discovery_run_id IN %s
               AND i.identity_category IN ('human_user', 'guest')
-              AND i.activity_status IN ('stale', 'never_used')
-              AND (
-                  EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
-                  OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
-                      AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator'))
-              )
+        """
+
+        # H2a: HIGH/KEY_VAULT + never authenticated
+        cursor.execute(f"""
+            {_HUMAN_BASE}
+              AND i.activity_status = 'never_used'
+              AND {_HIGH_KV_EXISTS}
         """, (rid_tuple,))
-        h2_dormant_priv = cursor.fetchone()[0] or 0
+        h2a_high_never = cursor.fetchone()[0] or 0
+
+        # H2b: HIGH/KEY_VAULT + inactive >90 days
+        cursor.execute(f"""
+            {_HUMAN_BASE}
+              AND i.days_since_last_signin IS NOT NULL
+              AND i.days_since_last_signin > 90
+              AND {_HIGH_KV_EXISTS}
+        """, (rid_tuple,))
+        h2b_high_inactive_90 = cursor.fetchone()[0] or 0
+
+        # H2c: HIGH/KEY_VAULT + inactive 31-90 days
+        cursor.execute(f"""
+            {_HUMAN_BASE}
+              AND i.days_since_last_signin IS NOT NULL
+              AND i.days_since_last_signin BETWEEN 31 AND 90
+              AND {_HIGH_KV_EXISTS}
+        """, (rid_tuple,))
+        h2c_high_inactive_31_90 = cursor.fetchone()[0] or 0
+
+        # H2d: MEDIUM (not HIGH/KV) + inactive >90 days
+        cursor.execute(f"""
+            {_HUMAN_BASE}
+              AND i.days_since_last_signin IS NOT NULL
+              AND i.days_since_last_signin > 90
+              AND {_MEDIUM_ONLY_EXISTS}
+        """, (rid_tuple,))
+        h2d_medium_inactive_90 = cursor.fetchone()[0] or 0
+
+        # H2e: MEDIUM (not HIGH/KV) + inactive 31-90 days
+        cursor.execute(f"""
+            {_HUMAN_BASE}
+              AND i.days_since_last_signin IS NOT NULL
+              AND i.days_since_last_signin BETWEEN 31 AND 90
+              AND {_MEDIUM_ONLY_EXISTS}
+        """, (rid_tuple,))
+        h2e_medium_inactive_31_90 = cursor.fetchone()[0] or 0
 
         # H3: Over-privileged (risk_score >= 70 OR tier = 'T0')
         cursor.execute("""
@@ -262,27 +400,52 @@ class AGIRSEngine:
 
         # Normalize: deductions per 100 humans, capped at 500
         raw = (h1_ghost * H1_GHOST_WEIGHT +
-               h2_dormant_priv * H2_DORMANT_PRIV_WEIGHT +
+               h2a_high_never * H2A_HIGH_NEVER_WEIGHT +
+               h2b_high_inactive_90 * H2B_HIGH_INACTIVE_90_WEIGHT +
+               h2c_high_inactive_31_90 * H2C_HIGH_INACTIVE_31_90_WEIGHT +
+               h2d_medium_inactive_90 * H2D_MEDIUM_INACTIVE_90_WEIGHT +
+               h2e_medium_inactive_31_90 * H2E_MEDIUM_INACTIVE_31_90_WEIGHT +
                h3_over_priv * H3_OVER_PRIV_WEIGHT +
                h4_ext_guest * H4_EXT_GUEST_WEIGHT +
                h5_zombie * H5_ZOMBIE_WEIGHT)
         normalized = min(raw / max(human_count, 1) * 100, 500)
         score = round(max(100 - normalized, 0), 2)
 
+        # Backward-compatible aggregate for downstream consumers
+        h2_dormant_priv = h2a_high_never + h2b_high_inactive_90 + h2c_high_inactive_31_90 + h2d_medium_inactive_90 + h2e_medium_inactive_31_90
+
         return {
             'score': score,
             'human_count': human_count,
             'h1_ghost': h1_ghost,
             'h2_dormant_priv': h2_dormant_priv,
+            'h2a_high_never': h2a_high_never,
+            'h2b_high_inactive_90': h2b_high_inactive_90,
+            'h2c_high_inactive_31_90': h2c_high_inactive_31_90,
+            'h2d_medium_inactive_90': h2d_medium_inactive_90,
+            'h2e_medium_inactive_31_90': h2e_medium_inactive_31_90,
             'h3_over_priv': h3_over_priv,
             'h4_ext_guest': h4_ext_guest,
             'h5_zombie': h5_zombie,
             'deduction_details': [
-                {'factor': 'Ghost humans', 'count': h1_ghost, 'weight': H1_GHOST_WEIGHT, 'deduction': h1_ghost * H1_GHOST_WEIGHT},
-                {'factor': 'Dormant privileged', 'count': h2_dormant_priv, 'weight': H2_DORMANT_PRIV_WEIGHT, 'deduction': h2_dormant_priv * H2_DORMANT_PRIV_WEIGHT},
-                {'factor': 'Over-privileged', 'count': h3_over_priv, 'weight': H3_OVER_PRIV_WEIGHT, 'deduction': h3_over_priv * H3_OVER_PRIV_WEIGHT},
-                {'factor': 'External guests with priv', 'count': h4_ext_guest, 'weight': H4_EXT_GUEST_WEIGHT, 'deduction': h4_ext_guest * H4_EXT_GUEST_WEIGHT},
-                {'factor': 'Zombie personas', 'count': h5_zombie, 'weight': H5_ZOMBIE_WEIGHT, 'deduction': h5_zombie * H5_ZOMBIE_WEIGHT},
+                {'factor': 'Ghost humans', 'count': h1_ghost, 'weight': H1_GHOST_WEIGHT,
+                 'deduction': h1_ghost * H1_GHOST_WEIGHT},
+                {'factor': 'HIGH/KV never authenticated', 'count': h2a_high_never, 'weight': H2A_HIGH_NEVER_WEIGHT,
+                 'deduction': h2a_high_never * H2A_HIGH_NEVER_WEIGHT},
+                {'factor': 'HIGH/KV inactive >90d', 'count': h2b_high_inactive_90, 'weight': H2B_HIGH_INACTIVE_90_WEIGHT,
+                 'deduction': h2b_high_inactive_90 * H2B_HIGH_INACTIVE_90_WEIGHT},
+                {'factor': 'HIGH/KV inactive 31-90d', 'count': h2c_high_inactive_31_90, 'weight': H2C_HIGH_INACTIVE_31_90_WEIGHT,
+                 'deduction': h2c_high_inactive_31_90 * H2C_HIGH_INACTIVE_31_90_WEIGHT},
+                {'factor': 'MEDIUM inactive >90d', 'count': h2d_medium_inactive_90, 'weight': H2D_MEDIUM_INACTIVE_90_WEIGHT,
+                 'deduction': h2d_medium_inactive_90 * H2D_MEDIUM_INACTIVE_90_WEIGHT},
+                {'factor': 'MEDIUM inactive 31-90d', 'count': h2e_medium_inactive_31_90, 'weight': H2E_MEDIUM_INACTIVE_31_90_WEIGHT,
+                 'deduction': h2e_medium_inactive_31_90 * H2E_MEDIUM_INACTIVE_31_90_WEIGHT},
+                {'factor': 'Over-privileged', 'count': h3_over_priv, 'weight': H3_OVER_PRIV_WEIGHT,
+                 'deduction': h3_over_priv * H3_OVER_PRIV_WEIGHT},
+                {'factor': 'External guests with priv', 'count': h4_ext_guest, 'weight': H4_EXT_GUEST_WEIGHT,
+                 'deduction': h4_ext_guest * H4_EXT_GUEST_WEIGHT},
+                {'factor': 'Zombie personas', 'count': h5_zombie, 'weight': H5_ZOMBIE_WEIGHT,
+                 'deduction': h5_zombie * H5_ZOMBIE_WEIGHT},
             ],
         }
 
@@ -309,7 +472,7 @@ class AGIRSEngine:
                     'phantom_breakdown': {'orphaned': 0, 'dormant': 0, 'zombie_nhi': 0, 'expired_creds': 0, 'ownerless_apps': 0},
                     'deduction_details': []}
 
-        # N1: Orphaned NHI (no owner)
+        # N1: Orphaned NHI — SSOT uses recommended_action='ORPHANED' (set by lineage engine)
         n1_orphaned = 0
         try:
             cursor.execute("""
@@ -317,7 +480,8 @@ class AGIRSEngine:
                 WHERE i.discovery_run_id IN %s
                   AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
                   AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
-                  AND NOT EXISTS (SELECT 1 FROM spn_owners so WHERE so.identity_db_id = i.id)
+                  AND i.recommended_action = 'ORPHANED'
+                  AND i.deleted_at IS NULL
             """, (rid_tuple,))
             n1_orphaned = cursor.fetchone()[0] or 0
         except Exception:
@@ -350,15 +514,11 @@ class AGIRSEngine:
         """, (rid_tuple,))
         n3_zombie = cursor.fetchone()[0] or 0
 
-        # N4: Expired/expiring credentials
-        cursor.execute("""
+        # N4: Expired/expiring credentials (SSOT: CredentialRiskSQL)
+        cursor.execute(f"""
             SELECT COUNT(*) FROM identities i
             WHERE i.discovery_run_id IN %s
-              AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
-              AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
-              AND i.credential_count > 0
-              AND i.credential_expiration IS NOT NULL
-              AND i.credential_expiration < NOW() + INTERVAL '30 days'
+              {CredentialRiskSQL.NHI_CREDENTIAL_RISK_FILTER}
         """, (rid_tuple,))
         n4_expired = cursor.fetchone()[0] or 0
 
@@ -386,6 +546,8 @@ class AGIRSEngine:
             n6_fed_misconfig = cursor.fetchone()[0] or 0
         except Exception:
             pass
+
+        # N7/N8 removed in v1 scope reset (analytics_workspaces, devops_service_connections deleted)
 
         # Apply average scope multiplier (1.5 for mix of subscription-level)
         avg_scope_mult = 1.3  # Moderate default
@@ -522,49 +684,17 @@ class AGIRSEngine:
         # Weighted average (equal 25% each)
         gei_score = round(sum(c['score'] for c in components) / 4, 2)
 
-        # Phase 3A: Mixed auth penalty — reduce GEI proportional to % of mixed-auth DBs
-        mixed_auth_penalty = 0
-        try:
-            cursor.execute("""
-                SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE mixed_auth_enabled) as mixed
-                FROM database_servers WHERE discovery_run_id IN %s
-            """, (rid_tuple,))
-            row = cursor.fetchone()
-            total_db, mixed_db = (row[0] or 0), (row[1] or 0)
-            if total_db > 0:
-                mixed_auth_penalty = round((mixed_db / total_db) * 10, 1)  # max -10
-                gei_score = round(max(gei_score - mixed_auth_penalty, 0), 2)
-        except Exception:
-            pass  # database_servers table may not exist yet
+        # Phase 3A/3B penalties removed in v1 scope reset
+        # (database_servers, analytics_workspaces tables deleted)
 
         return {
             'score': gei_score,
             'components': components,
-            'mixed_auth_penalty': mixed_auth_penalty,
         }
 
     # ── Blast Radius Danger Score ─────────────────────────────────
 
-    def _load_cluster_admin_identity_ids(self, cursor, run_ids: List[int]) -> set:
-        """Load identity IDs linked to AKS clusters with non-system cluster-admin bindings.
-
-        FIX D: Cluster-admin Danger Score 2.0 multiplier.
-        Only applies when Layer 2 data is available (aks_rbac_bindings populated).
-        """
-        try:
-            cursor.execute("""
-                SELECT DISTINCT i.id
-                FROM aks_rbac_bindings arb
-                JOIN aks_clusters ac ON ac.id = arb.aks_cluster_id
-                JOIN identities i ON i.azure_object_id = ac.system_msi_principal_id
-                    AND i.discovery_run_id = ac.discovery_run_id
-                WHERE arb.discovery_run_id IN %s
-                  AND arb.is_cluster_admin = TRUE
-                  AND arb.subject_name NOT LIKE 'system:%%'
-            """, (tuple(run_ids),))
-            return {row[0] for row in cursor.fetchall()}
-        except Exception:
-            return set()
+    # _load_cluster_admin_identity_ids removed in v1 scope reset (aks_clusters table deleted)
 
     def _update_blast_radius_scores(self, cursor, run_ids: List[int]):
         """Compute and persist blast_radius_score on each identity."""
@@ -576,9 +706,6 @@ class AGIRSEngine:
             self.db._commit()
         except Exception:
             self.db._rollback()
-
-        # FIX D: Load cluster-admin identity IDs for 2.0 multiplier
-        cluster_admin_ids = self._load_cluster_admin_identity_ids(cursor, run_ids)
 
         # Fetch identities with their tier, activity, scope info
         cursor.execute("""
@@ -619,10 +746,7 @@ class AGIRSEngine:
             if multi_tenant:
                 exposure_mult *= 1.3
 
-            # FIX D: Cluster-admin 2.0 multiplier (highest in system)
-            cluster_admin_mult = 2.0 if id_ in cluster_admin_ids else 1.0
-
-            score = round(privilege_weight * scope_mult * dormancy_mult * exposure_mult * cluster_admin_mult, 2)
+            score = round(privilege_weight * scope_mult * dormancy_mult * exposure_mult, 2)
             updates.append((score, id_))
 
         # Batch update
@@ -699,6 +823,60 @@ class AGIRSEngine:
 
         return results
 
+    def _compute_confidence(self, cursor, run_ids: List[int],
+                             hiri: Dict, nhiri: Dict, gei: Dict) -> Dict:
+        """Compute a confidence score (0-100) for the AGIRS result.
+
+        Confidence is reduced when data signals are missing:
+          - No humans discovered → -20
+          - No NHIs discovered → -20
+          - No GEI component configured → -15 per missing component
+          - No P2 telemetry → -10
+          - Single run only → -5
+        """
+        confidence = 100
+        reasons = []
+
+        if hiri.get('human_count', 0) == 0:
+            confidence -= 20
+            reasons.append('no_human_identities')
+        if nhiri.get('nhi_count', 0) == 0:
+            confidence -= 20
+            reasons.append('no_nhi_identities')
+
+        # Check GEI components
+        for comp in gei.get('components', []):
+            if not comp.get('configured', True):
+                confidence -= 15
+                reasons.append(f"gei_{comp['name'].lower().replace(' ', '_')}_not_configured")
+
+        # Check P2 telemetry
+        try:
+            rid_tuple = tuple(run_ids)
+            cursor.execute("""
+                SELECT COUNT(*) FROM workload_activity_stats
+                WHERE identity_db_id IN (
+                    SELECT id FROM identities WHERE discovery_run_id IN %s
+                )
+            """, (rid_tuple,))
+            p2_count = cursor.fetchone()[0] or 0
+            if p2_count == 0:
+                confidence -= 10
+                reasons.append('no_p2_telemetry')
+        except Exception:
+            confidence -= 10
+            reasons.append('p2_telemetry_unavailable')
+
+        # Single run → less confidence in trend data
+        if len(run_ids) <= 1:
+            confidence -= 5
+            reasons.append('single_run_only')
+
+        return {
+            'score': max(0, confidence),
+            'reasons': reasons,
+        }
+
     def _empty_result(self) -> Dict:
         return {
             'agirs_score': None,
@@ -711,4 +889,79 @@ class AGIRSEngine:
             'dangerous_identities': [],
             'human_count': 0,
             'nhi_count': 0,
+            'confidence': {'score': 0, 'reasons': ['no_data']},
+            'critical_cap_applied': False,
+            'agirs_contradiction': False,
+            'gei_floor_applied': False,
         }
+
+
+# ── Role Privilege Tier Classifier ──────────────────────────────────
+
+# HIGH privilege roles — can write, modify, or escalate
+_HIGH_ROLES = frozenset({
+    RBACRole.OWNER, RBACRole.CONTRIBUTOR, RBACRole.USER_ACCESS_ADMIN,
+    RBACRole.RBAC_ADMIN,
+    # Storage
+    RBACRole.STORAGE_BLOB_DATA_CONTRIBUTOR, RBACRole.STORAGE_BLOB_DATA_OWNER,
+    RBACRole.STORAGE_QUEUE_DATA_CONTRIBUTOR, RBACRole.STORAGE_TABLE_DATA_CONTRIBUTOR,
+    RBACRole.STORAGE_ACCOUNT_CONTRIBUTOR,
+    # Database
+    RBACRole.SQL_DB_CONTRIBUTOR, RBACRole.SQL_SERVER_CONTRIBUTOR,
+    RBACRole.SQL_MANAGED_INSTANCE_CONTRIBUTOR,
+    RBACRole.COSMOS_DB_ACCOUNT_READER, RBACRole.DOCUMENTDB_ACCOUNT_CONTRIBUTOR,
+    # Key Vault (belt-and-suspenders with scope check)
+    RBACRole.KEY_VAULT_ADMIN, RBACRole.KEY_VAULT_CERTS_OFFICER,
+    RBACRole.KEY_VAULT_SECRETS_OFFICER, RBACRole.KEY_VAULT_CRYPTO_OFFICER,
+    # Compute/Identity
+    RBACRole.VIRTUAL_MACHINE_CONTRIBUTOR,
+    RBACRole.MANAGED_IDENTITY_CONTRIBUTOR, RBACRole.MANAGED_IDENTITY_OPERATOR,
+})
+
+# MEDIUM privilege roles — read access or limited data-plane ops
+_MEDIUM_ROLES = frozenset({
+    RBACRole.READER,
+    RBACRole.STORAGE_BLOB_DATA_READER, RBACRole.STORAGE_QUEUE_DATA_MSG_PROCESSOR,
+    RBACRole.STORAGE_TABLE_DATA_READER,
+    RBACRole.KEY_VAULT_SECRETS_USER, RBACRole.KEY_VAULT_CERTIFICATE_USER,
+    RBACRole.KEY_VAULT_CRYPTO_USER, RBACRole.KEY_VAULT_READER,
+    RBACRole.SQL_DB_READER,
+    RBACRole.MONITORING_READER, RBACRole.LOG_ANALYTICS_READER,
+    RBACRole.SECURITY_READER,
+})
+
+_HIGH_SUFFIXES = ('Administrator', 'Contributor', 'Owner', 'DataWriter', 'DataOwner', 'Officer')
+_MEDIUM_SUFFIXES = ('Reader', 'DataReader', 'User', 'Viewer')
+
+
+def classify_role_privilege_tier(role_assignment: dict) -> str:
+    """Classify a single role assignment into a privilege tier.
+
+    Returns: 'HIGH' | 'MEDIUM' | 'LOW' | 'KEY_VAULT'
+
+    KEY_VAULT overrides everything — any role on a Key Vault resource is
+    treated as HIGH sensitivity regardless of role name, because even Reader
+    can enumerate secret names and metadata.
+    """
+    role_name = role_assignment.get('role_definition_name') or role_assignment.get('role_name') or ''
+    scope = role_assignment.get('scope') or role_assignment.get('directory_scope') or ''
+
+    # Key Vault scope overrides role name
+    if 'Microsoft.KeyVault/vaults' in scope:
+        return 'KEY_VAULT'
+
+    # Exact match
+    if role_name in _HIGH_ROLES:
+        return 'HIGH'
+    if role_name in _MEDIUM_ROLES:
+        return 'MEDIUM'
+
+    # Suffix match for custom roles
+    if role_name.endswith(_HIGH_SUFFIXES):
+        return 'HIGH'
+    if role_name.endswith(_MEDIUM_SUFFIXES):
+        return 'MEDIUM'
+
+    return 'LOW'
+
+

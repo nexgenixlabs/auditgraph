@@ -1,18 +1,23 @@
 """
-Phase 5: Identity Blast Radius Engine
+Identity Blast Radius Engine
 
 Simulates compromise of each identity and calculates reachable resources,
 sensitive assets, and escalation potential.  Produces a blast-radius view
 that feeds the Identity Detail UI and the /api/blast-radius endpoints.
 
+v1 scope reset: blast radius is inferred from role assignment scope strings
+only (subscription > RG > resource).  Resource-plane tables (compute_resources,
+database_servers, analytics_workspaces, devops_service_connections) removed.
+
 Data sources (SELECT only — never mutates upstream tables):
-  - identities + role_assignments      → RBAC scope expansion
-  - entra_role_assignments             → Entra directory privilege
+  - identities + role_assignments       → RBAC scope expansion
+  - entra_role_assignments              → Entra directory privilege
   - azure_storage_accounts / key_vaults → resource enumeration + classification
   - attack_paths                        → privilege escalation path count
   - fix_recommendations                 → blast radius reduction estimate
+  - integration_resources               → APIM / Batch / Event Hub context
 
-Safety limits (imported from AttackPathEngine where applicable):
+Safety limits:
   MAX_BLAST_RADIUS_IDENTITIES = 1000  — cap identities per run
   MAX_BLAST_RADIUS_RESOURCES  = 5000  — cap resources per identity
 """
@@ -125,14 +130,11 @@ class BlastRadiusEngine:
         for idb_id, roles in group_rbac.items():
             rbac_by_identity.setdefault(idb_id, []).extend(roles)
 
-        # Load compute danger context (identities accessing resources with env secrets)
-        compute_danger = self._load_compute_danger_context(run_id)
-
         # Load identities with FEDERATED_MISCONFIGURED verdict
         fed_misconfig_ids = self._load_federated_misconfigured_ids(run_id)
 
-        # Load DB admin context for blast radius bonus
-        db_admin_context = self._load_db_admin_context(run_id)
+        # Load integration context for blast radius bonus (APIM, EH/SB)
+        integration_context = self._load_integration_context(run_id)
 
         results: List[Dict] = []
         for ident in identities:
@@ -157,16 +159,14 @@ class BlastRadiusEngine:
             # Step 6: Resource breakdown
             breakdown = self._build_breakdown(reachable)
 
-            # Step 7: Risk score (with SAMI resource context + compute danger + fed misconfig + DB admin)
-            danger = compute_danger.get(idb_id)
-            db_ctx = db_admin_context.get(idb_id)
+            # Step 7: Risk score (with SAMI resource context + fed misconfig + integration)
+            integration_ctx = integration_context.get(idb_id)
             risk_score = self._compute_risk_score(
                 rbac, entra, reachable, sensitive_count,
                 ident['identity_category'], esc_count,
                 associated_resource_type=ident.get('associated_resource_type'),
-                compute_danger=danger,
                 has_federated_misconfigured=(idb_id in fed_misconfig_ids),
-                db_admin_context=db_ctx,
+                integration_context=integration_ctx,
             )
 
             # Step 8: Exposure level
@@ -191,21 +191,6 @@ class BlastRadiusEngine:
                 if r.get('resource_group'):
                     rg_ids.add(r['resource_group'])
 
-            # Compute danger score: 0-15 bonus based on env secret exposure
-            compute_danger_score = 0
-            if danger:
-                high = danger.get('high_severity_count', 0)
-                compute_danger_score = min(15, high * 5)
-
-            # Build attack paths for DB admin context
-            attack_paths = []
-            if db_ctx and db_ctx.get('mixed_auth') and db_ctx.get('open_firewall'):
-                attack_paths.append({
-                    'path_type': 'database_direct_access',
-                    'description': f"AAD admin of {db_ctx.get('server_name', 'unknown')} — mixed auth + open firewall",
-                    'contributing_resources': [db_ctx.get('azure_resource_id', '')],
-                })
-
             results.append({
                 'identity_id': idb_id,
                 'identity_name': ident['display_name'],
@@ -222,8 +207,6 @@ class BlastRadiusEngine:
                 'blast_radius_reduction': reduction,
                 'remediation_confidence': confidence,
                 'risk_score': risk_score,
-                'compute_danger_score': compute_danger_score,
-                'attack_paths': attack_paths,
             })
 
         results.sort(key=lambda r: r['risk_score'], reverse=True)
@@ -326,7 +309,7 @@ class BlastRadiusEngine:
             cursor.close()
 
     def _load_resources(self, run_id: int) -> List[Dict]:
-        """Load storage accounts + key vaults + compute resources as the resource universe."""
+        """Load storage accounts + key vaults as the resource universe."""
         resources: List[Dict] = []
         cursor = self.db.conn.cursor()
         try:
@@ -349,86 +332,61 @@ class BlastRadiusEngine:
                 except Exception:
                     pass  # Table may not exist yet
 
-            # Include compute resources
-            try:
-                cursor.execute("""
-                    SELECT azure_resource_id AS resource_id, resource_name AS name,
-                           resource_group, subscription_id, resource_type,
-                           NULL AS data_classification
-                    FROM compute_resources
-                    WHERE discovery_run_id = %s
-                """, (run_id,))
-                cols = [d[0] for d in cursor.description]
-                for row in cursor.fetchall():
-                    d = dict(zip(cols, row))
-                    resources.append(d)
-            except Exception:
-                pass  # Table may not exist yet
+            # Resource-plane blast radius removed in v1 scope reset
+            # Blast radius is now inferred from role assignment
+            # scope strings only (subscription > RG > resource)
 
             return resources
         finally:
             cursor.close()
 
     def _load_compute_danger_context(self, run_id: int) -> Dict[int, dict]:
-        """Load compute danger context: identities with access to resources that have env secrets.
-
-        Returns {identity_db_id: {secret_count, high_severity_count, resource_names}}.
-        """
-        cursor = self.db.conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT cra.identity_id AS identity_db_id,
-                       COUNT(DISTINCT ces.id) AS secret_count,
-                       COUNT(DISTINCT ces.id) FILTER (WHERE ces.severity = 'HIGH') AS high_count,
-                       ARRAY_AGG(DISTINCT cr.resource_name) AS resource_names
-                FROM compute_role_assignments cra
-                JOIN compute_resources cr ON cr.id = cra.compute_resource_id
-                JOIN compute_env_secrets ces ON ces.compute_resource_id = cr.id
-                WHERE cra.discovery_run_id = %s
-                  AND cra.identity_id IS NOT NULL
-                GROUP BY cra.identity_id
-            """, (run_id,))
-            result = {}
-            for row in cursor.fetchall():
-                result[row[0]] = {
-                    'secret_count': row[1],
-                    'high_severity_count': row[2],
-                    'resource_names': [r for r in (row[3] or []) if r],
-                }
-            return result
-        except Exception:
-            return {}  # Tables may not exist yet
-        finally:
-            cursor.close()
+        # Resource-plane tables removed in v1 scope reset.
+        # Blast radius is now inferred from role assignment scope strings only.
+        return {}
 
     def _load_db_admin_context(self, run_id: int) -> Dict[int, Dict]:
-        """Load DB admin context for identities that are AAD admins of database servers."""
+        # Resource-plane tables removed in v1 scope reset.
+        # Blast radius is now inferred from role assignment scope strings only.
+        return {}
+
+    def _load_analytics_context(self, run_id: int) -> Dict[int, Dict]:
+        # Resource-plane tables removed in v1 scope reset.
+        # Blast radius is now inferred from role assignment scope strings only.
+        return {}
+
+    def _load_devops_context(self, run_id: int) -> Dict[int, Dict]:
+        # Resource-plane tables removed in v1 scope reset.
+        # Blast radius is now inferred from role assignment scope strings only.
+        return {}
+
+    def _load_integration_context(self, run_id: int) -> Dict[int, Dict]:
+        """Load integration resource context for MSI identities (APIM, Event Hub, Service Bus, Batch, SWA)."""
         cursor = self.db.conn.cursor()
         try:
             cursor.execute("""
-                SELECT daa.identity_id, ds.server_name, ds.azure_resource_id,
-                       ds.mixed_auth_enabled, ds.has_open_firewall
-                FROM database_aad_admins daa
-                JOIN database_servers ds ON ds.id = daa.server_id
-                WHERE daa.discovery_run_id = %s AND daa.identity_id IS NOT NULL
+                SELECT msi_identity_id, resource_type,
+                       has_root_sas_key, has_unscoped_subscriptions,
+                       is_shared_key_enabled
+                FROM integration_resources
+                WHERE discovery_run_id = %s
+                  AND msi_identity_id IS NOT NULL
             """, (run_id,))
             result = {}
             for row in cursor.fetchall():
-                idb_id = row[0]
-                # Take the worst-case server for this identity
-                existing = result.get(idb_id)
-                is_worse = (
-                    existing is None
-                    or (row[3] and row[4] and not (existing.get('mixed_auth') and existing.get('open_firewall')))
-                    or (row[3] and not existing.get('mixed_auth'))
-                )
-                if is_worse:
-                    result[idb_id] = {
-                        'server_name': row[1],
-                        'azure_resource_id': row[2],
-                        'mixed_auth': row[3],
-                        'open_firewall': row[4],
-                    }
+                ctx = result.get(row[0], {
+                    'has_root_sas_key': False,
+                    'has_unscoped_subscriptions': False,
+                    'has_batch_shared_key': False,
+                })
+                ctx['resource_type'] = row[1]
+                if row[2]:
+                    ctx['has_root_sas_key'] = True
+                if row[3]:
+                    ctx['has_unscoped_subscriptions'] = True
+                if row[1] == 'batch_account' and row[4]:
+                    ctx['has_batch_shared_key'] = True
+                result[row[0]] = ctx
             return result
         except Exception:
             return {}
@@ -600,9 +558,8 @@ class BlastRadiusEngine:
         identity_category: str,
         escalation_count: int,
         associated_resource_type: Optional[str] = None,
-        compute_danger: Optional[Dict] = None,
         has_federated_misconfigured: bool = False,
-        db_admin_context: Optional[Dict] = None,
+        integration_context: Optional[Dict] = None,
     ) -> int:
         """Compute blast radius risk score (0-100).
 
@@ -615,20 +572,11 @@ class BlastRadiusEngine:
           - External identity weight
           - Escalation path weight
           - SAMI resource context multiplier
-          - Compute danger bonus (env secret exposure)
+          - Federated misconfigured bonus
+          - Integration resource bonus (APIM, Batch)
 
-        Scoring calibration — post Prompt 4 (2026-03-28)
-        AGIRS formula: 0.40×HIRI + 0.40×NHIRI + 0.20×GEI
-        Blast radius: base_score + resource_context_bonus + compute_danger (all additive)
-        New inputs active: group-inherited roles, SAMI resource context, compute env secrets
-        Additive bonus validated: max SAMI bonus = 12 (AKS), cannot push LOW to CRITICAL alone
-        Compute danger bonus: max +15 (3+ high-severity env secrets on accessed resources)
-
-        Max base score without bonuses: 150 (Entra:50 + RBAC:40 + Scope:15 + Resources:10
-        + Sensitive:15 + Guest:10 + Escalation:10), capped at 100.
-        SAMI bonus (3-12) + compute danger (0-15) are additive.
-
-        Regression gate: all bonuses are additive — scores can only increase or stay same.
+        v1 scope reset: compute_danger, db_admin, analytics, devops bonuses removed.
+        Blast radius is now inferred from role assignment scope strings only.
         """
         score = 0.0
 
@@ -679,25 +627,20 @@ class BlastRadiusEngine:
             resource_bonus = _SAMI_RESOURCE_CONTEXT.get(associated_resource_type, 3)
             score += resource_bonus
 
-        # Compute danger bonus — identity has RBAC to compute resources with exposed env secrets
-        # Max +15 for identities with access to 3+ high-severity exposed secrets
-        if compute_danger:
-            high_secrets = compute_danger.get('high_severity_count', 0)
-            if high_secrets > 0:
-                score += min(15, high_secrets * 5)
-
         # FEDERATED_MISCONFIGURED bonus — overly-broad federated credential
         # +12 blast radius points (same as AKS resource context bonus)
         if has_federated_misconfigured:
             score += 12
 
-        # Database admin bonus — AAD admin of mixed-auth / open-firewall DB
-        # +15 for mixed auth + open firewall, +8 for mixed auth only
-        if db_admin_context:
-            if db_admin_context.get('mixed_auth') and db_admin_context.get('open_firewall'):
-                score += 15
-            elif db_admin_context.get('mixed_auth'):
+        # Integration resource bonus — APIM unscoped subs (+8), root SAS key (+10),
+        # Batch SharedKey (+5)
+        if integration_context:
+            if integration_context.get('has_unscoped_subscriptions'):
                 score += 8
+            if integration_context.get('has_root_sas_key'):
+                score += 10
+            if integration_context.get('has_batch_shared_key'):
+                score += 5
 
         return min(100, max(0, int(score)))
 

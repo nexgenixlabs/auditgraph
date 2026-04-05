@@ -262,7 +262,8 @@ export default function AttackSimulator() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identity_id: identityId, max_depth: depthLimit }),
       });
-      const data = await res.json();
+      let data;
+      try { data = await res.json(); } catch { data = { error: 'Server error — check logs.' }; }
       if (!res.ok) {
         setError(data.error || 'Simulation failed.');
       } else {

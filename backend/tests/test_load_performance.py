@@ -24,6 +24,8 @@ import random
 import threading
 import statistics
 
+import pytest
+
 os.environ.setdefault('APP_ENV', 'local')
 os.environ.setdefault('FLASK_ENV', 'development')
 os.environ.setdefault('JWT_SECRET', 'test-secret-load')
@@ -208,6 +210,7 @@ def teardown():
 # Test 1: Isolation under load
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_isolation_under_load():
     """Each tenant reads concurrently — verify zero leakage."""
     print("\n  Test 1: Isolation under concurrent load")
@@ -265,6 +268,7 @@ def test_isolation_under_load():
 # Test 2: Index usage at scale (EXPLAIN ANALYZE)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_index_usage():
     """Verify the planner uses indexes, not seq scans, at 500k rows."""
     print("\n  Test 2: Index usage validation (EXPLAIN ANALYZE)")
@@ -333,6 +337,7 @@ def test_index_usage():
 # Test 3: Filtered + sorted query performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_filtered_sort_performance():
     """Measure latency for common dashboard queries across all tenants."""
     print("\n  Test 3: Dashboard query performance (per-tenant)")
@@ -393,6 +398,7 @@ def test_filtered_sort_performance():
 # Test 4: Cross-tenant JOIN safety
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_cross_tenant_join():
     """Verify JOINs between tenant-scoped connections respect RLS."""
     print("\n  Test 4: Cross-tenant JOIN safety")
@@ -438,6 +444,7 @@ def test_cross_tenant_join():
 # Test 5: UPDATE performance under RLS
 # ---------------------------------------------------------------------------
 
+@pytest.mark.requires_db
 def test_update_performance():
     """Verify tenant-scoped UPDATEs use indexes and are fast."""
     print("\n  Test 5: Tenant-scoped UPDATE performance")

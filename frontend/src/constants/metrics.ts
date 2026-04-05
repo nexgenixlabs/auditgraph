@@ -45,10 +45,11 @@ export const IDENTITY_CATEGORIES: Record<string, { label: string; shortLabel: st
   gcp_member:               { label: 'GCP Member',            shortLabel: 'Member', description: 'Other GCP IAM member type', cloud: 'gcp' },
 };
 
-/** Categories shown in dashboard/overview (excludes system MI & unknown) */
+/** Categories shown in filter dropdowns */
 export const CATEGORY_DISPLAY_ORDER: IdentityCategory[] = [
   // Azure
   'service_principal',
+  'managed_identity_system',
   'managed_identity_user',
   'human_user',
   'guest',
@@ -58,6 +59,12 @@ export const CATEGORY_DISPLAY_ORDER: IdentityCategory[] = [
   // GCP
   'gcp_service_account',
   'gcp_user',
+];
+
+/** Virtual group: both managed identity types */
+export const MANAGED_IDENTITY_GROUP: IdentityCategory[] = [
+  'managed_identity_system',
+  'managed_identity_user',
 ];
 
 /** Return only categories whose cloud provider is in the enabled set */
@@ -332,6 +339,7 @@ export const OWNER_STATUS_CONFIG: Record<string, { label: string; badgeClass: st
   owned:          { label: 'Owned',          badgeClass: 'bg-green-100 text-green-700' },
   single_owner:   { label: 'Single Owner',   badgeClass: 'bg-yellow-100 text-yellow-700' },
   resource_bound: { label: 'Resource Bound', badgeClass: 'bg-teal-100 text-teal-700' },
+  ungoverned:     { label: 'No Owner',       badgeClass: 'bg-amber-100 text-amber-700' },
   orphaned:       { label: 'Orphaned',       badgeClass: 'bg-red-100 text-red-700' },
   unknown:        { label: 'Unknown',        badgeClass: 'bg-gray-100 text-gray-500' },
 };
@@ -376,15 +384,11 @@ export const DATABASE_SERVER_TYPES = {
   COSMOSDB: 'cosmosdb',
 } as const;
 
-export const IDENTITY_PLANE_OPTIONS: { value: string; label: string }[] = [
-  { value: COMPUTE_RESOURCE_TYPES.APP_SERVICE, label: 'App Service' },
-  { value: COMPUTE_RESOURCE_TYPES.FUNCTION, label: 'Function App' },
-  { value: COMPUTE_RESOURCE_TYPES.VIRTUAL_MACHINE, label: 'VM' },
-  { value: COMPUTE_RESOURCE_TYPES.LOGIC_APP, label: 'Logic App' },
-  { value: CONTAINER_RESOURCE_TYPES.AKS_CLUSTER, label: 'AKS Cluster' },
-  { value: CONTAINER_RESOURCE_TYPES.ACR_REGISTRY, label: 'ACR Registry' },
-  { value: 'db_admin', label: 'DB Admin' },
-];
+export const ANALYTICS_WORKSPACE_TYPES = {
+  DATABRICKS: 'databricks',
+  SYNAPSE: 'synapse',
+  AZURE_ML: 'azure_ml',
+} as const;
 
 // ── Workload Identity Type Config ────────────────────────────────────
 

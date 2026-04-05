@@ -611,8 +611,8 @@ export function DataFreshnessBar({ tenant, scoring }: { tenant: TenantData['tena
           onMouseEnter={() => setShowTip(true)} onMouseLeave={() => setShowTip(false)}>
           <a href={scoring.url} target="_blank" rel="noopener noreferrer"
             style={{ color: P.accentIndigo, textDecoration: 'none', cursor: 'pointer' }}
-            onMouseOver={e => (e.currentTarget.style.textDecoration = 'underline')}
-            onMouseOut={e => (e.currentTarget.style.textDecoration = 'none')}>
+            onMouseOver={e => (e.currentTarget.style.opacity = '0.7')}
+            onMouseOut={e => (e.currentTarget.style.opacity = '1')}>
             {scoring.label}
           </a>
           {showTip && (

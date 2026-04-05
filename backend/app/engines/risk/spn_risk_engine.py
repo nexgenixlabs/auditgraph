@@ -10,6 +10,8 @@ Supports SPNs, Managed Identities, and App Registrations.
 
 from datetime import datetime, timedelta
 
+from app.constants.roles import EntraRole, RBACRole, _lower
+
 
 # ── High-Risk Permission GUIDs (MS Graph) ──────────────────────────
 HIGH_RISK_PERMISSION_GUIDS = {
@@ -25,19 +27,19 @@ HIGH_RISK_PERMISSION_GUIDS = {
     '7ab1d382-f21e-4acd-a863-ba3e13f7da61',  # Directory.Read.All (Application)
 }
 
-# ── Tenant-Admin Entra Roles ────────────────────────────────────────
-TENANT_ADMIN_ROLES = {
-    'global administrator', 'privileged role administrator',
-    'privileged authentication administrator',
-}
+# ── Tenant-Admin Entra Roles (derived from SSOT) ───────────────────
+TENANT_ADMIN_ROLES = _lower(frozenset({
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.PRIVILEGED_AUTH_ADMIN,
+}))
 
-# ── Dangerous RBAC Roles ────────────────────────────────────────────
-SUBSCRIPTION_OWNER_ROLES = {'owner', 'user access administrator'}
-CONTRIBUTOR_ROLES = {'contributor'}
-ELEVATED_RBAC_ROLES = SUBSCRIPTION_OWNER_ROLES | CONTRIBUTOR_ROLES | {
-    'security administrator', 'key vault administrator',
-    'storage blob data owner',
-}
+# ── Dangerous RBAC Roles (derived from SSOT) ───────────────────────
+SUBSCRIPTION_OWNER_ROLES = _lower(frozenset({RBACRole.OWNER, RBACRole.USER_ACCESS_ADMIN}))
+CONTRIBUTOR_ROLES = _lower(frozenset({RBACRole.CONTRIBUTOR}))
+ELEVATED_RBAC_ROLES = SUBSCRIPTION_OWNER_ROLES | CONTRIBUTOR_ROLES | _lower(frozenset({
+    EntraRole.SECURITY_ADMIN, RBACRole.KEY_VAULT_ADMIN,
+    RBACRole.STORAGE_BLOB_DATA_OWNER,
+}))
 
 
 class WorkloadExposureEngine:
@@ -119,11 +121,12 @@ class WorkloadExposureEngine:
                 identity_data, creds, owns, p2_stats=p2_stats)
             # System-assigned MIs are bound to their parent resource
             cat = (identity_data.get('identity_category') or '').lower()
-            if cat == 'managed_identity_system' and owner_status == 'orphaned':
+            if cat == 'managed_identity_system' and owner_status in ('orphaned', 'ungoverned'):
+                deduct = 10 if owner_status == 'orphaned' else 7
                 owner_status = 'resource_bound'
-                # Remove the orphaned finding we just generated
-                lc_findings = [f for f in lc_findings if f['finding_type'] != 'orphaned']
-                lc_score = max(lc_score - 10, 0)
+                # Remove the orphaned/ungoverned finding we just generated
+                lc_findings = [f for f in lc_findings if f['finding_type'] not in ('orphaned', 'ungoverned')]
+                lc_score = max(lc_score - deduct, 0)
         else:
             lc_score, lc_findings, owner_status = self._score_lifecycle(
                 identity_data, creds, owns, p2_stats=p2_stats)
@@ -733,20 +736,60 @@ class WorkloadExposureEngine:
         score = 0
         findings = []
 
-        # Owner status
+        # Owner status — consider activity before declaring orphaned
         if not owners or len(owners) == 0:
-            owner_status = 'orphaned'
-            score += 10
-            findings.append({
-                'finding_type': 'orphaned',
-                'severity': 'critical',
-                'title': 'No registered owner — orphaned workload identity',
-                'description': 'No accountability for this identity. Orphaned SPNs are prime attack targets.',
-                'evidence': {},
-                'remediation': 'Assign at least one owner. Establish attestation schedule.',
-                'component': 'lifecycle',
-                'score_impact': 10,
-            })
+            activity = (identity_data.get('activity_status') or '').lower()
+            last_sign_in = identity_data.get('last_sign_in')
+
+            # Compute days since last auth for boundary checks
+            days_since_last_auth = None
+            if last_sign_in:
+                if isinstance(last_sign_in, str):
+                    try:
+                        ls_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00')).replace(tzinfo=None)
+                        days_since_last_auth = (datetime.utcnow() - ls_dt).days
+                    except Exception:
+                        pass
+                elif hasattr(last_sign_in, 'replace'):
+                    days_since_last_auth = (datetime.utcnow() - last_sign_in.replace(tzinfo=None)).days
+
+            is_recently_active = (
+                activity in ('active',)
+                or (days_since_last_auth is not None and days_since_last_auth <= 30)
+            )
+            is_stale_but_used = (
+                activity in ('inactive',)
+                or (days_since_last_auth is not None and days_since_last_auth <= 90)
+            )
+
+            if is_recently_active or is_stale_but_used:
+                # Active or recently used but no owner — ungoverned, not orphaned
+                owner_status = 'ungoverned'
+                score += 7
+                findings.append({
+                    'finding_type': 'ungoverned',
+                    'severity': 'high',
+                    'title': 'No registered owner — active but ungoverned',
+                    'description': 'Identity is actively used but has no registered owner. Assign an owner for accountability.',
+                    'evidence': {'activity_status': activity, 'days_since_last_auth': days_since_last_auth},
+                    'remediation': 'Assign at least one owner. Active identities without owners are governance gaps.',
+                    'component': 'lifecycle',
+                    'score_impact': 7,
+                })
+            else:
+                # No owner + no activity → truly orphaned
+                owner_status = 'orphaned'
+                score += 10
+                findings.append({
+                    'finding_type': 'orphaned',
+                    'severity': 'critical',
+                    'title': 'No registered owner — orphaned workload identity',
+                    'description': 'No accountability for this identity. Orphaned SPNs are prime attack targets.',
+                    'evidence': {'activity_status': activity, 'days_since_last_auth': days_since_last_auth},
+                    'remediation': 'Assign at least one owner. Establish attestation schedule.',
+                    'component': 'lifecycle',
+                    'score_impact': 10,
+                })
         elif len(owners) == 1:
             owner_status = 'single_owner'
         else:

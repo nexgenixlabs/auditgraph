@@ -7,12 +7,31 @@ always display deterministic, pre-computed values rather than live queries.
 
 AGIRS (AuditGraph Identity Risk Score) computation is absorbed here as the
 single canonical source. The separate agirs_scores table is deprecated.
+
+ORPHANED definition (canonical — do not change without updating all consumers):
+  An identity is ORPHANED if ALL of the following are true:
+    1. owner_count = 0 (no assigned owner)
+    2. recommended_action = 'ORPHANED' (set by verdict engine in azure_discovery.py)
+    3. deleted_at IS NULL (not a ghost/deleted identity)
+    4. last_seen_auth IS NULL OR last_seen_auth < NOW() - INTERVAL '90 days'
+       (never used or inactive — active identities are AT_RISK, not ORPHANED)
+  Source of truth: recommended_action column on identities table.
+  Do NOT use: owner_count = 0 alone, owner_status = 'orphaned',
+              lineage_verdict (column does not exist on identities table).
 """
 
 import logging
 import json
 
+from app.constants.roles import (
+    T0_ENTRA_ROLES_LOWER, T1_ENTRA_ROLES_LOWER, T2_RBAC_ROLES_LOWER,
+)
+
 logger = logging.getLogger(__name__)
+
+# Pre-compute lists once at import time for SQL ANY() binding
+_PRIV_ENTRA_LIST = list(T0_ENTRA_ROLES_LOWER | T1_ENTRA_ROLES_LOWER)
+_PRIV_RBAC_LIST = list(T2_RBAC_ROLES_LOWER)
 
 
 class RiskSummaryEngine:
@@ -74,26 +93,30 @@ class RiskSummaryEngine:
                         AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                              OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
                     ) as ghost_count,
+                    -- SSOT for orphaned SPN count — all frontend components must read
+                    -- from this value. Do not add inline orphaned counts elsewhere.
+                    -- Uses recommended_action (set by lineage engine) not owner_status.
                     COUNT(*) FILTER (WHERE
-                        COALESCE(i.identity_category,'') IN ('service_principal','managed_identity_user')
-                        AND (i.owner_count = 0 OR i.owner_count IS NULL)
+                        i.recommended_action = 'ORPHANED'
+                        AND i.deleted_at IS NULL
                         AND NOT COALESCE(i.is_microsoft_system, false)
                     ) as orphaned_spn_count,
                     COUNT(*) FILTER (WHERE
                         NOT COALESCE(i.is_microsoft_system, false)
                         AND (EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
-                            AND LOWER(era.role_name) IN ('global administrator',
-                                'privileged role administrator','application administrator',
-                                'cloud application administrator','user administrator',
-                                'exchange administrator','security administrator'))
+                            AND LOWER(era.role_name) = ANY(%s))
                         OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
-                            AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator')))
+                            AND LOWER(ra.role_name) = ANY(%s)))
                     ) as over_privileged_count,
+                    -- SSOT: dormant_privileged = stale/never_used + T0/T1 roles only
+                    -- Matches AGIRS P1 definition. Do not use ANY role here.
                     COUNT(*) FILTER (WHERE
                         NOT COALESCE(i.is_microsoft_system, false)
                         AND i.activity_status IN ('stale','never_used')
-                        AND (EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
-                             OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id))
+                        AND (EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                            AND LOWER(era.role_name) = ANY(%s))
+                         OR EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                            AND LOWER(ra.role_name) = ANY(%s)))
                     ) as dormant_privileged_count,
                     COUNT(*) FILTER (WHERE
                         NOT COALESCE(i.is_microsoft_system, false)
@@ -106,7 +129,7 @@ class RiskSummaryEngine:
                 FROM identities i
                 WHERE i.discovery_run_id = ANY(%s)
                   AND i.deleted_at IS NULL
-            """, (self.run_ids,))
+            """, (_PRIV_ENTRA_LIST, _PRIV_RBAC_LIST, _PRIV_ENTRA_LIST, _PRIV_RBAC_LIST, self.run_ids))
             r = cursor.fetchone()
 
             summary['ghost_accounts'] = r[0] or 0
@@ -197,10 +220,11 @@ class RiskSummaryEngine:
             ap_count = 0
             try:
                 cursor.execute("SAVEPOINT rse_ap")
+                # Attack paths persist across runs — scope by org only
                 cursor.execute("""
                     SELECT COUNT(*) FROM attack_paths
-                    WHERE organization_id = %s AND discovery_run_id = ANY(%s)
-                """, (self.org_id, self.run_ids))
+                    WHERE organization_id = %s
+                """, (self.org_id,))
                 ap_count = cursor.fetchone()[0] or 0
                 cursor.execute("RELEASE SAVEPOINT rse_ap")
             except Exception:
