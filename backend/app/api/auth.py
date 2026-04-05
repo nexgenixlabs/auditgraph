@@ -20,7 +20,7 @@ from app.database import Database
 logger = logging.getLogger(__name__)
 
 # Phase 1B+1C: Dual JWT keys — fallback to JWT_SECRET only in development
-_is_dev = os.getenv('FLASK_ENV') == 'development'
+_is_dev = os.getenv('APP_ENV', 'local') in ('local', 'dev') or os.getenv('FLASK_ENV') == 'development'
 _jwt_fallback = os.getenv('JWT_SECRET') if _is_dev else None
 ADMIN_JWT_SECRET = os.getenv('ADMIN_JWT_SECRET') or _jwt_fallback
 CLIENT_JWT_SECRET = os.getenv('CLIENT_JWT_SECRET') or _jwt_fallback
@@ -219,7 +219,7 @@ def hash_refresh_token(raw_token: str) -> str:
 # ── Phase S1: httpOnly cookie auth ──
 
 COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', None)  # .auditgraph.ai in prod, None for localhost
-_IS_SECURE_COOKIE = os.getenv('FLASK_ENV') != 'development'
+_IS_SECURE_COOKIE = os.getenv('APP_ENV', 'local') not in ('local', 'dev')
 
 
 def _cookie_name(portal: str, token_type: str) -> str:
