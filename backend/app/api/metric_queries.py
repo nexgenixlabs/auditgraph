@@ -42,7 +42,7 @@ METRIC_DORMANT_HUMAN = """
 """
 
 METRIC_PRIVILEGED = """
-    AND COALESCE(i.tier, 'T3') IN ('T0', 'T1')
+    AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
 """
 
 METRIC_HIGH_RISK = """
@@ -54,7 +54,7 @@ METRIC_CRITICAL = """
 """
 
 METRIC_OVER_PERMISSIONED = """
-    AND (COALESCE(i.risk_score, 0) >= 70 OR i.tier = 'T0')
+    AND (COALESCE(i.risk_score, 0) >= 70 OR i.privilege_tier = 'T0')
 """
 
 METRIC_UNOWNED_NHI = """

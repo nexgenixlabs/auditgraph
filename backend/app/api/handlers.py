@@ -163,7 +163,7 @@ def _get_agirs_factor_sql(factor: str) -> str:
         # HIRI — H3: Over-privileged (risk_score >= 70 OR tier = 'T0')
         "h3_over_priv": """
             AND i.identity_category IN ('human_user', 'guest')
-            AND (COALESCE(i.risk_score, 0) >= 70 OR i.tier = 'T0')""",
+            AND (COALESCE(i.risk_score, 0) >= 70 OR i.privilege_tier = 'T0')""",
         # HIRI — H4: External guests with privileged roles
         "h4_ext_guest": """
             AND i.identity_category = 'guest'
@@ -946,7 +946,7 @@ def get_identities():
             tiers = [t.strip() for t in privilege_tier_filter.split(',') if t.strip() in allowed_tiers]
             if tiers:
                 placeholders = ','.join(['%s'] * len(tiers))
-                where_clauses += f" AND COALESCE(i.tier, 'T3') IN ({placeholders})"
+                where_clauses += f" AND COALESCE(i.privilege_tier, 'T3') IN ({placeholders})"
                 params.extend(tiers)
 
         # FIX1B: Credential status drill-down filter (matches dashboard posture counts)
@@ -23486,7 +23486,7 @@ def get_correlation_accounts():
                    il.account_object_id, il.account_enabled, il.link_method,
                    il.link_confidence, il.verified,
                    i.display_name, i.enabled, i.deleted_at, i.risk_score,
-                   i.risk_level, i.tier, i.identity_category, i.identity_id
+                   i.risk_level, i.privilege_tier, i.identity_category, i.identity_id
             FROM identity_links il
             JOIN identities i ON i.id = il.identity_db_id
             WHERE il.human_identity_id = %s
@@ -23648,7 +23648,7 @@ def get_dangerous_identities():
                 i.identity_category,
                 COALESCE(i.blast_radius_score, 0) as blast_radius_score,
                 COALESCE(i.risk_score, 0) as risk_score,
-                COALESCE(i.tier, 'T3') as tier,
+                COALESCE(i.privilege_tier, 'T3') as tier,
                 COALESCE(i.activity_status, 'unknown') as activity_status
             FROM identities i
             WHERE i.discovery_run_id IN %s
@@ -30960,12 +30960,29 @@ def get_risk_summary_full():
                 from app.engines.risk.risk_summary_engine import RiskSummaryEngine
                 engine = RiskSummaryEngine(db, org_id, run_ids)
                 summary = engine.compute()
-                engine.persist(summary)
-                logger.info("RiskSummaryEngine computed and persisted from /api/risk/summary/full")
-                # Re-read the now-persisted data (scoped to run_ids)
-                latest, previous = db.get_latest_risk_summaries(organization_id=org_id, run_ids=run_ids)
+                try:
+                    engine.persist(summary)
+                    logger.info("RiskSummaryEngine computed and persisted from /api/risk/summary/full")
+                    # Re-read the now-persisted data (scoped to run_ids)
+                    latest, previous = db.get_latest_risk_summaries(organization_id=org_id, run_ids=run_ids)
+                except Exception as pe:
+                    logger.warning("RiskSummaryEngine persist failed (using computed data): %s", pe)
+                    # Rollback aborted transaction so subsequent queries work
+                    try:
+                        db.conn.rollback()
+                    except Exception:
+                        pass
+                    # Use computed summary directly as latest
+                    latest = summary
+                    latest.setdefault('discovery_run_id', run_ids[0] if run_ids else None)
+                    previous = None
             except Exception as e:
-                logger.error("Live RiskSummaryEngine failed: %s", e, exc_info=True)
+                logger.error("Live RiskSummaryEngine compute failed: %s", e, exc_info=True)
+                # Rollback aborted transaction
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
 
             # If persist/re-read still failed, build latest from live query
             if not latest:

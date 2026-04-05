@@ -361,7 +361,7 @@ class AGIRSEngine:
             SELECT COUNT(*) FROM identities i
             WHERE i.discovery_run_id IN %s
               AND i.identity_category IN ('human_user', 'guest')
-              AND (COALESCE(i.risk_score, 0) >= 70 OR i.tier = 'T0')
+              AND (COALESCE(i.risk_score, 0) >= 70 OR i.privilege_tier = 'T0')
         """, (rid_tuple,))
         h3_over_priv = cursor.fetchone()[0] or 0
 
@@ -625,7 +625,7 @@ class AGIRSEngine:
                 FROM identities i
                 LEFT JOIN pim_eligible_assignments pea ON pea.identity_db_id = i.id
                 WHERE i.discovery_run_id IN %s
-                  AND i.tier IN ('T0', 'T1')
+                  AND i.privilege_tier IN ('T0', 'T1')
             """, (rid_tuple,))
             row = cursor.fetchone()
             t0_t1_count, pim_covered = (row[0] or 0), (row[1] or 0)
@@ -711,7 +711,7 @@ class AGIRSEngine:
         cursor.execute("""
             SELECT
                 i.id,
-                COALESCE(i.tier, 'T3') as tier,
+                COALESCE(i.privilege_tier, 'T3') as tier,
                 COALESCE(i.activity_status, 'unknown') as activity_status,
                 -- Highest scope: check for subscription-level or higher
                 (SELECT CASE
@@ -728,7 +728,7 @@ class AGIRSEngine:
                 (SELECT COUNT(DISTINCT ra.scope) FROM role_assignments ra WHERE ra.identity_db_id = i.id
                     AND ra.scope LIKE '/subscriptions/%%') > 1 as cross_subscription,
                 -- Multi-tenant app check
-                COALESCE(i.sign_in_audience, '') LIKE '%%multi%%' as multi_tenant_app
+                COALESCE(i.app_reg_sign_in_audience, '') LIKE '%%multi%%' as multi_tenant_app
             FROM identities i
             WHERE i.discovery_run_id IN %s
               AND COALESCE(i.deleted_at, '9999-01-01') > NOW()
@@ -771,7 +771,7 @@ class AGIRSEngine:
                 i.identity_category,
                 COALESCE(i.blast_radius_score, 0) as blast_radius_score,
                 COALESCE(i.risk_score, 0) as risk_score,
-                COALESCE(i.tier, 'T3') as tier,
+                COALESCE(i.privilege_tier, 'T3') as tier,
                 COALESCE(i.activity_status, 'unknown') as activity_status
             FROM identities i
             WHERE i.discovery_run_id IN %s
