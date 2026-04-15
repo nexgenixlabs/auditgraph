@@ -126,7 +126,7 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build & push backend image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./backend
           push: true
@@ -149,7 +149,7 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build & push frontend image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./frontend
           push: true
